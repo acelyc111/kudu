@@ -51,7 +51,7 @@ void BinaryDictBlockBuilder::Reset() {
   buffer_.reserve(options_->storage_attributes.cfile_block_size);
 
   if (mode_ == kCodeWordMode &&
-      dict_block_.IsBlockFull(options_->storage_attributes.cfile_block_size)) {
+      dict_block_.IsBlockFull()) {
     mode_ = kPlainBinaryMode;
     data_builder_.reset(new BinaryPlainBlockBuilder(options_));
   } else {
@@ -80,10 +80,9 @@ Slice BinaryDictBlockBuilder::Finish(rowid_t ordinal_pos) {
 //
 // If it is the latter case, all the subsequent data blocks will switch to
 // StringPlainBlock automatically.
-bool BinaryDictBlockBuilder::IsBlockFull(size_t limit) const {
-  int block_size = options_->storage_attributes.cfile_block_size;
-  if (data_builder_->IsBlockFull(block_size)) return true;
-  if (dict_block_.IsBlockFull(block_size) && (mode_ == kCodeWordMode)) return true;
+bool BinaryDictBlockBuilder::IsBlockFull() const {
+  if (data_builder_->IsBlockFull()) return true;
+  if (dict_block_.IsBlockFull() && (mode_ == kCodeWordMode)) return true;
   return false;
 }
 
@@ -111,7 +110,7 @@ int BinaryDictBlockBuilder::AddCodeWords(const uint8_t* vals, size_t count) {
       const uint8_t* s_ptr = dictionary_strings_arena_.AddSlice(*src);
       if (s_ptr == nullptr) {
         // Arena does not have enough space for string content
-        // Ideally, it should not happen.
+        // Ideally, this should not happen.
         LOG(ERROR) << "Arena of Dictionary Encoder does not have enough memory for strings";
         break;
       }
@@ -169,14 +168,27 @@ Status BinaryDictBlockBuilder::GetFirstKey(void* key_void) const {
   }
 }
 
+Status BinaryDictBlockBuilder::GetLastKey(void* key_void) const {
+  if (mode_ == kCodeWordMode) {
+    CHECK(finished_);
+    uint32_t last_codeword;
+    RETURN_NOT_OK(data_builder_->GetLastKey(reinterpret_cast<void*>(&last_codeword)));
+    return dict_block_.GetKeyAtIdx(key_void, last_codeword);
+  } else {
+    DCHECK_EQ(mode_, kPlainBinaryMode);
+    return data_builder_->GetLastKey(key_void);
+  }
+}
+
 ////////////////////////////////////////////////////////////
 // Decoding
 ////////////////////////////////////////////////////////////
 
 BinaryDictBlockDecoder::BinaryDictBlockDecoder(Slice slice, CFileIterator* iter)
     : data_(std::move(slice)),
-      parsed_(false) {
-  dict_decoder_ = iter->GetDictDecoder();
+      parsed_(false),
+      dict_decoder_(iter->GetDictDecoder()),
+      parent_cfile_iter_(iter) {
 }
 
 Status BinaryDictBlockDecoder::ParseHeader() {
@@ -233,6 +245,62 @@ Status BinaryDictBlockDecoder::SeekAtOrAfterValue(const void* value_void, bool* 
     DCHECK_EQ(mode_, kPlainBinaryMode);
     return data_decoder_->SeekAtOrAfterValue(value_void, exact);
   }
+}
+
+// TODO: implement CopyNextAndEval for more blocks. Eg. other blocks can
+// store their min/max values. CopyNextAndEval in these blocks could
+// short-circuit if the query can does not search for values within the
+// min/max range, or copy all and evaluate otherwise.
+Status BinaryDictBlockDecoder::CopyNextAndEval(size_t* n,
+                                               ColumnMaterializationContext* ctx,
+                                               SelectionVectorView* sel,
+                                               ColumnDataView* dst) {
+  ctx->SetDecoderEvalSupported();
+  if (mode_ == kPlainBinaryMode) {
+    // Copy all strings and evaluate them Slice-by-Slice.
+    return data_decoder_->CopyNextAndEval(n, ctx, sel, dst);
+  }
+
+  // Predicates that have no matching words should return no data.
+  SelectionVector* codewords_matching_pred = parent_cfile_iter_->GetCodeWordsMatchingPredicate();
+  CHECK(codewords_matching_pred != nullptr);
+  if (!codewords_matching_pred->AnySelected()) {
+    // If nothing is selected, move the data_decoder_ pointer forward and clear
+    // the corresponding bits in the selection vector.
+    int skip = static_cast<int>(*n);
+    data_decoder_->SeekForward(&skip);
+    *n = static_cast<size_t>(skip);
+    sel->ClearBits(*n);
+    return Status::OK();
+  }
+
+  // IsNotNull predicates should return all data.
+  if (ctx->pred()->predicate_type() == PredicateType::IsNotNull) {
+    return CopyNextDecodeStrings(n, dst);
+  }
+
+  // Load the rows' codeword values into a buffer for scanning.
+  BShufBlockDecoder<UINT32>* d_bptr = down_cast<BShufBlockDecoder<UINT32>*>(data_decoder_.get());
+  codeword_buf_.resize(*n * sizeof(uint32_t));
+  d_bptr->CopyNextValuesToArray(n, codeword_buf_.data());
+  Slice* out = reinterpret_cast<Slice*>(dst->data());
+  Arena* out_arena = dst->arena();
+  for (size_t i = 0; i < *n; i++, out++) {
+    // Check with the SelectionVectorView to see whether the data has already
+    // been cleared, in which case we can skip evaluation.
+    if (!sel->TestBit(i)) {
+      continue;
+    }
+    uint32_t codeword = *reinterpret_cast<uint32_t*>(&codeword_buf_[i*sizeof(uint32_t)]);
+    if (BitmapTest(codewords_matching_pred->bitmap(), codeword)) {
+      // Row is included in predicate, copy data to block.
+      CHECK(out_arena->RelocateSlice(dict_decoder_->string_at_index(codeword), out));
+    } else {
+      // Mark that the row will not be returned.
+      sel->ClearBit(i);
+    }
+  }
+  return Status::OK();
 }
 
 Status BinaryDictBlockDecoder::CopyNextDecodeStrings(size_t* n, ColumnDataView* dst) {

@@ -22,7 +22,7 @@
 #
 # Environment variables may be used to customize operation:
 #   BUILD_TYPE: Default: DEBUG
-#     Maybe be one of ASAN|TSAN|LEAKCHECK|DEBUG|RELEASE|COVERAGE|LINT
+#     Maybe be one of ASAN|TSAN|DEBUG|RELEASE|COVERAGE|LINT
 #
 #   KUDU_ALLOW_SLOW_TESTS   Default: 1
 #     Runs the "slow" version of the unit tests. Set to 0 to
@@ -56,12 +56,18 @@
 #   BUILD_JAVA        Default: 1
 #     Build and test java code if this is set to 1.
 #
-#   VALIDATE_CSD      Default: 0
-#     If 1, runs the CM CSD validator against the Kudu CSD.
-#     This requires access to an internal Cloudera maven repository.
-#
 #   BUILD_PYTHON       Default: 1
 #     Build and test the Python wrapper of the client API.
+#
+#   BUILD_PYTHON3      Default: 1
+#     Build and test the Python wrapper of the client API in Python. This
+#     option is not mutually exclusive from BUILD_PYTHON. If both options
+#     are set (default), then both will be run.
+#
+#   MVN_FLAGS          Default: ""
+#     Extra flags which are passed to 'mvn' when building and running Java
+#     tests. This can be useful, for example, to choose a different maven
+#     repository location.
 
 # If a commit messages contains a line that says 'DONT_BUILD', exit
 # immediately.
@@ -80,6 +86,7 @@ ulimit -c unlimited
 
 BUILD_TYPE=${BUILD_TYPE:-DEBUG}
 BUILD_TYPE=$(echo "$BUILD_TYPE" | tr a-z A-Z) # capitalize
+BUILD_TYPE_LOWER=$(echo "$BUILD_TYPE" | tr A-Z a-z)
 
 # Set up defaults for environment variables.
 DEFAULT_ALLOW_SLOW_TESTS=1
@@ -96,8 +103,8 @@ export KUDU_ALLOW_SLOW_TESTS=${KUDU_ALLOW_SLOW_TESTS:-$DEFAULT_ALLOW_SLOW_TESTS}
 export KUDU_COMPRESS_TEST_OUTPUT=${KUDU_COMPRESS_TEST_OUTPUT:-1}
 export TEST_TMPDIR=${TEST_TMPDIR:-/tmp/kudutest-$UID}
 BUILD_JAVA=${BUILD_JAVA:-1}
-VALIDATE_CSD=${VALIDATE_CSD:-0}
 BUILD_PYTHON=${BUILD_PYTHON:-1}
+BUILD_PYTHON3=${BUILD_PYTHON3:-1}
 
 # Ensure that the test data directory is usable.
 mkdir -p "$TEST_TMPDIR"
@@ -107,7 +114,7 @@ if [ ! -w "$TEST_TMPDIR" ]; then
 fi
 
 SOURCE_ROOT=$(cd $(dirname "$BASH_SOURCE")/../..; pwd)
-BUILD_ROOT=$SOURCE_ROOT/build
+BUILD_ROOT=$SOURCE_ROOT/build/$BUILD_TYPE_LOWER
 
 # Remove testing artifacts from the previous run before we do anything
 # else. Otherwise, if we fail during the "build" step, Jenkins will
@@ -116,8 +123,13 @@ BUILD_ROOT=$SOURCE_ROOT/build
 rm -rf $BUILD_ROOT
 mkdir -p $BUILD_ROOT
 
+# Same for the Java tests, which aren't inside BUILD_ROOT
+rm -rf $SOURCE_ROOT/java/*/target
+
 list_flaky_tests() {
-  curl -s "http://$TEST_RESULT_SERVER/list_failed_tests?num_days=3&build_pattern=%25kudu-test%25"
+  local url="http://$TEST_RESULT_SERVER/list_failed_tests?num_days=3&build_pattern=%25kudu-test%25"
+  >&2 echo Fetching flaky test list from "$url" ...
+  curl -s --show-error "$url"
   return $?
 }
 
@@ -139,9 +151,13 @@ if [ -d "$TOOLCHAIN_DIR" ]; then
   PATH=$TOOLCHAIN_DIR/apache-maven-3.0/bin:$PATH
 fi
 
-$SOURCE_ROOT/build-support/enable_devtoolset.sh thirdparty/build-if-necessary.sh
+THIRDPARTY_TYPE=
+if [ "$BUILD_TYPE" = "TSAN" ]; then
+  THIRDPARTY_TYPE=tsan
+fi
+$SOURCE_ROOT/build-support/enable_devtoolset.sh thirdparty/build-if-necessary.sh $THIRDPARTY_TYPE
 
-THIRDPARTY_BIN=$(pwd)/thirdparty/installed/bin
+THIRDPARTY_BIN=$(pwd)/thirdparty/installed/common/bin
 export PPROF_PATH=$THIRDPARTY_BIN/pprof
 
 if which ccache >/dev/null ; then
@@ -150,45 +166,69 @@ else
   CLANG=$(pwd)/thirdparty/clang-toolchain/bin/clang
 fi
 
-# Before running cmake below, clean out any errant cmake state from the source
-# tree. We need this to help transition into a world where out-of-tree builds
-# are required. Once that's done, the cleanup can be removed.
-rm -rf $SOURCE_ROOT/CMakeCache.txt $SOURCE_ROOT/CMakeFiles
-
 # Configure the build
 #
 # ASAN/TSAN can't build the Python bindings because the exported Kudu client
 # library (which the bindings depend on) is missing ASAN/TSAN symbols.
 cd $BUILD_ROOT
 if [ "$BUILD_TYPE" = "ASAN" ]; then
-  $SOURCE_ROOT/build-support/enable_devtoolset.sh \
-    "env CC=$CLANG CXX=$CLANG++ $THIRDPARTY_BIN/cmake -DKUDU_USE_ASAN=1 -DKUDU_USE_UBSAN=1 $SOURCE_ROOT"
-  BUILD_TYPE=fastdebug
+  USE_CLANG=1
+  CMAKE_BUILD=fastdebug
+  EXTRA_BUILD_FLAGS="-DKUDU_USE_ASAN=1 -DKUDU_USE_UBSAN=1"
   BUILD_PYTHON=0
+  BUILD_PYTHON3=0
 elif [ "$BUILD_TYPE" = "TSAN" ]; then
-  $SOURCE_ROOT/build-support/enable_devtoolset.sh \
-    "env CC=$CLANG CXX=$CLANG++ $THIRDPARTY_BIN/cmake -DKUDU_USE_TSAN=1 $SOURCE_ROOT"
-  BUILD_TYPE=fastdebug
+  USE_CLANG=1
+  CMAKE_BUILD=fastdebug
+  EXTRA_BUILD_FLAGS="-DKUDU_USE_TSAN=1"
   EXTRA_TEST_FLAGS="$EXTRA_TEST_FLAGS -LE no_tsan"
   BUILD_PYTHON=0
-elif [ "$BUILD_TYPE" = "LEAKCHECK" ]; then
-  BUILD_TYPE=release
-  export HEAPCHECK=normal
-  # Workaround for gperftools issue #497
-  export LD_BIND_NOW=1
+  BUILD_PYTHON3=0
 elif [ "$BUILD_TYPE" = "COVERAGE" ]; then
+  USE_CLANG=1
+  CMAKE_BUILD=debug
+  EXTRA_BUILD_FLAGS="-DKUDU_GENERATE_COVERAGE=1"
   DO_COVERAGE=1
-  BUILD_TYPE=debug
-  $SOURCE_ROOT/build-support/enable_devtoolset.sh "$THIRDPARTY_BIN/cmake -DKUDU_GENERATE_COVERAGE=1 $SOURCE_ROOT"
-  # Reset coverage info from previous runs
-  find src -name \*.gcda -o -name \*.gcno -exec rm {} \;
+
+  # We currently dont capture coverage for Java or Python.
+  BUILD_JAVA=0
+  BUILD_PYTHON=0
+  BUILD_PYTHON3=0
 elif [ "$BUILD_TYPE" = "LINT" ]; then
+  CMAKE_BUILD=debug
+else
+  # Must be DEBUG or RELEASE
+  CMAKE_BUILD=$BUILD_TYPE
+fi
+
+# Assemble the cmake command line.
+CMAKE=
+if [ -n "$USE_CLANG" ]; then
+  CMAKE="env CC=$CLANG CXX=$CLANG++"
+fi
+CMAKE="$CMAKE $SOURCE_ROOT/build-support/enable_devtoolset.sh"
+CMAKE="$CMAKE $THIRDPARTY_BIN/cmake"
+CMAKE="$CMAKE -DCMAKE_BUILD_TYPE=$CMAKE_BUILD"
+
+# On distributed tests, force dynamic linking even for release builds. Otherwise,
+# the test binaries are too large and we spend way too much time uploading them
+# to the test slaves.
+if [ "$ENABLE_DIST_TEST" == "1" ]; then
+  CMAKE="$CMAKE -DKUDU_LINK=dynamic"
+fi
+if [ -n "$EXTRA_BUILD_FLAGS" ]; then
+  CMAKE="$CMAKE $EXTRA_BUILD_FLAGS"
+fi
+CMAKE="$CMAKE $SOURCE_ROOT"
+$CMAKE
+
+# Short circuit for LINT builds.
+if [ "$BUILD_TYPE" = "LINT" ]; then
   # Create empty test logs or else Jenkins fails to archive artifacts, which
   # results in the build failing.
   mkdir -p Testing/Temporary
   mkdir -p $TEST_LOGDIR
 
-  $SOURCE_ROOT/build-support/enable_devtoolset.sh "$THIRDPARTY_BIN/cmake $SOURCE_ROOT"
   make lint | tee $TEST_LOGDIR/lint.log
   exit $?
 fi
@@ -216,22 +256,15 @@ if [ "$KUDU_FLAKY_TEST_ATTEMPTS" -gt 1 ]; then
   fi
 fi
 
-# On distributed tests, force dynamic linking even for release builds. Otherwise,
-# the test binaries are too large and we spend way too much time uploading them
-# to the test slaves.
-LINK_FLAGS=
-if [ "$ENABLE_DIST_TEST" == "1" ]; then
-  LINK_FLAGS="-DKUDU_LINK=dynamic"
-fi
-
-$SOURCE_ROOT/build-support/enable_devtoolset.sh "$THIRDPARTY_BIN/cmake -DCMAKE_BUILD_TYPE=${BUILD_TYPE} $LINK_FLAGS $SOURCE_ROOT"
-
 # our tests leave lots of data lying around, clean up before we run
 if [ -d "$TEST_TMPDIR" ]; then
   rm -Rf $TEST_TMPDIR/*
 fi
 
 # actually do the build
+echo
+echo Building C++ code.
+echo ------------------------------------------------------------
 NUM_PROCS=$(getconf _NPROCESSORS_ONLN)
 make -j$NUM_PROCS 2>&1 | tee build.log
 
@@ -245,30 +278,184 @@ if [ "$RUN_FLAKY_ONLY" == "1" ] ; then
     echo Must set TEST_RESULT_SERVER to use RUN_FLAKY_ONLY
     exit 1
   fi
+  echo
   echo Running flaky tests only:
-  list_flaky_tests | tee build/flaky-tests.txt
+  echo ------------------------------------------------------------
+  if ! ( set -o pipefail ;
+         list_flaky_tests | tee $BUILD_ROOT/flaky-tests.txt) ; then
+    echo Could not fetch flaky tests list.
+    exit 1
+  fi
   test_regex=$(perl -e '
     chomp(my @lines = <>);
     print join("|", map { "^" . quotemeta($_) . "\$" } @lines);
-   ' build/flaky-tests.txt)
+   ' $BUILD_ROOT/flaky-tests.txt)
+  if [ -z "$test_regex" ]; then
+    echo No tests are flaky.
+    exit 0
+  fi
   EXTRA_TEST_FLAGS="$EXTRA_TEST_FLAGS -R $test_regex"
 
-  # We don't support detecting java flaky tests at the moment.
-  echo Disabling Java build since RUN_FLAKY_ONLY=1
+  # We don't support detecting java and python flaky tests at the moment.
+  echo Disabling Java and python build since RUN_FLAKY_ONLY=1
+  BUILD_PYTHON=0
+  BUILD_PYTHON3=0
   BUILD_JAVA=0
 fi
 
 EXIT_STATUS=0
+FAILURES=""
 
-# Run the C++ unit tests.
+# If we're running distributed tests, submit them asynchronously while
+# we run the Java and Python tests.
 if [ "$ENABLE_DIST_TEST" == "1" ]; then
+  echo
+  echo Submitting distributed-test job.
+  echo ------------------------------------------------------------
   export DIST_TEST_JOB_PATH=$BUILD_ROOT/dist-test-job-id
-  $SOURCE_ROOT/build-support/dist_test.py run-all || EXIT_STATUS=$?
-  $DIST_TEST_HOME/client.py fetch --artifacts -d $TEST_LOGDIR
+  rm -f $DIST_TEST_JOB_PATH
+  if ! $SOURCE_ROOT/build-support/dist_test.py --no-wait run-all ; then
+    EXIT_STATUS=1
+    FAILURES="$FAILURES"$'Could not submit distributed test job\n'
+  fi
+  # Still need to run a few non-dist-test-capable tests locally.
+  EXTRA_TEST_FLAGS="$EXTRA_TEST_FLAGS -L no_dist_test"
+fi
+
+if ! $THIRDPARTY_BIN/ctest -j$NUM_PROCS $EXTRA_TEST_FLAGS ; then
+  EXIT_STATUS=1
+  FAILURES="$FAILURES"$'C++ tests failed\n'
+fi
+
+if [ "$DO_COVERAGE" == "1" ]; then
+  echo
+  echo Generating coverage report...
+  echo ------------------------------------------------------------
+  if ! $SOURCE_ROOT/thirdparty/installed/common/bin/gcovr \
+      -r $SOURCE_ROOT \
+      --gcov-filter='.*src#kudu.*' \
+      --gcov-executable=$SOURCE_ROOT/build-support/llvm-gcov-wrapper \
+      --xml \
+      > $BUILD_ROOT/coverage.xml ; then
+    EXIT_STATUS=1
+    FAILURES="$FAILURES"$'Coverage report failed\n'
+  fi
+fi
+
+if [ "$BUILD_JAVA" == "1" ]; then
+  echo
+  echo Building and testing java...
+  echo ------------------------------------------------------------
+
+  # Make sure we use JDK7
+  export JAVA_HOME=$JAVA7_HOME
+  export PATH=$JAVA_HOME/bin:$PATH
+  pushd $SOURCE_ROOT/java
+  export TSAN_OPTIONS="$TSAN_OPTIONS suppressions=$SOURCE_ROOT/build-support/tsan-suppressions.txt history_size=7"
+  set -x
+  if ! mvn $MVN_FLAGS \
+      -Dsurefire.rerunFailingTestsCount=3 \
+      -Dfailsafe.rerunFailingTestsCount=3 \
+      clean verify ; then
+    EXIT_STATUS=1
+    FAILURES="$FAILURES"$'Java build/test failed\n'
+  fi
+  # Test kudu-spark with Spark 2.x + Scala 2.11 profile
+  # This won't work if there are ever Spark integration tests!
+  rm -rf kudu-spark/target/
+  if ! mvn $MVN_FLAGS -Pspark2_2.11 -Dtest="org.apache.kudu.spark.kudu.*" test; then
+    EXIT_STATUS=1
+    FAILURES="$FAILURES"$'Java build/test failed\n'
+  fi
+  set +x
+  popd
+fi
+
+
+if [ "$BUILD_PYTHON" == "1" ]; then
+  echo
+  echo Building and testing python.
+  echo ------------------------------------------------------------
+
+  # Failing to compile the Python client should result in a build failure
+  set -e
+  export KUDU_HOME=$SOURCE_ROOT
+  export KUDU_BUILD=$BUILD_ROOT
+  pushd $SOURCE_ROOT/python
+
+  # Create a sane test environment
+  rm -Rf $KUDU_BUILD/py_env
+  virtualenv $KUDU_BUILD/py_env
+  source $KUDU_BUILD/py_env/bin/activate
+  pip install --upgrade pip
+  CC=$CLANG CXX=$CLANG++ pip install --disable-pip-version-check -r requirements.txt
+
+  # Delete old Cython extensions to force them to be rebuilt.
+  rm -Rf build kudu_python.egg-info kudu/*.so
+
+  # Assuming we run this script from base dir
+  CC=$CLANG CXX=$CLANG++ python setup.py build_ext
+  set +e
+  if ! python setup.py test \
+      --addopts="kudu --junit-xml=$KUDU_BUILD/test-logs/python_client.xml" \
+      2> $KUDU_BUILD/test-logs/python_client.log ; then
+    EXIT_STATUS=1
+    FAILURES="$FAILURES"$'Python tests failed\n'
+  fi
+  deactivate
+  popd
+fi
+
+if [ "$BUILD_PYTHON3" == "1" ]; then
+  echo
+  echo Building and testing python 3.
+  echo ------------------------------------------------------------
+
+  # Failing to compile the Python client should result in a build failure
+  set -e
+  export KUDU_HOME=$SOURCE_ROOT
+  export KUDU_BUILD=$BUILD_ROOT
+  pushd $SOURCE_ROOT/python
+
+  # Create a sane test environment
+  rm -Rf $KUDU_BUILD/py_env
+  virtualenv -p python3 $KUDU_BUILD/py_env
+  source $KUDU_BUILD/py_env/bin/activate
+  pip install --upgrade pip
+  CC=$CLANG CXX=$CLANG++ pip install --disable-pip-version-check -r requirements.txt
+
+  # Delete old Cython extensions to force them to be rebuilt.
+  rm -Rf build kudu_python.egg-info kudu/*.so
+
+  # Assuming we run this script from base dir
+  CC=$CLANG CXX=$CLANG++ python setup.py build_ext
+  set +e
+  if ! python setup.py test \
+      --addopts="kudu --junit-xml=$KUDU_BUILD/test-logs/python3_client.xml" \
+      2> $KUDU_BUILD/test-logs/python3_client.log ; then
+    EXIT_STATUS=1
+    FAILURES="$FAILURES"$'Python 3 tests failed\n'
+  fi
+  deactivate
+  popd
+fi
+
+# If we submitted the tasks earlier, go fetch the results now
+if [ "$ENABLE_DIST_TEST" == "1" ]; then
+  echo
+  echo Fetching previously submitted dist-test results...
+  echo ------------------------------------------------------------
+  if ! $DIST_TEST_HOME/bin/client watch ; then
+    EXIT_STATUS=1
+    FAILURES="$FAILURES"$'Distributed tests failed\n'
+  fi
+  DT_DIR=$TEST_LOGDIR/dist-test-out
+  rm -Rf $DT_DIR
+  $DIST_TEST_HOME/bin/client fetch --artifacts -d $DT_DIR
   # Fetching the artifacts expands each log into its own directory.
   # Move them back into the main log directory
-  rm -f $TEST_LOGDIR/*zip
-  for arch_dir in $TEST_LOGDIR/* ; do
+  rm -f $DT_DIR/*zip
+  for arch_dir in $DT_DIR/* ; do
     # In the case of sharded tests, we'll have multiple subdirs
     # which contain files of the same name. We need to disambiguate
     # when we move back. We can grab the shard index from the task name
@@ -279,18 +466,18 @@ if [ "$ENABLE_DIST_TEST" == "1" ]; then
       } else {
         print "unknown_shard";
       }')
-    for log_file in $arch_dir/build/test-logs/* ; do
+    for log_file in $arch_dir/build/$BUILD_TYPE_LOWER/test-logs/* ; do
       mv $log_file $TEST_LOGDIR/${shard_idx}_$(basename $log_file)
     done
     rm -Rf $arch_dir
   done
-  # Still need to run a few non-dist-test-capable tests locally.
-  EXTRA_TEST_FLAGS="$EXTRA_TEST_FLAGS -L no_dist_test"
 fi
 
-$THIRDPARTY_BIN/ctest -j$NUM_PROCS $EXTRA_TEST_FLAGS || EXIT_STATUS=$?
-
 if [ $EXIT_STATUS != 0 ]; then
+  echo
+  echo Tests failed, making sure we have XML files for all tests.
+  echo ------------------------------------------------------------
+
   # Tests that crash do not generate JUnit report XML files.
   # We go through and generate a kind of poor-man's version of them in those cases.
   for GTEST_OUTFILE in $TEST_LOGDIR/*.txt.gz; do
@@ -308,75 +495,19 @@ fi
 if [ $EXIT_STATUS == 0 ]; then
   TEST_TMPDIR_CONTENTS=$(ls $TEST_TMPDIR)
   if [ -n "$TEST_TMPDIR_CONTENTS" ]; then
-    echo "All tests passed, yet some left behind their test output:"
-    for SUBDIR in $TEST_TMPDIR_CONTENTS; do
-      echo $SUBDIR
-    done
+    echo "All tests passed, yet some left behind their test output."
+    echo "TEST_TMPDIR: $TEST_TMPDIR"
+    find $TEST_TMPDIR -ls
     EXIT_STATUS=1
   fi
-fi
-
-if [ "$DO_COVERAGE" == "1" ]; then
-  echo Generating coverage report...
-  ./thirdparty/gcovr-3.0/scripts/gcovr -r .  -e '.*\.pb\..*' --xml \
-      > build/coverage.xml || EXIT_STATUS=$?
-fi
-
-if [ "$BUILD_JAVA" == "1" ]; then
-  # Make sure we use JDK7
-  export JAVA_HOME=$JAVA7_HOME
-  export PATH=$JAVA_HOME/bin:$PATH
-  pushd $SOURCE_ROOT/java
-  export TSAN_OPTIONS="$TSAN_OPTIONS suppressions=$SOURCE_ROOT/build-support/tsan-suppressions.txt history_size=7"
-  set -x
-  VALIDATE_CSD_FLAG=""
-  if [ "$VALIDATE_CSD" == "1" ]; then
-    VALIDATE_CSD_FLAG="-PvalidateCSD"
-  fi
-  mvn -PbuildCSD \
-      $VALIDATE_CSD_FLAG \
-      -Dsurefire.rerunFailingTestsCount=3 \
-      -Dfailsafe.rerunFailingTestsCount=3 \
-      clean verify || EXIT_STATUS=$?
-  set +x
-  popd
-fi
-
-if [ "$HEAPCHECK" = normal ]; then
-  FAILED_TESTS=$(zgrep -L -- "WARNING: Perftools heap leak checker is active -- Performance may suffer" build/test-logs/*-test.txt*)
-  if [ -n "$FAILED_TESTS" ]; then
-    echo "Some tests didn't heap check properly:"
-    for FTEST in $FAILED_TESTS; do
-      echo $FTEST
-    done
-    EXIT_STATUS=1
-  else
-    echo "All tests heap checked properly"
-  fi
-fi
-
-if [ "$BUILD_PYTHON" == "1" ]; then
-  # Failing to compile the Python client should result in a build failure
-  set -e
-  export KUDU_HOME=$SOURCE_ROOT
-  export KUDU_BUILD=$BUILD_ROOT
-  pushd $SOURCE_ROOT/python
-
-  # Create a sane test environment
-  rm -Rf $KUDU_BUILD/py_env
-  virtualenv $KUDU_BUILD/py_env
-  source $KUDU_BUILD/py_env/bin/activate
-  pip install --upgrade pip
-  CC=$CLANG CXX=$CLANG++ pip install --disable-pip-version-check -r requirements.txt
-
-  # Assuming we run this script from base dir
-  CC=$CLANG CXX=$CLANG++ python setup.py build_ext
-  set +e
-  python setup.py test \
-    --addopts="kudu --junit-xml=$KUDU_BUILD/test-logs/python_client.xml" \
-    2> $KUDU_BUILD/test-logs/python_client.log || EXIT_STATUS=$?
 fi
 
 set -e
+
+if [ -n "$FAILURES" ]; then
+  echo Failure summary
+  echo ------------------------------------------------------------
+  echo $FAILURES
+fi
 
 exit $EXIT_STATUS

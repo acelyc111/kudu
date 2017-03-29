@@ -18,6 +18,8 @@
 #ifndef KUDU_FS_FS_MANAGER_H
 #define KUDU_FS_FS_MANAGER_H
 
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 #include <gtest/gtest_prod.h>
 #include <iosfwd>
 #include <memory>
@@ -107,10 +109,12 @@ class FsManager {
   // the on-disk structures.
   Status Open();
 
-  // Create the initial filesystem layout.
+  // Create the initial filesystem layout. If 'uuid' is provided, uses it as
+  // uuid of the filesystem. Otherwise generates one at random.
   //
   // Returns an error if the file system is already initialized.
-  Status CreateInitialFileSystemLayout();
+  Status CreateInitialFileSystemLayout(
+      boost::optional<std::string> uuid = boost::none);
 
   void DumpFileSystemTree(std::ostream& out);
 
@@ -212,7 +216,8 @@ class FsManager {
   void InitBlockManager();
 
   // Create a new InstanceMetadataPB.
-  void CreateInstanceMetadata(InstanceMetadataPB* metadata);
+  Status CreateInstanceMetadata(boost::optional<std::string> uuid,
+                                InstanceMetadataPB* metadata);
 
   // Save a InstanceMetadataPB to the filesystem.
   // Does not mutate the current state of the fsmanager.
@@ -232,6 +237,14 @@ class FsManager {
                           const std::string& prefix,
                           const std::string& path,
                           const std::vector<std::string>& objects);
+
+  // Deletes temporary files left from previous execution (e.g., after a crash).
+  // Logs warnings in case of errors.
+  void CleanTmpFiles();
+
+  // Checks that the permissions of the root data directories conform to the
+  // configured umask, and tightens them as necessary if they do not.
+  void CheckAndFixPermissions();
 
   static const char *kDataDirName;
   static const char *kTabletMetadataDirName;

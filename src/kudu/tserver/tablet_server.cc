@@ -27,13 +27,13 @@
 #include "kudu/rpc/service_if.h"
 #include "kudu/server/rpc_server.h"
 #include "kudu/server/webserver.h"
-#include "kudu/tablet/maintenance_manager.h"
 #include "kudu/tserver/heartbeater.h"
 #include "kudu/tserver/scanners.h"
 #include "kudu/tserver/tablet_service.h"
 #include "kudu/tserver/ts_tablet_manager.h"
 #include "kudu/tserver/tserver-path-handlers.h"
-#include "kudu/tserver/remote_bootstrap_service.h"
+#include "kudu/tserver/tablet_copy_service.h"
+#include "kudu/util/maintenance_manager.h"
 #include "kudu/util/net/net_util.h"
 #include "kudu/util/net/sockaddr.h"
 #include "kudu/util/status.h"
@@ -88,7 +88,9 @@ Status TabletServer::Init() {
   RETURN_NOT_OK(ValidateMasterAddressResolution());
 
   RETURN_NOT_OK(ServerBase::Init());
-  RETURN_NOT_OK(path_handlers_->Register(web_server_.get()));
+  if (web_server_) {
+    RETURN_NOT_OK(path_handlers_->Register(web_server_.get()));
+  }
 
   heartbeater_.reset(new Heartbeater(opts_, this));
 
@@ -111,19 +113,18 @@ Status TabletServer::Start() {
 
   gscoped_ptr<ServiceIf> ts_service(new TabletServiceImpl(this));
   gscoped_ptr<ServiceIf> admin_service(new TabletServiceAdminImpl(this));
-  gscoped_ptr<ServiceIf> consensus_service(new ConsensusServiceImpl(metric_entity(),
-                                                                    tablet_manager_.get()));
-  gscoped_ptr<ServiceIf> remote_bootstrap_service(
-      new RemoteBootstrapServiceImpl(fs_manager_.get(), tablet_manager_.get(), metric_entity()));
+  gscoped_ptr<ServiceIf> consensus_service(new ConsensusServiceImpl(this, tablet_manager_.get()));
+  gscoped_ptr<ServiceIf> tablet_copy_service(new TabletCopyServiceImpl(
+      this, tablet_manager_.get()));
 
-  RETURN_NOT_OK(ServerBase::RegisterService(ts_service.Pass()));
-  RETURN_NOT_OK(ServerBase::RegisterService(admin_service.Pass()));
-  RETURN_NOT_OK(ServerBase::RegisterService(consensus_service.Pass()));
-  RETURN_NOT_OK(ServerBase::RegisterService(remote_bootstrap_service.Pass()));
+  RETURN_NOT_OK(ServerBase::RegisterService(std::move(ts_service)));
+  RETURN_NOT_OK(ServerBase::RegisterService(std::move(admin_service)));
+  RETURN_NOT_OK(ServerBase::RegisterService(std::move(consensus_service)));
+  RETURN_NOT_OK(ServerBase::RegisterService(std::move(tablet_copy_service)));
   RETURN_NOT_OK(ServerBase::Start());
 
   RETURN_NOT_OK(heartbeater_->Start());
-  RETURN_NOT_OK(maintenance_manager_->Init());
+  RETURN_NOT_OK(maintenance_manager_->Init(fs_manager_->uuid()));
 
   google::FlushLogFiles(google::INFO); // Flush the startup messages.
 

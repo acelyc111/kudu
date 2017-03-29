@@ -20,8 +20,10 @@
 #include <deque>
 #include <iostream>
 #include <map>
+#include <stack>
 #include <unordered_set>
 
+#include <boost/optional.hpp>
 #include <glog/logging.h>
 #include <glog/stl_logging.h>
 #include <google/protobuf/message.h>
@@ -31,6 +33,7 @@
 #include "kudu/fs/fs.pb.h"
 #include "kudu/fs/log_block_manager.h"
 #include "kudu/gutil/map-util.h"
+#include "kudu/gutil/stringprintf.h"
 #include "kudu/gutil/strings/join.h"
 #include "kudu/gutil/strings/numbers.h"
 #include "kudu/gutil/strings/split.h"
@@ -40,12 +43,15 @@
 #include "kudu/gutil/strtoint.h"
 #include "kudu/gutil/walltime.h"
 #include "kudu/util/env_util.h"
+#include "kudu/util/errno.h"
+#include "kudu/util/flags.h"
 #include "kudu/util/flag_tags.h"
 #include "kudu/util/metrics.h"
 #include "kudu/util/net/net_util.h"
 #include "kudu/util/oid_generator.h"
 #include "kudu/util/path_util.h"
 #include "kudu/util/pb_util.h"
+#include "kudu/util/stopwatch.h"
 
 DEFINE_bool(enable_data_block_fsync, true,
             "Whether to enable fsync() of data blocks, metadata, and their parent directories. "
@@ -71,7 +77,8 @@ DEFINE_string(fs_data_dirs, "",
               "block directory.");
 TAG_FLAG(fs_data_dirs, stable);
 
-using google::protobuf::Message;
+DECLARE_string(umask);
+
 using kudu::env_util::ScopedFileDeleter;
 using kudu::fs::BlockManagerOptions;
 using kudu::fs::CreateBlockOptions;
@@ -80,7 +87,10 @@ using kudu::fs::LogBlockManager;
 using kudu::fs::ReadableBlock;
 using kudu::fs::WritableBlock;
 using std::map;
+using std::stack;
+using std::string;
 using std::unordered_set;
+using std::vector;
 using strings::Substitute;
 
 namespace kudu {
@@ -96,8 +106,6 @@ const char *FsManager::kDataDirName = "data";
 const char *FsManager::kCorruptedSuffix = ".corrupted";
 const char *FsManager::kInstanceMetadataFileName = "instance";
 const char *FsManager::kConsensusMetadataDirName = "consensus-meta";
-
-static const char* const kTmpInfix = ".tmp";
 
 FsManagerOpts::FsManagerOpts()
   : wal_path(FLAGS_fs_wal_dir),
@@ -225,6 +233,13 @@ void FsManager::InitBlockManager() {
 
 Status FsManager::Open() {
   RETURN_NOT_OK(Init());
+
+  // Remove leftover tmp files and fix permissions.
+  if (!read_only_) {
+    CleanTmpFiles();
+    CheckAndFixPermissions();
+  }
+
   for (const string& root : canonicalized_all_fs_roots_) {
     gscoped_ptr<InstanceMetadataPB> pb(new InstanceMetadataPB);
     RETURN_NOT_OK(pb_util::ReadPBContainerFromPath(env_, GetInstanceMetadataPath(root),
@@ -238,13 +253,15 @@ Status FsManager::Open() {
     }
   }
 
-  RETURN_NOT_OK(block_manager_->Open());
+  LOG_TIMING(INFO, "opening block manager") {
+    RETURN_NOT_OK(block_manager_->Open());
+  }
   LOG(INFO) << "Opened local filesystem: " << JoinStrings(canonicalized_all_fs_roots_, ",")
-            << std::endl << metadata_->DebugString();
+            << std::endl << SecureDebugString(*metadata_);
   return Status::OK();
 }
 
-Status FsManager::CreateInitialFileSystemLayout() {
+Status FsManager::CreateInitialFileSystemLayout(boost::optional<string> uuid) {
   CHECK(!read_only_);
 
   RETURN_NOT_OK(Init());
@@ -271,7 +288,7 @@ Status FsManager::CreateInitialFileSystemLayout() {
   ElementDeleter d(&delete_on_failure);
 
   InstanceMetadataPB metadata;
-  CreateInstanceMetadata(&metadata);
+  RETURN_NOT_OK(CreateInstanceMetadata(std::move(uuid), &metadata));
   unordered_set<string> to_sync;
   for (const string& root : canonicalized_all_fs_roots_) {
     bool created;
@@ -319,9 +336,16 @@ Status FsManager::CreateInitialFileSystemLayout() {
   return Status::OK();
 }
 
-void FsManager::CreateInstanceMetadata(InstanceMetadataPB* metadata) {
+Status FsManager::CreateInstanceMetadata(boost::optional<string> uuid,
+                                         InstanceMetadataPB* metadata) {
   ObjectIdGenerator oid_generator;
-  metadata->set_uuid(oid_generator.Next());
+  if (uuid) {
+    string canonicalized_uuid;
+    RETURN_NOT_OK(oid_generator.Canonicalize(uuid.get(), &canonicalized_uuid));
+    metadata->set_uuid(canonicalized_uuid);
+  } else {
+    metadata->set_uuid(oid_generator.Next());
+  }
 
   string time_str;
   StringAppendStrftime(&time_str, "%Y-%m-%d %H:%M:%S", time(nullptr), false);
@@ -330,6 +354,7 @@ void FsManager::CreateInstanceMetadata(InstanceMetadataPB* metadata) {
     hostname = "<unknown host>";
   }
   metadata->set_format_stamp(Substitute("Formatted at $0 on $1", time_str, hostname));
+  return Status::OK();
 }
 
 Status FsManager::WriteInstanceMetadata(const InstanceMetadataPB& metadata,
@@ -343,7 +368,7 @@ Status FsManager::WriteInstanceMetadata(const InstanceMetadataPB& metadata,
                                                 pb_util::NO_OVERWRITE,
                                                 pb_util::SYNC));
   LOG(INFO) << "Generated new instance metadata in path " << path << ":\n"
-            << metadata.DebugString();
+            << SecureDebugString(metadata);
   return Status::OK();
 }
 
@@ -372,7 +397,7 @@ const string& FsManager::uuid() const {
 
 vector<string> FsManager::GetDataRootDirs() const {
   // Add the data subdirectory to each data root.
-  std::vector<std::string> data_paths;
+  vector<string> data_paths;
   for (const string& data_fs_root : canonicalized_data_fs_roots_) {
     data_paths.push_back(JoinPathSegments(data_fs_root, kDataDirName));
   }
@@ -390,8 +415,9 @@ string FsManager::GetTabletMetadataPath(const string& tablet_id) const {
 
 namespace {
 // Return true if 'fname' is a valid tablet ID.
-bool IsValidTabletId(const std::string& fname) {
-  if (fname.find(kTmpInfix) != string::npos) {
+bool IsValidTabletId(const string& fname) {
+  if (fname.find(kTmpInfix) != string::npos ||
+      fname.find(kOldTmpInfix) != string::npos) {
     LOG(WARNING) << "Ignoring tmp file in tablet metadata dir: " << fname;
     return false;
   }
@@ -440,6 +466,65 @@ string FsManager::GetWalSegmentFileName(const string& tablet_id,
                                               StringPrintf("%09" PRIu64, sequence_number)));
 }
 
+void FsManager::CleanTmpFiles() {
+  DCHECK(!read_only_);
+  string canonized_path;
+  vector<string> children;
+  unordered_set<string> checked_dirs;
+  stack<string> paths;
+  for (const string& root : canonicalized_all_fs_roots_) {
+    paths.push(root);
+  }
+
+  while (!paths.empty()) {
+    string path = paths.top();
+    paths.pop();
+
+    Status s = env_->GetChildren(path, &children);
+    if (s.ok()) {
+      for (const string& child : children) {
+        if (child == "." || child == "..") continue;
+
+        // Canonicalize in case of symlinks
+        s = env_->Canonicalize(JoinPathSegments(path, child), &canonized_path);
+        if (!s.ok()) {
+          LOG(WARNING) << "Unable to get the real path: " << s.ToString();
+          continue;
+        }
+
+        bool is_directory;
+        s = env_->IsDirectory(canonized_path, &is_directory);
+        if (!s.ok()) {
+          LOG(WARNING) << "Unable to get information about file: " << s.ToString();
+          continue;
+        }
+
+        if (is_directory) {
+          // Check if we didn't handle this path yet
+          if (!ContainsKey(checked_dirs, canonized_path)) {
+            checked_dirs.insert(canonized_path);
+            paths.push(canonized_path);
+          }
+        } else if (child.find(kTmpInfix) != string::npos) {
+          s = env_->DeleteFile(canonized_path);
+          if (!s.ok()) {
+            LOG(WARNING) << "Unable to delete tmp file: " << s.ToString();
+          }
+        }
+      }
+    } else {
+      LOG(WARNING) << "Unable to read directory: " << s.ToString();
+    }
+  }
+}
+
+void FsManager::CheckAndFixPermissions() {
+  for (const string& root : canonicalized_all_fs_roots_) {
+    WARN_NOT_OK(env_->EnsureFileModeAdheresToUmask(root),
+                Substitute("could not check and fix permissions for path: $0",
+                           root));
+  }
+}
 
 // ==========================================================================
 //  Dump/Debug utils
@@ -451,7 +536,7 @@ void FsManager::DumpFileSystemTree(ostream& out) {
   for (const string& root : canonicalized_all_fs_roots_) {
     out << "File-System Root: " << root << std::endl;
 
-    std::vector<string> objects;
+    vector<string> objects;
     Status s = env_->GetChildren(root, &objects);
     if (!s.ok()) {
       LOG(ERROR) << "Unable to list the fs-tree: " << s.ToString();
@@ -467,7 +552,7 @@ void FsManager::DumpFileSystemTree(ostream& out, const string& prefix,
   for (const string& name : objects) {
     if (name == "." || name == "..") continue;
 
-    std::vector<string> sub_objects;
+    vector<string> sub_objects;
     string sub_path = JoinPathSegments(path, name);
     Status s = env_->GetChildren(sub_path, &sub_objects);
     if (s.ok()) {

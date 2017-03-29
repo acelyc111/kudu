@@ -18,7 +18,6 @@
 #ifndef KUDU_CFILE_CFILE_WRITER_H
 #define KUDU_CFILE_CFILE_WRITER_H
 
-#include <boost/utility.hpp>
 #include <unordered_map>
 #include <stdint.h>
 #include <string>
@@ -49,15 +48,12 @@ using std::unordered_map;
 
 class BlockPointer;
 class BTreeInfoPB;
-class GVIntBlockBuilder;
-class BinaryPrefixBlockBuilder;
 class IndexTreeBuilder;
 
 // Magic used in header/footer
-extern const char kMagicString[];
-
-const int kCFileMajorVersion = 1;
-const int kCFileMinorVersion = 0;
+extern const char kMagicStringV1[];
+extern const char kMagicStringV2[];
+extern const int kMagicLength;
 
 class NullBitmapBuilder {
  public:
@@ -138,17 +134,28 @@ class CFileWriter {
   //
   // The Slices in 'data_slices' are concatenated to form the block.
   //
-  // validx_key may be NULL if this file writer has not been configured with
-  // value indexing.
+  // validx_key and validx_prev may be NULL if this file writer has not been
+  // configured with value indexing.
+  //
+  // validx_prev should be a Slice pointing to the last key of the previous block.
+  // It will be used to optimize the value index entry for the block.
   Status AppendRawBlock(const vector<Slice> &data_slices,
                         size_t ordinal_pos,
-                        const void *validx_key,
+                        const void *validx_curr,
+                        const Slice &validx_prev,
                         const char *name_for_log);
 
 
   // Return the amount of data written so far to this CFile.
   // More data may be written by Finish(), but this is an approximation.
   size_t written_size() const;
+
+  // Return the number of values written to the file.
+  // This includes NULL cells, but does not include any "raw" blocks
+  // appended.
+  int written_value_count() const {
+    return value_count_;
+  }
 
   std::string ToString() const { return block_->id().ToString(); }
 
@@ -198,6 +205,10 @@ class CFileWriter {
   // The key-encoder. Only set if the writer is writing an embedded
   // value index.
   const KeyEncoder<faststring>* key_encoder_;
+
+  // The last key written to the block.
+  // Only set if the writer is writing an embedded value index.
+  faststring last_key_;
 
   // a temporary buffer for encoding
   faststring tmp_buf_;

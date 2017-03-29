@@ -33,13 +33,14 @@
 # central test server.
 
 # Path to the test executable or script to be run.
+# May be relative or absolute.
 TEST_PATH=$1
 
-# Path to the root source directory. This script is expected to live within it.
-SOURCE_ROOT=$(dirname "$BASH_SOURCE")/..
+# Absolute path to the root source directory. This script is expected to live within it.
+SOURCE_ROOT=$(cd $(dirname "$BASH_SOURCE")/.. ; pwd)
 
-# Path to the root build directory. The test path is expected to be within it.
-BUILD_ROOT=$(dirname "$TEST_PATH")/..
+# Absolute path to the root build directory. The test path is expected to be within it.
+BUILD_ROOT=$(cd $(dirname "$TEST_PATH")/.. ; pwd)
 
 TEST_LOGDIR=$BUILD_ROOT/test-logs
 mkdir -p $TEST_LOGDIR
@@ -49,6 +50,7 @@ mkdir -p $TEST_DEBUGDIR
 
 TEST_DIRNAME=$(cd $(dirname $TEST_PATH); pwd)
 TEST_FILENAME=$(basename $TEST_PATH)
+ABS_TEST_PATH=$TEST_DIRNAME/$TEST_FILENAME
 shift
 TEST_NAME=$(echo $TEST_FILENAME | perl -pe 's/\..+?$//') # Remove path and extension (if any).
 
@@ -96,26 +98,14 @@ fi
 # Suppressions require symbolization. We'll default to using the symbolizer in
 # thirdparty.
 if [ -z "$ASAN_SYMBOLIZER_PATH" ]; then
-  export ASAN_SYMBOLIZER_PATH=$SOURCE_ROOT/thirdparty/clang-toolchain/bin/llvm-symbolizer
+  export ASAN_SYMBOLIZER_PATH=$SOURCE_ROOT/thirdparty/installed/uninstrumented/bin/llvm-symbolizer
 fi
 
 # Configure TSAN (ignored if this isn't a TSAN build).
-#
-# Deadlock detection (new in clang 3.5) is disabled because:
-# 1. The clang 3.5 deadlock detector crashes in some Kudu unit tests. It
-#    needs compiler-rt commits c4c3dfd, 9a8efe3, and possibly others.
-# 2. Many unit tests report lock-order-inversion warnings; they should be
-#    fixed before reenabling the detector.
-TSAN_OPTIONS="$TSAN_OPTIONS detect_deadlocks=0"
 TSAN_OPTIONS="$TSAN_OPTIONS suppressions=$SOURCE_ROOT/build-support/tsan-suppressions.txt"
 TSAN_OPTIONS="$TSAN_OPTIONS history_size=7"
 TSAN_OPTIONS="$TSAN_OPTIONS external_symbolizer_path=$ASAN_SYMBOLIZER_PATH"
 export TSAN_OPTIONS
-
-# Enable leak detection even under LLVM 3.4, where it was disabled by default.
-# This flag only takes effect when running an ASAN build.
-ASAN_OPTIONS="$ASAN_OPTIONS detect_leaks=1"
-export ASAN_OPTIONS
 
 # Set up suppressions for LeakSanitizer
 LSAN_OPTIONS="$LSAN_OPTIONS suppressions=$SOURCE_ROOT/build-support/lsan-suppressions.txt"
@@ -146,10 +136,22 @@ for ATTEMPT_NUMBER in $(seq 1 $TEST_EXECUTION_ATTEMPTS) ; do
   # even when retries are successful.
   rm -f $XMLFILE
 
+  if [[ $OSTYPE =~ ^darwin ]]; then
+    #
+    # For builds on MacOS X 10.11, neither (g)addr2line nor atos translates
+    # address into line number.  The atos utility is able to do that only
+    # if load address (-l <addr>) or reference to currently running process
+    # (-p <pid>) is given.  This is so even for binaries linked with
+    # PIE disabled.
+    #
+    addr2line_filter=cat
+  else
+    addr2line_filter="$SOURCE_ROOT/build-support/stacktrace_addr2line.pl $ABS_TEST_PATH"
+  fi
   echo "Running $TEST_NAME, redirecting output into $LOGFILE" \
     "(attempt ${ATTEMPT_NUMBER}/$TEST_EXECUTION_ATTEMPTS)"
-  $TEST_PATH "$@" --test_timeout_after $KUDU_TEST_TIMEOUT 2>&1 \
-    | $SOURCE_ROOT/build-support/stacktrace_addr2line.pl $TEST_PATH \
+  $ABS_TEST_PATH "$@" --test_timeout_after $KUDU_TEST_TIMEOUT 2>&1 \
+    | $addr2line_filter \
     | $pipe_cmd > $LOGFILE
   STATUS=$?
 
@@ -189,7 +191,7 @@ for ATTEMPT_NUMBER in $(seq 1 $TEST_EXECUTION_ATTEMPTS) ; do
 
   if [ -n "$KUDU_REPORT_TEST_RESULTS" ]; then
     echo Reporting results
-    $SOURCE_ROOT/build-support/report-test.sh "$TEST_PATH" "$LOGFILE" "$STATUS" &
+    $SOURCE_ROOT/build-support/report-test.sh "$ABS_TEST_PATH" "$LOGFILE" "$STATUS" &
 
     # On success, we'll do "best effort" reporting, and disown the subprocess.
     # On failure, we want to upload the failed test log. So, in that case,
@@ -229,12 +231,12 @@ fi
 COREFILES=$(ls | grep ^core)
 if [ -n "$COREFILES" ]; then
   echo Found core dump. Saving executable and core files.
-  gzip < $TEST_PATH > "$TEST_DEBUGDIR/$TEST_NAME.gz" || exit $?
+  gzip < $ABS_TEST_PATH > "$TEST_DEBUGDIR/$TEST_NAME.gz" || exit $?
   for COREFILE in $COREFILES; do
     gzip < $COREFILE > "$TEST_DEBUGDIR/$TEST_NAME.$COREFILE.gz" || exit $?
   done
   # Pull in any .so files as well.
-  for LIB in $(ldd $TEST_PATH | grep $BUILD_ROOT | awk '{print $3}'); do
+  for LIB in $(ldd $ABS_TEST_PATH | grep $BUILD_ROOT | awk '{print $3}'); do
     LIB_NAME=$(basename $LIB)
     gzip < $LIB > "$TEST_DEBUGDIR/$LIB_NAME.gz" || exit $?
   done

@@ -17,31 +17,27 @@
 
 #include "kudu/rpc/inbound_call.h"
 
+#include <glog/stl_logging.h>
 #include <memory>
 
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/rpc/connection.h"
 #include "kudu/rpc/rpc_introspection.pb.h"
 #include "kudu/rpc/rpc_sidecar.h"
+#include "kudu/rpc/rpcz_store.h"
 #include "kudu/rpc/serialization.h"
+#include "kudu/rpc/service_if.h"
 #include "kudu/util/debug/trace_event.h"
-#include "kudu/util/flag_tags.h"
 #include "kudu/util/metrics.h"
 #include "kudu/util/trace.h"
 
 using google::protobuf::FieldDescriptor;
+using google::protobuf::io::CodedOutputStream;
 using google::protobuf::Message;
 using google::protobuf::MessageLite;
-using google::protobuf::io::CodedOutputStream;
 using std::shared_ptr;
 using std::vector;
 using strings::Substitute;
-
-DEFINE_bool(rpc_dump_all_traces, false,
-            "If true, dump all RPC traces at INFO level");
-TAG_FLAG(rpc_dump_all_traces, advanced);
-TAG_FLAG(rpc_dump_all_traces, runtime);
-
 
 namespace kudu {
 namespace rpc {
@@ -49,7 +45,8 @@ namespace rpc {
 InboundCall::InboundCall(Connection* conn)
   : conn_(conn),
     sidecars_deleter_(&sidecars_),
-    trace_(new Trace) {
+    trace_(new Trace),
+    method_info_(nullptr) {
   RecordCallReceived();
 }
 
@@ -78,6 +75,18 @@ Status InboundCall::ParseFrom(gscoped_ptr<InboundTransfer> transfer) {
 void InboundCall::RespondSuccess(const MessageLite& response) {
   TRACE_EVENT0("rpc", "InboundCall::RespondSuccess");
   Respond(response, true);
+}
+
+void InboundCall::RespondUnsupportedFeature(const vector<uint32_t>& unsupported_features) {
+  TRACE_EVENT0("rpc", "InboundCall::RespondUnsupportedFeature");
+  ErrorStatusPB err;
+  err.set_message("unsupported feature flags");
+  err.set_code(ErrorStatusPB::ERROR_INVALID_REQUEST);
+  for (uint32_t feature : unsupported_features) {
+    err.add_unsupported_feature_flags(feature);
+  }
+
+  Respond(err, false);
 }
 
 void InboundCall::RespondFailure(ErrorStatusPB::RpcErrorCodePB error_code,
@@ -114,22 +123,28 @@ void InboundCall::ApplicationErrorToPB(int error_ext_id, const std::string& mess
 void InboundCall::Respond(const MessageLite& response,
                           bool is_success) {
   TRACE_EVENT_FLOW_END0("rpc", "InboundCall", this);
-  Status s = SerializeResponseBuffer(response, is_success);
-  if (PREDICT_FALSE(!s.ok())) {
-    // TODO: test error case, serialize error response instead
-    LOG(DFATAL) << "Unable to serialize response: " << s.ToString();
-  }
+  SerializeResponseBuffer(response, is_success);
 
   TRACE_EVENT_ASYNC_END1("rpc", "InboundCall", this,
                          "method", remote_method_.method_name());
   TRACE_TO(trace_, "Queueing $0 response", is_success ? "success" : "failure");
-
-  LogTrace();
-  conn_->QueueResponseForCall(gscoped_ptr<InboundCall>(this).Pass());
+  RecordHandlingCompleted();
+  conn_->rpcz_store()->AddCall(this);
+  conn_->QueueResponseForCall(gscoped_ptr<InboundCall>(this));
 }
 
-Status InboundCall::SerializeResponseBuffer(const MessageLite& response,
-                                            bool is_success) {
+void InboundCall::SerializeResponseBuffer(const MessageLite& response,
+                                          bool is_success) {
+  if (PREDICT_FALSE(!response.IsInitialized())) {
+    LOG(ERROR) << "Invalid RPC response for " << ToString()
+               << ": protobuf missing required fields: "
+               << response.InitializationErrorString();
+    // Send it along anyway -- the client will also notice the missing fields
+    // and produce an error on the other side, but this will at least
+    // make it clear on both sides of the RPC connection what kind of error
+    // happened.
+  }
+
   uint32_t protobuf_msg_size = response.ByteSize();
 
   ResponseHeader resp_hdr;
@@ -142,13 +157,11 @@ Status InboundCall::SerializeResponseBuffer(const MessageLite& response,
   }
 
   int additional_size = absolute_sidecar_offset - protobuf_msg_size;
-  RETURN_NOT_OK(serialization::SerializeMessage(response, &response_msg_buf_,
-                                                additional_size, true));
+  serialization::SerializeMessage(response, &response_msg_buf_,
+                                  additional_size, true);
   int main_msg_size = additional_size + response_msg_buf_.size();
-  RETURN_NOT_OK(serialization::SerializeHeader(resp_hdr, main_msg_size,
-                                               &response_hdr_buf_));
-
-  return Status::OK();
+  serialization::SerializeHeader(resp_hdr, main_msg_size,
+                                 &response_hdr_buf_);
 }
 
 void InboundCall::SerializeResponseTo(vector<Slice>* slices) const {
@@ -176,6 +189,14 @@ Status InboundCall::AddRpcSidecar(gscoped_ptr<RpcSidecar> car, int* idx) {
 }
 
 string InboundCall::ToString() const {
+  if (header_.has_request_id()) {
+    return Substitute("Call $0 from $1 (ReqId={client: $2, seq_no=$3, attempt_no=$4})",
+                      remote_method_.ToString(),
+                      conn_->remote().ToString(),
+                      header_.request_id().client_id(),
+                      header_.request_id().seq_no(),
+                      header_.request_id().attempt_no());
+  }
   return Substitute("Call $0 from $1 (request call id $2)",
                       remote_method_.ToString(),
                       conn_->remote().ToString(),
@@ -186,39 +207,14 @@ void InboundCall::DumpPB(const DumpRunningRpcsRequestPB& req,
                          RpcCallInProgressPB* resp) {
   resp->mutable_header()->CopyFrom(header_);
   if (req.include_traces() && trace_) {
-    resp->set_trace_buffer(trace_->DumpToString(true));
+    resp->set_trace_buffer(trace_->DumpToString());
   }
-  resp->set_micros_elapsed(MonoTime::Now(MonoTime::FINE).GetDeltaSince(timing_.time_received)
+  resp->set_micros_elapsed((MonoTime::Now() - timing_.time_received)
                            .ToMicroseconds());
 }
 
-void InboundCall::LogTrace() const {
-  MonoTime now = MonoTime::Now(MonoTime::FINE);
-  int total_time = now.GetDeltaSince(timing_.time_received).ToMilliseconds();
-
-  if (header_.has_timeout_millis() && header_.timeout_millis() > 0) {
-    double log_threshold = header_.timeout_millis() * 0.75f;
-    if (total_time > log_threshold) {
-      // TODO: consider pushing this onto another thread since it may be slow.
-      // The traces may also be too large to fit in a log message.
-      LOG(WARNING) << ToString() << " took " << total_time << "ms (client timeout "
-                   << header_.timeout_millis() << ").";
-      std::string s = trace_->DumpToString(true);
-      if (!s.empty()) {
-        LOG(WARNING) << "Trace:\n" << s;
-      }
-      return;
-    }
-  }
-
-  if (PREDICT_FALSE(FLAGS_rpc_dump_all_traces)) {
-    LOG(INFO) << ToString() << " took " << total_time << "ms. Trace:";
-    trace_->Dump(&LOG(INFO), true);
-  }
-}
-
-const UserCredentials& InboundCall::user_credentials() const {
-  return conn_->user_credentials();
+const RemoteUser& InboundCall::remote_user() const {
+  return conn_->remote_user();
 }
 
 const Sockaddr& InboundCall::remote_address() const {
@@ -236,23 +232,31 @@ Trace* InboundCall::trace() {
 void InboundCall::RecordCallReceived() {
   TRACE_EVENT_ASYNC_BEGIN0("rpc", "InboundCall", this);
   DCHECK(!timing_.time_received.Initialized());  // Protect against multiple calls.
-  timing_.time_received = MonoTime::Now(MonoTime::FINE);
+  timing_.time_received = MonoTime::Now();
 }
 
 void InboundCall::RecordHandlingStarted(scoped_refptr<Histogram> incoming_queue_time) {
   DCHECK(incoming_queue_time != nullptr);
   DCHECK(!timing_.time_handled.Initialized());  // Protect against multiple calls.
-  timing_.time_handled = MonoTime::Now(MonoTime::FINE);
+  timing_.time_handled = MonoTime::Now();
   incoming_queue_time->Increment(
-      timing_.time_handled.GetDeltaSince(timing_.time_received).ToMicroseconds());
+      (timing_.time_handled - timing_.time_received).ToMicroseconds());
 }
 
-void InboundCall::RecordHandlingCompleted(scoped_refptr<Histogram> handler_run_time) {
-  DCHECK(handler_run_time != nullptr);
+void InboundCall::RecordHandlingCompleted() {
   DCHECK(!timing_.time_completed.Initialized());  // Protect against multiple calls.
-  timing_.time_completed = MonoTime::Now(MonoTime::FINE);
-  handler_run_time->Increment(
-      timing_.time_completed.GetDeltaSince(timing_.time_handled).ToMicroseconds());
+  timing_.time_completed = MonoTime::Now();
+
+  if (!timing_.time_handled.Initialized()) {
+    // Sometimes we respond to a call before we begin handling it (e.g. due to queue
+    // overflow, etc). These cases should not be counted against the histogram.
+    return;
+  }
+
+  if (method_info_) {
+    method_info_->handler_latency_histogram->Increment(
+        (timing_.time_completed - timing_.time_handled).ToMicroseconds());
+  }
 }
 
 bool InboundCall::ClientTimedOut() const {
@@ -260,8 +264,8 @@ bool InboundCall::ClientTimedOut() const {
     return false;
   }
 
-  MonoTime now = MonoTime::Now(MonoTime::FINE);
-  int total_time = now.GetDeltaSince(timing_.time_received).ToMilliseconds();
+  MonoTime now = MonoTime::Now();
+  int total_time = (now - timing_.time_received).ToMilliseconds();
   return total_time > header_.timeout_millis();
 }
 
@@ -269,9 +273,19 @@ MonoTime InboundCall::GetClientDeadline() const {
   if (!header_.has_timeout_millis() || header_.timeout_millis() == 0) {
     return MonoTime::Max();
   }
-  MonoTime deadline = timing_.time_received;
-  deadline.AddDelta(MonoDelta::FromMilliseconds(header_.timeout_millis()));
-  return deadline;
+  return timing_.time_received + MonoDelta::FromMilliseconds(header_.timeout_millis());
+}
+
+MonoTime InboundCall::GetTimeReceived() const {
+  return timing_.time_received;
+}
+
+vector<uint32_t> InboundCall::GetRequiredFeatures() const {
+  vector<uint32_t> features;
+  for (uint32_t feature : header_.required_feature_flags()) {
+    features.push_back(feature);
+  }
+  return features;
 }
 
 } // namespace rpc

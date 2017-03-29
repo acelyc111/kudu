@@ -21,6 +21,8 @@
 #include <netdb.h>
 
 #include <algorithm>
+#include <boost/functional/hash.hpp>
+#include <gflags/gflags.h>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -33,8 +35,10 @@
 #include "kudu/gutil/strings/strip.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/gutil/strings/util.h"
+#include "kudu/util/debug/trace_event.h"
 #include "kudu/util/errno.h"
 #include "kudu/util/faststring.h"
+#include "kudu/util/flag_tags.h"
 #include "kudu/util/net/net_util.h"
 #include "kudu/util/net/sockaddr.h"
 #include "kudu/util/stopwatch.h"
@@ -44,6 +48,9 @@
 #ifndef HOST_NAME_MAX
 #define HOST_NAME_MAX 64
 #endif
+
+DEFINE_bool(fail_dns_resolution, false, "Whether to fail all dns resolution, for tests.");
+TAG_FLAG(fail_dns_resolution, hidden);
 
 using std::unordered_set;
 using std::vector;
@@ -72,6 +79,17 @@ HostPort::HostPort(const Sockaddr& addr)
     port_(addr.port()) {
 }
 
+bool operator==(const HostPort& hp1, const HostPort& hp2) {
+  return hp1.port() == hp2.port() && hp1.host() == hp2.host();
+}
+
+size_t HostPort::HashCode() const {
+  size_t seed = 0;
+  boost::hash_combine(seed, host_);
+  boost::hash_combine(seed, port_);
+  return seed;
+}
+
 Status HostPort::ParseString(const string& str, uint16_t default_port) {
   std::pair<string, string> p = strings::Split(str, strings::delimiter::Limit(":", 1));
 
@@ -94,6 +112,8 @@ Status HostPort::ParseString(const string& str, uint16_t default_port) {
 }
 
 Status HostPort::ResolveAddresses(vector<Sockaddr>* addresses) const {
+  TRACE_EVENT1("net", "HostPort::ResolveAddresses",
+               "host", host_);
   struct addrinfo hints;
   memset(&hints, 0, sizeof(hints));
   hints.ai_family = AF_INET;
@@ -120,6 +140,9 @@ Status HostPort::ResolveAddresses(vector<Sockaddr>* addresses) const {
     }
     VLOG(2) << "Resolved address " << sockaddr.ToString()
             << " for host/port " << ToString();
+  }
+  if (PREDICT_FALSE(FLAGS_fail_dns_resolution)) {
+    return Status::NetworkError("injected DNS resolution failure");
   }
   return Status::OK();
 }
@@ -157,8 +180,8 @@ Status ParseAddressList(const std::string& addr_list,
                         std::vector<Sockaddr>* addresses) {
   vector<HostPort> host_ports;
   RETURN_NOT_OK(HostPort::ParseStrings(addr_list, default_port, &host_ports));
+  if (host_ports.empty()) return Status::InvalidArgument("No address specified");
   unordered_set<Sockaddr> uniqued;
-
   for (const HostPort& host_port : host_ports) {
     vector<Sockaddr> this_addresses;
     RETURN_NOT_OK(host_port.ResolveAddresses(&this_addresses));
@@ -178,6 +201,7 @@ Status ParseAddressList(const std::string& addr_list,
 }
 
 Status GetHostname(string* hostname) {
+  TRACE_EVENT0("net", "GetHostname");
   char name[HOST_NAME_MAX];
   int ret = gethostname(name, HOST_NAME_MAX);
   if (ret != 0) {
@@ -190,6 +214,7 @@ Status GetHostname(string* hostname) {
 }
 
 Status GetFQDN(string* hostname) {
+  TRACE_EVENT0("net", "GetFQDN");
   // Start with the non-qualified hostname
   RETURN_NOT_OK(GetHostname(hostname));
 
@@ -199,9 +224,14 @@ Status GetFQDN(string* hostname) {
   hints.ai_flags = AI_CANONNAME;
 
   struct addrinfo* result;
-  int rc = getaddrinfo(hostname->c_str(), nullptr, &hints, &result);
-  if (rc != 0) {
-    return Status::NetworkError("Unable to lookup FQDN", ErrnoToString(errno), errno);
+  LOG_SLOW_EXECUTION(WARNING, 200,
+                     Substitute("looking up canonical hostname for localhost "
+                                "(eventual result was $0)", *hostname)) {
+    TRACE_EVENT0("net", "getaddrinfo");
+    int rc = getaddrinfo(hostname->c_str(), nullptr, &hints, &result);
+    if (rc != 0) {
+      return Status::NetworkError("Unable to lookup FQDN", ErrnoToString(errno), errno);
+    }
   }
 
   *hostname = result->ai_canonname;
@@ -250,7 +280,7 @@ void TryRunLsof(const Sockaddr& addr, vector<string>* log) {
   string cmd = strings::Substitute(
       "export PATH=$$PATH:/usr/sbin ; "
       "lsof -n -i 'TCP:$0' -sTCP:LISTEN ; "
-      "for pid in $$(lsof -F p -n -i 'TCP:$0' -sTCP:LISTEN | cut -f 2 -dp) ; do"
+      "for pid in $$(lsof -F p -n -i 'TCP:$0' -sTCP:LISTEN | grep p | cut -f 2 -dp) ; do"
       "  while [ $$pid -gt 1 ] ; do"
       "    ps h -fp $$pid ;"
       "    stat=($$(</proc/$$pid/stat)) ;"
@@ -266,7 +296,7 @@ void TryRunLsof(const Sockaddr& addr, vector<string>* log) {
   LOG_STRING(INFO, log) << "$ " << cmd;
   vector<string> argv = { "bash", "-c", cmd };
   string results;
-  Status s = Subprocess::Call(argv, &results);
+  Status s = Subprocess::Call(argv, "", &results);
   if (PREDICT_FALSE(!s.ok())) {
     LOG_STRING(WARNING, log) << s.ToString();
   }

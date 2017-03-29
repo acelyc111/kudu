@@ -15,6 +15,19 @@
 # specific language governing permissions and limitations
 # under the License.
 
+PROTOBUF_GENERATE_CPP(
+  CLIENT_PROTO_SRCS CLIENT_PROTO_HDRS CLIENT_PROTO_TGTS
+  SOURCE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..
+  BINARY_ROOT ${CMAKE_CURRENT_BINARY_DIR}/../..
+  PROTO_FILES client.proto)
+set(CLIENT_PROTO_LIBS
+  kudu_common_proto
+  token_proto)
+ADD_EXPORTABLE_LIBRARY(client_proto
+  SRCS ${CLIENT_PROTO_SRCS}
+  DEPS ${CLIENT_PROTO_LIBS}
+  NONLINK_DEPS ${CLIENT_PROTO_TGTS})
+
 set(CLIENT_SRCS
   batcher.cc
   client.cc
@@ -22,29 +35,35 @@ set(CLIENT_SRCS
   client-internal.cc
   error_collector.cc
   error-internal.cc
+  master_rpc.cc
   meta_cache.cc
-  row_result.cc
+  scan_batch.cc
+  scan_configuration.cc
   scan_predicate.cc
+  scan_token-internal.cc
   scanner-internal.cc
-  session-internal.cc
+  replica-internal.cc
+  resource_metrics.cc
   schema.cc
+  session-internal.cc
   table-internal.cc
   table_alterer-internal.cc
   table_creator-internal.cc
+  tablet-internal.cc
   tablet_server-internal.cc
   value.cc
   write_op.cc
 )
 
 set(CLIENT_LIBS
-  kudu_common
-  master_proto
-  master_rpc
-  tserver_proto
-  tserver_service_proto
-  kudu_util
+  client_proto
   gutil
-  krpc)
+  krpc
+  kudu_common
+  kudu_util
+  master_proto
+  tserver_proto
+  tserver_service_proto)
 
 # Make sure we exclude tcmalloc from the exported library; we want the library
 # code to use the linking application's malloc implementation.
@@ -64,7 +83,7 @@ ADD_EXPORTABLE_LIBRARY(kudu_client
   DEPS ${CLIENT_LIBS}
   EXPORTED_SHARED
   EXPORTED_OUTPUT_NAME kudu_client
-  EXPORTED_OUTPUT_DIRECTORY "${BUILD_OUTPUT_ROOT_DIRECTORY}/exported"
+  EXPORTED_OUTPUT_DIRECTORY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/exported"
   EXPORTED_DEPS ${EXPORTED_CLIENT_LIBS})
 
 ################################################################################
@@ -154,12 +173,14 @@ install(FILES
   callbacks.h
   client.h
   row_result.h
+  scan_batch.h
   scan_predicate.h
   schema.h
   shared_ptr.h
   stubs.h
   value.h
   write_op.h
+  resource_metrics.h
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/kudu/client)
 
 # Headers: common
@@ -219,9 +240,12 @@ target_link_libraries(kudu_client_test_util
 
 # Tests
 
-if (NOT APPLE)
-  # The OS X system compiler does not support source symbol maps, so the client
-  # leaks internal symbols globally.
+# The OS X system compiler does not support source symbol maps, so the client
+# leaks internal symbols globally.
+#
+# Coverage builds insert gcov-related symbols into the client library. We
+# don't ship such builds, so there's no point in checking symbol visibility.
+if (NOT APPLE AND NOT "${KUDU_GENERATE_COVERAGE}")
   ADD_KUDU_TEST(client_symbol-test.sh LABELS no_dist_test)
 endif()
 
@@ -232,3 +256,5 @@ endif()
 set(KUDU_TEST_LINK_LIBS kudu_client integration-tests ${KUDU_MIN_TEST_LIBS})
 ADD_KUDU_TEST(client-test)
 ADD_KUDU_TEST(client-unittest)
+ADD_KUDU_TEST(predicate-test)
+ADD_KUDU_TEST(scan_token-test)

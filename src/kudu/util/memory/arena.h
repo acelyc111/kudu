@@ -26,18 +26,20 @@
 #include <boost/signals2/dummy_mutex.hpp>
 #include <glog/logging.h>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <stddef.h>
 #include <string.h>
 #include <vector>
 
 #include "kudu/gutil/dynamic_annotations.h"
+#include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/logging-inl.h"
 #include "kudu/gutil/macros.h"
-#include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/util/alignment.h"
 #include "kudu/util/locks.h"
 #include "kudu/util/memory/memory.h"
+#include "kudu/util/mutex.h"
 #include "kudu/util/slice.h"
 
 using std::allocator;
@@ -70,6 +72,9 @@ template <> struct ArenaTraits<false> {
 template <bool THREADSAFE>
 class ArenaBase {
  public:
+  // Arenas are required to have a minimum size of at least this amount.
+  static const size_t kMinimumChunkSize;
+
   // Creates a new arena, with a single buffer of size up-to
   // initial_buffer_size, upper size limit for later-allocated buffers capped
   // at max_buffer_size, and maximum capacity (i.e. total sizes of all buffers)
@@ -123,6 +128,9 @@ class ArenaBase {
   // It is legal for 'dst' to be a pointer to 'src'.
   // See AddSlice above for detail on memory lifetime.
   bool RelocateSlice(const Slice &src, Slice *dst);
+
+  // Similar to the above, but for StringPiece.
+  bool RelocateStringPiece(const StringPiece& src, StringPiece* sp);
 
   // Reserves a blob of the specified size in the arena, and returns a pointer
   // to it. The caller can then fill the allocated memory. The pointer is
@@ -185,7 +193,7 @@ class ArenaBase {
   }
 
   BufferAllocator* const buffer_allocator_;
-  vector<std::shared_ptr<Component> > arena_;
+  vector<std::unique_ptr<Component> > arena_;
 
   // The current component to allocate from.
   // Use AcquireLoadCurrent and ReleaseStoreCurrent to load/store.
@@ -420,7 +428,7 @@ inline uint8_t *ArenaBase<false>::Component::AllocateBytesAligned(
 template <bool THREADSAFE>
 inline void ArenaBase<THREADSAFE>::Component::AsanUnpoison(const void* addr, size_t size) {
 #ifdef ADDRESS_SANITIZER
-  lock_guard<spinlock_type> l(&asan_lock_);
+  std::lock_guard<spinlock_type> l(asan_lock_);
   ASAN_UNPOISON_MEMORY_REGION(addr, size);
 #endif
 }
@@ -456,6 +464,14 @@ inline bool ArenaBase<THREADSAFE>::RelocateSlice(const Slice &src, Slice *dst) {
   return true;
 }
 
+
+template <bool THREADSAFE>
+inline bool ArenaBase<THREADSAFE>::RelocateStringPiece(const StringPiece& src, StringPiece* sp) {
+  Slice slice(src.data(), src.size());
+  if (!RelocateSlice(slice, &slice)) return false;
+  *sp = StringPiece(reinterpret_cast<const char*>(slice.data()), slice.size());
+  return true;
+}
 
 template<bool THREADSAFE>
 template<class T>

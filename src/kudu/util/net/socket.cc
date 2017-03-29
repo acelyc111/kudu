@@ -33,6 +33,7 @@
 #include "kudu/gutil/basictypes.h"
 #include "kudu/gutil/stringprintf.h"
 #include "kudu/gutil/strings/substitute.h"
+#include "kudu/util/debug/trace_event.h"
 #include "kudu/util/errno.h"
 #include "kudu/util/flag_tags.h"
 #include "kudu/util/monotime.h"
@@ -168,6 +169,19 @@ Status Socket::SetNoDelay(bool enabled) {
   return Status::OK();
 }
 
+Status Socket::SetTcpCork(bool enabled) {
+#if defined(__linux__)
+  int flag = enabled ? 1 : 0;
+  if (setsockopt(fd_, IPPROTO_TCP, TCP_CORK, &flag, sizeof(flag)) == -1) {
+    int err = errno;
+    return Status::NetworkError(std::string("failed to set TCP_CORK: ") +
+                                ErrnoToString(err), Slice(), err);
+  }
+#endif // defined(__linux__)
+  // TODO: Use TCP_NOPUSH for OSX if perf becomes an issue.
+  return Status::OK();
+}
+
 Status Socket::SetNonBlocking(bool enabled) {
   int curflags = ::fcntl(fd_, F_GETFL, 0);
   if (curflags == -1) {
@@ -282,6 +296,17 @@ Status Socket::GetPeerAddress(Sockaddr *cur_addr) const {
   return Status::OK();
 }
 
+bool Socket::IsLoopbackConnection() const {
+  Sockaddr local, remote;
+  if (!GetSocketAddress(&local).ok()) return false;
+  if (!GetPeerAddress(&remote).ok()) return false;
+
+  // Compare without comparing ports.
+  local.set_port(0);
+  remote.set_port(0);
+  return local == remote;
+}
+
 Status Socket::Bind(const Sockaddr& bind_addr) {
   struct sockaddr_in addr = bind_addr.addr();
 
@@ -303,6 +328,7 @@ Status Socket::Bind(const Sockaddr& bind_addr) {
 }
 
 Status Socket::Accept(Socket *new_conn, Sockaddr *remote, int flags) {
+  TRACE_EVENT0("net", "Socket::Accept");
   struct sockaddr_in addr;
   socklen_t olen = sizeof(addr);
   DCHECK_GE(fd_, 0);
@@ -330,6 +356,8 @@ Status Socket::Accept(Socket *new_conn, Sockaddr *remote, int flags) {
 #endif // defined(__linux__)
 
   *remote = addr;
+  TRACE_EVENT_INSTANT1("net", "Accepted", TRACE_EVENT_SCOPE_THREAD,
+                       "remote", remote->ToString());
   return Status::OK();
 }
 
@@ -345,6 +373,8 @@ Status Socket::BindForOutgoingConnection() {
 }
 
 Status Socket::Connect(const Sockaddr &remote) {
+  TRACE_EVENT1("net", "Socket::Connect",
+               "remote", remote.ToString());
   if (PREDICT_FALSE(!FLAGS_local_ip_for_outbound_sockets.empty())) {
     RETURN_NOT_OK(BindForOutgoingConnection());
   }
@@ -428,7 +458,7 @@ Status Socket::BlockingWrite(const uint8_t *buf, size_t buflen, size_t *nwritten
   while (tot_written < buflen) {
     int32_t inc_num_written = 0;
     int32_t num_to_write = buflen - tot_written;
-    MonoDelta timeout = deadline.GetDeltaSince(MonoTime::Now(MonoTime::FINE));
+    MonoDelta timeout = deadline - MonoTime::Now();
     if (PREDICT_FALSE(timeout.ToNanoseconds() <= 0)) {
       return Status::TimedOut("BlockingWrite timed out");
     }
@@ -499,7 +529,7 @@ Status Socket::BlockingRecv(uint8_t *buf, size_t amt, size_t *nread, const MonoT
   while (tot_read < amt) {
     int32_t inc_num_read = 0;
     int32_t num_to_read = amt - tot_read;
-    MonoDelta timeout = deadline.GetDeltaSince(MonoTime::Now(MonoTime::FINE));
+    MonoDelta timeout = deadline - MonoTime::Now();
     if (PREDICT_FALSE(timeout.ToNanoseconds() <= 0)) {
       return Status::TimedOut("");
     }

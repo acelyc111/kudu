@@ -17,7 +17,7 @@
 #ifndef KUDU_CFILE_BLOOMFILE_H
 #define KUDU_CFILE_BLOOMFILE_H
 
-#include <boost/ptr_container/ptr_vector.hpp>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -61,6 +61,9 @@ class BloomFileWriter {
 
   // first key inserted in the current block.
   faststring first_key_;
+
+  // last key inserted in the previous block
+  faststring last_key_;
 };
 
 // Reader for a bloom file.
@@ -75,7 +78,7 @@ class BloomFileReader {
   //
   // After this call, the bloom reader is safe for use.
   static Status Open(gscoped_ptr<fs::ReadableBlock> block,
-                     const ReaderOptions& options,
+                     ReaderOptions options,
                      gscoped_ptr<BloomFileReader> *reader);
 
   // Lazily opens a bloom file using a previously opened block. A lazy open
@@ -84,7 +87,7 @@ class BloomFileReader {
   //
   // Init() must be called before using CheckKeyPresent().
   static Status OpenNoInit(gscoped_ptr<fs::ReadableBlock> block,
-                           const ReaderOptions& options,
+                           ReaderOptions options,
                            gscoped_ptr<BloomFileReader> *reader);
 
   // Fully opens a previously lazily opened bloom file, parsing and
@@ -103,7 +106,7 @@ class BloomFileReader {
  private:
   DISALLOW_COPY_AND_ASSIGN(BloomFileReader);
 
-  BloomFileReader(gscoped_ptr<CFileReader> reader, const ReaderOptions& options);
+  BloomFileReader(gscoped_ptr<CFileReader> reader, ReaderOptions options);
 
   // Parse the header present in the given block.
   //
@@ -128,7 +131,7 @@ class BloomFileReader {
   // We need a big per-thread object which gets passed around so as
   // to avoid this... Instead we'll use a per-CPU iterator as a
   // lame hack.
-  boost::ptr_vector<cfile::IndexTreeIterator> index_iters_;
+  std::vector<std::unique_ptr<cfile::IndexTreeIterator>> index_iters_;
   gscoped_ptr<padded_spinlock[]> iter_locks_;
 
   KuduOnceDynamic init_once_;
