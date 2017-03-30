@@ -17,10 +17,7 @@
 #ifndef KUDU_CLIENT_TABLE_CREATOR_INTERNAL_H
 #define KUDU_CLIENT_TABLE_CREATOR_INTERNAL_H
 
-#include <boost/optional.hpp>
-#include <memory>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "kudu/client/client.h"
@@ -41,20 +38,11 @@ class KuduTableCreator::Data {
 
   const KuduSchema* schema_;
 
-  std::vector<std::unique_ptr<KuduPartialRow>> range_partition_splits_;
-
-  struct RangePartition {
-    std::unique_ptr<KuduPartialRow> lower_bound;
-    std::unique_ptr<KuduPartialRow> upper_bound;
-    RangePartitionBound lower_bound_type;
-    RangePartitionBound upper_bound_type;
-  };
-
-  std::vector<RangePartition> range_partition_bounds_;
+  std::vector<const KuduPartialRow*> split_rows_;
 
   PartitionSchemaPB partition_schema_;
 
-  boost::optional<int> num_replicas_;
+  int num_replicas_;
 
   MonoDelta timeout_;
 

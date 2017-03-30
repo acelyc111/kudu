@@ -15,6 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <boost/thread/locks.hpp>
+#include <boost/thread/mutex.hpp>
 #include <mutex>
 #include <sched.h>
 #include <string>
@@ -52,7 +54,7 @@ BloomFileWriter::BloomFileWriter(gscoped_ptr<WritableBlock> block,
   // bloom filters are high-entropy data structures by their nature.
   opts.storage_attributes.encoding  = PLAIN_ENCODING;
   opts.storage_attributes.compression = NO_COMPRESSION;
-  writer_.reset(new cfile::CFileWriter(opts, GetTypeInfo(BINARY), false, std::move(block)));
+  writer_.reset(new cfile::CFileWriter(opts, GetTypeInfo(BINARY), false, block.Pass()));
 }
 
 Status BloomFileWriter::Start() {
@@ -92,13 +94,11 @@ Status BloomFileWriter::AppendKeys(
     if (PREDICT_FALSE(bloom_builder_.count() >= bloom_builder_.expected_count())) {
       RETURN_NOT_OK(FinishCurrentBloomBlock());
 
-      // Update the last key and set the next key as the first key of the next block.
-      // Setting the first key here avoids having to do it in normal code path of the loop.
-      last_key_.assign_copy(keys[i].data(), keys[i].size());
+      // Copy the next key as the first key of the next block.
+      // Doing this here avoids having to do it in normal code path of the loop.
       if (i < n_keys - 1) {
         first_key_.assign_copy(keys[i + 1].data(), keys[i + 1].size());
       }
-
     }
   }
 
@@ -106,15 +106,14 @@ Status BloomFileWriter::AppendKeys(
 }
 
 Status BloomFileWriter::FinishCurrentBloomBlock() {
-  VLOG(1) << "Appending a new bloom block, first_key="
-          << KUDU_REDACT(Slice(first_key_).ToDebugString());
+  VLOG(1) << "Appending a new bloom block, first_key=" << Slice(first_key_).ToDebugString();
 
   // Encode the header.
   BloomBlockHeaderPB hdr;
   hdr.set_num_hash_functions(bloom_builder_.n_hashes());
   faststring hdr_str;
   PutFixed32(&hdr_str, hdr.ByteSize());
-  pb_util::AppendToString(hdr, &hdr_str);
+  CHECK(pb_util::AppendToString(hdr, &hdr_str));
 
   // The data is the concatenation of the header and the bloom itself.
   vector<Slice> slices;
@@ -123,8 +122,7 @@ Status BloomFileWriter::FinishCurrentBloomBlock() {
 
   // Append to the file.
   Slice start_key(first_key_);
-  Slice last_key(last_key_);
-  RETURN_NOT_OK(writer_->AppendRawBlock(slices, 0, &start_key, last_key, "bloom block"));
+  RETURN_NOT_OK(writer_->AppendRawBlock(slices, 0, &start_key, "bloom block"));
 
   bloom_builder_.Clear();
 
@@ -140,37 +138,35 @@ Status BloomFileWriter::FinishCurrentBloomBlock() {
 ////////////////////////////////////////////////////////////
 
 Status BloomFileReader::Open(gscoped_ptr<ReadableBlock> block,
-                             ReaderOptions options,
+                             const ReaderOptions& options,
                              gscoped_ptr<BloomFileReader> *reader) {
   gscoped_ptr<BloomFileReader> bf_reader;
-  RETURN_NOT_OK(OpenNoInit(std::move(block),
-                           std::move(options), &bf_reader));
+  RETURN_NOT_OK(OpenNoInit(block.Pass(), options, &bf_reader));
   RETURN_NOT_OK(bf_reader->Init());
 
-  *reader = std::move(bf_reader);
+  *reader = bf_reader.Pass();
   return Status::OK();
 }
 
 Status BloomFileReader::OpenNoInit(gscoped_ptr<ReadableBlock> block,
-                                   ReaderOptions options,
+                                   const ReaderOptions& options,
                                    gscoped_ptr<BloomFileReader> *reader) {
   gscoped_ptr<CFileReader> cf_reader;
-  RETURN_NOT_OK(CFileReader::OpenNoInit(std::move(block),
-                                        options, &cf_reader));
+  RETURN_NOT_OK(CFileReader::OpenNoInit(block.Pass(), options, &cf_reader));
   gscoped_ptr<BloomFileReader> bf_reader(new BloomFileReader(
-      std::move(cf_reader), std::move(options)));
+      cf_reader.Pass(), options));
   if (!FLAGS_cfile_lazy_open) {
     RETURN_NOT_OK(bf_reader->Init());
   }
 
-  *reader = std::move(bf_reader);
+  *reader = bf_reader.Pass();
   return Status::OK();
 }
 
 BloomFileReader::BloomFileReader(gscoped_ptr<CFileReader> reader,
-                                 ReaderOptions options)
-  : reader_(std::move(reader)),
-    mem_consumption_(std::move(options.parent_mem_tracker),
+                                 const ReaderOptions& options)
+  : reader_(reader.Pass()),
+    mem_consumption_(options.parent_mem_tracker,
                      memory_footprint_excluding_reader()) {
 }
 
@@ -198,9 +194,9 @@ Status BloomFileReader::InitOnce() {
   // Ugly hack: create a per-cpu iterator.
   // Instead this should be threadlocal, or allow us to just
   // stack-allocate these things more smartly!
-  int n_cpus = base::MaxCPUIndex() + 1;
+  int n_cpus = base::NumCPUs();
   for (int i = 0; i < n_cpus; i++) {
-    index_iters_.emplace_back(
+    index_iters_.push_back(
       IndexTreeIterator::Create(reader_.get(), validx_root));
   }
   iter_locks_.reset(new padded_spinlock[n_cpus]);
@@ -262,7 +258,7 @@ Status BloomFileReader::CheckKeyPresent(const BloomKeyProbe &probe,
       cpu = (cpu + 1) % index_iters_.size();
     }
 
-    cfile::IndexTreeIterator *index_iter = index_iters_[cpu].get();
+    cfile::IndexTreeIterator *index_iter = &index_iters_[cpu];
 
     Status s = index_iter->SeekAtOrBefore(probe.key());
     if (PREDICT_FALSE(s.IsNotFound())) {
@@ -295,13 +291,14 @@ size_t BloomFileReader::memory_footprint_excluding_reader() const {
 
   size += init_once_.memory_footprint_excluding_this();
 
+  // This seems to be the easiest way to get a heap pointer to the ptr_vector.
+  //
   // TODO: Track the iterators' memory footprint? May change with every seek;
   // not clear if it's worth doing.
-  if (!index_iters_.empty()) {
-    size += kudu_malloc_usable_size(index_iters_.data());
-    for (int i = 0; i < index_iters_.size(); i++) {
-      size += kudu_malloc_usable_size(index_iters_[i].get());
-    }
+  size += kudu_malloc_usable_size(
+      const_cast<BloomFileReader*>(this)->index_iters_.c_array());
+  for (int i = 0; i < index_iters_.size(); i++) {
+    size += kudu_malloc_usable_size(&index_iters_[i]);
   }
 
   if (iter_locks_) {

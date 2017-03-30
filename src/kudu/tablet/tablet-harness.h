@@ -24,9 +24,8 @@
 
 #include "kudu/common/schema.h"
 #include "kudu/consensus/log_anchor_registry.h"
-#include "kudu/consensus/metadata.pb.h"
-#include "kudu/server/hybrid_clock.h"
 #include "kudu/server/logical_clock.h"
+#include "kudu/server/metadata.h"
 #include "kudu/tablet/tablet.h"
 #include "kudu/util/env.h"
 #include "kudu/util/mem_tracker.h"
@@ -53,7 +52,7 @@ static std::pair<PartitionSchema, Partition> CreateDefaultPartition(const Schema
 
   // Create the tablet partitions.
   vector<Partition> partitions;
-  CHECK_OK(partition_schema.CreatePartitions(vector<KuduPartialRow>(), {}, schema, &partitions));
+  CHECK_OK(partition_schema.CreatePartitions(vector<KuduPartialRow>(), schema, &partitions));
   CHECK_EQ(1, partitions.size());
   return std::make_pair(partition_schema, partitions[0]);
 }
@@ -61,22 +60,16 @@ static std::pair<PartitionSchema, Partition> CreateDefaultPartition(const Schema
 class TabletHarness {
  public:
   struct Options {
-    enum ClockType {
-      HYBRID_CLOCK,
-      LOGICAL_CLOCK
-    };
     explicit Options(string root_dir)
         : env(Env::Default()),
           tablet_id("test_tablet_id"),
           root_dir(std::move(root_dir)),
-          enable_metrics(true),
-          clock_type(LOGICAL_CLOCK) {}
+          enable_metrics(true) {}
 
     Env* env;
     string tablet_id;
     string root_dir;
     bool enable_metrics;
-    ClockType clock_type;
   };
 
   TabletHarness(const Schema& schema, Options options)
@@ -96,7 +89,6 @@ class TabletHarness {
     RETURN_NOT_OK(TabletMetadata::LoadOrCreate(fs_manager_.get(),
                                                options_.tablet_id,
                                                "KuduTableTest",
-                                               "KuduTableTestId",
                                                schema_,
                                                partition.first,
                                                partition.second,
@@ -106,12 +98,7 @@ class TabletHarness {
       metrics_registry_.reset(new MetricRegistry());
     }
 
-    if (options_.clock_type == Options::LOGICAL_CLOCK) {
-      clock_.reset(server::LogicalClock::CreateStartingAt(Timestamp::kInitialTimestamp));
-    } else {
-      clock_.reset(new server::HybridClock());
-      RETURN_NOT_OK(clock_->Init());
-    }
+    clock_ = server::LogicalClock::CreateStartingAt(Timestamp::kInitialTimestamp);
     tablet_.reset(new Tablet(metadata,
                              clock_,
                              std::shared_ptr<MemTracker>(),

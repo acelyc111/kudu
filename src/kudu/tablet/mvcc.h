@@ -18,7 +18,6 @@
 #define KUDU_TABLET_MVCC_H
 
 #include <gtest/gtest_prod.h>
-#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -61,10 +60,10 @@ class MvccSnapshot {
   inline bool IsCommitted(const Timestamp& timestamp) const {
     // Inline the most likely path, in which our watermarks determine
     // whether a transaction is committed.
-    if (PREDICT_TRUE(timestamp < all_committed_before_)) {
+    if (PREDICT_TRUE(timestamp.CompareTo(all_committed_before_) < 0)) {
       return true;
     }
-    if (PREDICT_TRUE(timestamp >= none_committed_at_or_after_)) {
+    if (PREDICT_TRUE(timestamp.CompareTo(none_committed_at_or_after_) >= 0)) {
       return false;
     }
     // Out-of-line the unlikely case which involves more complex (loopy) code.
@@ -165,6 +164,10 @@ class MvccSnapshot {
 //   or
 // 2) StartTransaction() -> AbortTransaction()
 //
+// When a transaction is started, a timestamp is assigned. The manager will
+// never assign a timestamp if there is already another transaction with
+// the same timestamp in flight or previously committed.
+//
 // When a transaction is ready to start making changes to in-memory data,
 // it should transition to APPLYING state by calling StartApplyingTransaction().
 // At this point, the transaction should apply its in-memory operations and
@@ -174,22 +177,46 @@ class MvccSnapshot {
 // NOTE: we do not support "rollback" of in-memory edits. Thus, once we call
 // StartApplyingTransaction(), the transaction _must_ commit.
 //
-// See: docs/design_docs/repeatable-reads.md for more information on some of the concepts in
-// this class like "clean" and "safe" time.
 class MvccManager {
  public:
-  MvccManager();
+  explicit MvccManager(const scoped_refptr<server::Clock>& clock);
+
+  // Begin a new transaction, assigning it a transaction ID.
+  // Callers should generally prefer using the ScopedTransaction class defined
+  // below, which will automatically finish the transaction when it goes out
+  // of scope.
+  Timestamp StartTransaction();
+
+  // The same as the above but but starts the transaction at the latest possible
+  // time, i.e. now + max_error. Returns Timestamp::kInvalidTimestamp if it was
+  // not possible to obtain the latest time.
+  Timestamp StartTransactionAtLatest();
 
   // Begins a new transaction, which is assigned the provided timestamp.
-  //
-  // Requires that 'timestamp' is not committed.
-  // Requires that 'timestamp' is greater than 'safe_time'.
-  void StartTransaction(Timestamp timestamp);
+  // Returns Status::OK() if the transaction was started successfully or
+  // Status::IllegalState() if the provided timestamp is already considered
+  // committed, e.g. if timestamp < 'all_committed_before_'.
+  Status StartTransactionAtTimestamp(Timestamp timestamp);
 
   // Mark that the transaction with the given timestamp is starting to apply
   // its writes to in-memory stores. This must be called before CommitTransaction().
   // If this is called, then AbortTransaction(timestamp) must never be called.
   void StartApplyingTransaction(Timestamp timestamp);
+
+  // Commit the given transaction.
+  //
+  // If the transaction is not currently in-flight, this will trigger an
+  // assertion error. It is an error to commit the same transaction more
+  // than once.
+  //
+  // This should be used for 'true' online transaction processing on LEADER
+  // replicas and not for delayed processing on FOLLOWER/LEARNER replicas or
+  // on bootstrap, as this advances 'all_committed_before_' to clock_->Now()
+  // when possible.
+  //
+  // The transaction must already have been marked as 'APPLYING' by calling
+  // StartApplyingTransaction(), or else this logs a FATAL error.
+  void CommitTransaction(Timestamp timestamp);
 
   // Abort the given transaction.
   //
@@ -198,31 +225,23 @@ class MvccManager {
   // than once.
   //
   // This makes sure that the transaction with 'timestamp' is removed from
-  // the in-flight set.
+  // the in-flight set but without advancing the safe time since a new
+  // transaction with a lower timestamp might be executed later.
   //
   // The transaction must not have been marked as 'APPLYING' by calling
   // StartApplyingTransaction(), or else this logs a FATAL error.
   void AbortTransaction(Timestamp timestamp);
 
-  // Commit the given transaction.
-  //
-  // If the transaction is not currently in-flight, this will trigger an
-  // assertion error. It is an error to commit the same transaction more
-  // than once.
+  // Same as commit transaction but does not advance 'all_committed_before_'.
+  // Used for bootstrap and delayed processing in FOLLOWERS/LEARNERS.
   //
   // The transaction must already have been marked as 'APPLYING' by calling
   // StartApplyingTransaction(), or else this logs a FATAL error.
-  void CommitTransaction(Timestamp timestamp);
+  void OfflineCommitTransaction(Timestamp timestamp);
 
-  // Adjusts the safe time so that the MvccManager can trim state.
-  //
-  // This must only be called when there is a guarantee that there won't be
-  // any more transactions with timestamps equal to or lower than 'safe_time'.
-  //
-  // TODO(dralves) Until leader leases is implemented this should only be called
-  // with the timestamps of consensus committed transactions, not with the safe
-  // time received from the leader (which can go back without leader leases).
-  void AdjustSafeTime(Timestamp safe_time);
+  // Used in conjunction with OfflineCommitTransaction() so that the mvcc
+  // manager can trim state.
+  void OfflineAdjustSafeTime(Timestamp safe_time);
 
   // Take a snapshot of the current MVCC state, which indicates which
   // transactions have been committed at the time of this call.
@@ -232,13 +251,30 @@ class MvccManager {
   // all transactions which have a lower timestamp)
   //
   // If there are any in-flight transactions at a lower timestamp, waits for
-  // them to complete before returning.
+  // them to complete before returning. Hence, we guarantee that, upon return,
+  // snapshot->is_clean().
   //
-  // If 'timestamp' was marked safe before the call to this method (e.g. by TimeManager)
-  // then the returned snapshot is repeatable.
-  Status WaitForSnapshotWithAllCommitted(Timestamp timestamp,
+  // TODO(KUDU-689): this may currently block forever, stalling scanner threads
+  // and potentially blocking tablet shutdown.
+  //
+  // REQUIRES: 'timestamp' must be in the past according to the configured
+  // clock.
+  Status WaitForCleanSnapshotAtTimestamp(Timestamp timestamp,
                                          MvccSnapshot* snapshot,
                                          const MonoTime& deadline) const WARN_UNUSED_RESULT;
+
+  // Take a snapshot at the current timestamp, and then wait for any
+  // currently running transactions at an earlier timestamp to finish.
+  //
+  // The returned snapshot acts as a "barrier":
+  // - all transactions which started prior to this call are included in
+  //   snapshot
+  // - no transactions which start after the call returns will be included
+  //   in snapshot
+  // - snapshot->is_clean() is guaranteed
+  //
+  // Note that transactions are not blocked during this call.
+  void WaitForCleanSnapshot(MvccSnapshot* snapshot) const;
 
   // Wait for all operations that are currently APPLYING to commit.
   //
@@ -271,9 +307,8 @@ class MvccManager {
   friend class MvccTest;
   FRIEND_TEST(MvccTest, TestAreAllTransactionsCommitted);
   FRIEND_TEST(MvccTest, TestTxnAbort);
-  FRIEND_TEST(MvccTest, TestAutomaticCleanTimeMoveToSafeTimeOnCommit);
+  FRIEND_TEST(MvccTest, TestCleanTimeCoalescingOnOfflineTransactions);
   FRIEND_TEST(MvccTest, TestWaitForApplyingTransactionsToCommit);
-  FRIEND_TEST(MvccTest, TestWaitForCleanSnapshot_SnapAfterSafeTimeWithInFlights);
 
   enum TxnState {
     RESERVED,
@@ -282,8 +317,6 @@ class MvccManager {
 
   bool InitTransactionUnlocked(const Timestamp& timestamp);
 
-  // TODO(dralves) ponder merging these since the new ALL_COMMITTED path no longer
-  // waits for the clean timestamp.
   enum WaitFor {
     ALL_COMMITTED,
     NONE_APPLYING
@@ -316,7 +349,7 @@ class MvccManager {
   // Commits the given transaction.
   // Sets *was_earliest to true if this was the earliest in-flight transaction.
   void CommitTransactionUnlocked(Timestamp timestamp,
-                                 bool* was_earliest_in_flight);
+                                 bool* was_earliest);
 
   // Remove the timestamp 'ts' from the in-flight map.
   // FATALs if the ts is not in the in-flight map.
@@ -325,7 +358,7 @@ class MvccManager {
 
   // Adjusts the clean time, i.e. the timestamp such that all transactions with
   // lower timestamps are committed or aborted, based on which transactions are
-  // currently in flight and on what is the latest value of 'safe_time_'.
+  // currently in flight and on what is the latest value of 'no_new_transactions_at_or_before_'.
   void AdjustCleanTime();
 
   // Advances the earliest in-flight timestamp, based on which transactions are
@@ -334,7 +367,7 @@ class MvccManager {
   void AdvanceEarliestInFlightTimestamp();
 
   int GetNumWaitersForTests() const {
-    std::lock_guard<simple_spinlock> l(lock_);
+    lock_guard<simple_spinlock> l(&lock_);
     return waiters_.size();
   }
 
@@ -347,16 +380,17 @@ class MvccManager {
   typedef std::unordered_map<Timestamp::val_type, TxnState> InFlightMap;
   InFlightMap timestamps_in_flight_;
 
-  // A transaction timestamp below which all transactions are either committed or in-flight,
+  // A transaction ID below which all transactions are either committed or in-flight,
   // meaning no new transactions will be started with a timestamp that is equal
   // to or lower than this one.
-  Timestamp safe_time_;
+  Timestamp no_new_transactions_at_or_before_;
 
   // The minimum timestamp in timestamps_in_flight_, or Timestamp::kMax
   // if that set is empty. This is cached in order to avoid having to iterate
   // over timestamps_in_flight_ on every commit.
   Timestamp earliest_in_flight_;
 
+  scoped_refptr<server::Clock> clock_;
   mutable std::vector<WaitingState*> waiters_;
 
   DISALLOW_COPY_AND_ASSIGN(MvccManager);
@@ -367,10 +401,29 @@ class MvccManager {
 // committed.
 class ScopedTransaction {
  public:
+
+  // How to assign the timestamp to this transaction:
+  // NOW - Based on the value obtained from clock_->Now().
+  // NOW_LATEST - Based on the value obtained from clock_->NowLatest().
+  // PRE_ASSIGNED - Based on the value passed in the ctor.
+  enum TimestampAssignmentType {
+    NOW,
+    NOW_LATEST,
+    PRE_ASSIGNED
+  };
+
   // Create a new transaction from the given MvccManager.
+  // If 'latest' is true this transaction will use MvccManager::StartTransactionAtLatest()
+  // instead of MvccManager::StartTransaction().
   //
-  // When this transaction is committed it will use MvccManager::CommitTransaction().
-  ScopedTransaction(MvccManager* manager, Timestamp timestamp);
+  // The MvccManager must remain valid for the lifetime of this object.
+  ScopedTransaction(MvccManager *manager, TimestampAssignmentType assignment_type = NOW);
+
+  // Like the ctor above but starts the transaction at a pre-defined timestamp.
+  // When this transaction is committed it will use MvccManager::OfflineCommitTransaction()
+  // so this is appropriate for offline replaying of transactions for replica catch-up or
+  // bootstrap.
+  explicit ScopedTransaction(MvccManager *manager, Timestamp timestamp);
 
   // Commit the transaction referenced by this scoped object, if it hasn't
   // already been committed.
@@ -400,7 +453,8 @@ class ScopedTransaction {
  private:
   bool done_;
   MvccManager * const manager_;
-  const Timestamp timestamp_;
+  TimestampAssignmentType assignment_type_;
+  Timestamp timestamp_;
 
   DISALLOW_COPY_AND_ASSIGN(ScopedTransaction);
 };

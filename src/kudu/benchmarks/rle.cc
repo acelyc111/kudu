@@ -24,7 +24,6 @@
 #include <glog/logging.h>
 #include <gflags/gflags.h>
 
-#include "kudu/gutil/basictypes.h"
 #include "kudu/gutil/mathlimits.h"
 #include "kudu/util/bit-stream-utils.h"
 #include "kudu/util/logging.h"
@@ -91,8 +90,15 @@ void BooleanRLE() {
 
   RleDecoder<bool> decoder(buffer.data(), encoder.len(), 1);
   bool val = false;
-  for (int i = 0; i < num_iters * 7; i++) {
-    ignore_result(decoder.GetNextRun(&val, MathLimits<size_t>::kMax));
+  size_t run_length;
+  for (int i = 0; i < num_iters; i++) {
+    run_length = decoder.GetNextRun(&val, MathLimits<size_t>::kMax);
+    run_length = decoder.GetNextRun(&val, MathLimits<size_t>::kMax);
+    run_length = decoder.GetNextRun(&val, MathLimits<size_t>::kMax);
+    run_length = decoder.GetNextRun(&val, MathLimits<size_t>::kMax);
+    run_length = decoder.GetNextRun(&val, MathLimits<size_t>::kMax);
+    run_length = decoder.GetNextRun(&val, MathLimits<size_t>::kMax);
+    run_length = decoder.GetNextRun(&val, MathLimits<size_t>::kMax);
   }
 }
 

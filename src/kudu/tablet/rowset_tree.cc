@@ -25,7 +25,6 @@
 
 #include "kudu/gutil/stl_util.h"
 #include "kudu/tablet/rowset.h"
-#include "kudu/tablet/rowset_metadata.h"
 #include "kudu/util/interval_tree.h"
 #include "kudu/util/interval_tree-inl.h"
 #include "kudu/util/slice.h"
@@ -45,8 +44,7 @@ bool RSEndpointBySliceCompare(const RowSetTree::RSEndpoint& a,
   if (slice_cmp) return slice_cmp < 0;
   ptrdiff_t rs_cmp = a.rowset_ - b.rowset_;
   if (rs_cmp) return rs_cmp < 0;
-  if (a.endpoint_ != b.endpoint_) return a.endpoint_ == RowSetTree::START;
-  return false;
+  return b.endpoint_ == RowSetTree::STOP;
 }
 
 } // anonymous namespace
@@ -94,7 +92,7 @@ Status RowSetTree::Reset(const RowSetVector &rowsets) {
   for (const shared_ptr<RowSet> &rs : rowsets) {
     gscoped_ptr<RowSetWithBounds> rsit(new RowSetWithBounds());
     rsit->rowset = rs.get();
-    string min_key, max_key;
+    Slice min_key, max_key;
     Status s = rs->GetBounds(&min_key, &max_key);
     if (s.IsNotSupported()) {
       // This rowset is a MemRowSet, for which the bounds change as more
@@ -111,15 +109,13 @@ Status RowSetTree::Reset(const RowSetVector &rowsets) {
     }
     DCHECK_LE(min_key.compare(max_key), 0)
       << "Rowset min must be <= max: " << rs->ToString();
+    // Load into key endpoints.
+    endpoints.push_back(RSEndpoint(rsit->rowset, START, min_key));
+    endpoints.push_back(RSEndpoint(rsit->rowset, STOP, max_key));
 
     // Load bounds and save entry
-    rsit->min_key = std::move(min_key);
-    rsit->max_key = std::move(max_key);
-
-    // Load into key endpoints.
-    endpoints.push_back(RSEndpoint(rsit->rowset, START, rsit->min_key));
-    endpoints.push_back(RSEndpoint(rsit->rowset, STOP, rsit->max_key));
-
+    rsit->min_key = min_key.ToString();
+    rsit->max_key = max_key.ToString();
     entries.push_back(rsit.release());
   }
 
@@ -132,15 +128,6 @@ Status RowSetTree::Reset(const RowSetVector &rowsets) {
   tree_.reset(new IntervalTree<RowSetIntervalTraits>(entries_));
   key_endpoints_.swap(endpoints);
   all_rowsets_.assign(rowsets.begin(), rowsets.end());
-
-  // Build the mapping from DRS ID to DRS.
-  drs_by_id_.clear();
-  for (auto& rs : all_rowsets_) {
-    if (rs->metadata()) {
-      InsertOrDie(&drs_by_id_, rs->metadata()->id(), rs.get());
-    }
-  }
-
   initted_ = true;
 
   return Status::OK();

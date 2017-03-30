@@ -16,12 +16,10 @@
 // under the License.
 
 #include <algorithm>
+#include <string>
+#include <vector>
 #include <boost/functional/hash.hpp>
 #include <gflags/gflags.h>
-#include <mutex>
-#include <string>
-#include <unordered_set>
-#include <vector>
 
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/gutil/walltime.h"
@@ -34,6 +32,15 @@
 #include "kudu/util/flag_tags.h"
 #include "kudu/util/kernel_stack_watchdog.h"
 
+namespace kudu {
+namespace rpc {
+
+using strings::Substitute;
+using google::protobuf::Message;
+using google::protobuf::io::CodedOutputStream;
+
+static const double kMicrosPerSecond = 1000000.0;
+
 // 100M cycles should be about 50ms on a 2Ghz box. This should be high
 // enough that involuntary context switches don't trigger it, but low enough
 // that any serious blocking behavior on the reactor would.
@@ -43,14 +50,6 @@ DEFINE_int64(rpc_callback_max_cycles, 100 * 1000 * 1000,
              " (Advanced debugging option)");
 TAG_FLAG(rpc_callback_max_cycles, advanced);
 TAG_FLAG(rpc_callback_max_cycles, runtime);
-
-namespace kudu {
-namespace rpc {
-
-using google::protobuf::Message;
-using strings::Substitute;
-
-static const double kMicrosPerSecond = 1000000.0;
 
 ///
 /// OutboundCall
@@ -71,15 +70,7 @@ OutboundCall::OutboundCall(const ConnectionId& conn_id,
            << (controller->timeout().Initialized() ? controller->timeout().ToString() : "none");
   header_.set_call_id(kInvalidCallId);
   remote_method.ToPB(header_.mutable_remote_method());
-  start_time_ = MonoTime::Now();
-
-  if (!controller_->required_server_features().empty()) {
-    required_rpc_features_.insert(RpcFeatureFlag::APPLICATION_FEATURE_FLAGS);
-  }
-
-  if (controller_->request_id_) {
-    header_.set_allocated_request_id(controller_->request_id_.release());
-  }
+  start_time_ = MonoTime::Now(MonoTime::FINE);
 }
 
 OutboundCall::~OutboundCall() {
@@ -98,11 +89,7 @@ Status OutboundCall::SerializeTo(vector<Slice>* slices) {
     header_.set_timeout_millis(timeout.ToMilliseconds());
   }
 
-  for (uint32_t feature : controller_->required_server_features()) {
-    header_.add_required_feature_flags(feature);
-  }
-
-  serialization::SerializeHeader(header_, param_len, &header_buf_);
+  CHECK_OK(serialization::SerializeHeader(header_, param_len, &header_buf_));
 
   // Return the concatenated packet.
   slices->push_back(Slice(header_buf_));
@@ -110,19 +97,20 @@ Status OutboundCall::SerializeTo(vector<Slice>* slices) {
   return Status::OK();
 }
 
-void OutboundCall::SetRequestParam(const Message& message) {
-  serialization::SerializeMessage(message, &request_buf_);
+Status OutboundCall::SetRequestParam(const Message& message) {
+  return serialization::SerializeMessage(message, &request_buf_);
 }
 
 Status OutboundCall::status() const {
-  std::lock_guard<simple_spinlock> l(lock_);
+  lock_guard<simple_spinlock> l(&lock_);
   return status_;
 }
 
 const ErrorStatusPB* OutboundCall::error_pb() const {
-  std::lock_guard<simple_spinlock> l(lock_);
+  lock_guard<simple_spinlock> l(&lock_);
   return error_pb_.get();
 }
+
 
 string OutboundCall::StateName(State state) {
   switch (state) {
@@ -130,8 +118,6 @@ string OutboundCall::StateName(State state) {
       return "READY";
     case ON_OUTBOUND_QUEUE:
       return "ON_OUTBOUND_QUEUE";
-    case SENDING:
-      return "SENDING";
     case SENT:
       return "SENT";
     case TIMED_OUT:
@@ -147,12 +133,12 @@ string OutboundCall::StateName(State state) {
 }
 
 void OutboundCall::set_state(State new_state) {
-  std::lock_guard<simple_spinlock> l(lock_);
+  lock_guard<simple_spinlock> l(&lock_);
   set_state_unlocked(new_state);
 }
 
 OutboundCall::State OutboundCall::state() const {
-  std::lock_guard<simple_spinlock> l(lock_);
+  lock_guard<simple_spinlock> l(&lock_);
   return state_;
 }
 
@@ -164,16 +150,11 @@ void OutboundCall::set_state_unlocked(State new_state) {
     case ON_OUTBOUND_QUEUE:
       DCHECK_EQ(state_, READY);
       break;
-    case SENDING:
-      // Allow SENDING to be set idempotently so we don't have to specifically check
-      // whether the state is transitioning in the RPC code.
-      DCHECK(state_ == ON_OUTBOUND_QUEUE || state_ == SENDING);
-      break;
     case SENT:
-      DCHECK_EQ(state_, SENDING);
+      DCHECK_EQ(state_, ON_OUTBOUND_QUEUE);
       break;
     case TIMED_OUT:
-      DCHECK(state_ == SENT || state_ == ON_OUTBOUND_QUEUE || state_ == SENDING);
+      DCHECK(state_ == SENT || state_ == ON_OUTBOUND_QUEUE);
       break;
     case FINISHED_SUCCESS:
       DCHECK_EQ(state_, SENT);
@@ -209,7 +190,7 @@ void OutboundCall::CallCallback() {
 }
 
 void OutboundCall::SetResponse(gscoped_ptr<CallResponse> resp) {
-  call_response_ = std::move(resp);
+  call_response_ = resp.Pass();
   Slice r(call_response_->serialized_response());
 
   if (call_response_->is_success()) {
@@ -217,7 +198,7 @@ void OutboundCall::SetResponse(gscoped_ptr<CallResponse> resp) {
     // which isn't great, since it would block processing of other RPCs in parallel.
     // Should look into a way to avoid this.
     if (!response_->ParseFromArray(r.data(), r.size())) {
-      SetFailed(Status::IOError("invalid RPC response, missing fields",
+      SetFailed(Status::IOError("Invalid response, missing fields",
                                 response_->InitializationErrorString()));
       return;
     }
@@ -240,10 +221,6 @@ void OutboundCall::SetQueued() {
   set_state(ON_OUTBOUND_QUEUE);
 }
 
-void OutboundCall::SetSending() {
-  set_state(SENDING);
-}
-
 void OutboundCall::SetSent() {
   set_state(SENT);
 
@@ -262,7 +239,7 @@ void OutboundCall::SetSent() {
 void OutboundCall::SetFailed(const Status &status,
                              ErrorStatusPB* err_pb) {
   {
-    std::lock_guard<simple_spinlock> l(lock_);
+    lock_guard<simple_spinlock> l(&lock_);
     status_ = status;
     if (status_.IsRemoteError()) {
       CHECK(err_pb);
@@ -276,32 +253,27 @@ void OutboundCall::SetFailed(const Status &status,
 }
 
 void OutboundCall::SetTimedOut() {
-  // We have to fetch timeout outside the lock to avoid a lock
-  // order inversion between this class and RpcController.
-  MonoDelta timeout = controller_->timeout();
   {
-    std::lock_guard<simple_spinlock> l(lock_);
+    lock_guard<simple_spinlock> l(&lock_);
     status_ = Status::TimedOut(Substitute(
-        "$0 RPC to $1 timed out after $2 ($3)",
+        "$0 RPC to $1 timed out after $2",
         remote_method_.method_name(),
         conn_id_.remote().ToString(),
-        timeout.ToString(),
-        StateName(state_)));
+        controller_->timeout().ToString()));
     set_state_unlocked(TIMED_OUT);
   }
   CallCallback();
 }
 
 bool OutboundCall::IsTimedOut() const {
-  std::lock_guard<simple_spinlock> l(lock_);
+  lock_guard<simple_spinlock> l(&lock_);
   return state_ == TIMED_OUT;
 }
 
 bool OutboundCall::IsFinished() const {
-  std::lock_guard<simple_spinlock> l(lock_);
+  lock_guard<simple_spinlock> l(&lock_);
   switch (state_) {
     case READY:
-    case SENDING:
     case ON_OUTBOUND_QUEUE:
     case SENT:
       return false;
@@ -321,36 +293,71 @@ string OutboundCall::ToString() const {
 
 void OutboundCall::DumpPB(const DumpRunningRpcsRequestPB& req,
                           RpcCallInProgressPB* resp) {
-  std::lock_guard<simple_spinlock> l(lock_);
+  lock_guard<simple_spinlock> l(&lock_);
   resp->mutable_header()->CopyFrom(header_);
   resp->set_micros_elapsed(
-      (MonoTime::Now() - start_time_).ToMicroseconds());
+    MonoTime::Now(MonoTime::FINE) .GetDeltaSince(start_time_).ToMicroseconds());
+}
 
-  switch (state_) {
-    case READY:
-      // Don't bother setting a state for "READY" since we don't expose a call
-      // until it's at least on the queue of a connection.
-      break;
-    case ON_OUTBOUND_QUEUE:
-      resp->set_state(RpcCallInProgressPB::ON_OUTBOUND_QUEUE);
-      break;
-    case SENDING:
-      resp->set_state(RpcCallInProgressPB::SENDING);
-      break;
-    case SENT:
-      resp->set_state(RpcCallInProgressPB::SENT);
-      break;
-    case TIMED_OUT:
-      resp->set_state(RpcCallInProgressPB::TIMED_OUT);
-      break;
-    case FINISHED_ERROR:
-      resp->set_state(RpcCallInProgressPB::FINISHED_ERROR);
-      break;
-    case FINISHED_SUCCESS:
-      resp->set_state(RpcCallInProgressPB::FINISHED_SUCCESS);
-      break;
+///
+/// UserCredentials
+///
+
+UserCredentials::UserCredentials() {}
+
+bool UserCredentials::has_effective_user() const {
+  return !eff_user_.empty();
+}
+
+void UserCredentials::set_effective_user(const string& eff_user) {
+  eff_user_ = eff_user;
+}
+
+bool UserCredentials::has_real_user() const {
+  return !real_user_.empty();
+}
+
+void UserCredentials::set_real_user(const string& real_user) {
+  real_user_ = real_user;
+}
+
+bool UserCredentials::has_password() const {
+  return !password_.empty();
+}
+
+void UserCredentials::set_password(const string& password) {
+  password_ = password;
+}
+
+void UserCredentials::CopyFrom(const UserCredentials& other) {
+  eff_user_ = other.eff_user_;
+  real_user_ = other.real_user_;
+  password_ = other.password_;
+}
+
+string UserCredentials::ToString() const {
+  // Does not print the password.
+  return StringPrintf("{real_user=%s, eff_user=%s}", real_user_.c_str(), eff_user_.c_str());
+}
+
+size_t UserCredentials::HashCode() const {
+  size_t seed = 0;
+  if (has_effective_user()) {
+    boost::hash_combine(seed, effective_user());
   }
+  if (has_real_user()) {
+    boost::hash_combine(seed, real_user());
+  }
+  if (has_password()) {
+    boost::hash_combine(seed, password());
+  }
+  return seed;
+}
 
+bool UserCredentials::Equals(const UserCredentials& other) const {
+  return (effective_user() == other.effective_user()
+       && real_user() == other.real_user()
+       && password() == other.password());
 }
 
 ///
@@ -363,17 +370,17 @@ ConnectionId::ConnectionId(const ConnectionId& other) {
   DoCopyFrom(other);
 }
 
-ConnectionId::ConnectionId(const Sockaddr& remote, UserCredentials user_credentials) {
+ConnectionId::ConnectionId(const Sockaddr& remote, const UserCredentials& user_credentials) {
   remote_ = remote;
-  user_credentials_ = std::move(user_credentials);
+  user_credentials_.CopyFrom(user_credentials);
 }
 
 void ConnectionId::set_remote(const Sockaddr& remote) {
   remote_ = remote;
 }
 
-void ConnectionId::set_user_credentials(UserCredentials user_credentials) {
-  user_credentials_ = std::move(user_credentials);
+void ConnectionId::set_user_credentials(const UserCredentials& user_credentials) {
+  user_credentials_.CopyFrom(user_credentials);
 }
 
 void ConnectionId::CopyFrom(const ConnectionId& other) {
@@ -389,7 +396,7 @@ string ConnectionId::ToString() const {
 
 void ConnectionId::DoCopyFrom(const ConnectionId& other) {
   remote_ = other.remote_;
-  user_credentials_ = other.user_credentials_;
+  user_credentials_.CopyFrom(other.user_credentials_);
 }
 
 size_t ConnectionId::HashCode() const {

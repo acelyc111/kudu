@@ -32,7 +32,6 @@ RowOperationsPB_Type ToInternalWriteType(KuduWriteOperation::Type type) {
     case KuduWriteOperation::INSERT: return RowOperationsPB_Type_INSERT;
     case KuduWriteOperation::UPDATE: return RowOperationsPB_Type_UPDATE;
     case KuduWriteOperation::DELETE: return RowOperationsPB_Type_DELETE;
-    case KuduWriteOperation::UPSERT: return RowOperationsPB_Type_UPSERT;
     default: LOG(FATAL) << "Unexpected write operation type: " << type;
   }
 }
@@ -41,8 +40,8 @@ RowOperationsPB_Type ToInternalWriteType(KuduWriteOperation::Type type) {
 
 KuduWriteOperation::KuduWriteOperation(const shared_ptr<KuduTable>& table)
   : table_(table),
-    row_(table->schema().schema_),
-    size_in_buffer_(0) {}
+    row_(table->schema().schema_) {
+}
 
 KuduWriteOperation::~KuduWriteOperation() {}
 
@@ -59,11 +58,6 @@ EncodedKey* KuduWriteOperation::CreateKey() const {
 }
 
 int64_t KuduWriteOperation::SizeInBuffer() const {
-  if (size_in_buffer_ > 0) {
-    // Once computed, the raw size of the operation is cached and returned
-    // for all subsequent calls.
-    return size_in_buffer_;
-  }
   const Schema* schema = row_.schema();
   int size = 1; // for the operation type
 
@@ -77,12 +71,12 @@ int64_t KuduWriteOperation::SizeInBuffer() const {
       size += schema->column(i).type_info()->size();
       if (schema->column(i).type_info()->physical_type() == BINARY) {
         ContiguousRow row(schema, row_.row_data_);
-        const Slice* bin = reinterpret_cast<const Slice*>(row.cell_ptr(i));
-        size += bin->size();
+        Slice bin;
+        memcpy(&bin, row.cell_ptr(i), sizeof(bin));
+        size += bin.size();
       }
     }
   }
-  size_in_buffer_ = size;
   return size;
 }
 
@@ -109,15 +103,6 @@ KuduDelete::KuduDelete(const shared_ptr<KuduTable>& table)
 }
 
 KuduDelete::~KuduDelete() {}
-
-// Upsert -----------------------------------------------------------------------
-
-KuduUpsert::KuduUpsert(const shared_ptr<KuduTable>& table)
-  : KuduWriteOperation(table) {
-}
-
-KuduUpsert::~KuduUpsert() {}
-
 
 } // namespace client
 } // namespace kudu

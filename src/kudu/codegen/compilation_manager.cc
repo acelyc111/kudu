@@ -49,10 +49,6 @@ DEFINE_bool(codegen_time_compilation, false, "Whether to print time that each co
 TAG_FLAG(codegen_time_compilation, experimental);
 TAG_FLAG(codegen_time_compilation, runtime);
 
-DEFINE_int32(codegen_cache_capacity, 100, "Number of entries which may be stored in the "
-             "code generation cache.");
-TAG_FLAG(codegen_cache_capacity, experimental);
-
 METRIC_DEFINE_gauge_int64(server, code_cache_hits, "Codegen Cache Hits",
                           kudu::MetricUnit::kCacheHits,
                           "Number of codegen cache hits since start",
@@ -82,7 +78,7 @@ class CompilationTask : public Runnable {
       generator_(generator) {}
 
   // Can only be run once.
-  void Run() override {
+  virtual void Run() override {
     // We need to fail softly because the user could have just given
     // a malformed projection schema pair, but could be long gone by
     // now so there's nowhere to return the status to.
@@ -122,7 +118,7 @@ class CompilationTask : public Runnable {
 } // anonymous namespace
 
 CompilationManager::CompilationManager()
-  : cache_(FLAGS_codegen_cache_capacity),
+  : cache_(kDefaultCacheCapacity),
     hit_counter_(0),
     query_counter_(0) {
   CHECK_OK(ThreadPoolBuilder("compiler_manager_pool")

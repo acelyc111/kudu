@@ -35,6 +35,10 @@
 namespace kudu {
 class Status;
 
+namespace metadata {
+class RaftPeerPB;
+}
+
 namespace rpc {
 class Messenger;
 class RpcController;
@@ -100,17 +104,19 @@ class VoteCounter {
 // The result of a leader election.
 struct ElectionResult {
  public:
-  ElectionResult(const VoteRequestPB& vote_request, ElectionVote decision,
-                 ConsensusTerm highest_term, const std::string& message);
+  ElectionResult(ConsensusTerm election_term, ElectionVote decision);
+  ElectionResult(ConsensusTerm election_term, ElectionVote decision,
+                 ConsensusTerm higher_term, const std::string& message);
 
-  // The vote request that was sent to the voters for this election.
-  const VoteRequestPB vote_request;
+  // Term the election was run for.
+  const ConsensusTerm election_term;
 
   // The overall election GRANTED/DENIED decision of the configuration.
   const ElectionVote decision;
 
-  // The highest term seen from any voter.
-  const ConsensusTerm highest_voter_term;
+  // At least one voter had a higher term than the candidate.
+  const bool has_higher_term;
+  const ConsensusTerm higher_term;
 
   // Human-readable explanation of the vote result, if any.
   const std::string message;
@@ -230,9 +236,6 @@ class LeaderElection : public RefCountedThreadSafe<LeaderElection> {
 
   // Map of UUID -> VoterState.
   VoterStateMap voter_state_;
-
-  // The highest term seen from a voter so far (or 0 if no votes).
-  int64_t highest_voter_term_;
 };
 
 } // namespace consensus

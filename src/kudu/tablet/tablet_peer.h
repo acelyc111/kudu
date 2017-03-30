@@ -20,13 +20,11 @@
 
 #include <map>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <vector>
 
 #include "kudu/consensus/consensus.h"
 #include "kudu/consensus/log.h"
-#include "kudu/consensus/time_manager.h"
 #include "kudu/gutil/callback.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/tablet/tablet.h"
@@ -43,7 +41,6 @@ class LogAnchorRegistry;
 
 namespace rpc {
 class Messenger;
-class ResultTracker;
 }
 
 namespace tserver {
@@ -61,25 +58,16 @@ class TabletStatusPB;
 class TabletStatusListener;
 class TransactionDriver;
 
-// Interface by which various tablet-related processes can report back their status
-// to TabletPeer without having to have a circular class dependency, and so that
-// those other classes can be easily tested without constructing a TabletPeer.
-class TabletStatusListener {
- public:
-  virtual ~TabletStatusListener() {}
-
-  virtual void StatusMessage(const std::string& status) = 0;
-};
-
 // A peer in a tablet consensus configuration, which coordinates writes to tablets.
 // Each time Write() is called this class appends a new entry to a replicated
 // state machine through a consensus algorithm, which makes sure that other
 // peers see the same updates in the same order. In addition to this, this
 // class also splits the work and coordinates multi-threaded execution.
 class TabletPeer : public RefCountedThreadSafe<TabletPeer>,
-                   public consensus::ReplicaTransactionFactory,
-                   public TabletStatusListener {
+                   public consensus::ReplicaTransactionFactory {
  public:
+  typedef std::map<int64_t, int64_t> MaxIdxToSegmentSizeMap;
+
   TabletPeer(const scoped_refptr<TabletMetadata>& meta,
              const consensus::RaftPeerPB& local_peer_pb, ThreadPool* apply_pool,
              Callback<void(const std::string& reason)> mark_dirty_clbk);
@@ -89,7 +77,6 @@ class TabletPeer : public RefCountedThreadSafe<TabletPeer>,
   Status Init(const std::shared_ptr<tablet::Tablet>& tablet,
               const scoped_refptr<server::Clock>& clock,
               const std::shared_ptr<rpc::Messenger>& messenger,
-              const scoped_refptr<rpc::ResultTracker>& result_tracker,
               const scoped_refptr<log::Log>& log,
               const scoped_refptr<MetricEntity>& metric_entity);
 
@@ -113,7 +100,7 @@ class TabletPeer : public RefCountedThreadSafe<TabletPeer>,
   // The caller is expected to build and pass a TrasactionContext that points
   // to the RPC WriteRequest, WriteResponse, RpcContext and to the tablet's
   // MvccManager.
-  Status SubmitWrite(std::unique_ptr<WriteTransactionState> tx_state);
+  Status SubmitWrite(WriteTransactionState *tx_state);
 
   // Called by the tablet service to start an alter schema transaction.
   //
@@ -126,7 +113,7 @@ class TabletPeer : public RefCountedThreadSafe<TabletPeer>,
   // The AlterSchema operation is taking the tablet component lock in exclusive mode
   // meaning that no other operation on the tablet can be executed while the
   // AlterSchema is in progress.
-  Status SubmitAlterSchema(std::unique_ptr<AlterSchemaTransactionState> tx_state);
+  Status SubmitAlterSchema(gscoped_ptr<AlterSchemaTransactionState> tx_state);
 
   void GetTabletStatusPB(TabletStatusPB* status_pb_out) const;
 
@@ -135,31 +122,27 @@ class TabletPeer : public RefCountedThreadSafe<TabletPeer>,
       const scoped_refptr<consensus::ConsensusRound>& round) OVERRIDE;
 
   consensus::Consensus* consensus() {
-    std::lock_guard<simple_spinlock> lock(lock_);
+    boost::lock_guard<simple_spinlock> lock(lock_);
     return consensus_.get();
   }
 
   scoped_refptr<consensus::Consensus> shared_consensus() const {
-    std::lock_guard<simple_spinlock> lock(lock_);
+    boost::lock_guard<simple_spinlock> lock(lock_);
     return consensus_;
   }
 
   Tablet* tablet() const {
-    std::lock_guard<simple_spinlock> lock(lock_);
+    boost::lock_guard<simple_spinlock> lock(lock_);
     return tablet_.get();
   }
 
-  scoped_refptr<consensus::TimeManager> time_manager() const {
-    return consensus_->time_manager();
-  }
-
   std::shared_ptr<Tablet> shared_tablet() const {
-    std::lock_guard<simple_spinlock> lock(lock_);
+    boost::lock_guard<simple_spinlock> lock(lock_);
     return tablet_;
   }
 
   const TabletStatePB state() const {
-    std::lock_guard<simple_spinlock> lock(lock_);
+    boost::lock_guard<simple_spinlock> lock(lock_);
     return state_;
   }
 
@@ -171,26 +154,28 @@ class TabletPeer : public RefCountedThreadSafe<TabletPeer>,
   // TODO: move this to raft_consensus.h.
   Status UpdatePermanentUuids();
 
+  TabletStatusListener* status_listener() const {
+    return status_listener_.get();
+  }
+
   // Sets the tablet to a BOOTSTRAPPING state, indicating it is starting up.
   void SetBootstrapping() {
-    std::lock_guard<simple_spinlock> lock(lock_);
+    boost::lock_guard<simple_spinlock> lock(lock_);
     CHECK_EQ(NOT_STARTED, state_);
     state_ = BOOTSTRAPPING;
   }
 
-  // Implementation of TabletStatusListener::StatusMessage().
-  void StatusMessage(const std::string& status) override;
-
-  // Retrieve the last human-readable status of this tablet peer.
-  std::string last_status() const;
-
-  // Sets the tablet state to FAILED additionally setting the error to the provided
+  // sets the tablet state to FAILED additionally setting the error to the provided
   // one.
-  void SetFailed(const Status& error);
+  void SetFailed(const Status& error) {
+    boost::lock_guard<simple_spinlock> lock(lock_);
+    state_ = FAILED;
+    error_ = error;
+  }
 
   // Returns the error that occurred, when state is FAILED.
   Status error() const {
-    std::lock_guard<simple_spinlock> lock(lock_);
+    boost::lock_guard<simple_spinlock> lock(lock_);
     return error_;
   }
 
@@ -199,18 +184,21 @@ class TabletPeer : public RefCountedThreadSafe<TabletPeer>,
   // etc. For use in places like the Web UI.
   std::string HumanReadableState() const;
 
-  // Adds list of transactions in-flight at the time of the call to 'out'.
+  // Adds list of transactions in-flight at the time of the call to
+  // 'out'. TransactionStatusPB objects are used to allow this method
+  // to be used by both the web-UI and ts-cli.
   void GetInFlightTransactions(Transaction::TraceType trace_type,
                                std::vector<consensus::TransactionStatusPB>* out) const;
 
-  // Returns the log indexes to be retained for durability and to catch up peers.
+  // Returns the minimum known log index that is in-memory or in-flight.
   // Used for selection of log segments to delete during Log GC.
-  log::RetentionIndexes GetRetentionIndexes() const;
+  void GetEarliestNeededLogIndex(int64_t* log_index) const;
 
-  // See Log::GetReplaySizeMap(...).
+  // Returns a map of log index -> segment size, of all the segments that currently cannot be GCed
+  // because in-memory structures have anchors in them.
   //
   // Returns a non-ok status if the tablet isn't running.
-  Status GetReplaySizeMap(std::map<int64_t, int64_t>* replay_size_map) const;
+  Status GetMaxIndexesToSegmentSizeMap(MaxIdxToSegmentSizeMap* idx_size_map) const;
 
   // Returns the amount of bytes that would be GC'd if RunLogGC() was called.
   //
@@ -263,11 +251,6 @@ class TabletPeer : public RefCountedThreadSafe<TabletPeer>,
     return meta_;
   }
 
-  // Marks the tablet as dirty so that it's included in the next heartbeat.
-  void MarkTabletDirty(const std::string& reason) {
-    mark_dirty_clbk_.Run(reason);
-  }
-
  private:
   friend class RefCountedThreadSafe<TabletPeer>;
   friend class TabletPeerTest;
@@ -300,15 +283,12 @@ class TabletPeer : public RefCountedThreadSafe<TabletPeer>,
   std::shared_ptr<Tablet> tablet_;
   std::shared_ptr<rpc::Messenger> messenger_;
   scoped_refptr<consensus::Consensus> consensus_;
+  gscoped_ptr<TabletStatusListener> status_listener_;
   simple_spinlock prepare_replicate_lock_;
 
-  // Lock protecting state_, last_status_, as well as smart pointers to collaborating
+  // Lock protecting state_ as well as smart pointers to collaborating
   // classes such as tablet_ and consensus_.
   mutable simple_spinlock lock_;
-
-  // The human-readable last status of the tablet, displayed on the web page, command line
-  // tools, etc.
-  std::string last_status_;
 
   // Lock taken during Init/Shutdown which ensures that only a single thread
   // attempts to perform major lifecycle operations (Init/Shutdown) at once.
@@ -335,17 +315,13 @@ class TabletPeer : public RefCountedThreadSafe<TabletPeer>,
   scoped_refptr<log::LogAnchorRegistry> log_anchor_registry_;
 
   // Function to mark this TabletPeer's tablet as dirty in the TSTabletManager.
-  //
-  // Must be called whenever cluster membership or leadership changes, or when
-  // the tablet's schema changes.
+  // This function must be called any time the cluster membership or cluster
+  // leadership changes.
   Callback<void(const std::string& reason)> mark_dirty_clbk_;
 
   // List of maintenance operations for the tablet that need information that only the peer
   // can provide.
   std::vector<MaintenanceOp*> maintenance_ops_;
-
-  // The result tracker for writes.
-  scoped_refptr<rpc::ResultTracker> result_tracker_;
 
   DISALLOW_COPY_AND_ASSIGN(TabletPeer);
 };

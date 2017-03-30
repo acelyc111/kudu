@@ -19,9 +19,8 @@
 
 #include "kudu/common/encoded_key.h"
 #include "kudu/common/key_encoder.h"
-#include "kudu/common/key_util.h"
 #include "kudu/common/row.h"
-#include "kudu/util/logging.h"
+#include "kudu/common/row_key-util.h"
 
 namespace kudu {
 
@@ -96,7 +95,7 @@ Status EncodedKey::IncrementEncodedKey(const Schema& tablet_schema,
 
   // Increment the new key
   ContiguousRow new_row(&tablet_schema, new_row_key);
-  if (!key_util::IncrementPrimaryKey(&new_row, arena)) {
+  if (!row_key_util::IncrementKey(&new_row, arena)) {
     return Status::IllegalState("No lexicographically greater key exists");
   }
 
@@ -181,19 +180,17 @@ string EncodedKey::RangeToString(const EncodedKey* lower, const EncodedKey* uppe
   string ret;
   if (lower && upper) {
     ret.append("encoded key BETWEEN ");
-    ret.append(KUDU_REDACT(lower->encoded_key().ToDebugString()));
+    ret.append(lower->encoded_key().ToDebugString());
     ret.append(" AND ");
-    ret.append(KUDU_REDACT(upper->encoded_key().ToDebugString()));
+    ret.append(upper->encoded_key().ToDebugString());
     return ret;
-  }
-  if (lower) {
+  } else if (lower) {
     ret.append("encoded key >= ");
-    ret.append(KUDU_REDACT(lower->encoded_key().ToDebugString()));
+    ret.append(lower->encoded_key().ToDebugString());
     return ret;
-  }
-  if (upper) {
+  } else if (upper) {
     ret.append("encoded key <= ");
-    ret.append(KUDU_REDACT(upper->encoded_key().ToDebugString()));
+    ret.append(upper->encoded_key().ToDebugString());
   } else {
     LOG(DFATAL) << "Invalid key!";
     ret = "invalid key range";

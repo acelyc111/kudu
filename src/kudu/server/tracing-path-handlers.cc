@@ -17,8 +17,6 @@
 #include "kudu/server/tracing-path-handlers.h"
 
 #include <map>
-#include <memory>
-#include <string.h>
 #include <string>
 #include <utility>
 #include <vector>
@@ -30,14 +28,12 @@
 #include <rapidjson/stringbuffer.h>
 
 #include "kudu/gutil/strings/escaping.h"
-#include "kudu/util/debug/trace_event_impl.h"
 #include "kudu/util/jsonwriter.h"
-#include "kudu/util/zlib.h"
+#include "kudu/util/debug/trace_event_impl.h"
 
 using std::map;
-using std::ostringstream;
 using std::string;
-using std::unique_ptr;
+using std::stringstream;
 using std::vector;
 
 using kudu::debug::CategoryFilter;
@@ -56,7 +52,6 @@ enum Handler {
   kBeginRecording,
   kGetBufferPercentFull,
   kEndRecording,
-  kEndRecordingCompressed,
   kSimpleDump
 };
 
@@ -122,24 +117,16 @@ Status BeginRecording(const Webserver::WebRequest& req,
   return Status::OK();
 }
 
+
 Status EndRecording(const Webserver::WebRequest& req,
-                    bool compressed,
-                    ostringstream* out) {
+                    stringstream* out) {
   TraceLog* tl = TraceLog::GetInstance();
   tl->SetDisabled();
-  string json = TraceResultBuffer::FlushTraceLogToString();
-
-  if (compressed) {
-    RETURN_NOT_OK_PREPEND(zlib::Compress(json, out),
-                          "Could not compress output");
-  } else {
-    *out << json;
-  }
-
+  *out << TraceResultBuffer::FlushTraceLogToString();
   return Status::OK();
 }
 
-Status CaptureMonitoring(ostringstream* out) {
+Status CaptureMonitoring(stringstream* out) {
   TraceLog* tl = TraceLog::GetInstance();
   if (!tl->IsEnabled()) {
     return Status::IllegalState("monitoring not enabled");
@@ -148,7 +135,7 @@ Status CaptureMonitoring(ostringstream* out) {
   return Status::OK();
 }
 
-void GetCategories(ostringstream* out) {
+void GetCategories(stringstream* out) {
   vector<string> groups;
   kudu::debug::TraceLog::GetInstance()->GetKnownCategoryGroups(&groups);
   JsonWriter j(out, JsonWriter::COMPACT);
@@ -159,13 +146,13 @@ void GetCategories(ostringstream* out) {
   j.EndArray();
 }
 
-void GetMonitoringStatus(ostringstream* out) {
+void GetMonitoringStatus(stringstream* out) {
   TraceLog* tl = TraceLog::GetInstance();
   bool is_monitoring = tl->IsEnabled();
   std::string category_filter = tl->GetCurrentCategoryFilter().ToString();
   int options = static_cast<int>(tl->trace_options());
 
-  ostringstream json_out;
+  stringstream json_out;
   JsonWriter j(&json_out, JsonWriter::COMPACT);
   j.StartObject();
 
@@ -189,7 +176,7 @@ void GetMonitoringStatus(ostringstream* out) {
 }
 
 void HandleTraceJsonPage(const Webserver::ArgumentMap &args,
-                         std::ostringstream* output) {
+                         std::stringstream* output) {
   TraceLog* tl = TraceLog::GetInstance();
   tl->SetEnabled(CategoryFilter(CategoryFilter::kDefaultCategoryFilterString),
                  TraceLog::RECORDING_MODE,
@@ -202,7 +189,7 @@ void HandleTraceJsonPage(const Webserver::ArgumentMap &args,
 
 Status DoHandleRequest(Handler handler,
                        const Webserver::WebRequest& req,
-                       std::ostringstream* output) {
+                       std::stringstream* output) {
   VLOG(2) << "Tracing request type=" << handler << ": " << req.query_string;
 
   switch (handler) {
@@ -226,10 +213,7 @@ Status DoHandleRequest(Handler handler,
       break;
     case kEndMonitoring:
     case kEndRecording:
-      RETURN_NOT_OK(EndRecording(req, false, output));
-      break;
-    case kEndRecordingCompressed:
-      RETURN_NOT_OK(EndRecording(req, true, output));
+      RETURN_NOT_OK(EndRecording(req, output));
       break;
     case kSimpleDump:
       HandleTraceJsonPage(req.parsed_args, output);
@@ -242,7 +226,7 @@ Status DoHandleRequest(Handler handler,
 
 void HandleRequest(Handler handler,
                    const Webserver::WebRequest& req,
-                   std::ostringstream* output) {
+                   std::stringstream* output) {
   Status s = DoHandleRequest(handler, req, output);
   if (!s.ok()) {
     LOG(WARNING) << "Tracing error for handler " << handler << ": "
@@ -267,7 +251,6 @@ void TracingPathHandlers::RegisterHandlers(Webserver* server) {
     { "/tracing/json/begin_recording", kBeginRecording },
     { "/tracing/json/get_buffer_percent_full", kGetBufferPercentFull },
     { "/tracing/json/end_recording", kEndRecording },
-    { "/tracing/json/end_recording_compressed", kEndRecordingCompressed },
     { "/tracing/json/simple_dump", kSimpleDump } };
 
   typedef pair<string, Handler> HandlerPair;

@@ -18,14 +18,7 @@
 #define KUDU_UTIL_HDRHISTOGRAM_H_
 
 // C++ (TR1) port of HdrHistogram.
-//
-// Portions of these classes were ported from Java to C++ from the sources
-// available at https://github.com/HdrHistogram/HdrHistogram .
-//
-//   The code in this repository code was Written by Gil Tene, Michael Barker,
-//   and Matt Warren, and released to the public domain, as explained at
-//   http://creativecommons.org/publicdomain/zero/1.0/
-// ---------------------------------------------------------------------------
+// Original java implementation: http://giltene.github.io/HdrHistogram/
 //
 // A High Dynamic Range (HDR) Histogram
 //

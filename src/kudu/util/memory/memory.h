@@ -40,11 +40,11 @@
 #include <vector>
 
 #include "kudu/util/boost_mutex_utils.h"
-#include "kudu/util/memory/overwrite.h"
 #include "kudu/util/mutex.h"
 #include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/logging-inl.h"
 #include "kudu/gutil/macros.h"
+#include "kudu/gutil/strings/stringpiece.h"
 #include "kudu/gutil/singleton.h"
 
 using std::copy;
@@ -60,6 +60,8 @@ namespace kudu {
 
 class BufferAllocator;
 class MemTracker;
+
+void OverwriteWithPattern(char* p, size_t len, StringPiece pattern);
 
 // Wrapper for a block of data allocated by a BufferAllocator. Owns the block.
 // (To release the block, destroy the buffer - it will then return it via the
@@ -474,7 +476,7 @@ class MemoryLimit : public BufferAllocator {
  public:
   // Creates a limiter based on the default, heap allocator. Quota is infinite.
   // (Can be set using SetQuota).
-  MemoryLimit()
+  explicit MemoryLimit()
       : quota_(std::numeric_limits<size_t>::max()),
         allocator_(HeapBufferAllocator::Get(), &quota_) {}
 

@@ -22,7 +22,8 @@
 #include <string>
 #include <vector>
 
-#include "kudu/client/client.h"
+#include "kudu/master/master.h"
+#include "kudu/master/master.proxy.h"
 #include "kudu/rpc/messenger.h"
 #include "kudu/server/server_base.h"
 #include "kudu/server/server_base.proxy.h"
@@ -41,46 +42,46 @@ namespace tools {
 class RemoteKsckTabletServer : public KsckTabletServer {
  public:
   explicit RemoteKsckTabletServer(const std::string& id,
-                                  const HostPort host_port,
-                                  std::shared_ptr<rpc::Messenger> messenger)
+                                  const Sockaddr& address,
+                                  const std::shared_ptr<rpc::Messenger>& messenger)
       : KsckTabletServer(id),
-        host_port_(host_port),
-        messenger_(std::move(messenger)) {
+        address_(address.ToString()),
+        messenger_(messenger),
+        generic_proxy_(new server::GenericServiceProxy(messenger, address)),
+        ts_proxy_(new tserver::TabletServerServiceProxy(messenger, address)) {
   }
 
-  // Resolves the host/port and sets up proxies.
-  // Must be called after constructing.
-  Status Init();
+  virtual Status Connect() const OVERRIDE;
 
-  Status FetchInfo() override;
+  virtual Status CurrentTimestamp(uint64_t* timestamp) const OVERRIDE;
 
-  void RunTabletChecksumScanAsync(
+  virtual void RunTabletChecksumScanAsync(
       const std::string& tablet_id,
       const Schema& schema,
       const ChecksumOptions& options,
-      ChecksumProgressCallbacks* callbacks) override;
+      const ReportResultCallback& callback) OVERRIDE;
 
-  virtual std::string address() const OVERRIDE {
-    return host_port_.ToString();
+
+  virtual const std::string& address() const OVERRIDE {
+    return address_;
   }
 
  private:
-  const HostPort host_port_;
+  const std::string address_;
   const std::shared_ptr<rpc::Messenger> messenger_;
-  std::shared_ptr<server::GenericServiceProxy> generic_proxy_;
-  std::shared_ptr<tserver::TabletServerServiceProxy> ts_proxy_;
+  const std::shared_ptr<server::GenericServiceProxy> generic_proxy_;
+  const std::shared_ptr<tserver::TabletServerServiceProxy> ts_proxy_;
 };
 
 // This implementation connects to a Master via RPC.
 class RemoteKsckMaster : public KsckMaster {
  public:
 
-  static Status Build(const std::vector<std::string>& master_addresses,
-                      std::shared_ptr<KsckMaster>* master);
+  static Status Build(const Sockaddr& address, std::shared_ptr<KsckMaster>* master);
 
   virtual ~RemoteKsckMaster() { }
 
-  virtual Status Connect() OVERRIDE;
+  virtual Status Connect() const OVERRIDE;
 
   virtual Status RetrieveTabletServers(TSMap* tablet_servers) OVERRIDE;
 
@@ -90,16 +91,23 @@ class RemoteKsckMaster : public KsckMaster {
 
  private:
 
-  RemoteKsckMaster(const std::vector<std::string>& master_addresses,
-                   std::shared_ptr<rpc::Messenger> messenger)
-      : master_addresses_(master_addresses),
-        messenger_(std::move(messenger)) {
+  explicit RemoteKsckMaster(const Sockaddr& address,
+                            const std::shared_ptr<rpc::Messenger>& messenger)
+      : messenger_(messenger),
+        proxy_(new master::MasterServiceProxy(messenger, address)) {
   }
 
-  const std::vector<std::string> master_addresses_;
-  const std::shared_ptr<rpc::Messenger> messenger_;
+  Status GetTableInfo(const std::string& table_name, Schema* schema, int* num_replicas);
 
-  client::sp::shared_ptr<client::KuduClient> client_;
+  // Used to get a batch of tablets from the master, passing a pointer to the
+  // seen last key that will be used as the new start key. The
+  // last_partition_key is updated to point at the new last key that came in
+  // the batch.
+  Status GetTabletsBatch(const std::string& table_name, std::string* last_partition_key,
+    std::vector<std::shared_ptr<KsckTablet> >& tablets, bool* more_tablets);
+
+  std::shared_ptr<rpc::Messenger> messenger_;
+  std::shared_ptr<master::MasterServiceProxy> proxy_;
 };
 
 } // namespace tools

@@ -3,12 +3,7 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include "kudu/util/env.h"
-
-#include <memory>
-
 #include "kudu/util/faststring.h"
-
-using std::unique_ptr;
 
 namespace kudu {
 
@@ -33,7 +28,7 @@ FileLock::~FileLock() {
 static Status DoWriteStringToFile(Env* env, const Slice& data,
                                   const std::string& fname,
                                   bool should_sync) {
-  unique_ptr<WritableFile> file;
+  gscoped_ptr<WritableFile> file;
   Status s = env->NewWritableFile(fname, &file);
   if (!s.ok()) {
     return s;
@@ -66,13 +61,13 @@ Status WriteStringToFileSync(Env* env, const Slice& data,
 
 Status ReadFileToString(Env* env, const std::string& fname, faststring* data) {
   data->clear();
-  unique_ptr<SequentialFile> file;
+  gscoped_ptr<SequentialFile> file;
   Status s = env->NewSequentialFile(fname, &file);
   if (!s.ok()) {
     return s;
   }
   static const int kBufferSize = 8192;
-  unique_ptr<uint8_t[]> scratch(new uint8_t[kBufferSize]);
+  gscoped_ptr<uint8_t[]> scratch(new uint8_t[kBufferSize]);
   while (true) {
     Slice fragment;
     s = file->Read(kBufferSize, &fragment, scratch.get());
@@ -85,6 +80,9 @@ Status ReadFileToString(Env* env, const std::string& fname, faststring* data) {
     }
   }
   return s;
+}
+
+EnvWrapper::~EnvWrapper() {
 }
 
 }  // namespace kudu

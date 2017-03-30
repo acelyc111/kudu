@@ -27,15 +27,15 @@ namespace kudu {
 // GLog sink that keeps an internal buffer of messages that have been logged.
 class StringVectorSink : public google::LogSink {
  public:
-  void send(google::LogSeverity severity, const char* full_filename,
-            const char* base_filename, int line,
-            const struct ::tm* tm_time,
-            const char* message, size_t message_len) override {
+  virtual void send(google::LogSeverity severity, const char* full_filename,
+                    const char* base_filename, int line,
+                    const struct ::tm* tm_time,
+                    const char* message, size_t message_len) override {
     logged_msgs_.push_back(ToString(severity, base_filename, line,
                                     tm_time, message, message_len));
   }
 
-  std::vector<std::string>& logged_msgs() {
+  const std::vector<std::string>& logged_msgs() const {
     return logged_msgs_;
   }
 

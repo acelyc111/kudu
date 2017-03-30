@@ -15,21 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "kudu/util/status_callback.h"
-
 #include "kudu/util/status.h"
-
-using std::string;
+#include "kudu/util/status_callback.h"
 
 namespace kudu {
 
 void DoNothingStatusCB(const Status& status) {}
-
-void CrashIfNotOkStatusCB(const string& message, const Status& status) {
-  if (PREDICT_FALSE(!status.ok())) {
-    LOG(FATAL) << message << ": " << status.ToString();
-  }
-}
 
 Status DoNothingStatusClosure() { return Status::OK(); }
 

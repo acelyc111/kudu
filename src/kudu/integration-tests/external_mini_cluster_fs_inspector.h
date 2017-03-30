@@ -22,7 +22,6 @@
 #include <vector>
 
 #include "kudu/gutil/macros.h"
-#include "kudu/gutil/strings/stringpiece.h"
 #include "kudu/tablet/metadata.pb.h"
 #include "kudu/util/monotime.h"
 
@@ -51,27 +50,10 @@ class ExternalMiniClusterFsInspector {
   ~ExternalMiniClusterFsInspector();
 
   Status ListFilesInDir(const std::string& path, std::vector<std::string>* entries);
-
-  // If provided, files are filtered by the glob-style pattern 'pattern'.
-  int CountFilesInDir(const std::string& path, StringPiece pattern = StringPiece());
-
-  // List all of the tablets with tablet metadata in the cluster.
-  std::vector<std::string> ListTablets();
-
-  // List all of the tablets with tablet metadata on the given tablet server index.
-  // This may include tablets that are tombstoned and not running.
+  int CountFilesInDir(const std::string& path);
+  int CountWALSegmentsOnTS(int index);
   std::vector<std::string> ListTabletsOnTS(int index);
-
-  // List the tablet IDs on the given tablet which actually have data (as
-  // evidenced by their having a WAL). This excludes those that are tombstoned.
-  std::vector<std::string> ListTabletsWithDataOnTS(int index);
-
-  // Return the number of files in the WAL directory for the given 'tablet_id' on TS 'index'.
-  // If provided, files are filtered by the glob-style pattern 'pattern'.
-  int CountFilesInWALDirForTS(int index,
-                              const std::string& tablet_id,
-                              StringPiece pattern = StringPiece());
-
+  int CountWALSegmentsForTabletOnTS(int index, const std::string& tablet_id);
   bool DoesConsensusMetaExistForTabletOnTS(int index, const std::string& tablet_id);
 
   int CountReplicasInMetadataDirs();
@@ -80,20 +62,11 @@ class ExternalMiniClusterFsInspector {
 
   Status ReadTabletSuperBlockOnTS(int index, const std::string& tablet_id,
                                   tablet::TabletSuperBlockPB* sb);
-
-  // Get the modification time (in micros) of the tablet superblock for the given tablet
-  // server index and tablet ID.
-  int64_t GetTabletSuperBlockMTimeOrDie(int ts_index, const std::string& tablet_id);
-
   Status ReadConsensusMetadataOnTS(int index, const std::string& tablet_id,
                                    consensus::ConsensusMetadataPB* cmeta_pb);
-  Status WriteConsensusMetadataOnTS(int index,
-                                    const std::string& tablet_id,
-                                    const consensus::ConsensusMetadataPB& cmeta_pb);
-
   Status CheckTabletDataStateOnTS(int index,
                                   const std::string& tablet_id,
-                                  const std::vector<tablet::TabletDataState>& expected_states);
+                                  tablet::TabletDataState state);
 
   Status WaitForNoData(const MonoDelta& timeout = MonoDelta::FromSeconds(30));
   Status WaitForNoDataOnTS(int index, const MonoDelta& timeout = MonoDelta::FromSeconds(30));
@@ -104,7 +77,7 @@ class ExternalMiniClusterFsInspector {
   Status WaitForReplicaCount(int expected, const MonoDelta& timeout = MonoDelta::FromSeconds(30));
   Status WaitForTabletDataStateOnTS(int index,
                                     const std::string& tablet_id,
-                                    const std::vector<tablet::TabletDataState>& expected_states,
+                                    tablet::TabletDataState data_state,
                                     const MonoDelta& timeout = MonoDelta::FromSeconds(30));
 
   // Loop and check for certain filenames in the WAL directory of the specified
@@ -122,16 +95,6 @@ class ExternalMiniClusterFsInspector {
       const MonoDelta& timeout = MonoDelta::FromSeconds(30));
 
  private:
-  // Return the number of files in WAL directories on the given tablet server.
-  // This includes log index files (not just segments).
-  int CountWALFilesOnTS(int index);
-
-  std::string GetConsensusMetadataPathOnTS(int index,
-                                           const std::string& tablet_id) const;
-
-  std::string GetTabletSuperBlockPathOnTS(int ts_index,
-                                          const std::string& tablet_id) const;
-
   Env* const env_;
   ExternalMiniCluster* const cluster_;
 

@@ -63,10 +63,6 @@ class LocalTabletWriter {
     return Write(RowOperationsPB::INSERT, row);
   }
 
-  Status Upsert(const KuduPartialRow& row) {
-    return Write(RowOperationsPB::UPSERT, row);
-  }
-
   Status Delete(const KuduPartialRow& row) {
     return Write(RowOperationsPB::DELETE, row);
   }
@@ -96,15 +92,16 @@ class LocalTabletWriter {
 
     RETURN_NOT_OK(tablet_->DecodeWriteOperations(client_schema_, tx_state_.get()));
     RETURN_NOT_OK(tablet_->AcquireRowLocks(tx_state_.get()));
-    tablet_->AssignTimestampAndStartTransactionForTests(tx_state_.get());
+    tablet_->StartTransaction(tx_state_.get());
 
     // Create a "fake" OpId and set it in the TransactionState for anchoring.
     tx_state_->mutable_op_id()->CopyFrom(consensus::MaximumOpId());
     tablet_->ApplyRowOperations(tx_state_.get());
 
     tx_state_->ReleaseTxResultPB(&result_);
-    tablet_->mvcc_manager()->AdjustSafeTime(tx_state_->timestamp());
-    tx_state_->CommitOrAbort(Transaction::COMMITTED);
+    tx_state_->Commit();
+    tx_state_->release_row_locks();
+    tx_state_->ReleaseSchemaLock();
 
     // Return the status of first failed op.
     int op_idx = 0;

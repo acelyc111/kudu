@@ -17,18 +17,14 @@
 
 #include "kudu/client/tablet_server-internal.h"
 
-#include <string>
-
-#include "kudu/util/net/net_util.h"
-
 using std::string;
 
 namespace kudu {
 namespace client {
 
-KuduTabletServer::Data::Data(string uuid, HostPort hp)
+KuduTabletServer::Data::Data(string uuid, string hostname)
     : uuid_(std::move(uuid)),
-      hp_(std::move(hp)) {
+      hostname_(std::move(hostname)) {
 }
 
 KuduTabletServer::Data::~Data() {

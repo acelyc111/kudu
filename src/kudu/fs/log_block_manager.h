@@ -19,7 +19,7 @@
 #define KUDU_FS_LOG_BLOCK_MANAGER_H
 
 #include <deque>
-#include <map>
+#include <gtest/gtest_prod.h>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -27,12 +27,8 @@
 #include <utility>
 #include <vector>
 
-#include <boost/optional/optional.hpp>
-#include <gtest/gtest_prod.h>
-
 #include "kudu/fs/block_id.h"
 #include "kudu/fs/block_manager.h"
-#include "kudu/fs/data_dirs.h"
 #include "kudu/fs/fs.pb.h"
 #include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/ref_counted.h"
@@ -43,13 +39,11 @@
 
 namespace kudu {
 class Env;
-template <class FileType>
-class FileCache;
 class MetricEntity;
-class RWFile;
 class ThreadPool;
 
 namespace fs {
+class PathInstanceMetadataFile;
 
 namespace internal {
 class LogBlock;
@@ -157,9 +151,6 @@ struct LogBlockManagerMetrics;
 // The log-backed block manager.
 class LogBlockManager : public BlockManager {
  public:
-  static const char* kContainerMetadataFileSuffix;
-  static const char* kContainerDataFileSuffix;
-
   LogBlockManager(Env* env, const BlockManagerOptions& opts);
 
   virtual ~LogBlockManager();
@@ -184,11 +175,7 @@ class LogBlockManager : public BlockManager {
   int64_t CountBlocksForTests() const;
 
  private:
-  FRIEND_TEST(LogBlockManagerTest, TestLookupBlockLimit);
-  FRIEND_TEST(LogBlockManagerTest, TestMetadataTruncation);
-  FRIEND_TEST(LogBlockManagerTest, TestParseKernelRelease);
   FRIEND_TEST(LogBlockManagerTest, TestReuseBlockIds);
-
   friend class internal::LogBlockContainer;
 
   // Simpler typedef for a block map which isn't tracked in the memory tracker.
@@ -212,12 +199,12 @@ class LogBlockManager : public BlockManager {
   void AddNewContainerUnlocked(internal::LogBlockContainer* container);
 
   // Returns the next container available for writing using a round-robin
-  // selection policy, creating a new one if necessary.
+  // selection policy, or null if no suitable container was found.
   //
   // After returning, the container is considered to be in use. When
   // writing is finished, call MakeContainerAvailable() to make it
   // available to other writers.
-  Status GetOrCreateContainer(internal::LogBlockContainer** container);
+  internal::LogBlockContainer* GetAvailableContainer();
 
   // Indicate that this container is no longer in use and can be handed out
   // to other writers.
@@ -253,18 +240,25 @@ class LogBlockManager : public BlockManager {
   // already gone.
   scoped_refptr<internal::LogBlock> RemoveLogBlock(const BlockId& block_id);
 
-  // Parses a block record, adding or removing it in 'block_map', and
-  // accounting for it in the metadata for 'container'.
-  //
-  // Returns a bad status if the record is malformed in some way.
-  Status ProcessBlockRecord(const BlockRecordPB& record,
-                            internal::LogBlockContainer* container,
-                            UntrackedBlockMap* block_map);
+  // Unlocked variant of RemoveLogBlock(); must hold 'lock_'.
+  scoped_refptr<internal::LogBlock> RemoveLogBlockUnlocked(const BlockId& block_id);
 
-  // Open a particular data directory belonging to the block manager.
+  // Parse a block record, adding or removing it in 'block_map', and
+  // accounting for it in the metadata for 'container'.
+  void ProcessBlockRecord(const BlockRecordPB& record,
+                          internal::LogBlockContainer* container,
+                          UntrackedBlockMap* block_map);
+
+  // Open a particular root path belonging to the block manager.
   //
-  // Success or failure is set in 'result_status'.
-  void OpenDataDir(DataDir* dir, Status* result_status);
+  // Success or failure is set in 'result_status'. On success, also sets
+  // 'result_metadata' with an allocated metadata file.
+  void OpenRootPath(const std::string& root_path,
+                    Status* result_status,
+                    PathInstanceMetadataFile** result_metadata);
+
+  // Test for hole punching support at 'path'.
+  Status CheckHolePunch(const std::string& path);
 
   // Perform basic initialization.
   Status Init();
@@ -273,21 +267,7 @@ class LogBlockManager : public BlockManager {
 
   Env* env() const { return env_; }
 
-  // Returns the path of the given container. Only for use by tests.
-  static std::string ContainerPathForTests(internal::LogBlockContainer* container);
-
-  // Returns whether the given kernel release is vulnerable to KUDU-1508.
-  static bool IsBuggyEl6Kernel(const std::string& kernel_release);
-
-  // Finds an appropriate block limit from 'per_fs_block_size_block_limits'
-  // using the given filesystem block size.
-  static int64_t LookupBlockLimit(int64_t fs_block_size);
-
   const internal::LogBlockManagerMetrics* metrics() const { return metrics_.get(); }
-
-  // For kernels affected by KUDU-1508, tracks a known good upper bound on the
-  // number of blocks per container, given a particular filesystem block size.
-  static const std::map<int64_t, int64_t> per_fs_block_size_block_limits;
 
   // Tracks memory consumption of any allocations numerous enough to be
   // interesting (e.g. LogBlocks).
@@ -295,17 +275,6 @@ class LogBlockManager : public BlockManager {
 
   // Protects the block map, container structures, and 'dirty_dirs'.
   mutable simple_spinlock lock_;
-
-  // Manages and owns all of the block manager's data directories.
-  DataDirManager dd_manager_;
-
-  // Maps a data directory to an upper bound on the number of blocks that a
-  // container residing in that directory should observe, if one is necessary.
-  std::unordered_map<const DataDir*,
-                     boost::optional<int64_t>> block_limits_by_data_dir_;
-
-  // Manages files opened for reading.
-  std::unique_ptr<FileCache<RWFile>> file_cache_;
 
   // Maps block IDs to blocks that are now readable, either because they
   // already existed on disk when the block manager was opened, or because
@@ -326,8 +295,7 @@ class LogBlockManager : public BlockManager {
   // excluding containers that are either in use or full.
   //
   // Does not own the containers.
-  std::unordered_map<const DataDir*,
-                     std::deque<internal::LogBlockContainer*>> available_containers_by_data_dir_;
+  std::deque<internal::LogBlockContainer*> available_containers_;
 
   // Tracks dirty container directories.
   //
@@ -340,14 +308,26 @@ class LogBlockManager : public BlockManager {
   // If true, only read operations are allowed.
   const bool read_only_;
 
-  // If true, the kernel is vulnerable to KUDU-1508.
-  const bool buggy_el6_kernel_;
+  // Filesystem paths where all block directories are found.
+  const std::vector<std::string> root_paths_;
+
+  // Index of 'root_paths_' for the next created block.
+  AtomicInt<int32> root_paths_idx_;
+
+  // Maps root paths to instance metadata files found in each root path.
+  typedef std::unordered_map<std::string, PathInstanceMetadataFile*> InstanceMap;
+  InstanceMap instances_by_root_path_;
+
+  // Maps root paths to thread pools. Each pool runs at most one thread, and
+  // so serves as a "work queue" for that particular disk.
+  typedef std::unordered_map<std::string, ThreadPool*> ThreadPoolMap;
+  ThreadPoolMap thread_pools_by_root_path_;
 
   // For generating container names.
   ObjectIdGenerator oid_generator_;
 
   // For generating block IDs.
-  AtomicInt<int64_t> next_block_id_;
+  ThreadSafeRandom rand_;
 
   // Metrics for the block manager.
   //

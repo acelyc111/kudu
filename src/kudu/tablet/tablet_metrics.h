@@ -22,7 +22,6 @@
 
 namespace kudu {
 
-class Arena;
 class Counter;
 template<class T>
 class AtomicGauge;
@@ -37,17 +36,10 @@ struct ProbeStats;
 struct TabletMetrics {
   explicit TabletMetrics(const scoped_refptr<MetricEntity>& metric_entity);
 
-  // Add a batch of probe stats to the metrics.
-  //
-  // We use C-style array passing here since the call site allocates the
-  // ProbeStats from an arena.
-  //
-  // This allocates temporary scratch space from work_arena.
-  void AddProbeStats(const ProbeStats* stats_array, int len, Arena* work_arena);
+  void AddProbeStats(const ProbeStats& stats);
 
   // Operation rates
   scoped_refptr<Counter> rows_inserted;
-  scoped_refptr<Counter> rows_upserted;
   scoped_refptr<Counter> rows_updated;
   scoped_refptr<Counter> rows_deleted;
   scoped_refptr<Counter> insertions_failed_dup_key;
@@ -64,10 +56,7 @@ struct TabletMetrics {
   scoped_refptr<Counter> key_file_lookups;
   scoped_refptr<Counter> delta_file_lookups;
   scoped_refptr<Counter> mrs_lookups;
-
-  // Operation stats.
   scoped_refptr<Counter> bytes_flushed;
-  scoped_refptr<Counter> undo_delta_block_gc_bytes_deleted;
 
   scoped_refptr<Histogram> bloom_lookups_per_op;
   scoped_refptr<Histogram> key_file_lookups_per_op;
@@ -83,19 +72,34 @@ struct TabletMetrics {
   scoped_refptr<AtomicGauge<uint32_t> > compact_rs_running;
   scoped_refptr<AtomicGauge<uint32_t> > delta_minor_compact_rs_running;
   scoped_refptr<AtomicGauge<uint32_t> > delta_major_compact_rs_running;
-  scoped_refptr<AtomicGauge<uint32_t> > undo_delta_block_gc_running;
-  scoped_refptr<AtomicGauge<int64_t> > undo_delta_block_estimated_retained_bytes;
 
   scoped_refptr<Histogram> flush_dms_duration;
   scoped_refptr<Histogram> flush_mrs_duration;
   scoped_refptr<Histogram> compact_rs_duration;
   scoped_refptr<Histogram> delta_minor_compact_rs_duration;
   scoped_refptr<Histogram> delta_major_compact_rs_duration;
-  scoped_refptr<Histogram> undo_delta_block_gc_init_duration;
-  scoped_refptr<Histogram> undo_delta_block_gc_delete_duration;
-  scoped_refptr<Histogram> undo_delta_block_gc_perform_duration;
 
   scoped_refptr<Counter> leader_memory_pressure_rejections;
+};
+
+class ProbeStatsSubmitter {
+ public:
+  ProbeStatsSubmitter(const ProbeStats& stats, TabletMetrics* metrics)
+    : stats_(stats),
+      metrics_(metrics) {
+  }
+
+  ~ProbeStatsSubmitter() {
+    if (metrics_) {
+      metrics_->AddProbeStats(stats_);
+    }
+  }
+
+ private:
+  const ProbeStats& stats_;
+  TabletMetrics* const metrics_;
+
+  DISALLOW_COPY_AND_ASSIGN(ProbeStatsSubmitter);
 };
 
 } // namespace tablet

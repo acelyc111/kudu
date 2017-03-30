@@ -60,17 +60,17 @@ class CFileReader {
   //
   // After this call, the reader is safe for use.
   static Status Open(gscoped_ptr<fs::ReadableBlock> block,
-                     ReaderOptions options,
+                     const ReaderOptions& options,
                      gscoped_ptr<CFileReader>* reader);
 
   // Lazily open a cfile using a previously opened block. A lazy open does
   // not incur additional I/O, nor does it validate the contents of the
   // cfile.
   //
-  // Init() must be called before most methods; the exceptions are documented
-  // below.
+  // Init() must be called before using most methods. Exceptions include
+  // NewIterator() and file_size().
   static Status OpenNoInit(gscoped_ptr<fs::ReadableBlock> block,
-                           ReaderOptions options,
+                           const ReaderOptions& options,
                            gscoped_ptr<CFileReader>* reader);
 
   // Fully opens a previously lazily opened cfile, parsing and validating
@@ -84,7 +84,6 @@ class CFileReader {
     DONT_CACHE_BLOCK
   };
 
-  // Can be called before Init().
   Status NewIterator(CFileIterator **iter, CacheControl cache_control);
   Status NewIterator(gscoped_ptr<CFileIterator> *iter,
                      CacheControl cache_control) {
@@ -114,11 +113,6 @@ class CFileReader {
   // Can be called before Init().
   uint64_t file_size() const {
     return file_size_;
-  }
-
-  // Can be called before Init().
-  const BlockId& block_id() const {
-    return block_->id();
   }
 
   const TypeInfo *type_info() const {
@@ -167,14 +161,13 @@ class CFileReader {
     return BlockPointer(footer().validx_info().root_block());
   }
 
-  // Can be called before Init().
   std::string ToString() const { return block_->id().ToString(); }
 
  private:
   DISALLOW_COPY_AND_ASSIGN(CFileReader);
 
-  CFileReader(ReaderOptions options,
-              uint64_t file_size,
+  CFileReader(const ReaderOptions &options,
+              const uint64_t file_size,
               gscoped_ptr<fs::ReadableBlock> block);
 
   // Callback used in 'init_once_' to initialize this cfile.
@@ -193,11 +186,11 @@ class CFileReader {
   const gscoped_ptr<fs::ReadableBlock> block_;
   const uint64_t file_size_;
 
-  uint8_t cfile_version_;
-
   gscoped_ptr<CFileHeaderPB> header_;
   gscoped_ptr<CFileFooterPB> footer_;
-  const CompressionCodec* codec_;
+
+  gscoped_ptr<CompressedBlockDecoder> block_uncompressor_;
+
   const TypeInfo *type_info_;
   const TypeEncodingInfo *type_encoding_info_;
 
@@ -246,13 +239,11 @@ class ColumnIterator {
   virtual Status PrepareBatch(size_t *n) = 0;
 
   // Copy values into the prepared column block.
-  // Any indirected values (eg strings) are copied into the ctx's block's
+  // Any indirected values (eg strings) are copied into the dst block's
   // arena.
   // This does _not_ advance the position in the underlying file. Multiple
   // calls to Scan() will re-read the same values.
-  // If decoder eval is supported and allowed, will additionally evaluate the
-  // column predicate.
-  virtual Status Scan(ColumnMaterializationContext* ctx) = 0;
+  virtual Status Scan(ColumnBlock *dst) = 0;
 
   // Finish processing the current batch, advancing the iterators
   // such that the next call to PrepareBatch() will start where the previous
@@ -275,14 +266,14 @@ class DefaultColumnValueIterator : public ColumnIterator {
     : typeinfo_(typeinfo), value_(value), ordinal_(0) {
   }
 
-  Status SeekToOrdinal(rowid_t ord_idx) override;
+  Status SeekToOrdinal(rowid_t ord_idx) OVERRIDE;
 
   bool seeked() const OVERRIDE { return true; }
 
   rowid_t GetCurrentOrdinal() const OVERRIDE { return ordinal_; }
 
-  Status PrepareBatch(size_t* n) OVERRIDE;
-  Status Scan(ColumnMaterializationContext* ctx) override;
+  Status PrepareBatch(size_t *n) OVERRIDE;
+  Status Scan(ColumnBlock *dst) OVERRIDE;
   Status FinishBatch() OVERRIDE;
 
   const IteratorStats& io_statistics() const OVERRIDE { return io_stats_; }
@@ -312,7 +303,7 @@ class CFileIterator : public ColumnIterator {
   // If provided seek point is past the end of the file,
   // then returns a NotFound Status.
   // TODO: do we ever want to be able to seek to the end of the file?
-  Status SeekToOrdinal(rowid_t ord_idx) override;
+  Status SeekToOrdinal(rowid_t ord_idx) OVERRIDE;
 
   // Seek the index to the given row_key, or to the index entry immediately
   // before it. Then (if the index is sparse) seek the data block to the
@@ -355,7 +346,7 @@ class CFileIterator : public ColumnIterator {
   // arena.
   // This does _not_ advance the position in the underlying file. Multiple
   // calls to Scan() will re-read the same values.
-  Status Scan(ColumnMaterializationContext* ctx) override;
+  Status Scan(ColumnBlock *dst) OVERRIDE;
 
   // Finish processing the current batch, advancing the iterators
   // such that the next call to PrepareBatch() will start where the previous
@@ -366,23 +357,16 @@ class CFileIterator : public ColumnIterator {
   bool HasNext() const;
 
   // Convenience method to prepare a batch, scan it, and finish it.
-  Status CopyNextValues(size_t* n, ColumnMaterializationContext* ctx);
+  Status CopyNextValues(size_t *n, ColumnBlock *dst);
 
   const IteratorStats &io_statistics() const OVERRIDE {
     return io_stats_;
   }
 
-  // If the column is dictionary-coded, returns the decoder
+  // It the column is dictionary-coded, returns the decoder
   // for the cfile's dictionary block. This is called by the
-  // BinaryDictBlockDecoder.
-  BinaryPlainBlockDecoder* GetDictDecoder() { return dict_decoder_.get(); }
-
-  // If the column is dictionary-coded and a predicate on the column exists,
-  // returns the set of codewords that pass the predicate. Since a vocabulary
-  // is shared among the multiple BinaryDictBlockDecoders in a single cfile,
-  // the reader must expose an interface for all decoders to access the
-  // single set of predicate-satisfying codewords.
-  SelectionVector* GetCodeWordsMatchingPredicate() { return codewords_matching_pred_.get(); }
+  // StringDictBlockDecoder.
+  BinaryPlainBlockDecoder* GetDictDecoder() { return dict_decoder_.get();}
 
  private:
   DISALLOW_COPY_AND_ASSIGN(CFileIterator);
@@ -450,12 +434,9 @@ class CFileIterator : public ColumnIterator {
   gscoped_ptr<IndexTreeIterator> posidx_iter_;
   gscoped_ptr<IndexTreeIterator> validx_iter_;
 
-  // Decoder for the dictionary block.
+  // Decoder for the dictionary block
   gscoped_ptr<BinaryPlainBlockDecoder> dict_decoder_;
   BlockHandle dict_block_handle_;
-
-  // Set containing the codewords that match the predicate in a dictionary.
-  std::unique_ptr<SelectionVector> codewords_matching_pred_;
 
   // The currently in-use index iterator. This is equal to either
   // posidx_iter_.get(), validx_iter_.get(), or NULL if not seeked.

@@ -19,10 +19,8 @@
 #include <memory>
 #include <vector>
 
-#include "kudu/client/client-internal.h"
 #include "kudu/client/client-test-util.h"
 #include "kudu/gutil/mathlimits.h"
-#include "kudu/gutil/strings/join.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/integration-tests/external_mini_cluster.h"
 #include "kudu/integration-tests/test_workload.h"
@@ -127,8 +125,9 @@ TEST_F(ClientStressTest, TestStartScans) {
   // is empty.
   for (int run = 1; run <= (AllowSlowTests() ? 10 : 2); run++) {
     LOG(INFO) << "Starting run " << run;
+    KuduClientBuilder builder;
     client::sp::shared_ptr<KuduClient> client;
-    CHECK_OK(cluster_->CreateClient(nullptr, &client));
+    CHECK_OK(cluster_->CreateClient(builder, &client));
 
     CountDownLatch go_latch(1);
     vector<scoped_refptr<Thread> > threads;
@@ -223,14 +222,7 @@ class ClientStressTest_LowMemory : public ClientStressTest {
 // Stress test where, due to absurdly low memory limits, many client requests
 // are rejected, forcing the client to retry repeatedly.
 TEST_F(ClientStressTest_LowMemory, TestMemoryThrottling) {
-#ifdef THREAD_SANITIZER
-  // TSAN tests run much slower, so we don't want to wait for as many
-  // rejections before declaring the test to be passed.
-  const int64_t kMinRejections = 20;
-#else
   const int64_t kMinRejections = 100;
-#endif
-
   const MonoDelta kMaxWaitTime = MonoDelta::FromSeconds(60);
 
   TestWorkload work(cluster_.get());
@@ -238,7 +230,8 @@ TEST_F(ClientStressTest_LowMemory, TestMemoryThrottling) {
   work.Start();
 
   // Wait until we've rejected some number of requests.
-  MonoTime deadline = MonoTime::Now() + kMaxWaitTime;
+  MonoTime deadline = MonoTime::Now(MonoTime::FINE);
+  deadline.AddDelta(kMaxWaitTime);
   while (true) {
     int64_t total_num_rejections = 0;
 
@@ -271,26 +264,10 @@ TEST_F(ClientStressTest_LowMemory, TestMemoryThrottling) {
     }
     if (total_num_rejections >= kMinRejections) {
       break;
-    } else if (MonoTime::Now() > deadline) {
-      FAIL() << "Ran for " << kMaxWaitTime.ToString() << ", deadline expired and only saw "
-             << total_num_rejections << " memory rejections";
+    } else if (deadline.ComesBefore(MonoTime::Now(MonoTime::FINE))) {
+      FAIL() << "Ran for " << kMaxWaitTime.ToString() << ", deadline expired";
     }
     SleepFor(MonoDelta::FromMilliseconds(200));
-  }
-}
-
-// This test just creates a bunch of clients and makes sure that the generated client ids
-// are unique among the created clients.
-TEST_F(ClientStressTest, TestUniqueClientIds) {
-  set<string> client_ids;
-  for (int i = 0; i < 1000; i++) {
-    client::sp::shared_ptr<KuduClient> client;
-    CHECK_OK(cluster_->CreateClient(nullptr, &client));
-    string client_id = client->data_->client_id_;
-    auto result = client_ids.insert(client_id);
-    EXPECT_TRUE(result.second) << "Unique id generation failed. New client id: " << client_id
-                                   << " had already been used. Generated ids: "
-                                   << JoinStrings(client_ids, ",");
   }
 }
 

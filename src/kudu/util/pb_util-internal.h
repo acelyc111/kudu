@@ -20,11 +20,8 @@
 #ifndef KUDU_UTIL_PB_UTIL_INTERNAL_H
 #define KUDU_UTIL_PB_UTIL_INTERNAL_H
 
-#include <memory>
-
 #include <glog/logging.h>
 #include <google/protobuf/io/zero_copy_stream.h>
-
 #include "kudu/util/env.h"
 
 namespace kudu {
@@ -34,8 +31,7 @@ namespace internal {
 // Input Stream used by ParseFromSequentialFile()
 class SequentialFileFileInputStream : public google::protobuf::io::ZeroCopyInputStream {
  public:
-  explicit SequentialFileFileInputStream(SequentialFile *rfile,
-                                         size_t buffer_size = kDefaultBufferSize)
+  SequentialFileFileInputStream(SequentialFile *rfile, size_t buffer_size = kDefaultBufferSize)
     : buffer_used_(0), buffer_offset_(0),
       buffer_size_(buffer_size), buffer_(new uint8[buffer_size_]),
       total_read_(0), rfile_(rfile) {
@@ -59,10 +55,6 @@ class SequentialFileFileInputStream : public google::protobuf::io::ZeroCopyInput
     return total_read_;
   }
 
-  Status status() const {
-    return status_;
-  }
-
  private:
   static const size_t kDefaultBufferSize = 8192;
 
@@ -71,7 +63,7 @@ class SequentialFileFileInputStream : public google::protobuf::io::ZeroCopyInput
   size_t buffer_used_;
   size_t buffer_offset_;
   const size_t buffer_size_;
-  std::unique_ptr<uint8_t[]> buffer_;
+  gscoped_ptr<uint8_t[]> buffer_;
 
   size_t total_read_;
   SequentialFile *rfile_;
@@ -80,7 +72,7 @@ class SequentialFileFileInputStream : public google::protobuf::io::ZeroCopyInput
 // Output Stream used by SerializeToWritableFile()
 class WritableFileOutputStream : public google::protobuf::io::ZeroCopyOutputStream {
  public:
-  explicit WritableFileOutputStream(WritableFile *wfile, size_t buffer_size = kDefaultBufferSize)
+  WritableFileOutputStream(WritableFile *wfile, size_t buffer_size = kDefaultBufferSize)
     : buffer_offset_(0), buffer_size_(buffer_size), buffer_(new uint8[buffer_size_]),
       flushed_(0), wfile_(wfile) {
     CHECK_GT(buffer_size, 0);
@@ -118,7 +110,7 @@ class WritableFileOutputStream : public google::protobuf::io::ZeroCopyOutputStre
 
   size_t buffer_offset_;
   const size_t buffer_size_;
-  std::unique_ptr<uint8_t[]> buffer_;
+  gscoped_ptr<uint8_t[]> buffer_;
 
   size_t flushed_;
   WritableFile *wfile_;

@@ -25,13 +25,12 @@
 
 #include <algorithm>
 #include <stdint.h>
+#include <bitshuffle.h>
 
-#include "kudu/cfile/bitshuffle_arch_wrapper.h"
 #include "kudu/cfile/block_encodings.h"
 #include "kudu/cfile/cfile_util.h"
 #include "kudu/common/columnblock.h"
 #include "kudu/gutil/strings/substitute.h"
-#include "kudu/util/alignment.h"
 #include "kudu/util/coding.h"
 #include "kudu/util/coding-inl.h"
 #include "kudu/util/hexdump.h"
@@ -46,43 +45,20 @@ void AbortWithBitShuffleError(int64_t val) ATTRIBUTE_NORETURN;
 // BshufBlockBuilder bitshuffles and compresses the bits of fixed
 // size type blocks with lz4.
 //
-// The block format is as follows:
-//
-// 1. Header: (20 bytes total)
-//
-//    <first_ordinal> [32-bit]
-//      The ordinal offset of the first element in the block.
-//
-//    <num_elements> [32-bit]
-//      The number of elements encoded in the block.
-//
-//    <compressed_size> [32-bit]
-//      The post-compression size of the block, including this header.
-//
-//    <padded_num_elements> [32-bit]
-//      Padding is needed to meet the requirements of the bitshuffle
-//      library such that the input/output is a multiple of 8. Some
-//      ignored elements are appended to the end of the block if necessary
-//      to meet this requirement.
-//
-//      This header field is the post-padding element count.
-//
-//    <elem_size_bytes> [32-bit]
-//      The size of the elements, in bytes, as actually encoded. In the
-//      case that all of the data in a block can fit into a smaller
-//      integer type, then we may choose to encode that smaller type
-//      to save CPU costs.
-//
-//      This is currently only implemented in the UINT32 block type.
-//
-//   NOTE: all on-disk ints are encoded little-endian
-//
-// 2. Element data
-//
-//    The header is followed by the bitshuffle-compressed element data.
-//
+// Header includes:
+// 1. ordinal of the first element within the block (uint32_t, little endian).
+// 2. num of element within the block (uint32_t, little endian).
+// 3. compressed_size, including the header size (uint32_t, little endian).
+// 4. number of element after padding, padding is needed to meet the requirement
+//    by bitshuffle library that the number of element in the block must be
+//    multiple of 8. That means some psudo elements are appended at the end of the
+//    block if necessary (uint32_t, little endian).
+// 5. the size of the elements in bytes, as actually encoded. In the case that all of the
+//    data in a block can fit into a smaller integer type, then we may choose to encode
+//    that smaller type to save CPU costs. This is currently done only for the UINT32
+//    block type.  (uint32_t, little endian).
 template<DataType Type>
-class BShufBlockBuilder final : public BlockBuilder {
+class BShufBlockBuilder : public BlockBuilder {
  public:
   explicit BShufBlockBuilder(const WriterOptions* options)
     : count_(0),
@@ -91,27 +67,29 @@ class BShufBlockBuilder final : public BlockBuilder {
   }
 
   void Reset() OVERRIDE {
-    auto block_size = options_->storage_attributes.cfile_block_size;
     count_ = 0;
     data_.clear();
-    data_.reserve(block_size);
+    data_.reserve(options_->storage_attributes.cfile_block_size);
     buffer_.clear();
-    buffer_.resize(kHeaderSize);
-    finished_ = false;
-    rem_elem_capacity_ = block_size / size_of_type;
+    buffer_.resize(kMaxHeaderSize);
   }
 
-  bool IsBlockFull() const override {
-    return rem_elem_capacity_ == 0;
+  bool IsBlockFull(size_t limit) const OVERRIDE {
+    return EstimateEncodedSize() > limit;
   }
 
   int Add(const uint8_t* vals_void, size_t count) OVERRIDE {
-    DCHECK(!finished_);
-    int to_add = std::min<int>(rem_elem_capacity_, count);
-    data_.append(vals_void, to_add * size_of_type);
-    count_ += to_add;
-    rem_elem_capacity_ -= to_add;
-    return to_add;
+    const CppType* vals = reinterpret_cast<const CppType* >(vals_void);
+    int added = 0;
+    // If the current block is full, stop adding more items.
+    while (!IsBlockFull(options_->storage_attributes.cfile_block_size) && added < count) {
+      const uint8_t* ptr = reinterpret_cast<const uint8_t*>(vals);
+      data_.append(ptr, size_of_type);
+      vals++;
+      added++;
+      count_++;
+    }
+    return added;
   }
 
   size_t Count() const OVERRIDE {
@@ -119,67 +97,49 @@ class BShufBlockBuilder final : public BlockBuilder {
   }
 
   Status GetFirstKey(void* key) const OVERRIDE {
-    DCHECK(finished_);
     if (count_ == 0) {
       return Status::NotFound("no keys in data block");
     }
-    memcpy(key, &first_key_, size_of_type);
-    return Status::OK();
-  }
-
-  Status GetLastKey(void* key) const OVERRIDE {
-    DCHECK(finished_);
-    if (count_ == 0) {
-      return Status::NotFound("no keys in data block");
-    }
-    memcpy(key, &last_key_, size_of_type);
+    memcpy(key, &data_[0], size_of_type);
     return Status::OK();
   }
 
   Slice Finish(rowid_t ordinal_pos) OVERRIDE {
-    RememberFirstAndLastKey();
     return Finish(ordinal_pos, size_of_type);
   }
 
  private:
-  typedef typename TypeTraits<Type>::cpp_type CppType;
-
-  const CppType* cell_ptr(int idx) const {
-    DCHECK_GE(idx, 0);
-    return reinterpret_cast<const CppType*>(&data_[idx * size_of_type]);
+  size_t EstimateEncodedSize() const {
+    int num = count_ + NumOfPaddingNeeded();
+    // The result of bshuf_compress_lz4_bound(num, size_of_type, 0)
+    // is always bigger than the original size (num * size_of_type).
+    // However, the compression ratio in most cases is larger than 1,
+    // Therefore, using the original size may be more accurate and
+    // cause less overhead.
+    return kMaxHeaderSize + num * size_of_type;
   }
-  CppType* cell_ptr(int idx) {
-    DCHECK_GE(idx, 0);
-    return reinterpret_cast<CppType*>(&data_[idx * size_of_type]);
-  }
 
-  // Remember the last added key in 'last_key_'. This is done during
-  // Finish() because Finish() may rearrange/collapse the values in the
-  // data_ buffer during the encoding process.
-  void RememberFirstAndLastKey() {
-    if (count_ == 0) return;
-    memcpy(&first_key_, cell_ptr(0), size_of_type);
-    memcpy(&last_key_, cell_ptr(count_ - 1), size_of_type);
+  uint32_t NumOfPaddingNeeded() const {
+    return (count_ % 8 == 0) ? 0 : 8 - (count_ % 8);
   }
 
   Slice Finish(rowid_t ordinal_pos, int final_size_of_type) {
-    data_.resize(kHeaderSize + final_size_of_type * count_);
+    data_.resize(kMaxHeaderSize + final_size_of_type * count_);
 
     // Do padding so that the input num of element is multiple of 8.
-    int num_elems_after_padding = KUDU_ALIGN_UP(count_, 8);
-    int padding_elems = num_elems_after_padding - count_;
-    int padding_bytes = padding_elems * final_size_of_type;
-    for (int i = 0; i < padding_bytes; i++) {
+    uint32_t num_of_padding = NumOfPaddingNeeded() * final_size_of_type;
+    for (int i = 0; i < num_of_padding; i++) {
       data_.push_back(0);
     }
 
-    buffer_.resize(kHeaderSize +
-                   bitshuffle::compress_lz4_bound(num_elems_after_padding, final_size_of_type, 0));
+    int num_elems_after_padding = count_ + NumOfPaddingNeeded();
+    buffer_.resize(kMaxHeaderSize +
+                   bshuf_compress_lz4_bound(num_elems_after_padding, final_size_of_type, 0));
 
     InlineEncodeFixed32(&buffer_[0], ordinal_pos);
     InlineEncodeFixed32(&buffer_[4], count_);
-    int64_t bytes = bitshuffle::compress_lz4(data_.data(), &buffer_[kHeaderSize],
-                                             num_elems_after_padding, final_size_of_type, 0);
+    int64_t bytes = bshuf_compress_lz4(data_.data(), &buffer_[kMaxHeaderSize],
+                                    num_elems_after_padding, final_size_of_type, 0);
     if (PREDICT_FALSE(bytes < 0)) {
       // This means the bitshuffle function fails.
       // Ideally, this should not happen.
@@ -188,15 +148,15 @@ class BShufBlockBuilder final : public BlockBuilder {
       // since we have logged fatal in AbortWithBitShuffleError().
       return Slice();
     }
-    InlineEncodeFixed32(&buffer_[8], kHeaderSize + bytes);
+    InlineEncodeFixed32(&buffer_[8], kMaxHeaderSize + bytes);
     InlineEncodeFixed32(&buffer_[12], num_elems_after_padding);
     InlineEncodeFixed32(&buffer_[16], final_size_of_type);
-    finished_ = true;
-    return Slice(buffer_.data(), kHeaderSize + bytes);
+    return Slice(buffer_.data(), kMaxHeaderSize + bytes);
   }
 
   // Length of a header.
-  static const size_t kHeaderSize = sizeof(uint32_t) * 5;
+  static const size_t kMaxHeaderSize = sizeof(uint32_t) * 5;
+  typedef typename TypeTraits<Type>::cpp_type CppType;
   enum {
     size_of_type = TypeTraits<Type>::size
   };
@@ -204,10 +164,6 @@ class BShufBlockBuilder final : public BlockBuilder {
   faststring data_;
   faststring buffer_;
   uint32_t count_;
-  int rem_elem_capacity_;
-  bool finished_;
-  CppType first_key_;
-  CppType last_key_;
   const WriterOptions* options_;
 };
 
@@ -215,7 +171,7 @@ template<>
 Slice BShufBlockBuilder<UINT32>::Finish(rowid_t ordinal_pos);
 
 template<DataType Type>
-class BShufBlockDecoder final : public BlockDecoder {
+class BShufBlockDecoder : public BlockDecoder {
  public:
   explicit BShufBlockDecoder(Slice slice)
       : data_(std::move(slice)),
@@ -243,7 +199,7 @@ class BShufBlockDecoder final : public BlockDecoder {
       return Status::Corruption("Size Information unmatched");
     }
     num_elems_after_padding_ = DecodeFixed32(&data_[12]);
-    if (num_elems_after_padding_ != KUDU_ALIGN_UP(num_elems_, 8)) {
+    if (num_elems_after_padding_ != num_elems_ + NumOfPaddingNeeded()) {
       return Status::Corruption("num of element information corrupted");
     }
     size_of_elem_ = DecodeFixed32(&data_[16]);
@@ -362,13 +318,18 @@ class BShufBlockDecoder final : public BlockDecoder {
     return result;
   }
 
+  // Return the number of padding elements needed to ensure that the
+  // number of elements is a multiple of 8.
+  uint32_t NumOfPaddingNeeded() const {
+    return KUDU_ALIGN_UP(num_elems_, 8) - num_elems_;
+  }
+
   Status Expand() {
     if (num_elems_ > 0) {
       int64_t bytes;
-      decoded_.resize(num_elems_after_padding_ * size_of_elem_);
+      decoded_.resize(num_elems_after_padding_ * size_of_type);
       uint8_t* in = const_cast<uint8_t*>(&data_[kHeaderSize]);
-      bytes = bitshuffle::decompress_lz4(in, decoded_.data(), num_elems_after_padding_,
-                                         size_of_elem_, 0);
+      bytes = bshuf_decompress_lz4(in, decoded_.data(), num_elems_after_padding_, size_of_type, 0);
       if (PREDICT_FALSE(bytes < 0)) {
         // Ideally, this should not happen.
         AbortWithBitShuffleError(bytes);
@@ -402,6 +363,8 @@ class BShufBlockDecoder final : public BlockDecoder {
   faststring decoded_;
 };
 
+template<>
+Status BShufBlockDecoder<UINT32>::Expand();
 template<>
 Status BShufBlockDecoder<UINT32>::SeekAtOrAfterValue(const void* value_void, bool* exact);
 template<>

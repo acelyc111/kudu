@@ -58,16 +58,13 @@ class Batcher : public RefCountedThreadSafe<Batcher> {
  public:
   // Create a new batcher associated with the given session.
   //
-  // Any errors which come back from operations performed by this batcher
-  // are posted to the provided ErrorCollector.
+  // Any errors which come back from operations performed by this batcher are posted to
+  // the provided ErrorCollector.
   //
-  // Takes a reference on error_collector. Takes a weak_ptr to session -- this
-  // is to break circular dependencies (a session keeps a reference to its
-  // current batcher) and make it possible to call notify a session
-  // (if it's around) from a batcher which does its job using other threads.
+  // Takes a reference on error_collector. Creates a weak_ptr to 'session'.
   Batcher(KuduClient* client,
-          scoped_refptr<ErrorCollector> error_collector,
-          client::sp::weak_ptr<KuduSession> session,
+          ErrorCollector* error_collector,
+          const client::sp::shared_ptr<KuduSession>& session,
           kudu::client::KuduSession::ExternalConsistencyMode consistency_mode);
 
   // Abort the current batch. Any writes that were buffered and not yet sent are
@@ -80,9 +77,11 @@ class Batcher : public RefCountedThreadSafe<Batcher> {
   // The timeout is currently set on all of the RPCs, but in the future will be relative
   // to when the Flush call is made (eg even if the lookup of the TS takes a long time, it
   // may time out before even sending an op). TODO: implement that
-  void SetTimeout(const MonoDelta& timeout);
+  void SetTimeoutMillis(int millis);
 
   // Add a new operation to the batch. Requires that the batch has not yet been flushed.
+  // TODO: in other flush modes, this may not be the case -- need to
+  // update this when they're implemented.
   //
   // NOTE: If this returns not-OK, does not take ownership of 'write_op'.
   Status Add(KuduWriteOperation* write_op) WARN_UNUSED_RESULT;
@@ -107,25 +106,6 @@ class Batcher : public RefCountedThreadSafe<Batcher> {
   // created.
   kudu::client::KuduSession::ExternalConsistencyMode external_consistency_mode() const {
     return consistency_mode_;
-  }
-
-  // Get time of the first operation in the batch.  If no operations are in
-  // there yet, the returned MonoTime object is not initialized
-  // (i.e. MonoTime::Initialized() returns false).
-  const MonoTime& first_op_time() const {
-    std::lock_guard<simple_spinlock> l(lock_);
-    return first_op_time_;
-  }
-
-  // Return the total size (number of bytes) of all pending write operations
-  // accumulated by the batcher.
-  int64_t buffer_bytes_used() const {
-    return buffer_bytes_used_.Load();
-  }
-
-  // Compute in-buffer size for the given write operation.
-  static int64_t GetOperationSizeInBuffer(KuduWriteOperation* write_op) {
-    return write_op->SizeInBuffer();
   }
 
  private:
@@ -186,10 +166,7 @@ class Batcher : public RefCountedThreadSafe<Batcher> {
   kudu::client::KuduSession::ExternalConsistencyMode consistency_mode_;
 
   // Errors are reported into this error collector.
-  scoped_refptr<ErrorCollector> error_collector_;
-
-  // The time when the very first operation was added into the batcher.
-  MonoTime first_op_time_;
+  scoped_refptr<ErrorCollector> const error_collector_;
 
   // Set to true if there was at least one error from this Batcher.
   // Protected by lock_
@@ -215,7 +192,7 @@ class Batcher : public RefCountedThreadSafe<Batcher> {
 
   // Amount of time to wait for a given op, from start to finish.
   //
-  // Set by SetTimeout().
+  // Set by SetTimeoutMillis.
   MonoDelta timeout_;
 
   // After flushing, the absolute deadline for all in-flight ops.
@@ -225,6 +202,10 @@ class Batcher : public RefCountedThreadSafe<Batcher> {
   //
   // Note: _not_ protected by lock_!
   Atomic32 outstanding_lookups_;
+
+  // The maximum number of bytes of encoded operations which will be allowed to
+  // be buffered.
+  int64_t max_buffer_size_;
 
   // The number of bytes used in the buffer for pending operations.
   AtomicInt<int64_t> buffer_bytes_used_;

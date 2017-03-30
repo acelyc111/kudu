@@ -34,10 +34,5 @@ const char* DeltaType_Name(DeltaType t) {
   return "UNKNOWN";
 }
 
-Status DeltaKey::DeltaKeyError(const Slice& orig, const char* err) {
-  return Status::Corruption(strings::Substitute("Bad delta key: $0", err),
-                            KUDU_REDACT(orig.ToDebugString(20)));
-}
-
 } // namespace tablet
 } // namespace kudu

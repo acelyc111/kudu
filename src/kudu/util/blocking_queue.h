@@ -17,6 +17,7 @@
 #ifndef KUDU_UTIL_BLOCKING_QUEUE_H
 #define KUDU_UTIL_BLOCKING_QUEUE_H
 
+#include <boost/type_traits/remove_pointer.hpp>
 #include <list>
 #include <string>
 #include <type_traits>
@@ -51,7 +52,7 @@ class BlockingQueue {
   // If T is a pointer, this will be the base type.  If T is not a pointer, you
   // can ignore this and the functions which make use of it.
   // Template substitution failure is not an error.
-  typedef typename std::remove_pointer<T>::type T_VAL;
+  typedef typename boost::remove_pointer<T>::type T_VAL;
 
   explicit BlockingQueue(size_t max_size)
     : shutdown_(false),

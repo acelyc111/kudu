@@ -33,11 +33,11 @@ struct WriterOptions;
 
 // Encoding for data blocks of binary data that have common prefixes.
 // This encodes in a manner similar to LevelDB (prefix coding)
-class BinaryPrefixBlockBuilder final : public BlockBuilder {
+class BinaryPrefixBlockBuilder : public BlockBuilder {
  public:
   explicit BinaryPrefixBlockBuilder(const WriterOptions *options);
 
-  bool IsBlockFull() const override;
+  bool IsBlockFull(size_t limit) const OVERRIDE;
 
   int Add(const uint8_t *vals, size_t count) OVERRIDE;
 
@@ -56,11 +56,10 @@ class BinaryPrefixBlockBuilder final : public BlockBuilder {
   // key should be a Slice *
   Status GetFirstKey(void *key) const OVERRIDE;
 
-  // Return the last added key.
-  // key should be a Slice *
-  Status GetLastKey(void *key) const OVERRIDE;
-
  private:
+  // Return the length of the common prefix shared by the two strings.
+  static size_t CommonPrefixLength(const Slice& a, const Slice& b);
+
   faststring buffer_;
   faststring last_val_;
 
@@ -82,7 +81,7 @@ class BinaryPrefixBlockBuilder final : public BlockBuilder {
 };
 
 // Decoder for BINARY type, PREFIX encoding
-class BinaryPrefixBlockDecoder final : public BlockDecoder {
+class BinaryPrefixBlockDecoder : public BlockDecoder {
  public:
   explicit BinaryPrefixBlockDecoder(Slice slice);
 

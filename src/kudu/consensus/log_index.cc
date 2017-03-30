@@ -29,27 +29,25 @@
 #include "kudu/consensus/log_index.h"
 
 #include <fcntl.h>
-#include <mutex>
 #include <string>
 #include <sys/mman.h>
-#include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
 #include "kudu/consensus/opid_util.h"
+#include "kudu/util/locks.h"
 #include "kudu/gutil/map-util.h"
 #include "kudu/gutil/stringprintf.h"
 #include "kudu/gutil/strings/substitute.h"
-#include "kudu/util/errno.h"
-#include "kudu/util/locks.h"
 
 using std::string;
 using strings::Substitute;
 
-#define RETRY_ON_EINTR(ret, expr) do {          \
-    (ret) = (expr);                             \
-  } while (((ret) == -1) && (errno == EINTR));
+#define RETRY_ON_EINTR(ret, expr) do { \
+  ret = expr; \
+} while ((ret == -1) && (errno == EINTR));
 
 namespace kudu {
 namespace log {
@@ -137,11 +135,11 @@ void LogIndex::IndexChunk::GetEntry(int entry_index, PhysicalEntry* ret) {
   memcpy(ret, mapping_ + sizeof(PhysicalEntry) * entry_index, sizeof(PhysicalEntry));
 }
 
-void LogIndex::IndexChunk::SetEntry(int entry_index, const PhysicalEntry& entry) {
+void LogIndex::IndexChunk::SetEntry(int entry_index, const PhysicalEntry& phys) {
   DCHECK_GE(fd_, 0) << "Must Open() first";
   DCHECK_LT(entry_index, kEntriesPerIndexChunk);
 
-  memcpy(mapping_ + sizeof(PhysicalEntry) * entry_index, &entry, sizeof(PhysicalEntry));
+  memcpy(mapping_ + sizeof(PhysicalEntry) * entry_index, &phys, sizeof(PhysicalEntry));
 }
 
 ////////////////////////////////////////////////////////////
@@ -172,7 +170,7 @@ Status LogIndex::GetChunkForIndex(int64_t log_index, bool create,
   int64_t chunk_idx = log_index / kEntriesPerIndexChunk;
 
   {
-    std::lock_guard<simple_spinlock> l(open_chunks_lock_);
+    lock_guard<simple_spinlock> l(&open_chunks_lock_);
     if (FindCopy(open_chunks_, chunk_idx, chunk)) {
       return Status::OK();
     }
@@ -185,7 +183,7 @@ Status LogIndex::GetChunkForIndex(int64_t log_index, bool create,
   RETURN_NOT_OK_PREPEND(OpenChunk(chunk_idx, chunk),
                         "Couldn't open index chunk");
   {
-    std::lock_guard<simple_spinlock> l(open_chunks_lock_);
+    lock_guard<simple_spinlock> l(&open_chunks_lock_);
     if (PREDICT_FALSE(ContainsKey(open_chunks_, chunk_idx))) {
       // Someone else opened the chunk in the meantime.
       // We'll just return that one.
@@ -243,7 +241,7 @@ void LogIndex::GC(int64_t min_index_to_retain) {
   // Enumerate which chunks to delete.
   vector<int64_t> chunks_to_delete;
   {
-    std::lock_guard<simple_spinlock> l(open_chunks_lock_);
+    lock_guard<simple_spinlock> l(&open_chunks_lock_);
     for (auto it = open_chunks_.begin();
          it != open_chunks_.lower_bound(min_chunk_to_retain); ++it) {
       chunks_to_delete.push_back(it->first);
@@ -260,7 +258,7 @@ void LogIndex::GC(int64_t min_index_to_retain) {
     }
     LOG(INFO) << "Deleted log index segment " << path;
     {
-      std::lock_guard<simple_spinlock> l(open_chunks_lock_);
+      lock_guard<simple_spinlock> l(&open_chunks_lock_);
       open_chunks_.erase(chunk_idx);
     }
   }

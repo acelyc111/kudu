@@ -31,8 +31,7 @@ target_link_libraries(server_common
   gutil
   kudu_fs
   kudu_util
-  consensus_metadata_proto
-  security)
+  consensus_metadata_proto)
 
 #########################################
 # server_common tests
@@ -102,8 +101,5 @@ endif()
 # server_process tests
 #########################################
 
-set(KUDU_TEST_LINK_LIBS  ${KUDU_MIN_TEST_LIBS}
-  kudu_curl_util
-  server_process
-  security-test)
+set(KUDU_TEST_LINK_LIBS server_process ${KUDU_MIN_TEST_LIBS})
 ADD_KUDU_TEST(webserver-test)

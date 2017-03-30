@@ -17,14 +17,12 @@
 #ifndef KUDU_TWITTER_DEMO_TWITTER_STREAMER_H
 #define KUDU_TWITTER_DEMO_TWITTER_STREAMER_H
 
-#include <mutex>
-#include <thread>
+#include <boost/thread/mutex.hpp>
+#include <boost/thread/thread.hpp>
 
 #include "kudu/util/faststring.h"
 #include "kudu/util/slice.h"
 #include "kudu/util/status.h"
-
-using std::thread;
 
 namespace kudu {
 namespace twitter_demo {
@@ -51,8 +49,8 @@ class TwitterStreamer {
   Status DoStreaming();
   size_t DataReceived(const Slice& data);
 
-  thread thread_;
-  std::mutex lock_;
+  boost::thread thread_;
+  boost::mutex lock_;
   Status stream_status_;
 
   faststring recv_buf_;

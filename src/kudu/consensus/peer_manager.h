@@ -41,8 +41,9 @@ class PeerMessageQueue;
 class PeerProxyFactory;
 class RaftConfigPB;
 
-// Manages the remote peers that pull data from the local queue and send updates to the
-// remote machines.
+// Manages the set of local and remote peers that pull data from the
+// queue into the local log/remote machines.
+// Methods are virtual to ease mocking.
 class PeerManager {
  public:
   // All of the raw pointer arguments are not owned by the PeerManager
@@ -50,28 +51,28 @@ class PeerManager {
   //
   // 'request_thread_pool' is the pool used to construct requests to send
   // to the peers.
-  PeerManager(std::string tablet_id,
-              std::string local_uuid,
+  PeerManager(const std::string tablet_id,
+              const std::string local_uuid,
               PeerProxyFactory* peer_proxy_factory,
               PeerMessageQueue* queue,
               ThreadPool* request_thread_pool,
               const scoped_refptr<log::Log>& log);
 
-  ~PeerManager();
+  virtual ~PeerManager();
 
   // Updates 'peers_' according to the new configuration config.
-  Status UpdateRaftConfig(const RaftConfigPB& config);
+  virtual Status UpdateRaftConfig(const RaftConfigPB& config);
 
   // Signals all peers of the current configuration that there is a new request pending.
-  void SignalRequest(bool force_if_queue_empty = false);
+  virtual void SignalRequest(bool force_if_queue_empty = false);
 
   // Closes all peers.
-  void Close();
+  virtual void Close();
 
  private:
   std::string GetLogPrefix() const;
 
-  typedef std::unordered_map<std::string, std::shared_ptr<Peer>> PeersMap;
+  typedef std::unordered_map<std::string, Peer*> PeersMap;
   const std::string tablet_id_;
   const std::string local_uuid_;
   PeerProxyFactory* peer_proxy_factory_;

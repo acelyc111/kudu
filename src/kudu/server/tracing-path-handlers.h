@@ -21,6 +21,8 @@
 #include "kudu/server/webserver.h"
 #include "kudu/util/status.h"
 
+#include <sstream>
+
 namespace kudu {
 namespace server {
 

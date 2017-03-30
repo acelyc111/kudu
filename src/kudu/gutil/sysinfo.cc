@@ -53,9 +53,8 @@
 #include <shlwapi.h>          // for SHGetValueA()
 #include <tlhelp32.h>         // for Module32First()
 #endif
-#include "kudu/gutil/dynamic_annotations.h"   // for RunningOnValgrind
-#include "kudu/gutil/macros.h"
 #include "kudu/gutil/sysinfo.h"
+#include "kudu/gutil/dynamic_annotations.h"   // for RunningOnValgrind
 #include "kudu/gutil/walltime.h"
 #include <glog/logging.h>
 
@@ -74,7 +73,6 @@ namespace base {
 
 static double cpuinfo_cycles_per_second = 1.0;  // 0.0 might be dangerous
 static int cpuinfo_num_cpus = 1;  // Conservative guess
-static int cpuinfo_max_cpu_index = -1;
 
 void SleepForNanoseconds(int64_t nanoseconds) {
   // Sleep for nanosecond duration
@@ -105,65 +103,25 @@ static int64 EstimateCyclesPerSecond(const int estimate_time_ms) {
 
 // ReadIntFromFile is only called on linux and cygwin platforms.
 #if defined(__linux__) || defined(__CYGWIN__) || defined(__CYGWIN32__)
-
-// Slurp a file with a single read() call into 'buf'. This is only safe to use on small
-// files in places like /proc where we are guaranteed not to get a partial read.
-// Any remaining bytes in the buffer are zeroed.
-//
-// 'buflen' must be more than large enough to hold the whole file, or else this will
-// issue a FATAL error.
-static bool SlurpSmallTextFile(const char* file, char* buf, int buflen) {
-  bool ret = false;
-  int fd = open(file, O_RDONLY);
-  if (fd == -1) return ret;
-
-  memset(buf, '\0', buflen);
-  int n = read(fd, buf, buflen - 1);
-  CHECK_NE(n, buflen - 1) << "buffer of len " << buflen << " not large enough to store "
-                          << "contents of " << file;
-  if (n > 0) {
-    ret = true;
-  }
-
-  close(fd);
-  return ret;
-}
-
 // Helper function for reading an int from a file. Returns true if successful
 // and the memory location pointed to by value is set to the value read.
 static bool ReadIntFromFile(const char *file, int *value) {
+  bool ret = false;
+  int fd = open(file, O_RDONLY);
+  if (fd == -1) return ret;
   char line[1024];
-  if (!SlurpSmallTextFile(file, line, arraysize(line))) {
-    return false;
-  }
   char* err;
-  const int temp_value = strtol(line, &err, 10);
-  if (line[0] != '\0' && (*err == '\n' || *err == '\0')) {
-    *value = temp_value;
-    return true;
+  memset(line, '\0', sizeof(line));
+  if (read(fd, line, sizeof(line) - 1) != -1) {
+    const int temp_value = strtol(line, &err, 10);
+    if (line[0] != '\0' && (*err == '\n' || *err == '\0')) {
+      *value = temp_value;
+      ret = true;
+    }
   }
-  return false;
+  close(fd);
+  return ret;
 }
-
-static int ReadMaxCPUIndex() {
-  char buf[1024];
-  CHECK(SlurpSmallTextFile("/sys/devices/system/cpu/present", buf, arraysize(buf)));
-
-  // On a single-core machine, 'buf' will contain the string '0' with a newline.
-  if (strcmp(buf, "0\n") == 0) {
-    return 0;
-  }
-
-  // On multi-core, it will have a CPU range like '0-7'.
-  CHECK_EQ(0, memcmp(buf, "0-", 2)) << "bad list of possible CPUs: " << buf;
-
-  char* max_cpu_str = &buf[2];
-  char* err;
-  int val = strtol(max_cpu_str, &err, 10);
-  CHECK(*err == '\n' || *err == '\0') << "unable to parse max CPU index from: " << buf;
-  return val;
-}
-
 #endif
 
 // WARNING: logging calls back to InitializeSystemInfo() so it must
@@ -222,7 +180,11 @@ static void InitializeSystemInfo() {
   const char* pname = "/proc/cpuinfo";
   int fd = open(pname, O_RDONLY);
   if (fd == -1) {
-    PLOG(FATAL) << "Unable to read CPU info from /proc. procfs must be mounted.";
+    perror(pname);
+    if (!saw_mhz) {
+      cpuinfo_cycles_per_second = EstimateCyclesPerSecond(1000);
+    }
+    return;          // TODO: use generic tester instead?
   }
 
   double bogo_clock = 1.0;
@@ -306,7 +268,6 @@ static void InitializeSystemInfo() {
   if (num_cpus > 0) {
     cpuinfo_num_cpus = num_cpus;
   }
-  cpuinfo_max_cpu_index = ReadMaxCPUIndex();
 
 #elif defined __FreeBSD__
   // For this sysctl to work, the machine must be configured without
@@ -385,13 +346,6 @@ static void InitializeSystemInfo() {
   // Generic cycles per second counter
   cpuinfo_cycles_per_second = EstimateCyclesPerSecond(1000);
 #endif
-
-  // On platforms where we can't determine the max CPU index, just use the
-  // number of CPUs. This might break if CPUs are taken offline, but
-  // better than a wild guess.
-  if (cpuinfo_max_cpu_index < 0) {
-    cpuinfo_max_cpu_index = cpuinfo_num_cpus - 1;
-  }
 }
 
 double CyclesPerSecond(void) {
@@ -402,11 +356,6 @@ double CyclesPerSecond(void) {
 int NumCPUs(void) {
   InitializeSystemInfo();
   return cpuinfo_num_cpus;
-}
-
-int MaxCPUIndex(void) {
-  InitializeSystemInfo();
-  return cpuinfo_max_cpu_index;
 }
 
 } // namespace base

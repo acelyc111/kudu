@@ -29,51 +29,50 @@ namespace tablet {
 
 using std::shared_ptr;
 using std::string;
-using std::unique_ptr;
 using std::vector;
 using strings::Substitute;
 
 DeltaIteratorMerger::DeltaIteratorMerger(
-    vector<unique_ptr<DeltaIterator> > iters)
+    vector<shared_ptr<DeltaIterator> > iters)
     : iters_(std::move(iters)) {}
 
 Status DeltaIteratorMerger::Init(ScanSpec *spec) {
-  for (const unique_ptr<DeltaIterator> &iter : iters_) {
+  for (const shared_ptr<DeltaIterator> &iter : iters_) {
     RETURN_NOT_OK(iter->Init(spec));
   }
   return Status::OK();
 }
 
 Status DeltaIteratorMerger::SeekToOrdinal(rowid_t idx) {
-  for (const unique_ptr<DeltaIterator> &iter : iters_) {
+  for (const shared_ptr<DeltaIterator> &iter : iters_) {
     RETURN_NOT_OK(iter->SeekToOrdinal(idx));
   }
   return Status::OK();
 }
 
 Status DeltaIteratorMerger::PrepareBatch(size_t nrows, PrepareFlag flag) {
-  for (const unique_ptr<DeltaIterator> &iter : iters_) {
+  for (const shared_ptr<DeltaIterator> &iter : iters_) {
     RETURN_NOT_OK(iter->PrepareBatch(nrows, flag));
   }
   return Status::OK();
 }
 
 Status DeltaIteratorMerger::ApplyUpdates(size_t col_to_apply, ColumnBlock *dst) {
-  for (const unique_ptr<DeltaIterator> &iter : iters_) {
+  for (const shared_ptr<DeltaIterator> &iter : iters_) {
     RETURN_NOT_OK(iter->ApplyUpdates(col_to_apply, dst));
   }
   return Status::OK();
 }
 
 Status DeltaIteratorMerger::ApplyDeletes(SelectionVector *sel_vec) {
-  for (const unique_ptr<DeltaIterator> &iter : iters_) {
+  for (const shared_ptr<DeltaIterator> &iter : iters_) {
     RETURN_NOT_OK(iter->ApplyDeletes(sel_vec));
   }
   return Status::OK();
 }
 
 Status DeltaIteratorMerger::CollectMutations(vector<Mutation *> *dst, Arena *arena) {
-  for (const unique_ptr<DeltaIterator> &iter : iters_) {
+  for (const shared_ptr<DeltaIterator> &iter : iters_) {
     RETURN_NOT_OK(iter->CollectMutations(dst, arena));
   }
   // TODO: do we need to do some kind of sorting here to deal with out-of-order
@@ -91,7 +90,7 @@ Status DeltaIteratorMerger::FilterColumnIdsAndCollectDeltas(
     const vector<ColumnId>& col_ids,
     vector<DeltaKeyAndUpdate>* out,
     Arena* arena) {
-  for (const unique_ptr<DeltaIterator>& iter : iters_) {
+  for (const shared_ptr<DeltaIterator>& iter : iters_) {
     RETURN_NOT_OK(iter->FilterColumnIdsAndCollectDeltas(col_ids, out, arena));
   }
   // We use a stable sort here since an input may include multiple deltas for the
@@ -102,7 +101,7 @@ Status DeltaIteratorMerger::FilterColumnIdsAndCollectDeltas(
 }
 
 bool DeltaIteratorMerger::HasNext() {
-  for (const unique_ptr<DeltaIterator>& iter : iters_) {
+  for (const shared_ptr<DeltaIterator>& iter : iters_) {
     if (iter->HasNext()) {
       return true;
     }
@@ -111,21 +110,12 @@ bool DeltaIteratorMerger::HasNext() {
   return false;
 }
 
-bool DeltaIteratorMerger::MayHaveDeltas() {
-  for (const unique_ptr<DeltaIterator>& iter : iters_) {
-    if (iter->MayHaveDeltas()) {
-      return true;
-    }
-  }
-  return false;
-}
-
 string DeltaIteratorMerger::ToString() const {
   string ret;
   ret.append("DeltaIteratorMerger(");
 
   bool first = true;
-  for (const unique_ptr<DeltaIterator> &iter : iters_) {
+  for (const shared_ptr<DeltaIterator> &iter : iters_) {
     if (!first) {
       ret.append(", ");
     }
@@ -142,8 +132,8 @@ Status DeltaIteratorMerger::Create(
     const vector<shared_ptr<DeltaStore> > &stores,
     const Schema* projection,
     const MvccSnapshot &snapshot,
-    unique_ptr<DeltaIterator>* out) {
-  vector<unique_ptr<DeltaIterator> > delta_iters;
+    shared_ptr<DeltaIterator>* out) {
+  vector<shared_ptr<DeltaIterator> > delta_iters;
 
   for (const shared_ptr<DeltaStore> &store : stores) {
     DeltaIterator* raw_iter;
@@ -154,15 +144,15 @@ Status DeltaIteratorMerger::Create(
     RETURN_NOT_OK_PREPEND(s, Substitute("Could not create iterator for store $0",
                                         store->ToString()));
 
-    delta_iters.push_back(unique_ptr<DeltaIterator>(raw_iter));
+    delta_iters.push_back(shared_ptr<DeltaIterator>(raw_iter));
   }
 
   if (delta_iters.size() == 1) {
     // If we only have one input to the "merge", we can just directly
     // return that iterator.
-    *out = std::move(delta_iters[0]);
+    *out = delta_iters[0];
   } else {
-    out->reset(new DeltaIteratorMerger(std::move(delta_iters)));
+    *out = shared_ptr<DeltaIterator>(new DeltaIteratorMerger(delta_iters));
   }
   return Status::OK();
 }

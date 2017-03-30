@@ -25,7 +25,6 @@
 #include <string>
 
 #include "kudu/gutil/endian.h"
-#include "kudu/gutil/hash/builtin_type_hash.h"
 #include "kudu/gutil/macros.h"
 #include "kudu/gutil/stringprintf.h"
 #include "kudu/gutil/strings/substitute.h"
@@ -74,9 +73,9 @@ bool Sockaddr::operator<(const Sockaddr &rhs) const {
 }
 
 uint32_t Sockaddr::HashCode() const {
-  uint32_t hash = Hash32NumWithSeed(addr_.sin_addr.s_addr, 0);
-  hash = Hash32NumWithSeed(addr_.sin_port, hash);
-  return hash;
+  uint32_t ret = addr_.sin_addr.s_addr;
+  ret ^= (addr_.sin_port * 7919);
+  return ret;
 }
 
 void Sockaddr::set_port(int port) {

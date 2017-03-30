@@ -22,9 +22,9 @@
 #ifndef KUDU_TABLET_DISKROWSET_H_
 #define KUDU_TABLET_DISKROWSET_H_
 
+#include <boost/thread/mutex.hpp>
 #include <gtest/gtest_prod.h>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -35,11 +35,9 @@
 #include "kudu/tablet/delta_key.h"
 #include "kudu/tablet/rowset_metadata.h"
 #include "kudu/tablet/rowset.h"
-#include "kudu/tablet/tablet_mem_trackers.h"
 #include "kudu/util/atomic.h"
 #include "kudu/util/bloom_filter.h"
 #include "kudu/util/locks.h"
-#include "kudu/util/mem_tracker.h"
 
 namespace kudu {
 
@@ -63,7 +61,6 @@ class CFileSet;
 class DeltaFileWriter;
 class DeltaStats;
 class DeltaTracker;
-class HistoryGcOpts;
 class MultiColumnWriter;
 class Mutation;
 class OperationResultPB;
@@ -272,8 +269,9 @@ class DiskRowSet : public RowSet {
   // If successful, sets *rowset to the newly open rowset
   static Status Open(const std::shared_ptr<RowSetMetadata>& rowset_metadata,
                      log::LogAnchorRegistry* log_anchor_registry,
-                     const TabletMemTrackers& mem_trackers,
-                     std::shared_ptr<DiskRowSet> *rowset);
+                     std::shared_ptr<DiskRowSet> *rowset,
+                     const std::shared_ptr<MemTracker>& parent_tracker =
+                     std::shared_ptr<MemTracker>());
 
   ////////////////////////////////////////////////////////////
   // "Management" functions
@@ -313,8 +311,7 @@ class DiskRowSet : public RowSet {
   // Read functions.
   ////////////////////
   virtual Status NewRowIterator(const Schema *projection,
-                                const MvccSnapshot &mvcc_snap,
-                                OrderMode order,
+                                const MvccSnapshot &snap,
                                 gscoped_ptr<RowwiseIterator>* out) const OVERRIDE;
 
   virtual Status NewCompactionInput(const Schema* projection,
@@ -325,8 +322,8 @@ class DiskRowSet : public RowSet {
   Status CountRows(rowid_t *count) const OVERRIDE;
 
   // See RowSet::GetBounds(...)
-  virtual Status GetBounds(std::string* min_encoded_key,
-                           std::string* max_encoded_key) const OVERRIDE;
+  virtual Status GetBounds(Slice *min_encoded_key,
+                           Slice *max_encoded_key) const OVERRIDE;
 
   // Estimate the number of bytes on-disk for the base data.
   uint64_t EstimateBaseDataDiskSize() const;
@@ -348,21 +345,10 @@ class DiskRowSet : public RowSet {
 
   double DeltaStoresCompactionPerfImprovementScore(DeltaCompactionType type) const OVERRIDE;
 
-  Status EstimateBytesInPotentiallyAncientUndoDeltas(Timestamp ancient_history_mark,
-                                                     int64_t* bytes) OVERRIDE;
-
-  Status InitUndoDeltas(Timestamp ancient_history_mark,
-                        MonoTime deadline,
-                        int64_t* delta_blocks_initialized,
-                        int64_t* bytes_in_ancient_undos) OVERRIDE;
-
-  Status DeleteAncientUndoDeltas(Timestamp ancient_history_mark,
-                                 int64_t* blocks_deleted, int64_t* bytes_deleted) OVERRIDE;
-
   // Major compacts all the delta files for all the columns.
-  Status MajorCompactDeltaStores(HistoryGcOpts history_gc_opts);
+  Status MajorCompactDeltaStores();
 
-  std::mutex *compact_flush_lock() OVERRIDE {
+  boost::mutex *compact_flush_lock() OVERRIDE {
     return &compact_flush_lock_;
   }
 
@@ -378,38 +364,28 @@ class DiskRowSet : public RowSet {
     return rowset_metadata_->ToString();
   }
 
-  std::string LogPrefix() const {
-    return strings::Substitute("T $0 P $1: $2: ",
-        rowset_metadata_->tablet_metadata()->tablet_id(),
-        rowset_metadata_->fs_manager()->uuid(),
-        ToString());
-  }
-
-  virtual Status DebugDump(std::vector<std::string> *lines = NULL) OVERRIDE;
+  virtual Status DebugDump(std::vector<std::string> *out = NULL) OVERRIDE;
 
  private:
   FRIEND_TEST(TestRowSet, TestRowSetUpdate);
   FRIEND_TEST(TestRowSet, TestDMSFlush);
   FRIEND_TEST(TestCompaction, TestOneToOne);
-  FRIEND_TEST(TabletHistoryGcTest, TestMajorDeltaCompactionOnSubsetOfColumns);
 
   friend class CompactionInput;
   friend class Tablet;
 
   DiskRowSet(std::shared_ptr<RowSetMetadata> rowset_metadata,
              log::LogAnchorRegistry* log_anchor_registry,
-             const TabletMemTrackers& mem_trackers);
+             std::shared_ptr<MemTracker> parent_tracker);
 
   Status Open();
 
   // Create a new major delta compaction object to compact the specified columns.
   Status NewMajorDeltaCompaction(const std::vector<ColumnId>& col_ids,
-                                 HistoryGcOpts history_gc_opts,
                                  gscoped_ptr<MajorDeltaCompaction>* out) const;
 
   // Major compacts all the delta files for the specified columns.
-  Status MajorCompactDeltaStoresWithColumnIds(const std::vector<ColumnId>& col_ids,
-                                              HistoryGcOpts history_gc_opts);
+  Status MajorCompactDeltaStoresWithColumnIds(const std::vector<ColumnId>& col_ids);
 
   std::shared_ptr<RowSetMetadata> rowset_metadata_;
 
@@ -417,7 +393,7 @@ class DiskRowSet : public RowSet {
 
   log::LogAnchorRegistry* log_anchor_registry_;
 
-  TabletMemTrackers mem_trackers_;
+  std::shared_ptr<MemTracker> parent_tracker_;
 
   // Base data for this rowset.
   mutable percpu_rwlock component_lock_;
@@ -426,7 +402,7 @@ class DiskRowSet : public RowSet {
 
   // Lock governing this rowset's inclusion in a compact/flush. If locked,
   // no other compactor will attempt to include this rowset.
-  std::mutex compact_flush_lock_;
+  boost::mutex compact_flush_lock_;
 
   DISALLOW_COPY_AND_ASSIGN(DiskRowSet);
 };

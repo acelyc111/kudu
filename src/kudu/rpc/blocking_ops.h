@@ -38,8 +38,10 @@ class Status;
 
 namespace rpc {
 
+class SaslMessagePB;
+
 // Returns OK if socket is in blocking mode. Otherwise, returns an error.
-Status EnsureBlockingMode(const Socket* sock);
+Status EnsureBlockingMode(const Socket* const sock);
 
 // Encode and send a message over a socket.
 // header: Request or Response header protobuf.

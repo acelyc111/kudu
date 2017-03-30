@@ -15,38 +15,31 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "kudu/util/errno.h"
-
-#include <errno.h>
+/*
+ * Get the POSIX strerror_r.
+ *
+ * By default, glibc uses its own, non-POSIX, definition of strerror_r.  We want
+ * the POSIX version. 
+ *
+ * Note: This must come first!  If you include anything before this point, you
+ * might get the non-standard strerror_r definition.
+ */
+#undef _GNU_SOURCE
+#define _XOPEN_SOURCE 600
 #include <string.h>
-
-#include "kudu/gutil/dynamic_annotations.h"
-#include "kudu/util/logging.h"
+#define _GNU_SOURCE
+#undef _XOPEN_SOURCE
 
 namespace kudu {
 
 void ErrnoToCString(int err, char *buf, size_t buf_len) {
-  CHECK_GT(buf_len, 0);
-#if !defined(__GLIBC__) || \
-  ((_POSIX_C_SOURCE >= 200112 || _XOPEN_SOURCE >= 600) && !defined(_GNU_SOURCE))
-  // Using POSIX version 'int strerror_r(...)'.
-  int ret = strerror_r(err, buf, buf_len);
-  if (ret && ret != ERANGE && ret != EINVAL) {
-    strncpy(buf, "unknown error", buf_len);
-    buf[buf_len - 1] = '\0';
+  if (strerror_r(err, buf, buf_len)) {
+    static const char UNKNOWN_ERROR[] = "unknown error";
+    if (buf_len >= sizeof(UNKNOWN_ERROR)) {
+      strcpy(buf, UNKNOWN_ERROR); // NOLINT(runtime/printf)
+    } else {
+      memset(buf, 0, buf_len);
+    }
   }
-#else
-  // Using GLIBC version
-
-  // KUDU-1515: TSAN in Clang 3.9 has an incorrect interceptor for strerror_r:
-  // https://github.com/google/sanitizers/issues/696
-  ANNOTATE_IGNORE_WRITES_BEGIN();
-  char* ret = strerror_r(err, buf, buf_len);
-  ANNOTATE_IGNORE_WRITES_END();
-  if (ret != buf) {
-    strncpy(buf, ret, buf_len);
-    buf[buf_len - 1] = '\0';
-  }
-#endif
 }
 } // namespace kudu

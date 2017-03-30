@@ -23,8 +23,11 @@ namespace client {
 
 KuduError::Data::Data(gscoped_ptr<KuduWriteOperation> failed_op,
                       const Status& status) :
-  failed_op_(std::move(failed_op)),
+  failed_op_(failed_op.Pass()),
   status_(status) {
+}
+
+KuduError::Data::~Data() {
 }
 
 } // namespace client

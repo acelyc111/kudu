@@ -38,6 +38,10 @@
 
 namespace kudu {
 
+namespace metadata {
+class RowSetMetadata;
+}
+
 namespace tablet {
 
 using kudu::cfile::BloomFileReader;
@@ -53,9 +57,9 @@ class CFileSet : public std::enable_shared_from_this<CFileSet> {
  public:
   class Iterator;
 
-  static Status Open(std::shared_ptr<RowSetMetadata> rowset_metadata,
-                     std::shared_ptr<MemTracker> parent_mem_tracker,
-                     std::shared_ptr<CFileSet>* cfile_set);
+  explicit CFileSet(std::shared_ptr<RowSetMetadata> rowset_metadata);
+
+  Status Open();
 
   // Create an iterator with the given projection. 'projection' must remain valid
   // for the lifetime of the returned iterator.
@@ -64,8 +68,8 @@ class CFileSet : public std::enable_shared_from_this<CFileSet> {
   Status CountRows(rowid_t *count) const;
 
   // See RowSet::GetBounds
-  virtual Status GetBounds(std::string* min_encoded_key,
-                           std::string* max_encoded_key) const;
+  virtual Status GetBounds(Slice *min_encoded_key,
+                           Slice *max_encoded_key) const;
 
   uint64_t EstimateOnDiskSize() const;
 
@@ -94,10 +98,6 @@ class CFileSet : public std::enable_shared_from_this<CFileSet> {
 
   DISALLOW_COPY_AND_ASSIGN(CFileSet);
 
-  CFileSet(std::shared_ptr<RowSetMetadata> rowset_metadata,
-           std::shared_ptr<MemTracker> parent_mem_tracker);
-
-  Status DoOpen();
   Status OpenBloomReader();
   Status OpenAdHocIndexReader();
   Status LoadMinMaxKeys();
@@ -113,7 +113,6 @@ class CFileSet : public std::enable_shared_from_this<CFileSet> {
   const Schema &tablet_schema() const { return rowset_metadata_->tablet_schema(); }
 
   std::shared_ptr<RowSetMetadata> rowset_metadata_;
-  std::shared_ptr<MemTracker> parent_mem_tracker_;
 
   std::string min_encoded_key_;
   std::string max_encoded_key_;
@@ -145,7 +144,7 @@ class CFileSet::Iterator : public ColumnwiseIterator {
 
   virtual Status InitializeSelectionVector(SelectionVector *sel_vec) OVERRIDE;
 
-  Status MaterializeColumn(ColumnMaterializationContext *ctx) override;
+  virtual Status MaterializeColumn(size_t col_idx, ColumnBlock *dst) OVERRIDE;
 
   virtual Status FinishBatch() OVERRIDE;
 
@@ -198,7 +197,7 @@ class CFileSet::Iterator : public ColumnwiseIterator {
   void Unprepare();
 
   // Prepare the given column if not already prepared.
-  Status PrepareColumn(ColumnMaterializationContext *ctx);
+  Status PrepareColumn(size_t col_idx);
 
   const std::shared_ptr<CFileSet const> base_data_;
   const Schema* projection_;

@@ -39,11 +39,11 @@ namespace cfile {
 
 struct WriterOptions;
 
-class BinaryPlainBlockBuilder final : public BlockBuilder {
+class BinaryPlainBlockBuilder : public BlockBuilder {
  public:
   explicit BinaryPlainBlockBuilder(const WriterOptions *options);
 
-  bool IsBlockFull() const override;
+  bool IsBlockFull(size_t limit) const OVERRIDE;
 
   int Add(const uint8_t *vals, size_t count) OVERRIDE;
 
@@ -58,17 +58,9 @@ class BinaryPlainBlockBuilder final : public BlockBuilder {
 
   size_t Count() const OVERRIDE;
 
-  // Return the key at index idx.
-  // key should be a Slice*
-  Status GetKeyAtIdx(void* key_void, int idx) const;
-
   // Return the first added key.
-  // key should be a Slice*
-  Status GetFirstKey(void* key) const OVERRIDE;
-
-  // Return the last added key.
-  // key should be a Slice*
-  Status GetLastKey(void* key) const OVERRIDE;
+  // key should be a Slice *
+  Status GetFirstKey(void *key) const OVERRIDE;
 
   // Length of a header.
   static const size_t kMaxHeaderSize = sizeof(uint32_t) * 3;
@@ -88,7 +80,7 @@ class BinaryPlainBlockBuilder final : public BlockBuilder {
 
 };
 
-class BinaryPlainBlockDecoder final : public BlockDecoder {
+class BinaryPlainBlockDecoder : public BlockDecoder {
  public:
   explicit BinaryPlainBlockDecoder(Slice slice);
 
@@ -97,10 +89,6 @@ class BinaryPlainBlockDecoder final : public BlockDecoder {
   virtual Status SeekAtOrAfterValue(const void *value,
                                     bool *exact_match) OVERRIDE;
   Status CopyNextValues(size_t *n, ColumnDataView *dst) OVERRIDE;
-  Status CopyNextAndEval(size_t* n,
-                         ColumnMaterializationContext* ctx,
-                         SelectionVectorView* sel,
-                         ColumnDataView* dst) override;
 
   virtual bool HasNext() const OVERRIDE {
     DCHECK(parsed_);
@@ -122,45 +110,22 @@ class BinaryPlainBlockDecoder final : public BlockDecoder {
   }
 
   Slice string_at_index(size_t idx) const {
-    const uint32_t str_offset = offset(idx);
-    uint32_t len = offset(idx + 1) - str_offset;
-    return Slice(&data_[str_offset], len);
+    const uint32_t offset = offsets_[idx];
+    uint32_t len = offsets_[idx + 1] - offset;
+    return Slice(&data_[offset], len);
   }
 
   // Minimum length of a header.
   static const size_t kMinHeaderSize = sizeof(uint32_t) * 3;
 
  private:
-  // Helper template for handling batches of rows. CellHandler is a lambda that
-  // gets called on every cell. When decoder evaluation is enabled, it
-  // evaluates whether or not the string should be copied and sets a
-  // SelectionVectorView bit at the appropriate location. When decoder
-  // evaluation is disabled, it copies the cell's string to dst.
-  template <typename CellHandler>
-  Status HandleBatch(size_t* n, ColumnDataView* dst, CellHandler c);
-
-  // Return the offset within 'data_' where the string value with index 'idx'
-  // can be found.
-  uint32_t offset(int idx) const {
-    const uint8_t* p = &offsets_buf_[idx * sizeof(uint32_t)];
-    uint32_t ret;
-    memcpy(&ret, p, sizeof(uint32_t));
-    return ret;
-  }
-
   Slice data_;
   bool parsed_;
 
-  // A buffer for an array of 32-bit integers for the offsets of the underlying
-  // strings in 'data_'.
-  //
+  // The parsed offsets.
   // This array also contains one extra offset at the end, pointing
   // _after_ the last entry. This makes the code much simpler.
-  //
-  // The array is stored inside a 'faststring' instead of a vector<uint32_t> to
-  // avoid the overhead of calling vector::push_back -- one would think it would
-  // be fully inlined away, but it's actually a perf win to do this.
-  faststring offsets_buf_;
+  std::vector<uint32_t> offsets_;
 
   uint32_t num_elems_;
   rowid_t ordinal_pos_base_;

@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <boost/thread/thread.hpp>
 #include <curl/curl.h>
 #include <fstream>
 #include <gflags/gflags.h>
@@ -74,7 +75,7 @@ gscoped_ptr<TwitterConsumer> CreateInsertConsumer() {
 
   gscoped_ptr<InsertConsumer> ret(new InsertConsumer(client));
   CHECK_OK(ret->Init());
-  return gscoped_ptr<TwitterConsumer>(std::move(ret)); // up-cast
+  return gscoped_ptr<TwitterConsumer>(ret.Pass()); // up-cast
 }
 
 static void IngestFromFile(const string& file, gscoped_ptr<TwitterConsumer> consumer) {
@@ -109,7 +110,7 @@ static int main(int argc, char** argv) {
     CHECK_OK(streamer.Start());
     CHECK_OK(streamer.Join());
   } else if (FLAGS_twitter_firehose_source == "file") {
-    IngestFromFile(FLAGS_twitter_firehose_file, std::move(consumer));
+    IngestFromFile(FLAGS_twitter_firehose_file, consumer.Pass());
   } else {
     LOG(FATAL) << "Unknown source: " << FLAGS_twitter_firehose_source;
   }

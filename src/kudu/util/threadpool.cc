@@ -15,8 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "kudu/util/threadpool.h"
-
 #include <boost/function.hpp>
 #include <gflags/gflags.h>
 #include <glog/logging.h>
@@ -28,8 +26,8 @@
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/gutil/sysinfo.h"
 #include "kudu/util/metrics.h"
-#include "kudu/util/stopwatch.h"
 #include "kudu/util/thread.h"
+#include "kudu/util/threadpool.h"
 #include "kudu/util/trace.h"
 
 namespace kudu {
@@ -42,7 +40,7 @@ using strings::Substitute;
 
 class FunctionRunnable : public Runnable {
  public:
-  explicit FunctionRunnable(boost::function<void()> func) : func_(std::move(func)) {}
+  FunctionRunnable(boost::function<void()> func) : func_(std::move(func)) {}
 
   void Run() OVERRIDE {
     func_();
@@ -63,12 +61,6 @@ ThreadPoolBuilder::ThreadPoolBuilder(std::string name)
       max_queue_size_(std::numeric_limits<int>::max()),
       idle_timeout_(MonoDelta::FromMilliseconds(500)) {}
 
-ThreadPoolBuilder& ThreadPoolBuilder::set_trace_metric_prefix(
-    const std::string& prefix) {
-  trace_metric_prefix_ = prefix;
-  return *this;
-}
-
 ThreadPoolBuilder& ThreadPoolBuilder::set_min_threads(int min_threads) {
   CHECK_GE(min_threads, 0);
   min_threads_ = min_threads;
@@ -82,6 +74,7 @@ ThreadPoolBuilder& ThreadPoolBuilder::set_max_threads(int max_threads) {
 }
 
 ThreadPoolBuilder& ThreadPoolBuilder::set_max_queue_size(int max_queue_size) {
+  CHECK_GT(max_queue_size, 0);
   max_queue_size_ = max_queue_size;
   return *this;
 }
@@ -114,16 +107,6 @@ ThreadPool::ThreadPool(const ThreadPoolBuilder& builder)
     num_threads_(0),
     active_threads_(0),
     queue_size_(0) {
-
-  string prefix = !builder.trace_metric_prefix_.empty() ?
-      builder.trace_metric_prefix_ : builder.name_;
-
-  queue_time_trace_metric_name_ = TraceMetrics::InternName(
-      prefix + ".queue_time_us");
-  run_wall_time_trace_metric_name_ = TraceMetrics::InternName(
-      prefix + ".run_wall_time_us");
-  run_cpu_time_trace_metric_name_ = TraceMetrics::InternName(
-      prefix + ".run_cpu_time_us");
 }
 
 ThreadPool::~ThreadPool() {
@@ -146,33 +129,26 @@ Status ThreadPool::Init() {
   return Status::OK();
 }
 
-void ThreadPool::Shutdown() {
-  MutexLock unique_lock(lock_);
-  CheckNotPoolThreadUnlocked();
-
-  pool_status_ = Status::ServiceUnavailable("The pool has been shut down.");
-
-  // Clear the queue_ member under the lock, but defer the releasing
-  // of the entries outside the lock, in case there are concurrent threads
-  // wanting to access the ThreadPool. The task's destructors may acquire
-  // locks, etc, so this also prevents lock inversions.
-  auto to_release = std::move(queue_);
+void ThreadPool::ClearQueue() {
+  for (QueueEntry& e : queue_) {
+    if (e.trace) {
+      e.trace->Release();
+    }
+  }
   queue_.clear();
   queue_size_ = 0;
+}
+
+void ThreadPool::Shutdown() {
+  MutexLock unique_lock(lock_);
+  pool_status_ = Status::ServiceUnavailable("The pool has been shut down.");
+  ClearQueue();
   not_empty_.Broadcast();
 
   // The Runnable doesn't have Abort() so we must wait
   // and hopefully the abort is done outside before calling Shutdown().
   while (num_threads_ > 0) {
     no_threads_cond_.Wait();
-  }
-
-  // Finally release the tasks that were in the queue, outside the lock.
-  unique_lock.Unlock();
-  for (QueueEntry& e : to_release) {
-    if (e.trace) {
-      e.trace->Release();
-    }
   }
 }
 
@@ -182,12 +158,12 @@ Status ThreadPool::SubmitClosure(const Closure& task) {
   return SubmitFunc(boost::bind(&Closure::Run, task));
 }
 
-Status ThreadPool::SubmitFunc(boost::function<void()> func) {
-  return Submit(std::shared_ptr<Runnable>(new FunctionRunnable(std::move(func))));
+Status ThreadPool::SubmitFunc(const boost::function<void()>& func) {
+  return Submit(std::shared_ptr<Runnable>(new FunctionRunnable(func)));
 }
 
-Status ThreadPool::Submit(std::shared_ptr<Runnable> task) {
-  MonoTime submit_time = MonoTime::Now();
+Status ThreadPool::Submit(const std::shared_ptr<Runnable>& task) {
+  MonoTime submit_time = MonoTime::Now(MonoTime::FINE);
 
   MutexLock guard(lock_);
   if (PREDICT_FALSE(!pool_status_.ok())) {
@@ -195,12 +171,9 @@ Status ThreadPool::Submit(std::shared_ptr<Runnable> task) {
   }
 
   // Size limit check.
-  int64_t capacity_remaining = static_cast<int64_t>(max_threads_) - active_threads_ +
-                               static_cast<int64_t>(max_queue_size_) - queue_size_;
-  if (capacity_remaining < 1) {
-    return Status::ServiceUnavailable(
-        Substitute("Thread pool is at capacity ($0/$1 tasks running, $2/$3 tasks queued)",
-                   num_threads_, max_threads_, queue_size_, max_queue_size_));
+  if (queue_size_ == max_queue_size_) {
+    return Status::ServiceUnavailable(Substitute("Thread pool queue is full ($0 items)",
+                                                 queue_size_));
   }
 
   // Should we create another thread?
@@ -220,16 +193,17 @@ Status ThreadPool::Submit(std::shared_ptr<Runnable> task) {
       if (num_threads_ == 0) {
         // If we have no threads, we can't do any work.
         return status;
+      } else {
+        // If we failed to create a thread, but there are still some other
+        // worker threads, log a warning message and continue.
+        LOG(WARNING) << "Thread pool failed to create thread: "
+                     << status.ToString();
       }
-      // If we failed to create a thread, but there are still some other
-      // worker threads, log a warning message and continue.
-      LOG(ERROR) << "Thread pool failed to create thread: "
-                 << status.ToString();
     }
   }
 
   QueueEntry e;
-  e.runnable = std::move(task);
+  e.runnable = task;
   e.trace = Trace::CurrentTrace();
   // Need to AddRef, since the thread which submitted the task may go away,
   // and we don't want the trace to be destructed while waiting in the queue.
@@ -238,7 +212,7 @@ Status ThreadPool::Submit(std::shared_ptr<Runnable> task) {
   }
   e.submit_time = submit_time;
 
-  queue_.emplace_back(std::move(e));
+  queue_.push_back(e);
   int length_at_submit = queue_size_++;
 
   guard.Unlock();
@@ -253,19 +227,18 @@ Status ThreadPool::Submit(std::shared_ptr<Runnable> task) {
 
 void ThreadPool::Wait() {
   MutexLock unique_lock(lock_);
-  CheckNotPoolThreadUnlocked();
   while ((!queue_.empty()) || (active_threads_ > 0)) {
     idle_cond_.Wait();
   }
 }
 
 bool ThreadPool::WaitUntil(const MonoTime& until) {
-  return WaitFor(until - MonoTime::Now());
+  MonoDelta relative = until.GetDeltaSince(MonoTime::Now(MonoTime::FINE));
+  return WaitFor(relative);
 }
 
 bool ThreadPool::WaitFor(const MonoDelta& delta) {
   MutexLock unique_lock(lock_);
-  CheckNotPoolThreadUnlocked();
   while ((!queue_.empty()) || (active_threads_ > 0)) {
     if (!idle_cond_.TimedWait(delta)) {
       return false;
@@ -286,6 +259,7 @@ void ThreadPool::SetQueueTimeMicrosHistogram(const scoped_refptr<Histogram>& his
 void ThreadPool::SetRunTimeMicrosHistogram(const scoped_refptr<Histogram>& hist) {
   run_time_us_histogram_ = hist;
 }
+
 
 void ThreadPool::DispatchThread(bool permanent) {
   MutexLock unique_lock(lock_);
@@ -318,50 +292,29 @@ void ThreadPool::DispatchThread(bool permanent) {
     }
 
     // Fetch a pending task
-    QueueEntry entry = std::move(queue_.front());
+    QueueEntry entry = queue_.front();
     queue_.pop_front();
     queue_size_--;
     ++active_threads_;
 
     unique_lock.Unlock();
 
-    // Release the reference which was held by the queued item.
+    // Update metrics
+    if (queue_time_us_histogram_) {
+      MonoTime now(MonoTime::Now(MonoTime::FINE));
+      queue_time_us_histogram_->Increment(now.GetDeltaSince(entry.submit_time).ToMicroseconds());
+    }
+
     ADOPT_TRACE(entry.trace);
+    // Release the reference which was held by the queued item.
     if (entry.trace) {
       entry.trace->Release();
     }
-
-    // Update metrics
-    MonoTime now(MonoTime::Now());
-    int64_t queue_time_us = (now - entry.submit_time).ToMicroseconds();
-    TRACE_COUNTER_INCREMENT(queue_time_trace_metric_name_, queue_time_us);
-    if (queue_time_us_histogram_) {
-      queue_time_us_histogram_->Increment(queue_time_us);
-    }
-
     // Execute the task
     {
-      MicrosecondsInt64 start_wall_us = GetMonoTimeMicros();
-      MicrosecondsInt64 start_cpu_us = GetThreadCpuTimeMicros();
-
+      ScopedLatencyMetric m(run_time_us_histogram_.get());
       entry.runnable->Run();
-
-      int64_t wall_us = GetMonoTimeMicros() - start_wall_us;
-      int64_t cpu_us = GetThreadCpuTimeMicros() - start_cpu_us;
-
-      if (run_time_us_histogram_) {
-        run_time_us_histogram_->Increment(wall_us);
-      }
-      TRACE_COUNTER_INCREMENT(run_wall_time_trace_metric_name_, wall_us);
-      TRACE_COUNTER_INCREMENT(run_cpu_time_trace_metric_name_, cpu_us);
     }
-    // Destruct the task while we do not hold the lock.
-    //
-    // The task's destructor may be expensive if it has a lot of bound
-    // objects, and we don't want to block submission of the threadpool.
-    // In the worst case, the destructor might even try to do something
-    // with this threadpool, and produce a deadlock.
-    entry.runnable.reset();
     unique_lock.Lock();
 
     if (--active_threads_ == 0) {
@@ -374,7 +327,6 @@ void ThreadPool::DispatchThread(bool permanent) {
   // and add a new task just as the last running thread is about to exit.
   CHECK(unique_lock.OwnsLock());
 
-  CHECK_EQ(threads_.erase(Thread::current_thread()), 1);
   if (--num_threads_ == 0) {
     no_threads_cond_.Broadcast();
 
@@ -388,23 +340,12 @@ void ThreadPool::DispatchThread(bool permanent) {
 Status ThreadPool::CreateThreadUnlocked() {
   // The first few threads are permanent, and do not time out.
   bool permanent = (num_threads_ < min_threads_);
-  scoped_refptr<Thread> t;
   Status s = kudu::Thread::Create("thread pool", strings::Substitute("$0 [worker]", name_),
-                                  &ThreadPool::DispatchThread, this, permanent, &t);
+                                  &ThreadPool::DispatchThread, this, permanent, nullptr);
   if (s.ok()) {
-    InsertOrDie(&threads_, t.get());
     num_threads_++;
   }
   return s;
-}
-
-void ThreadPool::CheckNotPoolThreadUnlocked() {
-  Thread* current = Thread::current_thread();
-  if (ContainsKey(threads_, current)) {
-    LOG(FATAL) << Substitute("Thread belonging to thread pool '$0' with "
-        "name '$1' called pool function that would result in deadlock",
-        name_, current->name());
-  }
 }
 
 } // namespace kudu

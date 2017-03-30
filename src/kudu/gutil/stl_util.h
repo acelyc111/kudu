@@ -55,6 +55,7 @@ using std::vector;
 #include "kudu/gutil/integral_types.h"
 #include "kudu/gutil/macros.h"
 #include "kudu/gutil/port.h"
+#include "kudu/gutil/algorithm.h"
 
 // Sort and remove duplicates of an STL vector or deque.
 template<class T>

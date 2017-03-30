@@ -40,6 +40,7 @@
 # Constants
 ##########################################################
 ROOT=$(readlink -f $(dirname $0)/../../..)
+OUTDIR=$ROOT/build/tpch
 
 ##########################################################
 # Overridable params
@@ -66,10 +67,6 @@ record_result() {
   fi
 }
 
-ensure_cpu_scaling() {
-  $ROOT/src/kudu/scripts/ensure_cpu_scaling.sh "$@"
-}
-
 ##########################################################
 # Main
 ##########################################################
@@ -85,13 +82,6 @@ set -o pipefail
 ulimit -m $[3000*1000]
 ulimit -c unlimited # gather core dumps
 
-# Set CPU governor, and restore it on exit.
-old_governor=$(ensure_cpu_scaling performance)
-restore_governor() {
-  ensure_cpu_scaling $old_governor >/dev/null
-}
-trap restore_governor EXIT
-
 # PATH=<toolchain_stuff>:$PATH
 export TOOLCHAIN=/mnt/toolchain/toolchain.sh
 if [ -f "$TOOLCHAIN" ]; then
@@ -102,17 +92,19 @@ fi
 $ROOT/build-support/enable_devtoolset.sh $ROOT/thirdparty/build-if-necessary.sh
 
 # PATH=<thirdparty_stuff>:<toolchain_stuff>:$PATH
-THIRDPARTY_BIN=$(pwd)/thirdparty/installed/common/bin
+THIRDPARTY_BIN=$(pwd)/thirdparty/installed/bin
 export PPROF_PATH=$THIRDPARTY_BIN/pprof
 
-BUILD_TYPE=release
-
 # Build Kudu
-mkdir -p build/$BUILD_TYPE
-pushd build/$BUILD_TYPE
-rm -rf CMakeCache CMakeFiles/
+rm -rf build
+mkdir -p build
+pushd build
 
-$ROOT/build-support/enable_devtoolset.sh $THIRDPARTY_BIN/cmake -DCMAKE_BUILD_TYPE=${BUILD_TYPE} ../..
+BUILD_TYPE=release
+# Workaround for gperftools issue #497
+export LD_BIND_NOW=1
+
+$ROOT/build-support/enable_devtoolset.sh $THIRDPARTY_BIN/cmake -DCMAKE_BUILD_TYPE=${BUILD_TYPE} ..
 
 NUM_PROCS=$(cat /proc/cpuinfo | grep processor | wc -l)
 make -j${NUM_PROCS} tpch1 2>&1 | tee build.log
@@ -122,16 +114,14 @@ popd
 cat $LINEITEM_TBL_PATH > /dev/null
 cat $LINEITEM_TBL_PATH > /dev/null
 
-OUTDIR=$ROOT/build/$BUILD_TYPE/tpch
 rm -Rf $KUDU_DATA_DIR   # Clean up data dir.
 mkdir -p $OUTDIR        # Create log file output dir.
 
-$ROOT/build/$BUILD_TYPE/bin/tpch1 -logtostderr=1 \
-                                  -tpch_path_to_data=$LINEITEM_TBL_PATH \
-                                  -mini_cluster_base_dir=$KUDU_DATA_DIR \
-                                  -tpch_num_query_iterations=$TPCH_NUM_QUERY_ITERS \
-                                  $* \
-                                  >$OUTDIR/benchmark.log 2>&1
+./build/latest/tpch1 -logtostderr=1 \
+                     -tpch_path_to_data=$LINEITEM_TBL_PATH \
+                     -mini_cluster_base_dir=$KUDU_DATA_DIR \
+                     -tpch_num_query_iterations=$TPCH_NUM_QUERY_ITERS \
+                     >$OUTDIR/benchmark.log 2>&1
 
 cat $OUTDIR/benchmark.log
 INSERT_TIME=$(grep "Time spent loading" $OUTDIR/benchmark.log | \

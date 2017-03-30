@@ -30,7 +30,6 @@
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/rpc/messenger.h"
 #include "kudu/util/flag_tags.h"
-#include "kudu/util/logging.h"
 #include "kudu/util/metrics.h"
 #include "kudu/util/net/sockaddr.h"
 #include "kudu/util/net/socket.h"
@@ -133,15 +132,14 @@ void AcceptorPool::RunThread() {
       if (Release_Load(&closing_)) {
         break;
       }
-      KLOG_EVERY_N_SECS(WARNING, 1) << "AcceptorPool: accept failed: " << s.ToString()
-                                    << THROTTLE_MSG;
+      LOG(WARNING) << "AcceptorPool: accept failed: " << s.ToString();
       continue;
     }
     s = new_sock.SetNoDelay(true);
     if (!s.ok()) {
-      KLOG_EVERY_N_SECS(WARNING, 1) << "Acceptor with remote = " << remote.ToString()
+      LOG(WARNING) << "Acceptor with remote = " << remote.ToString()
           << " failed to set TCP_NODELAY on a newly accepted socket: "
-          << s.ToString() << THROTTLE_MSG;
+          << s.ToString();
       continue;
     }
     rpc_connections_accepted_->Increment();

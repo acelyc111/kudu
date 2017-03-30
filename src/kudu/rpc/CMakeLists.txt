@@ -23,7 +23,7 @@ PROTOBUF_GENERATE_CPP(
   PROTO_FILES rpc_header.proto)
 ADD_EXPORTABLE_LIBRARY(rpc_header_proto
   SRCS ${RPC_HEADER_PROTO_SRCS}
-  DEPS protobuf pb_util_proto token_proto
+  DEPS protobuf
   NONLINK_DEPS ${RPC_HEADER_PROTO_TGTS})
 
 PROTOBUF_GENERATE_CPP(
@@ -42,43 +42,37 @@ ADD_EXPORTABLE_LIBRARY(rpc_introspection_proto
 ### RPC library
 set(KRPC_SRCS
     acceptor_pool.cc
+    auth_store.cc
     blocking_ops.cc
-    client_negotiation.cc
+    outbound_call.cc
     connection.cc
     constants.cc
     inbound_call.cc
     messenger.cc
     negotiation.cc
-    outbound_call.cc
     proxy.cc
     reactor.cc
     remote_method.cc
-    remote_user.cc
-    request_tracker.cc
-    result_tracker.cc
     rpc.cc
     rpc_context.cc
     rpc_controller.cc
-    rpcz_store.cc
     sasl_common.cc
+    sasl_client.cc
     sasl_helper.cc
+    sasl_server.cc
     serialization.cc
-    server_negotiation.cc
     service_if.cc
     service_pool.cc
-    service_queue.cc
-    user_credentials.cc
     transfer.cc
 )
 
 set(KRPC_LIBS
-  cyrus_sasl
-  gutil
-  kudu_util
-  libev
   rpc_header_proto
   rpc_introspection_proto
-  security)
+  kudu_util
+  gutil
+  libev
+  cyrus_sasl)
 
 ADD_EXPORTABLE_LIBRARY(krpc
   SRCS ${KRPC_SRCS}
@@ -88,7 +82,6 @@ ADD_EXPORTABLE_LIBRARY(krpc
 add_executable(protoc-gen-krpc protoc-gen-krpc.cc)
 target_link_libraries(protoc-gen-krpc
     ${KUDU_BASE_LIBS}
-    rpc_header_proto
     protoc
     protobuf
     gutil
@@ -115,14 +108,10 @@ target_link_libraries(rtest_krpc
   rtest_diff_package_proto)
 
 # Tests
-set(KUDU_TEST_LINK_LIBS rtest_krpc krpc rpc_header_proto security-test ${KUDU_MIN_TEST_LIBS})
-ADD_KUDU_TEST(exactly_once_rpc-test)
+set(KUDU_TEST_LINK_LIBS rtest_krpc krpc ${KUDU_MIN_TEST_LIBS})
 ADD_KUDU_TEST(mt-rpc-test RUN_SERIAL true)
-ADD_KUDU_TEST(negotiation-test)
 ADD_KUDU_TEST(reactor-test)
-ADD_KUDU_TEST(request_tracker-test)
 ADD_KUDU_TEST(rpc-bench RUN_SERIAL true)
 ADD_KUDU_TEST(rpc-test)
 ADD_KUDU_TEST(rpc_stub-test)
-ADD_KUDU_TEST(service_queue-test)
-
+ADD_KUDU_TEST(sasl_rpc-test)

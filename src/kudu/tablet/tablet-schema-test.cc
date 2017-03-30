@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <boost/lexical_cast.hpp>
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 

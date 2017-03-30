@@ -14,9 +14,8 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-
-#include <string>
-#include <vector>
+//
+// Tests for the kudu-admin command-line tool.
 
 #include <gtest/gtest.h>
 
@@ -25,7 +24,6 @@
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/integration-tests/test_workload.h"
 #include "kudu/integration-tests/ts_itest-base.h"
-#include "kudu/tools/tool_test_util.h"
 #include "kudu/util/subprocess.h"
 #include "kudu/util/test_util.h"
 
@@ -34,31 +32,42 @@ namespace tools {
 
 using client::KuduClient;
 using client::KuduClientBuilder;
-using client::KuduSchema;
-using client::KuduTableCreator;
 using client::sp::shared_ptr;
-using consensus::ConsensusStatePB;
 using itest::TabletServerMap;
 using itest::TServerDetails;
-using std::string;
-using std::vector;
 using strings::Substitute;
 
+static const char* const kAdminToolName = "kudu-admin";
+
 class AdminCliTest : public tserver::TabletServerIntegrationTestBase {
+ protected:
+  // Figure out where the admin tool is.
+  string GetAdminToolPath() const;
 };
 
-// Test config change while running a workload.
+string AdminCliTest::GetAdminToolPath() const {
+  string exe;
+  CHECK_OK(Env::Default()->GetExecutablePath(&exe));
+  string binroot = DirName(exe);
+  string tool_path = JoinPathSegments(binroot, kAdminToolName);
+  CHECK(Env::Default()->FileExists(tool_path)) << "kudu-admin tool not found at " << tool_path;
+  return tool_path;
+}
+
+// Test kudu-admin config change while running a workload.
 // 1. Instantiate external mini cluster with 3 TS.
 // 2. Create table with 2 replicas.
-// 3. Invoke CLI to trigger a config change.
+// 3. Invoke kudu-admin CLI to invoke a config change.
 // 4. Wait until the new server bootstraps.
 // 5. Profit!
 TEST_F(AdminCliTest, TestChangeConfig) {
   FLAGS_num_tablet_servers = 3;
   FLAGS_num_replicas = 2;
-  BuildAndStart({ "--enable_leader_failure_detection=false" },
-                { "--catalog_manager_wait_for_new_tablets_to_elect_leader=false",
-                  "--allow_unsafe_replication_factor=true"});
+
+  vector<string> ts_flags, master_flags;
+  ts_flags.push_back("--enable_leader_failure_detection=false");
+  master_flags.push_back("--catalog_manager_wait_for_new_tablets_to_elect_leader=false");
+  BuildAndStart(ts_flags, master_flags);
 
   vector<TServerDetails*> tservers;
   AppendValuesFromMap(tablet_servers_, &tservers);
@@ -101,16 +110,12 @@ TEST_F(AdminCliTest, TestChangeConfig) {
   ASSERT_EQ(leader->uuid(), master_observed_leader->uuid());
 
   LOG(INFO) << "Adding tserver with uuid " << new_node->uuid() << " as VOTER...";
-  ASSERT_OK(Subprocess::Call({
-    GetKuduCtlAbsolutePath(),
-    "tablet",
-    "change_config",
-    "add_replica",
-    cluster_->master()->bound_rpc_addr().ToString(),
-    tablet_id_,
-    new_node->uuid(),
-    "VOTER"
-  }));
+  string exe_path = GetAdminToolPath();
+  string arg_str = Substitute("$0 -master_addresses $1 change_config $2 ADD_SERVER $3 VOTER",
+                              exe_path,
+                              cluster_->master()->bound_rpc_addr().ToString(),
+                              tablet_id_, new_node->uuid());
+  ASSERT_OK(Subprocess::Call(arg_str));
 
   InsertOrDie(&active_tablet_servers, new_node->uuid(), new_node);
   ASSERT_OK(WaitUntilCommittedConfigNumVotersIs(active_tablet_servers.size(),
@@ -139,15 +144,12 @@ TEST_F(AdminCliTest, TestChangeConfig) {
 
   // Now remove the server once again.
   LOG(INFO) << "Removing tserver with uuid " << new_node->uuid() << " from the config...";
-  ASSERT_OK(Subprocess::Call({
-    GetKuduCtlAbsolutePath(),
-    "tablet",
-    "change_config",
-    "remove_replica",
-    cluster_->master()->bound_rpc_addr().ToString(),
-    tablet_id_,
-    new_node->uuid()
-  }));
+  arg_str = Substitute("$0 -master_addresses $1 change_config $2 REMOVE_SERVER $3",
+                       exe_path,
+                       cluster_->master()->bound_rpc_addr().ToString(),
+                       tablet_id_, new_node->uuid());
+
+  ASSERT_OK(Subprocess::Call(arg_str));
 
   ASSERT_EQ(1, active_tablet_servers.erase(new_node->uuid()));
   ASSERT_OK(WaitUntilCommittedConfigNumVotersIs(active_tablet_servers.size(),
@@ -155,186 +157,33 @@ TEST_F(AdminCliTest, TestChangeConfig) {
                                                 MonoDelta::FromSeconds(10)));
 }
 
-Status GetTermFromConsensus(const vector<TServerDetails*>& tservers,
-                            const string& tablet_id,
-                            int64 *current_term) {
-  ConsensusStatePB cstate;
-  for (auto& ts : tservers) {
-    RETURN_NOT_OK(
-        itest::GetConsensusState(ts, tablet_id,
-                                 consensus::CONSENSUS_CONFIG_COMMITTED,
-                                 MonoDelta::FromSeconds(10), &cstate));
-    if (cstate.has_leader_uuid() && cstate.has_current_term()) {
-      *current_term = cstate.current_term();
-      return Status::OK();
-    }
-  }
-  return Status::NotFound(Substitute(
-      "No leader replica found for tablet $0", tablet_id));
-}
-
-TEST_F(AdminCliTest, TestLeaderStepDown) {
-  FLAGS_num_tablet_servers = 3;
-  FLAGS_num_replicas = 3;
-  BuildAndStart({}, {});
-
-  vector<TServerDetails*> tservers;
-  AppendValuesFromMap(tablet_servers_, &tservers);
-  ASSERT_EQ(FLAGS_num_tablet_servers, tservers.size());
-  for (auto& ts : tservers) {
-    ASSERT_OK(itest::WaitUntilTabletRunning(ts,
-                                            tablet_id_,
-                                            MonoDelta::FromSeconds(10)));
-  }
-
-  int64 current_term;
-  ASSERT_OK(GetTermFromConsensus(tservers, tablet_id_,
-                                 &current_term));
-
-  // The leader for the given tablet may change anytime, resulting in
-  // the command returning an error code. Hence checking for term advancement
-  // only if the leader_step_down succeeds. It is also unsafe to check
-  // the term advancement without honoring status of the command since
-  // there may not have been another election in the meanwhile.
-  string stderr;
-  Status s = Subprocess::Call({GetKuduCtlAbsolutePath(),
-                               "tablet", "leader_step_down",
-                               cluster_->master()->bound_rpc_addr().ToString(),
-                               tablet_id_}, "", nullptr, &stderr);
-  bool not_currently_leader = stderr.find(
-      Status::IllegalState("").CodeAsString()) != string::npos;
-  ASSERT_TRUE(s.ok() || not_currently_leader);
-  if (s.ok()) {
-    int64 new_term;
-    AssertEventually([&]() {
-        ASSERT_OK(GetTermFromConsensus(tservers, tablet_id_,
-                                       &new_term));
-        ASSERT_GT(new_term, current_term);
-      });
-  }
-}
-
-TEST_F(AdminCliTest, TestLeaderStepDownWhenNotPresent) {
-  FLAGS_num_tablet_servers = 3;
-  FLAGS_num_replicas = 3;
-  BuildAndStart(
-      { "--enable_leader_failure_detection=false" },
-      { "--catalog_manager_wait_for_new_tablets_to_elect_leader=false" });
-  vector<TServerDetails*> tservers;
-  AppendValuesFromMap(tablet_servers_, &tservers);
-  ASSERT_EQ(FLAGS_num_tablet_servers, tservers.size());
-  for (auto& ts : tservers) {
-    ASSERT_OK(itest::WaitUntilTabletRunning(ts,
-                                            tablet_id_,
-                                            MonoDelta::FromSeconds(10)));
-  }
-
-  int64 current_term;
-  ASSERT_TRUE(GetTermFromConsensus(tservers, tablet_id_,
-                                   &current_term).IsNotFound());
-  string stdout;
-  ASSERT_OK(Subprocess::Call({
-    GetKuduCtlAbsolutePath(),
-    "tablet",
-    "leader_step_down",
-    cluster_->master()->bound_rpc_addr().ToString(),
-    tablet_id_
-  }, "", &stdout));
-  ASSERT_STR_CONTAINS(stdout,
-                      Substitute("No leader replica found for tablet $0",
-                                 tablet_id_));
-}
-
 TEST_F(AdminCliTest, TestDeleteTable) {
   FLAGS_num_tablet_servers = 1;
   FLAGS_num_replicas = 1;
-  BuildAndStart({}, {});
 
+  vector<string> ts_flags, master_flags;
+  BuildAndStart(ts_flags, master_flags);
   string master_address = cluster_->master()->bound_rpc_addr().ToString();
-  shared_ptr<KuduClient> client;
-  ASSERT_OK(KuduClientBuilder()
-            .add_master_server_addr(master_address)
-            .Build(&client));
 
-  ASSERT_OK(Subprocess::Call({
-    GetKuduCtlAbsolutePath(),
-    "table",
-    "delete",
-    master_address,
-    kTableId
-  }));
+  shared_ptr<KuduClient> client;
+  CHECK_OK(KuduClientBuilder()
+        .add_master_server_addr(master_address)
+        .Build(&client));
+
+  // Default table that gets created;
+  string table_name = "TestTable";
+
+  string exe_path = GetAdminToolPath();
+  string arg_str = Substitute("$0 -master_addresses $1 delete_table $2",
+                              exe_path,
+                              master_address,
+                              table_name);
+
+  ASSERT_OK(Subprocess::Call(arg_str));
 
   vector<string> tables;
   ASSERT_OK(client->ListTables(&tables));
   ASSERT_TRUE(tables.empty());
-}
-
-TEST_F(AdminCliTest, TestListTables) {
-  FLAGS_num_tablet_servers = 1;
-  FLAGS_num_replicas = 1;
-
-  BuildAndStart({}, {});
-
-  string stdout;
-  ASSERT_OK(Subprocess::Call({
-    GetKuduCtlAbsolutePath(),
-    "table",
-    "list",
-    cluster_->master()->bound_rpc_addr().ToString()
-  }, "", &stdout, nullptr));
-
-  vector<string> stdout_lines = strings::Split(stdout, ",",
-                                               strings::SkipEmpty());
-  ASSERT_EQ(1, stdout_lines.size());
-  ASSERT_EQ(Substitute("$0\n", kTableId), stdout_lines[0]);
-}
-
-TEST_F(AdminCliTest, TestListTablesDetail) {
-  FLAGS_num_tablet_servers = 3;
-  FLAGS_num_replicas = 3;
-
-  BuildAndStart({}, {});
-
-  // Add another table to test multiple tables output.
-  const string kAnotherTableId = "TestAnotherTable";
-  KuduSchema client_schema(client::KuduSchemaFromSchema(schema_));
-  gscoped_ptr<KuduTableCreator> table_creator(client_->NewTableCreator());
-  ASSERT_OK(table_creator->table_name(kAnotherTableId)
-           .schema(&client_schema)
-           .set_range_partition_columns({ "key" })
-           .num_replicas(FLAGS_num_replicas)
-           .Create());
-
-  // Grab list of tablet_ids from any tserver.
-  vector<TServerDetails*> tservers;
-  vector<string> tablet_ids;
-  AppendValuesFromMap(tablet_servers_, &tservers);
-  ListRunningTabletIds(tservers.front(),
-                       MonoDelta::FromSeconds(30), &tablet_ids);
-
-  string stdout;
-  ASSERT_OK(Subprocess::Call({
-    GetKuduCtlAbsolutePath(),
-    "table",
-    "list",
-    "--list_tablets",
-    cluster_->master()->bound_rpc_addr().ToString()
-  }, "", &stdout, nullptr));
-
-  vector<string> stdout_lines = strings::Split(stdout, "\n",
-                                               strings::SkipEmpty());
-
-  // Verify multiple tables along with their tablets and replica-uuids.
-  ASSERT_EQ(4, stdout_lines.size());
-  ASSERT_STR_CONTAINS(stdout, kTableId);
-  ASSERT_STR_CONTAINS(stdout, kAnotherTableId);
-  ASSERT_STR_CONTAINS(stdout, tablet_ids.front());
-  ASSERT_STR_CONTAINS(stdout, tablet_ids.back());
-
-  for (auto& ts : tservers) {
-    ASSERT_STR_CONTAINS(stdout, ts->uuid());
-    ASSERT_STR_CONTAINS(stdout, ts->uuid());
-  }
 }
 
 } // namespace tools

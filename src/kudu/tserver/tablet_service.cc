@@ -24,11 +24,9 @@
 #include <vector>
 
 #include "kudu/common/iterator.h"
-#include "kudu/common/scan_spec.h"
 #include "kudu/common/schema.h"
 #include "kudu/common/wire_protocol.h"
 #include "kudu/consensus/consensus.h"
-#include "kudu/consensus/time_manager.h"
 #include "kudu/gutil/bind.h"
 #include "kudu/gutil/casts.h"
 #include "kudu/gutil/stl_util.h"
@@ -37,14 +35,13 @@
 #include "kudu/rpc/rpc_context.h"
 #include "kudu/rpc/rpc_sidecar.h"
 #include "kudu/server/hybrid_clock.h"
-#include "kudu/tablet/compaction.h"
-#include "kudu/tablet/metadata.pb.h"
 #include "kudu/tablet/tablet_bootstrap.h"
-#include "kudu/tablet/tablet_metrics.h"
+#include "kudu/tserver/remote_bootstrap_service.h"
+#include "kudu/tablet/metadata.pb.h"
 #include "kudu/tablet/tablet_peer.h"
+#include "kudu/tablet/tablet_metrics.h"
 #include "kudu/tablet/transactions/alter_schema_transaction.h"
 #include "kudu/tablet/transactions/write_transaction.h"
-#include "kudu/tserver/tablet_copy_service.h"
 #include "kudu/tserver/scanners.h"
 #include "kudu/tserver/tablet_server.h"
 #include "kudu/tserver/ts_tablet_manager.h"
@@ -56,7 +53,6 @@
 #include "kudu/util/logging.h"
 #include "kudu/util/mem_tracker.h"
 #include "kudu/util/monotime.h"
-#include "kudu/util/pb_util.h"
 #include "kudu/util/status.h"
 #include "kudu/util/status_callback.h"
 #include "kudu/util/trace.h"
@@ -77,16 +73,6 @@ DEFINE_int32(scanner_batch_size_rows, 100,
 TAG_FLAG(scanner_batch_size_rows, advanced);
 TAG_FLAG(scanner_batch_size_rows, runtime);
 
-DEFINE_bool(scanner_allow_snapshot_scans_with_logical_timestamps, false,
-            "If set, the server will support snapshot scans with logical timestamps.");
-TAG_FLAG(scanner_allow_snapshot_scans_with_logical_timestamps, unsafe);
-
-DEFINE_int32(scanner_max_wait_ms, 1000,
-             "The maximum amount of time (in milliseconds) we'll hang a scanner thread waiting for "
-             "safe time to advance or transactions to commit, even if its deadline allows waiting "
-             "longer.");
-TAG_FLAG(scanner_max_wait_ms, advanced);
-
 // Fault injection flags.
 DEFINE_int32(scanner_inject_latency_on_each_batch_ms, 0,
              "If set, the scanner will pause the specified number of milliesconds "
@@ -95,50 +81,40 @@ DEFINE_int32(scanner_inject_latency_on_each_batch_ms, 0,
 TAG_FLAG(scanner_inject_latency_on_each_batch_ms, unsafe);
 
 DECLARE_int32(memory_limit_warn_threshold_percentage);
-DECLARE_int32(tablet_history_max_age_sec);
-
-using google::protobuf::RepeatedPtrField;
-using kudu::consensus::ChangeConfigRequestPB;
-using kudu::consensus::ChangeConfigResponsePB;
-using kudu::consensus::CONSENSUS_CONFIG_ACTIVE;
-using kudu::consensus::CONSENSUS_CONFIG_COMMITTED;
-using kudu::consensus::Consensus;
-using kudu::consensus::ConsensusConfigType;
-using kudu::consensus::ConsensusRequestPB;
-using kudu::consensus::ConsensusResponsePB;
-using kudu::consensus::GetLastOpIdRequestPB;
-using kudu::consensus::GetNodeInstanceRequestPB;
-using kudu::consensus::GetNodeInstanceResponsePB;
-using kudu::consensus::LeaderStepDownRequestPB;
-using kudu::consensus::LeaderStepDownResponsePB;
-using kudu::consensus::RunLeaderElectionRequestPB;
-using kudu::consensus::RunLeaderElectionResponsePB;
-using kudu::consensus::StartTabletCopyRequestPB;
-using kudu::consensus::StartTabletCopyResponsePB;
-using kudu::consensus::VoteRequestPB;
-using kudu::consensus::VoteResponsePB;
-using kudu::rpc::RpcContext;
-using kudu::server::ServerBase;
-using kudu::tablet::AlterSchemaTransactionState;
-using kudu::tablet::Tablet;
-using kudu::tablet::TabletPeer;
-using kudu::tablet::TabletStatusPB;
-using kudu::tablet::TransactionCompletionCallback;
-using kudu::tablet::WriteTransactionState;
-using std::shared_ptr;
-using std::unique_ptr;
-using std::vector;
-using strings::Substitute;
-
-namespace kudu {
-namespace cfile {
-extern const char* CFILE_CACHE_MISS_BYTES_METRIC_NAME;
-extern const char* CFILE_CACHE_HIT_BYTES_METRIC_NAME;
-}
-}
 
 namespace kudu {
 namespace tserver {
+
+using consensus::ChangeConfigRequestPB;
+using consensus::ChangeConfigResponsePB;
+using consensus::CONSENSUS_CONFIG_ACTIVE;
+using consensus::CONSENSUS_CONFIG_COMMITTED;
+using consensus::Consensus;
+using consensus::ConsensusConfigType;
+using consensus::ConsensusRequestPB;
+using consensus::ConsensusResponsePB;
+using consensus::GetNodeInstanceRequestPB;
+using consensus::GetNodeInstanceResponsePB;
+using consensus::LeaderStepDownRequestPB;
+using consensus::LeaderStepDownResponsePB;
+using consensus::RunLeaderElectionRequestPB;
+using consensus::RunLeaderElectionResponsePB;
+using consensus::StartRemoteBootstrapRequestPB;
+using consensus::StartRemoteBootstrapResponsePB;
+using consensus::VoteRequestPB;
+using consensus::VoteResponsePB;
+
+using google::protobuf::RepeatedPtrField;
+using rpc::RpcContext;
+using std::shared_ptr;
+using std::vector;
+using strings::Substitute;
+using tablet::AlterSchemaTransactionState;
+using tablet::Tablet;
+using tablet::TabletPeer;
+using tablet::TabletStatusPB;
+using tablet::TransactionCompletionCallback;
+using tablet::WriteTransactionState;
 
 namespace {
 
@@ -185,7 +161,7 @@ bool CheckUuidMatchOrRespond(TabletPeerLookupIf* tablet_manager,
   if (PREDICT_FALSE(!req->has_dest_uuid())) {
     // Maintain compat in release mode, but complain.
     string msg = Substitute("$0: Missing destination UUID in request from $1: $2",
-                            method_name, context->requestor_string(), SecureShortDebugString(*req));
+                            method_name, context->requestor_string(), req->ShortDebugString());
 #ifdef NDEBUG
     KLOG_EVERY_N(ERROR, 100) << msg;
 #else
@@ -198,7 +174,7 @@ bool CheckUuidMatchOrRespond(TabletPeerLookupIf* tablet_manager,
                                                   "Local UUID: $1. Requested UUID: $2",
                                                   method_name, local_uuid, req->dest_uuid()));
     LOG(WARNING) << s.ToString() << ": from " << context->requestor_string()
-                 << ": " << SecureShortDebugString(*req);
+                 << ": " << req->ShortDebugString();
     SetupErrorAndRespond(resp->mutable_error(), s,
                          TabletServerErrorPB::WRONG_SERVER_UUID, context);
     return false;
@@ -264,15 +240,17 @@ static void SetupErrorAndRespond(TabletServerErrorPB* error,
                                  TabletServerErrorPB::Code code,
                                  rpc::RpcContext* context) {
   // Generic "service unavailable" errors will cause the client to retry later.
-  if ((code == TabletServerErrorPB::UNKNOWN_ERROR ||
-       code == TabletServerErrorPB::THROTTLED) && s.IsServiceUnavailable()) {
+  if (code == TabletServerErrorPB::UNKNOWN_ERROR && s.IsServiceUnavailable()) {
     context->RespondRpcFailure(rpc::ErrorStatusPB::ERROR_SERVER_TOO_BUSY, s);
     return;
   }
 
   StatusToPB(s, error->mutable_status());
   error->set_code(code);
-  context->RespondNoCache();
+  // TODO: rename RespondSuccess() to just "Respond" or
+  // "SendResponse" since we use it for application-level error
+  // responses, and this just looks confusing!
+  context->RespondSuccess();
 }
 
 template <class ReqType, class RespType>
@@ -415,8 +393,7 @@ class ScanResultChecksummer : public ScanResultCollector {
   ScanResultChecksummer()
       : crc_(crc::GetCrc32cInstance()),
         agg_checksum_(0),
-        blocks_processed_(0),
-        rows_checksummed_(0) {
+        blocks_processed_(0) {
   }
 
   virtual void HandleRowBlock(const Schema* client_projection_schema,
@@ -431,7 +408,6 @@ class ScanResultChecksummer : public ScanResultCollector {
       if (!row_block.selection_vector()->IsRowSelected(i)) continue;
       uint32_t row_crc = CalcRowCrc32(*client_projection_schema, row_block.row(i));
       agg_checksum_ += row_crc;
-      rows_checksummed_++;
     }
     // Find the last selected row and save its encoded key.
     SetLastRow(row_block, &encoded_last_row_);
@@ -446,10 +422,6 @@ class ScanResultChecksummer : public ScanResultCollector {
 
   virtual int64_t NumRowsReturned() const OVERRIDE {
     return 0;
-  }
-
-  int64_t rows_checksummed() const {
-    return rows_checksummed_;
   }
 
   // Accessors for initializing / setting the checksum.
@@ -488,7 +460,6 @@ class ScanResultChecksummer : public ScanResultCollector {
   crc::Crc* const crc_;
   uint64_t agg_checksum_;
   int blocks_processed_;
-  int64_t rows_checksummed_;
   faststring encoded_last_row_;
 
   DISALLOW_COPY_AND_ASSIGN(ScanResultChecksummer);
@@ -508,39 +479,19 @@ static size_t GetMaxBatchSizeBytesHint(const ScanRequestPB* req) {
 }
 
 TabletServiceImpl::TabletServiceImpl(TabletServer* server)
-  : TabletServerServiceIf(server->metric_entity(), server->result_tracker()),
+  : TabletServerServiceIf(server->metric_entity()),
     server_(server) {
 }
 
-bool TabletServiceImpl::AuthorizeClientOrServiceUser(const google::protobuf::Message* /*req*/,
-                                                 google::protobuf::Message* /*resp*/,
-                                                 rpc::RpcContext* rpc) {
-  return server_->Authorize(rpc, ServerBase::SUPER_USER | ServerBase::USER |
-                            ServerBase::SERVICE_USER);
-}
-
-bool TabletServiceImpl::AuthorizeClient(const google::protobuf::Message* /*req*/,
-                                        google::protobuf::Message* /*resp*/,
-                                        rpc::RpcContext* rpc) {
-  return server_->Authorize(rpc, ServerBase::SUPER_USER | ServerBase::USER);
-}
-
-
-void TabletServiceImpl::Ping(const PingRequestPB* /*req*/,
-                             PingResponsePB* /*resp*/,
+void TabletServiceImpl::Ping(const PingRequestPB* req,
+                             PingResponsePB* resp,
                              rpc::RpcContext* context) {
   context->RespondSuccess();
 }
 
 TabletServiceAdminImpl::TabletServiceAdminImpl(TabletServer* server)
-  : TabletServerAdminServiceIf(server->metric_entity(), server->result_tracker()),
+  : TabletServerAdminServiceIf(server->metric_entity()),
     server_(server) {
-}
-
-bool TabletServiceAdminImpl::AuthorizeServiceUser(const google::protobuf::Message* /*req*/,
-                                                  google::protobuf::Message* /*resp*/,
-                                                  rpc::RpcContext* rpc) {
-  return server_->Authorize(rpc, ServerBase::SUPER_USER | ServerBase::SERVICE_USER);
 }
 
 void TabletServiceAdminImpl::AlterSchema(const AlterSchemaRequestPB* req,
@@ -549,7 +500,7 @@ void TabletServiceAdminImpl::AlterSchema(const AlterSchemaRequestPB* req,
   if (!CheckUuidMatchOrRespond(server_->tablet_manager(), "AlterSchema", req, resp, context)) {
     return;
   }
-  DVLOG(3) << "Received Alter Schema RPC: " << SecureDebugString(*req);
+  DVLOG(3) << "Received Alter Schema RPC: " << req->DebugString();
 
   scoped_refptr<TabletPeer> tablet_peer;
   if (!LookupTabletPeerOrRespond(server_->tablet_manager(), req->tablet_id(), resp, context,
@@ -599,15 +550,15 @@ void TabletServiceAdminImpl::AlterSchema(const AlterSchemaRequestPB* req,
     return;
   }
 
-  unique_ptr<AlterSchemaTransactionState> tx_state(
+  gscoped_ptr<AlterSchemaTransactionState> tx_state(
     new AlterSchemaTransactionState(tablet_peer.get(), req, resp));
 
   tx_state->set_completion_callback(gscoped_ptr<TransactionCompletionCallback>(
       new RpcTransactionCompletionCallback<AlterSchemaResponsePB>(context,
-                                                                  resp)));
+                                                                  resp)).Pass());
 
   // Submit the alter schema op. The RPC will be responded to asynchronously.
-  Status s = tablet_peer->SubmitAlterSchema(std::move(tx_state));
+  Status s = tablet_peer->SubmitAlterSchema(tx_state.Pass());
   if (PREDICT_FALSE(!s.ok())) {
     SetupErrorAndRespond(resp->mutable_error(), s,
                          TabletServerErrorPB::UNKNOWN_ERROR,
@@ -651,7 +602,7 @@ void TabletServiceAdminImpl::CreateTablet(const CreateTabletRequestPB* req,
             << " (table=" << req->table_name()
             << " [id=" << req->table_id() << "]), partition="
             << partition_schema.PartitionDebugString(partition, schema);
-  VLOG(1) << "Full request: " << SecureDebugString(*req);
+  VLOG(1) << "Full request: " << req->DebugString();
 
   s = server_->tablet_manager()->CreateNewTablet(req->table_id(),
                                                  req->tablet_id(),
@@ -692,7 +643,7 @@ void TabletServiceAdminImpl::DeleteTablet(const DeleteTabletRequestPB* req,
             << " with delete_type " << TabletDataState_Name(delete_type)
             << (req->has_reason() ? (" (" + req->reason() + ")") : "")
             << " from " << context->requestor_string();
-  VLOG(1) << "Full request: " << SecureDebugString(*req);
+  VLOG(1) << "Full request: " << req->DebugString();
 
   boost::optional<int64_t> cas_config_opid_index_less_or_equal;
   if (req->has_cas_config_opid_index_less_or_equal()) {
@@ -715,7 +666,7 @@ void TabletServiceImpl::Write(const WriteRequestPB* req,
                               rpc::RpcContext* context) {
   TRACE_EVENT1("tserver", "TabletServiceImpl::Write",
                "tablet_id", req->tablet_id());
-  DVLOG(3) << "Received Write RPC: " << SecureDebugString(*req);
+  DVLOG(3) << "Received Write RPC: " << req->DebugString();
 
   scoped_refptr<TabletPeer> tablet_peer;
   if (!LookupTabletPeerOrRespond(server_->tablet_manager(), req->tablet_id(), resp, context,
@@ -728,16 +679,6 @@ void TabletServiceImpl::Write(const WriteRequestPB* req,
   Status s = GetTabletRef(tablet_peer, &tablet, &error_code);
   if (PREDICT_FALSE(!s.ok())) {
     SetupErrorAndRespond(resp->mutable_error(), s, error_code, context);
-    return;
-  }
-
-  uint64_t bytes = req->row_operations().rows().size() +
-      req->row_operations().indirect_data().size();
-  if (!tablet->ShouldThrottleAllow(bytes)) {
-    SetupErrorAndRespond(resp->mutable_error(),
-                         Status::ServiceUnavailable("Rejecting Write request: throttled"),
-                         TabletServerErrorPB::THROTTLED,
-                         context);
     return;
   }
 
@@ -769,11 +710,7 @@ void TabletServiceImpl::Write(const WriteRequestPB* req,
     return;
   }
 
-  unique_ptr<WriteTransactionState> tx_state(new WriteTransactionState(
-      tablet_peer.get(),
-      req,
-      context->AreResultsTracked() ? context->request_id() : nullptr,
-      resp));
+  auto tx_state = new WriteTransactionState(tablet_peer.get(), req, resp);
 
   // If the client sent us a timestamp, decode it and update the clock so that all future
   // timestamps are greater than the passed timestamp.
@@ -790,10 +727,10 @@ void TabletServiceImpl::Write(const WriteRequestPB* req,
 
   tx_state->set_completion_callback(gscoped_ptr<TransactionCompletionCallback>(
       new RpcTransactionCompletionCallback<WriteResponsePB>(context,
-                                                            resp)));
+                                                            resp)).Pass());
 
   // Submit the write. The RPC will be responded to asynchronously.
-  s = tablet_peer->SubmitWrite(std::move(tx_state));
+  s = tablet_peer->SubmitWrite(tx_state);
 
   // Check that we could submit the write
   if (PREDICT_FALSE(!s.ok())) {
@@ -801,28 +738,22 @@ void TabletServiceImpl::Write(const WriteRequestPB* req,
                          TabletServerErrorPB::UNKNOWN_ERROR,
                          context);
   }
+  return;
 }
 
-ConsensusServiceImpl::ConsensusServiceImpl(ServerBase* server,
+ConsensusServiceImpl::ConsensusServiceImpl(const scoped_refptr<MetricEntity>& metric_entity,
                                            TabletPeerLookupIf* tablet_manager)
-    : ConsensusServiceIf(server->metric_entity(), server->result_tracker()),
-      server_(server),
-      tablet_manager_(tablet_manager) {
+  : ConsensusServiceIf(metric_entity),
+    tablet_manager_(tablet_manager) {
 }
 
 ConsensusServiceImpl::~ConsensusServiceImpl() {
 }
 
-bool ConsensusServiceImpl::AuthorizeServiceUser(const google::protobuf::Message* /*req*/,
-                                                google::protobuf::Message* /*resp*/,
-                                                rpc::RpcContext* rpc) {
-  return server_->Authorize(rpc, ServerBase::SUPER_USER | ServerBase::SERVICE_USER);
-}
-
 void ConsensusServiceImpl::UpdateConsensus(const ConsensusRequestPB* req,
                                            ConsensusResponsePB* resp,
                                            rpc::RpcContext* context) {
-  DVLOG(3) << "Received Consensus Update RPC: " << SecureDebugString(*req);
+  DVLOG(3) << "Received Consensus Update RPC: " << req->DebugString();
   if (!CheckUuidMatchOrRespond(tablet_manager_, "UpdateConsensus", req, resp, context)) {
     return;
   }
@@ -854,7 +785,7 @@ void ConsensusServiceImpl::UpdateConsensus(const ConsensusRequestPB* req,
 void ConsensusServiceImpl::RequestConsensusVote(const VoteRequestPB* req,
                                                 VoteResponsePB* resp,
                                                 rpc::RpcContext* context) {
-  DVLOG(3) << "Received Consensus Request Vote RPC: " << SecureDebugString(*req);
+  DVLOG(3) << "Received Consensus Request Vote RPC: " << req->DebugString();
   if (!CheckUuidMatchOrRespond(tablet_manager_, "RequestConsensusVote", req, resp, context)) {
     return;
   }
@@ -879,7 +810,7 @@ void ConsensusServiceImpl::RequestConsensusVote(const VoteRequestPB* req,
 void ConsensusServiceImpl::ChangeConfig(const ChangeConfigRequestPB* req,
                                         ChangeConfigResponsePB* resp,
                                         RpcContext* context) {
-  DVLOG(3) << "Received ChangeConfig RPC: " << SecureDebugString(*req);
+  DVLOG(3) << "Received ChangeConfig RPC: " << req->DebugString();
   if (!CheckUuidMatchOrRespond(tablet_manager_, "ChangeConfig", req, resp, context)) {
     return;
   }
@@ -903,7 +834,7 @@ void ConsensusServiceImpl::ChangeConfig(const ChangeConfigRequestPB* req,
 void ConsensusServiceImpl::GetNodeInstance(const GetNodeInstanceRequestPB* req,
                                            GetNodeInstanceResponsePB* resp,
                                            rpc::RpcContext* context) {
-  DVLOG(3) << "Received Get Node Instance RPC: " << SecureDebugString(*req);
+  DVLOG(3) << "Received Get Node Instance RPC: " << req->DebugString();
   resp->mutable_node_instance()->CopyFrom(tablet_manager_->NodeInstance());
   context->RespondSuccess();
 }
@@ -911,7 +842,7 @@ void ConsensusServiceImpl::GetNodeInstance(const GetNodeInstanceRequestPB* req,
 void ConsensusServiceImpl::RunLeaderElection(const RunLeaderElectionRequestPB* req,
                                              RunLeaderElectionResponsePB* resp,
                                              rpc::RpcContext* context) {
-  DVLOG(3) << "Received Run Leader Election RPC: " << SecureDebugString(*req);
+  DVLOG(3) << "Received Run Leader Election RPC: " << req->DebugString();
   if (!CheckUuidMatchOrRespond(tablet_manager_, "RunLeaderElection", req, resp, context)) {
     return;
   }
@@ -923,8 +854,7 @@ void ConsensusServiceImpl::RunLeaderElection(const RunLeaderElectionRequestPB* r
   scoped_refptr<Consensus> consensus;
   if (!GetConsensusOrRespond(tablet_peer, resp, context, &consensus)) return;
   Status s = consensus->StartElection(
-      consensus::Consensus::ELECT_EVEN_IF_LEADER_IS_ALIVE,
-      consensus::Consensus::EXTERNAL_REQUEST);
+      consensus::Consensus::ELECT_EVEN_IF_LEADER_IS_ALIVE);
   if (PREDICT_FALSE(!s.ok())) {
     SetupErrorAndRespond(resp->mutable_error(), s,
                          TabletServerErrorPB::UNKNOWN_ERROR,
@@ -937,7 +867,7 @@ void ConsensusServiceImpl::RunLeaderElection(const RunLeaderElectionRequestPB* r
 void ConsensusServiceImpl::LeaderStepDown(const LeaderStepDownRequestPB* req,
                                           LeaderStepDownResponsePB* resp,
                                           RpcContext* context) {
-  DVLOG(3) << "Received Leader stepdown RPC: " << SecureDebugString(*req);
+  DVLOG(3) << "Received Leader stepdown RPC: " << req->DebugString();
   if (!CheckUuidMatchOrRespond(tablet_manager_, "LeaderStepDown", req, resp, context)) {
     return;
   }
@@ -961,7 +891,7 @@ void ConsensusServiceImpl::LeaderStepDown(const LeaderStepDownRequestPB* req,
 void ConsensusServiceImpl::GetLastOpId(const consensus::GetLastOpIdRequestPB *req,
                                        consensus::GetLastOpIdResponsePB *resp,
                                        rpc::RpcContext *context) {
-  DVLOG(3) << "Received GetLastOpId RPC: " << SecureDebugString(*req);
+  DVLOG(3) << "Received GetLastOpId RPC: " << req->DebugString();
   if (!CheckUuidMatchOrRespond(tablet_manager_, "GetLastOpId", req, resp, context)) {
     return;
   }
@@ -978,12 +908,7 @@ void ConsensusServiceImpl::GetLastOpId(const consensus::GetLastOpIdRequestPB *re
   }
   scoped_refptr<Consensus> consensus;
   if (!GetConsensusOrRespond(tablet_peer, resp, context, &consensus)) return;
-  if (PREDICT_FALSE(req->opid_type() == consensus::UNKNOWN_OPID_TYPE)) {
-    HandleUnknownError(Status::InvalidArgument("Invalid opid_type specified to GetLastOpId()"),
-                       resp, context);
-    return;
-  }
-  Status s = consensus->GetLastOpId(req->opid_type(), resp->mutable_opid());
+  Status s = consensus->GetLastReceivedOpId(resp->mutable_opid());
   if (PREDICT_FALSE(!s.ok())) {
     SetupErrorAndRespond(resp->mutable_error(), s,
                          TabletServerErrorPB::UNKNOWN_ERROR,
@@ -996,7 +921,7 @@ void ConsensusServiceImpl::GetLastOpId(const consensus::GetLastOpIdRequestPB *re
 void ConsensusServiceImpl::GetConsensusState(const consensus::GetConsensusStateRequestPB *req,
                                              consensus::GetConsensusStateResponsePB *resp,
                                              rpc::RpcContext *context) {
-  DVLOG(3) << "Received GetConsensusState RPC: " << SecureDebugString(*req);
+  DVLOG(3) << "Received GetConsensusState RPC: " << req->DebugString();
   if (!CheckUuidMatchOrRespond(tablet_manager_, "GetConsensusState", req, resp, context)) {
     return;
   }
@@ -1019,20 +944,20 @@ void ConsensusServiceImpl::GetConsensusState(const consensus::GetConsensusStateR
   context->RespondSuccess();
 }
 
-void ConsensusServiceImpl::StartTabletCopy(const StartTabletCopyRequestPB* req,
-                                           StartTabletCopyResponsePB* resp,
-                                           rpc::RpcContext* context) {
-  if (!CheckUuidMatchOrRespond(tablet_manager_, "StartTabletCopy", req, resp, context)) {
+void ConsensusServiceImpl::StartRemoteBootstrap(const StartRemoteBootstrapRequestPB* req,
+                                                StartRemoteBootstrapResponsePB* resp,
+                                                rpc::RpcContext* context) {
+  if (!CheckUuidMatchOrRespond(tablet_manager_, "StartRemoteBootstrap", req, resp, context)) {
     return;
   }
-  auto response_callback = [context, resp](const Status& s, TabletServerErrorPB::Code error_code) {
-    if (!s.ok()) {
-      SetupErrorAndRespond(resp->mutable_error(), s, error_code, context);
-      return;
-    }
-    context->RespondSuccess();
-  };
-  tablet_manager_->StartTabletCopy(req, response_callback);
+  Status s = tablet_manager_->StartRemoteBootstrap(*req);
+  if (!s.ok()) {
+    SetupErrorAndRespond(resp->mutable_error(), s,
+                         TabletServerErrorPB::UNKNOWN_ERROR,
+                         context);
+    return;
+  }
+  context->RespondSuccess();
 }
 
 void TabletServiceImpl::ScannerKeepAlive(const ScannerKeepAliveRequestPB *req,
@@ -1041,23 +966,15 @@ void TabletServiceImpl::ScannerKeepAlive(const ScannerKeepAliveRequestPB *req,
   DCHECK(req->has_scanner_id());
   SharedScanner scanner;
   if (!server_->scanner_manager()->LookupScanner(req->scanner_id(), &scanner)) {
-    resp->mutable_error()->set_code(TabletServerErrorPB::SCANNER_EXPIRED);
-    StatusToPB(Status::NotFound("Scanner not found"), resp->mutable_error()->mutable_status());
-    context->RespondSuccess();
-    return;
+      resp->mutable_error()->set_code(TabletServerErrorPB::SCANNER_EXPIRED);
+      StatusToPB(Status::NotFound("Scanner not found"),
+                 resp->mutable_error()->mutable_status());
+      return;
   }
   scanner->UpdateAccessTime();
   context->RespondSuccess();
 }
 
-namespace {
-void SetResourceMetrics(ResourceMetricsPB* metrics, rpc::RpcContext* context) {
-  metrics->set_cfile_cache_miss_bytes(
-    context->trace()->metrics()->GetMetric(cfile::CFILE_CACHE_MISS_BYTES_METRIC_NAME));
-  metrics->set_cfile_cache_hit_bytes(
-    context->trace()->metrics()->GetMetric(cfile::CFILE_CACHE_HIT_BYTES_METRIC_NAME));
-}
-} // anonymous namespace
 
 void TabletServiceImpl::Scan(const ScanRequestPB* req,
                              ScanResponsePB* resp,
@@ -1079,7 +996,7 @@ void TabletServiceImpl::Scan(const ScanRequestPB* req,
   ScanResultCopier collector(&data, rows_data.get(), indirect_data.get());
 
   bool has_more_results = false;
-  TabletServerErrorPB::Code error_code = TabletServerErrorPB::UNKNOWN_ERROR;
+  TabletServerErrorPB::Code error_code;
   if (req->has_new_scan_request()) {
     const NewScanRequestPB& scan_pb = req->new_scan_request();
     scoped_refptr<TabletPeer> tablet_peer;
@@ -1124,14 +1041,14 @@ void TabletServiceImpl::Scan(const ScanRequestPB* req,
     // Add sidecar data to context and record the returned indices.
     int rows_idx;
     CHECK_OK(context->AddRpcSidecar(make_gscoped_ptr(
-        new rpc::RpcSidecar(std::move(rows_data))), &rows_idx));
+        new rpc::RpcSidecar(rows_data.Pass())), &rows_idx));
     resp->mutable_data()->set_rows_sidecar(rows_idx);
 
     // Add indirect data as a sidecar, if applicable.
     if (indirect_data->size() > 0) {
       int indirect_idx;
       CHECK_OK(context->AddRpcSidecar(make_gscoped_ptr(
-          new rpc::RpcSidecar(std::move(indirect_data))), &indirect_idx));
+          new rpc::RpcSidecar(indirect_data.Pass())), &indirect_idx));
       resp->mutable_data()->set_indirect_data_sidecar(indirect_idx);
     }
 
@@ -1143,8 +1060,7 @@ void TabletServiceImpl::Scan(const ScanRequestPB* req,
       resp->set_last_primary_key(last.ToString());
     }
   }
-  resp->set_propagated_timestamp(server_->clock()->Now().ToUint64());
-  SetResourceMetrics(resp->mutable_resource_metrics(), context);
+
   context->RespondSuccess();
 }
 
@@ -1157,12 +1073,9 @@ void TabletServiceImpl::ListTablets(const ListTabletsRequestPB* req,
   for (const scoped_refptr<TabletPeer>& peer : peers) {
     StatusAndSchemaPB* status = peer_status->Add();
     peer->GetTabletStatusPB(status->mutable_tablet_status());
-
-    if (req->need_schema_info()) {
-      CHECK_OK(SchemaToPB(peer->tablet_metadata()->schema(),
-                          status->mutable_schema()));
-      peer->tablet_metadata()->partition_schema().ToPB(status->mutable_partition_schema());
-    }
+    CHECK_OK(SchemaToPB(peer->status_listener()->schema(),
+                        status->mutable_schema()));
+    peer->tablet_metadata()->partition_schema().ToPB(status->mutable_partition_schema());
   }
   context->RespondSuccess();
 }
@@ -1170,7 +1083,7 @@ void TabletServiceImpl::ListTablets(const ListTabletsRequestPB* req,
 void TabletServiceImpl::Checksum(const ChecksumRequestPB* req,
                                  ChecksumResponsePB* resp,
                                  rpc::RpcContext* context) {
-  VLOG(1) << "Full request: " << SecureDebugString(*req);
+  VLOG(1) << "Full request: " << req->DebugString();
 
   // Validate the request: user must pass a new_scan_request or
   // a scanner ID, but not both.
@@ -1229,13 +1142,8 @@ void TabletServiceImpl::Checksum(const ChecksumRequestPB* req,
 
   resp->set_checksum(collector.agg_checksum());
   resp->set_has_more_results(has_more);
-  SetResourceMetrics(resp->mutable_resource_metrics(), context);
-  resp->set_rows_checksummed(collector.rows_checksummed());
-  context->RespondSuccess();
-}
 
-bool TabletServiceImpl::SupportsFeature(uint32_t feature) const {
-  return feature == TabletServerFeatures::COLUMN_PREDICATES;
+  context->RespondSuccess();
 }
 
 void TabletServiceImpl::Shutdown() {
@@ -1328,31 +1236,15 @@ static Status SetupScanSpec(const NewScanRequestPB& scan_pb,
 
   unordered_set<string> missing_col_names;
 
-  // First the column predicates.
-  for (const ColumnPredicatePB& pred_pb : scan_pb.column_predicates()) {
-    boost::optional<ColumnPredicate> predicate;
-    RETURN_NOT_OK(ColumnPredicateFromPB(tablet_schema, scanner->arena(), pred_pb, &predicate));
-
-    if (projection.find_column(predicate->column().name()) == Schema::kColumnNotFound &&
-        !ContainsKey(missing_col_names, predicate->column().name())) {
-      InsertOrDie(&missing_col_names, predicate->column().name());
-      missing_cols->push_back(predicate->column());
-    }
-
-    ret->AddPredicate(std::move(*predicate));
-  }
-
-  // Then the column range predicates.
-  // TODO: remove this once all clients have moved to ColumnPredicatePB and
-  // backwards compatibility can be broken.
-  for (const ColumnRangePredicatePB& pred_pb : scan_pb.deprecated_range_predicates()) {
-    if (!pred_pb.has_lower_bound() && !pred_pb.has_inclusive_upper_bound()) {
+  // First the column range predicates.
+  for (const ColumnRangePredicatePB& pred_pb : scan_pb.range_predicates()) {
+    if (!pred_pb.has_lower_bound() && !pred_pb.has_upper_bound()) {
       return Status::InvalidArgument(
-        string("Invalid predicate ") + SecureShortDebugString(pred_pb) +
+        string("Invalid predicate ") + pred_pb.ShortDebugString() +
         ": has no lower or upper bound.");
     }
     ColumnSchema col(ColumnSchemaFromPB(pred_pb.column()));
-    if (projection.find_column(col.name()) == Schema::kColumnNotFound &&
+    if (projection.find_column(col.name()) == -1 &&
         !ContainsKey(missing_col_names, col.name())) {
       missing_cols->push_back(col);
       InsertOrDie(&missing_col_names, col.name());
@@ -1366,23 +1258,24 @@ static Status SetupScanSpec(const NewScanRequestPB& scan_pb,
                                           scanner->arena(),
                                           &val));
       lower_bound = val;
+    } else {
+      lower_bound = nullptr;
     }
-    if (pred_pb.has_inclusive_upper_bound()) {
+    if (pred_pb.has_upper_bound()) {
       const void* val;
-      RETURN_NOT_OK(ExtractPredicateValue(col, pred_pb.inclusive_upper_bound(),
+      RETURN_NOT_OK(ExtractPredicateValue(col, pred_pb.upper_bound(),
                                           scanner->arena(),
                                           &val));
       upper_bound = val;
+    } else {
+      upper_bound = nullptr;
     }
 
-    auto pred = ColumnPredicate::InclusiveRange(col, lower_bound, upper_bound, scanner->arena());
-    if (pred) {
-      if (VLOG_IS_ON(3)) {
-        VLOG(3) << "Parsed predicate " << pred->ToString()
-                << " from " << SecureShortDebugString(scan_pb);
-      }
-      ret->AddPredicate(*pred);
+    ColumnRangePredicate pred(col, lower_bound, upper_bound);
+    if (VLOG_IS_ON(3)) {
+      VLOG(3) << "Parsed predicate " << pred.ToString() << " from " << scan_pb.ShortDebugString();
     }
+    ret->AddPredicate(pred);
   }
 
   // When doing an ordered scan, we need to include the key columns to be able to encode
@@ -1404,26 +1297,6 @@ static Status SetupScanSpec(const NewScanRequestPB& scan_pb,
   spec->swap(ret);
   return Status::OK();
 }
-
-namespace {
-// Checks if 'timestamp' is before the 'tablet's AHM if this is a READ_AT_SNAPSHOT scan.
-// Returns Status::OK() if it's not or Status::InvalidArgument() if it is.
-Status VerifyNotAncientHistory(Tablet* tablet, ReadMode read_mode, Timestamp timestamp) {
-  tablet::HistoryGcOpts history_gc_opts = tablet->GetHistoryGcOpts();
-  if (read_mode == READ_AT_SNAPSHOT && history_gc_opts.IsAncientHistory(timestamp)) {
-    return Status::InvalidArgument(
-        Substitute("Snapshot timestamp is earlier than the ancient history mark. Consider "
-                       "increasing the value of the configuration parameter "
-                       "--tablet_history_max_age_sec. Snapshot timestamp: $0 "
-                       "Ancient History Mark: $1 Physical time difference: $2",
-                   tablet->clock()->Stringify(timestamp),
-                   tablet->clock()->Stringify(history_gc_opts.ancient_history_mark()),
-                   tablet->clock()->GetPhysicalComponentDifference(
-                       timestamp, history_gc_opts.ancient_history_mark()).ToString()));
-  }
-  return Status::OK();
-}
-} // anonymous namespace
 
 // Start a new scan.
 Status TabletServiceImpl::HandleNewScanRequest(TabletPeer* tablet_peer,
@@ -1487,19 +1360,9 @@ Status TabletServiceImpl::HandleNewScanRequest(TabletPeer* tablet_peer,
     return s;
   }
 
-  VLOG(3) << "Before optimizing scan spec: " << spec->ToString(tablet_schema);
-  spec->OptimizeScan(tablet_schema, scanner->arena(), scanner->autorelease_pool(), true);
-  VLOG(3) << "After optimizing scan spec: " << spec->ToString(tablet_schema);
-
-  if (spec->CanShortCircuit()) {
-    VLOG(1) << "short-circuiting without creating a server-side scanner.";
-    *has_more_results = false;
-    return Status::OK();
-  }
-
   // Store the original projection.
   gscoped_ptr<Schema> orig_projection(new Schema(projection));
-  scanner->set_client_projection_schema(std::move(orig_projection));
+  scanner->set_client_projection_schema(orig_projection.Pass());
 
   // Build a new projection with the projection columns and the missing columns. Make
   // sure to set whether the column is a key column appropriately.
@@ -1534,29 +1397,14 @@ Status TabletServiceImpl::HandleNewScanRequest(TabletPeer* tablet_peer,
         break;
       }
       case READ_AT_SNAPSHOT: {
-        s = HandleScanAtSnapshot(scan_pb, rpc_context, projection, tablet_peer,
-                                 &iter, snap_timestamp);
-        // If we got a Status::ServiceUnavailable() from HandleScanAtSnapshot() it might
-        // mean we're just behind so let the client try again.
-        if (s.IsServiceUnavailable()) {
-          *error_code = TabletServerErrorPB::THROTTLED;
-          return s;
-        }
-
+        s = HandleScanAtSnapshot(scan_pb, rpc_context, projection, tablet, &iter, snap_timestamp);
         if (!s.ok()) {
           tmp_error_code = TabletServerErrorPB::INVALID_SNAPSHOT;
         }
-        break;
       }
-        TRACE("Iterator created");
+      TRACE("Iterator created");
     }
   }
-
-  // Make a copy of the optimized spec before it's passed to the iterator.
-  // This copy will be given to the Scanner so it can report its predicates to
-  // /scans. The copy is necessary because the original spec will be modified
-  // as its predicates are pushed into lower-level iterators.
-  gscoped_ptr<ScanSpec> orig_spec(new ScanSpec(*spec));
 
   if (PREDICT_TRUE(s.ok())) {
     TRACE_EVENT0("tserver", "iter->Init");
@@ -1572,36 +1420,8 @@ Status TabletServiceImpl::HandleNewScanRequest(TabletPeer* tablet_peer,
     *error_code = tmp_error_code;
     return s;
   } else if (PREDICT_FALSE(!s.ok())) {
-    LOG(WARNING) << "Error setting up scanner with request " << SecureShortDebugString(*req);
+    LOG(WARNING) << "Error setting up scanner with request " << req->ShortDebugString();
     *error_code = TabletServerErrorPB::UNKNOWN_ERROR;
-    return s;
-  }
-
-  // If this is a snapshot scan and the user specified a specific timestamp to
-  // scan at, then check that we are not attempting to scan at a time earlier
-  // than the ancient history mark. Only perform this check if tablet history
-  // GC is enabled.
-  //
-  // TODO: This validation essentially prohibits scans with READ_AT_SNAPSHOT
-  // when history_max_age is set to zero. There is a tablet history GC related
-  // race when the history max age is set to very low, or zero. Imagine a case
-  // where a scan was started and READ_AT_SNAPSHOT was specified without
-  // specifying a snapshot timestamp, and --tablet_history_max_age_sec=0. The
-  // above code path will select the latest timestamp (under a lock) prior to
-  // calling RowIterator::Init(), which actually opens the blocks. That means
-  // that there is an opportunity in between those two calls for tablet history
-  // GC to kick in and delete some history. In fact, we may easily not actually
-  // end up with a valid snapshot in that case. It would be more correct to
-  // initialize the row iterator and then select the latest timestamp
-  // represented by those open files in that case.
-  //
-  // Now that we have initialized our row iterator at a snapshot, return an
-  // error if the snapshot timestamp was prior to the ancient history mark.
-  // We have to check after we open the iterator in order to avoid a TOCTOU
-  // error.
-  s = VerifyNotAncientHistory(tablet.get(), scan_pb.read_mode(), *snap_timestamp);
-  if (!s.ok()) {
-    *error_code = TabletServerErrorPB::INVALID_SNAPSHOT;
     return s;
   }
 
@@ -1613,7 +1433,7 @@ Status TabletServiceImpl::HandleNewScanRequest(TabletPeer* tablet_peer,
     return Status::OK();
   }
 
-  scanner->Init(std::move(iter), std::move(orig_spec));
+  scanner->Init(iter.Pass(), spec.Pass());
   unreg_scanner.Cancel();
   *scanner_id = scanner->id();
 
@@ -1665,7 +1485,7 @@ Status TabletServiceImpl::HandleContinueScanRequest(const ScanRequestPB* req,
   ScopedUnregisterScanner unreg_scanner(server_->scanner_manager(), scanner->id());
 
   VLOG(2) << "Found existing scanner " << scanner->id() << " for request: "
-          << SecureShortDebugString(*req);
+          << req->ShortDebugString();
   TRACE("Found scanner $0", scanner->id());
 
   if (batch_size_bytes == 0 && req->close_scanner()) {
@@ -1692,7 +1512,8 @@ Status TabletServiceImpl::HandleContinueScanRequest(const ScanRequestPB* req,
   // TODO: in the future, use the client timeout to set a budget. For now,
   // just use a half second, which should be plenty to amortize call overhead.
   int budget_ms = 500;
-  MonoTime deadline = MonoTime::Now() + MonoDelta::FromMilliseconds(budget_ms);
+  MonoTime deadline = MonoTime::Now(MonoTime::COARSE);
+  deadline.AddDelta(MonoDelta::FromMilliseconds(budget_ms));
 
   int64_t rows_scanned = 0;
   while (iter->HasNext()) {
@@ -1702,8 +1523,7 @@ Status TabletServiceImpl::HandleContinueScanRequest(const ScanRequestPB* req,
 
     Status s = iter->NextBlock(&block);
     if (PREDICT_FALSE(!s.ok())) {
-      LOG(WARNING) << "Copying rows from internal iterator for request "
-                   << SecureShortDebugString(*req);
+      LOG(WARNING) << "Copying rows from internal iterator for request " << req->ShortDebugString();
       *error_code = TabletServerErrorPB::UNKNOWN_ERROR;
       return s;
     }
@@ -1724,7 +1544,8 @@ Status TabletServiceImpl::HandleContinueScanRequest(const ScanRequestPB* req,
     }
 
     // TODO: should check if RPC got cancelled, once we implement RPC cancellation.
-    if (PREDICT_FALSE(MonoTime::Now() >= deadline)) {
+    MonoTime now = MonoTime::Now(MonoTime::COARSE);
+    if (PREDICT_FALSE(!now.ComesBefore(deadline))) {
       TRACE("Deadline expired - responding early");
       break;
     }
@@ -1734,30 +1555,18 @@ Status TabletServiceImpl::HandleContinueScanRequest(const ScanRequestPB* req,
     }
   }
 
+  // Update metrics based on this scan request.
   scoped_refptr<TabletPeer> tablet_peer = scanner->tablet_peer();
   shared_ptr<Tablet> tablet;
-  TabletServerErrorPB::Code tablet_ref_error_code;
-  const Status s = GetTabletRef(tablet_peer, &tablet, &tablet_ref_error_code);
-  // If the tablet is not running, but the scan operation in progress
-  // has reached this point, the tablet server has the necessary data to
-  // send in response for the scan continuation request.
-  if (PREDICT_FALSE(!s.ok() && tablet_ref_error_code !=
-                        TabletServerErrorPB::TABLET_NOT_RUNNING)) {
-    *error_code = tablet_ref_error_code;
-    return s;
-  }
+  RETURN_NOT_OK(GetTabletRef(tablet_peer, &tablet, error_code));
 
-  // Update metrics based on this scan request.
-  if (tablet) {
-    // First, the number of rows/cells/bytes actually returned to the user.
-    tablet->metrics()->scanner_rows_returned->IncrementBy(
-        result_collector->NumRowsReturned());
-    tablet->metrics()->scanner_cells_returned->IncrementBy(
-        result_collector->NumRowsReturned() *
-            scanner->client_projection_schema()->num_columns());
-    tablet->metrics()->scanner_bytes_returned->IncrementBy(
-        result_collector->ResponseSize());
-  }
+  // First, the number of rows/cells/bytes actually returned to the user.
+  tablet->metrics()->scanner_rows_returned->IncrementBy(
+      result_collector->NumRowsReturned());
+  tablet->metrics()->scanner_cells_returned->IncrementBy(
+      result_collector->NumRowsReturned() * scanner->client_projection_schema()->num_columns());
+  tablet->metrics()->scanner_bytes_returned->IncrementBy(
+      result_collector->ResponseSize());
 
   // Then the number of rows/cells/bytes actually processed. Here we have to dig
   // into the per-column iterator stats, sum them up, and then subtract out the
@@ -1772,14 +1581,12 @@ Status TabletServiceImpl::HandleContinueScanRequest(const ScanRequestPB* req,
   delta_stats.SubtractStats(scanner->already_reported_stats());
   scanner->set_already_reported_stats(total_stats);
 
-  if (tablet) {
-    tablet->metrics()->scanner_rows_scanned->IncrementBy(
-        rows_scanned);
-    tablet->metrics()->scanner_cells_scanned_from_disk->IncrementBy(
-        delta_stats.cells_read_from_disk);
-    tablet->metrics()->scanner_bytes_scanned_from_disk->IncrementBy(
-        delta_stats.bytes_read_from_disk);
-  }
+  tablet->metrics()->scanner_rows_scanned->IncrementBy(
+      rows_scanned);
+  tablet->metrics()->scanner_cells_scanned_from_disk->IncrementBy(
+      delta_stats.cells_read_from_disk);
+  tablet->metrics()->scanner_bytes_scanned_from_disk->IncrementBy(
+      delta_stats.bytes_read_from_disk);
 
   scanner->UpdateAccessTime();
   *has_more_results = !req->close_scanner() && iter->HasNext();
@@ -1792,25 +1599,16 @@ Status TabletServiceImpl::HandleContinueScanRequest(const ScanRequestPB* req,
   return Status::OK();
 }
 
-namespace {
-// Helper to clamp a client deadline for a scan to the max supported by the server.
-MonoTime ClampScanDeadlineForWait(const MonoTime& deadline, bool* was_clamped) {
-  MonoTime now = MonoTime::Now();
-  if (deadline.GetDeltaSince(now).ToMilliseconds() > FLAGS_scanner_max_wait_ms) {
-    *was_clamped = true;
-    return now + MonoDelta::FromMilliseconds(FLAGS_scanner_max_wait_ms);
-  }
-  *was_clamped = false;
-  return deadline;
-}
-} // anonymous namespace
-
 Status TabletServiceImpl::HandleScanAtSnapshot(const NewScanRequestPB& scan_pb,
                                                const RpcContext* rpc_context,
                                                const Schema& projection,
-                                               TabletPeer* tablet_peer,
+                                               const shared_ptr<Tablet>& tablet,
                                                gscoped_ptr<RowwiseIterator>* iter,
                                                Timestamp* snap_timestamp) {
+
+  // TODO check against the earliest boundary (i.e. how early can we go) right
+  // now we're keeping all undos/redos forever!
+
   // If the client sent a timestamp update our clock with it.
   if (scan_pb.has_propagated_timestamp()) {
     Timestamp propagated_timestamp(scan_pb.propagated_timestamp());
@@ -1831,19 +1629,14 @@ Status TabletServiceImpl::HandleScanAtSnapshot(const NewScanRequestPB& scan_pb,
   // ... else we use the client provided one, but make sure it is not too far
   // in the future as to be invalid.
   } else {
-
+    tmp_snap_timestamp.FromUint64(scan_pb.snap_timestamp());
     Timestamp max_allowed_ts;
     Status s = server_->clock()->GetGlobalLatest(&max_allowed_ts);
-    if (s.IsNotSupported() &&
-        PREDICT_TRUE(!FLAGS_scanner_allow_snapshot_scans_with_logical_timestamps)) {
+    if (!s.ok()) {
       return Status::NotSupported("Snapshot scans not supported on this server",
                                   s.ToString());
     }
-    tmp_snap_timestamp.FromUint64(scan_pb.snap_timestamp());
-
-    // Note: if 'max_allowed_ts' is not obtained from clock_->GetGlobalLatest() it's guaranteed
-    // to be higher than 'tmp_snap_timestamp'.
-    if (tmp_snap_timestamp > max_allowed_ts) {
+    if (tmp_snap_timestamp.CompareTo(max_allowed_ts) > 0) {
       return Status::InvalidArgument(
           Substitute("Snapshot time $0 in the future. Max allowed timestamp is $1",
                      server_->clock()->Stringify(tmp_snap_timestamp),
@@ -1851,60 +1644,45 @@ Status TabletServiceImpl::HandleScanAtSnapshot(const NewScanRequestPB& scan_pb,
     }
   }
 
-  // Before we wait on anything check that the timestamp is after the AHM.
-  // This is not the final check. We'll check this again after the iterators are open but
-  // there is no point in waiting if we can't actually scan afterwards.
-  RETURN_NOT_OK(VerifyNotAncientHistory(tablet_peer->tablet(),
-                                        ReadMode::READ_AT_SNAPSHOT,
-                                        tmp_snap_timestamp));
-
   tablet::MvccSnapshot snap;
-  Tablet* tablet = tablet_peer->tablet();
-  scoped_refptr<consensus::TimeManager> time_manager = tablet_peer->time_manager();
-  tablet::MvccManager* mvcc_manager = tablet->mvcc_manager();
 
-  // Reduce the client's deadline by a few msecs to allow for overhead.
-  MonoTime client_deadline = rpc_context->GetClientDeadline() - MonoDelta::FromMilliseconds(10);
+  // Wait for the in-flights in the snapshot to be finished.
+  // We'll use the client-provided deadline, but not if it's more than 5 seconds from
+  // now -- it's better to make the client retry than hold RPC threads busy.
+  //
+  // TODO(KUDU-1127): even this may not be sufficient -- perhaps we should check how long it
+  // has been since the MVCC manager was able to advance its safe time. If it has been
+  // a long time, it's likely that the majority of voters for this tablet are down
+  // and some writes are "stuck" and therefore won't be committed.
+  MonoTime client_deadline = rpc_context->GetClientDeadline();
+  // Subtract a little bit from the client deadline so that it's more likely we actually
+  // have time to send our response sent back before it times out.
+  client_deadline.AddDelta(MonoDelta::FromMilliseconds(-10));
 
-  // Its not good for the tablet server or for the client if we hang here forever. The tablet
-  // server will have one less available thread and the client might be stuck spending all
-  // of the allotted time for the scan on a partitioned server that will never have a consistent
-  // snapshot at 'snap_timestamp'.
-  // Because of this we clamp the client's deadline to the max. configured. If the client
-  // sets a long timeout then it can use it by trying in other servers.
-  bool was_clamped = false;
-  MonoTime final_deadline = ClampScanDeadlineForWait(client_deadline, &was_clamped);
-
-  // Wait for the tablet to know that 'snap_timestamp' is safe. I.e. that all operations
-  // that came before it are, at least, started. This, together with waiting for the mvcc
-  // snapshot to be clean below, allows us to always return the same data when scanning at
-  // the same timestamp (repeatable reads).
-  TRACE("Waiting safe time to advance");
-  MonoTime before = MonoTime::Now();
-  Status s = time_manager->WaitUntilSafe(tmp_snap_timestamp, final_deadline);
-
-  if (s.ok()) {
-    // Wait for the in-flights in the snapshot to be finished.
-    TRACE("Waiting for operations to commit");
-    s = mvcc_manager->WaitForSnapshotWithAllCommitted(tmp_snap_timestamp, &snap, client_deadline);
+  MonoTime deadline = MonoTime::Now(MonoTime::FINE);
+  deadline.AddDelta(MonoDelta::FromSeconds(5));
+  if (client_deadline.ComesBefore(deadline)) {
+    deadline = client_deadline;
   }
 
-  // If we got an TimeOut but we had clamped the deadline, return a ServiceUnavailable instead
-  // so that the client retries.
-  if (s.IsTimedOut() && was_clamped) {
-    return Status::ServiceUnavailable(s.CloneAndPrepend(
-        "could not wait for desired snapshot timestamp to be consistent").ToString());
-  }
-  RETURN_NOT_OK(s);
+  TRACE("Waiting for operations in snapshot to commit");
+  MonoTime before = MonoTime::Now(MonoTime::FINE);
+  RETURN_NOT_OK_PREPEND(
+      tablet->mvcc_manager()->WaitForCleanSnapshotAtTimestamp(
+          tmp_snap_timestamp, &snap, deadline),
+      "could not wait for desired snapshot timestamp to be consistent");
 
-  uint64_t duration_usec = (MonoTime::Now() - before).ToMicroseconds();
+  uint64_t duration_usec = MonoTime::Now(MonoTime::FINE).GetDeltaSince(before).ToMicroseconds();
   tablet->metrics()->snapshot_read_inflight_wait_duration->Increment(duration_usec);
   TRACE("All operations in snapshot committed. Waited for $0 microseconds", duration_usec);
 
-  if (scan_pb.order_mode() == UNKNOWN_ORDER_MODE) {
-    return Status::InvalidArgument("Unknown order mode specified");
+  tablet::Tablet::OrderMode order;
+  switch (scan_pb.order_mode()) {
+    case UNORDERED: order = tablet::Tablet::UNORDERED; break;
+    case ORDERED: order = tablet::Tablet::ORDERED; break;
+    default: LOG(FATAL) << "Unexpected order mode.";
   }
-  RETURN_NOT_OK(tablet->NewRowIterator(projection, snap, scan_pb.order_mode(), iter));
+  RETURN_NOT_OK(tablet->NewRowIterator(projection, snap, order, iter));
   *snap_timestamp = tmp_snap_timestamp;
   return Status::OK();
 }

@@ -27,7 +27,7 @@ namespace client {
 class KuduError::Data {
  public:
   Data(gscoped_ptr<KuduWriteOperation> failed_op, const Status& error);
-  ~Data() = default;
+  ~Data();
 
   gscoped_ptr<KuduWriteOperation> failed_op_;
   Status status_;

@@ -63,11 +63,6 @@ namespace kudu {
   kudu::sw_internal::LogTiming VARNAME_LINENUM(_log_timing)(__FILE__, __LINE__, \
       google::severity, "", description, -1, true);
 
-// Scoped version of LOG_SLOW_EXECUTION().
-#define SCOPED_LOG_SLOW_EXECUTION(severity, max_expected_millis, description) \
-  kudu::sw_internal::LogTiming VARNAME_LINENUM(_log_timing)(__FILE__, __LINE__, \
-      google::severity, "", description, max_expected_millis, true)
-
 // Scoped version of LOG_SLOW_EXECUTION() but with a prefix.
 #define SCOPED_LOG_SLOW_EXECUTION_PREFIX(severity, max_expected_millis, prefix, description) \
   kudu::sw_internal::LogTiming VARNAME_LINENUM(_log_timing)(__FILE__, __LINE__, \
@@ -112,9 +107,8 @@ struct CpuTimes {
   nanosecond_type wall;
   nanosecond_type user;
   nanosecond_type system;
-  int64_t context_switches;
 
-  void clear() { wall = user = system = context_switches = 0LL; }
+  void clear() { wall = user = system = 0LL; }
 
   // Return a string formatted similar to the output of the "time" shell command.
   std::string ToString() const {
@@ -144,16 +138,11 @@ struct CpuTimes {
 //
 // Wall clock time is based on a monotonic timer, so can be reliably used for
 // determining durations.
-// CPU time is based on either current thread's usage or the usage of the whole
-// process, depending on the value of 'Mode' passed to the constructor.
+// CPU time is based on the current thread's usage (not the whole process).
 //
 // The implementation relies on several syscalls, so should not be used for
 // hot paths, but is useful for timing anything on the granularity of seconds
 // or more.
-//
-// NOTE: the user time reported by this class is based on Linux scheduler ticks
-// and thus has low precision. Use GetThreadCpuTimeMicros() from walltime.h if
-// more accurate per-thread CPU usage timing is required.
 class Stopwatch {
  public:
 
@@ -189,7 +178,6 @@ class Stopwatch {
     times_.wall = current.wall - times_.wall;
     times_.user = current.user - times_.user;
     times_.system = current.system - times_.system;
-    times_.context_switches = current.context_switches - times_.context_switches;
   }
 
   // Return the elapsed amount of time. If the stopwatch is running, then returns
@@ -204,7 +192,6 @@ class Stopwatch {
     current.wall -= times_.wall;
     current.user -= times_.user;
     current.system -= times_.system;
-    current.context_switches -= times_.context_switches;
     return current;
   }
 
@@ -226,7 +213,6 @@ class Stopwatch {
     times_.wall   -= current.wall;
     times_.user   -= current.user;
     times_.system -= current.system;
-    times_.context_switches -= current.context_switches;
   }
 
   bool is_stopped() const {
@@ -262,9 +248,8 @@ class Stopwatch {
     CHECK_EQ(0, clock_gettime(CLOCK_MONOTONIC, &wall));
 #endif  // defined(__APPLE__)
     times->wall   = wall.tv_sec * 1000000000L + wall.tv_nsec;
-    times->user   = usage.ru_utime.tv_sec * 1000000000L + usage.ru_utime.tv_usec * 1000L;
-    times->system = usage.ru_stime.tv_sec * 1000000000L + usage.ru_stime.tv_usec * 1000L;
-    times->context_switches = usage.ru_nvcsw + usage.ru_nivcsw;
+    times->user   = usage.ru_utime.tv_sec * 1000000000L + usage.ru_utime.tv_usec * 1000;
+    times->system = usage.ru_stime.tv_sec * 1000000000L + usage.ru_stime.tv_usec * 1000;
   }
 
   bool stopped_;

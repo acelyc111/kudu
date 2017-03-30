@@ -16,8 +16,6 @@
 // under the License.
 #include "kudu/consensus/consensus_meta.h"
 
-#include <memory>
-
 #include "kudu/consensus/log_util.h"
 #include "kudu/consensus/metadata.pb.h"
 #include "kudu/consensus/opid_util.h"
@@ -32,7 +30,6 @@ namespace kudu {
 namespace consensus {
 
 using std::string;
-using std::unique_ptr;
 using strings::Substitute;
 
 Status ConsensusMetadata::Create(FsManager* fs_manager,
@@ -40,8 +37,8 @@ Status ConsensusMetadata::Create(FsManager* fs_manager,
                                  const std::string& peer_uuid,
                                  const RaftConfigPB& config,
                                  int64_t current_term,
-                                 unique_ptr<ConsensusMetadata>* cmeta_out) {
-  unique_ptr<ConsensusMetadata> cmeta(new ConsensusMetadata(fs_manager, tablet_id, peer_uuid));
+                                 gscoped_ptr<ConsensusMetadata>* cmeta_out) {
+  gscoped_ptr<ConsensusMetadata> cmeta(new ConsensusMetadata(fs_manager, tablet_id, peer_uuid));
   cmeta->set_committed_config(config);
   cmeta->set_current_term(current_term);
   RETURN_NOT_OK(cmeta->Flush());
@@ -52,8 +49,8 @@ Status ConsensusMetadata::Create(FsManager* fs_manager,
 Status ConsensusMetadata::Load(FsManager* fs_manager,
                                const std::string& tablet_id,
                                const std::string& peer_uuid,
-                               unique_ptr<ConsensusMetadata>* cmeta_out) {
-  unique_ptr<ConsensusMetadata> cmeta(new ConsensusMetadata(fs_manager, tablet_id, peer_uuid));
+                               gscoped_ptr<ConsensusMetadata>* cmeta_out) {
+  gscoped_ptr<ConsensusMetadata> cmeta(new ConsensusMetadata(fs_manager, tablet_id, peer_uuid));
   RETURN_NOT_OK(pb_util::ReadPBContainerFromPath(fs_manager->env(),
                                                  fs_manager->GetConsensusMetadataPath(tablet_id),
                                                  &cmeta->pb_));
@@ -68,7 +65,6 @@ Status ConsensusMetadata::DeleteOnDiskData(FsManager* fs_manager, const string& 
   if (!env->FileExists(cmeta_path)) {
     return Status::OK();
   }
-  LOG(INFO) << "T " << tablet_id << " Deleting consensus metadata";
   RETURN_NOT_OK_PREPEND(env->DeleteFile(cmeta_path),
                         "Unable to delete consensus metadata file for tablet " + tablet_id);
   return Status::OK();
@@ -187,8 +183,6 @@ void ConsensusMetadata::MergeCommittedConsensusStatePB(const ConsensusStatePB& c
 
 Status ConsensusMetadata::Flush() {
   SCOPED_LOG_SLOW_EXECUTION_PREFIX(WARNING, 500, LogPrefix(), "flushing consensus metadata");
-
-  flush_count_for_tests_++;
   // Sanity test to ensure we never write out a bad configuration.
   RETURN_NOT_OK_PREPEND(VerifyRaftConfig(pb_.committed_config(), COMMITTED_QUORUM),
                         "Invalid config in ConsensusMetadata, cannot flush to disk");
@@ -225,8 +219,7 @@ ConsensusMetadata::ConsensusMetadata(FsManager* fs_manager,
     : fs_manager_(CHECK_NOTNULL(fs_manager)),
       tablet_id_(std::move(tablet_id)),
       peer_uuid_(std::move(peer_uuid)),
-      has_pending_config_(false),
-      flush_count_for_tests_(0) {}
+      has_pending_config_(false) {}
 
 std::string ConsensusMetadata::LogPrefix() const {
   return Substitute("T $0 P $1: ", tablet_id_, peer_uuid_);
@@ -236,7 +229,7 @@ void ConsensusMetadata::UpdateActiveRole() {
   ConsensusStatePB cstate = ToConsensusStatePB(CONSENSUS_CONFIG_ACTIVE);
   active_role_ = GetConsensusRole(peer_uuid_, cstate);
   VLOG_WITH_PREFIX(1) << "Updating active role to " << RaftPeerPB::Role_Name(active_role_)
-                      << ". Consensus state: " << SecureShortDebugString(cstate);
+                      << ". Consensus state: " << cstate.ShortDebugString();
 }
 
 } // namespace consensus

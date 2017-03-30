@@ -52,7 +52,7 @@ class AlterSchemaTransactionState : public TransactionState {
   }
 
   const tserver::AlterSchemaRequestPB* request() const OVERRIDE { return request_; }
-  tserver::AlterSchemaResponsePB* response() const OVERRIDE { return response_; }
+  tserver::AlterSchemaResponsePB* response() OVERRIDE { return response_; }
 
   void set_schema(const Schema* schema) { schema_ = schema; }
   const Schema* schema() const { return schema_; }
@@ -102,8 +102,7 @@ class AlterSchemaTransactionState : public TransactionState {
 // Executes the alter schema transaction,.
 class AlterSchemaTransaction : public Transaction {
  public:
-  AlterSchemaTransaction(std::unique_ptr<AlterSchemaTransactionState> tx_state,
-                         consensus::DriverType type);
+  AlterSchemaTransaction(AlterSchemaTransactionState* tx_state, consensus::DriverType type);
 
   virtual AlterSchemaTransactionState* state() OVERRIDE { return state_.get(); }
   virtual const AlterSchemaTransactionState* state() const OVERRIDE { return state_.get(); }
@@ -128,7 +127,7 @@ class AlterSchemaTransaction : public Transaction {
   virtual std::string ToString() const OVERRIDE;
 
  private:
-  std::unique_ptr<AlterSchemaTransactionState> state_;
+  gscoped_ptr<AlterSchemaTransactionState> state_;
   DISALLOW_COPY_AND_ASSIGN(AlterSchemaTransaction);
 };
 

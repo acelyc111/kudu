@@ -17,11 +17,9 @@
 #ifndef KUDU_UTIL_SUBPROCESS_H
 #define KUDU_UTIL_SUBPROCESS_H
 
-#include <map>
+#include <glog/logging.h>
 #include <string>
 #include <vector>
-
-#include <glog/logging.h>
 
 #include "kudu/gutil/macros.h"
 #include "kudu/util/status.h"
@@ -60,19 +58,9 @@ class Subprocess {
   void ShareParentStdout(bool share = true) { SetFdShared(STDOUT_FILENO, share); }
   void ShareParentStderr(bool share = true) { SetFdShared(STDERR_FILENO, share); }
 
-  // Add environment variables to be set before executing the subprocess.
-  //
-  // These environment variables are merged into the existing environment
-  // of the parent process. In other words, there is no need to prime this
-  // map with the current environment; instead, just specify any variables
-  // that should be overridden.
-  //
-  // Repeated calls to this function replace earlier calls.
-  void SetEnvVars(std::map<std::string, std::string> env);
-
   // Start the subprocess. Can only be called once.
   //
-  // This returns a bad Status if the fork() fails. However,
+  // Thie returns a bad Status if the fork() fails. However,
   // note that if the executable path was incorrect such that
   // exec() fails, this will still return Status::OK. You must
   // use Wait() to check for failure.
@@ -84,7 +72,7 @@ class Subprocess {
   // NOTE: unlike the standard wait(2) call, this may be called multiple
   // times. If the process has exited, it will repeatedly return the same
   // exit code.
-  Status Wait(int* wait_status = nullptr);
+  Status Wait(int* ret) { return DoWait(ret, 0); }
 
   // Like the above, but does not block. This returns Status::TimedOut
   // immediately if the child has not exited. Otherwise returns Status::OK
@@ -93,16 +81,12 @@ class Subprocess {
   // NOTE: unlike the standard wait(2) call, this may be called multiple
   // times. If the process has exited, it will repeatedly return the same
   // exit code.
-  Status WaitNoBlock(int* wait_status = nullptr);
+  Status WaitNoBlock(int* ret) { return DoWait(ret, WNOHANG); }
 
   // Send a signal to the subprocess.
   // Note that this does not reap the process -- you must still Wait()
   // in order to reap it. Only call after starting.
   Status Kill(int signal);
-
-  // Retrieve exit status of the process awaited by Wait() and/or WaitNoBlock()
-  // methods. Must be called only after calling Wait()/WaitNoBlock().
-  Status GetExitStatus(int* exit_status, std::string* info_str = nullptr) const;
 
   // Helper method that creates a Subprocess, issues a Start() then a Wait().
   // Expects a blank-separated list of arguments, with the first being the
@@ -113,16 +97,12 @@ class Subprocess {
 
   // Same as above, but accepts a vector that includes the path to the
   // executable as argv[0] and the arguments to the program in argv[1..n].
-  //
-  // Writes the value of 'stdin_in' to the subprocess' stdin. The length of
-  // 'stdin_in' should be limited to 64kib.
-  //
-  // Also collects the output from the child process stdout and stderr into
-  // 'stdout_out' and 'stderr_out' respectively.
+  static Status Call(const std::vector<std::string>& argv);
+
+  // Same as above, but collects the output from the child process stdout into
+  // 'stdout_out'.
   static Status Call(const std::vector<std::string>& argv,
-                     const std::string& stdin_in = "",
-                     std::string* stdout_out = nullptr,
-                     std::string* stderr_out = nullptr);
+                     std::string* stdout_out);
 
   // Return the pipe fd to the child's standard stream.
   // Stream should not be disabled or shared.
@@ -141,30 +121,29 @@ class Subprocess {
   pid_t pid() const;
 
  private:
+  void SetFdShared(int stdfd, bool share);
+  int CheckAndOffer(int stdfd) const;
+  int ReleaseChildFd(int stdfd);
+  Status DoWait(int* ret, int options);
+
+  enum StreamMode {SHARED, DISABLED, PIPED};
+
+  std::string program_;
+  std::vector<std::string> argv_;
+
   enum State {
     kNotStarted,
     kRunning,
     kExited
   };
-  enum StreamMode {SHARED, DISABLED, PIPED};
-  enum WaitMode {BLOCKING, NON_BLOCKING};
-
-  Status DoWait(int* wait_status, WaitMode mode);
-  void SetFdShared(int stdfd, bool share);
-  int CheckAndOffer(int stdfd) const;
-  int ReleaseChildFd(int stdfd);
-
-  std::string program_;
-  std::vector<std::string> argv_;
-  std::map<std::string, std::string> env_;
   State state_;
   int child_pid_;
   enum StreamMode fd_state_[3];
   int child_fds_[3];
 
-  // The cached wait status if Wait()/WaitNoBlock() has been called.
+  // The cached exit result code if Wait() has been called.
   // Only valid if state_ == kExited.
-  int wait_status_;
+  int cached_rc_;
 
   DISALLOW_COPY_AND_ASSIGN(Subprocess);
 };

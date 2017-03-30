@@ -15,15 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <string>
-#include <vector>
-
 #include <gtest/gtest.h>
 
 #include "kudu/util/path_util.h"
-
-using std::string;
-using std::vector;
 
 namespace kudu {
 
@@ -62,16 +56,6 @@ TEST(TestPathUtil, DirNameTest) {
   ASSERT_EQ("/", DirName("/ab"));
   ASSERT_EQ("/", DirName("/ab///"));
   ASSERT_EQ("/ab", DirName("/ab/cd"));
-}
-
-TEST(TestPathUtil, SplitPathTest) {
-  typedef vector<string> Vec;
-  ASSERT_EQ(Vec({"/"}), SplitPath("/"));
-  ASSERT_EQ(Vec({"/", "a", "b"}), SplitPath("/a/b"));
-  ASSERT_EQ(Vec({"/", "a", "b"}), SplitPath("/a/b/"));
-  ASSERT_EQ(Vec({"a", "b"}), SplitPath("a/b"));
-  ASSERT_EQ(Vec({"."}), SplitPath("."));
-  ASSERT_EQ(Vec(), SplitPath(""));
 }
 
 } // namespace kudu

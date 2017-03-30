@@ -22,131 +22,125 @@
 
 #include "kudu/rpc/outbound_call.h"
 #include "kudu/rpc/inbound_call.h"
-#include "kudu/rpc/remote_user.h"
-#include "kudu/rpc/result_tracker.h"
 #include "kudu/rpc/rpc_sidecar.h"
 #include "kudu/rpc/service_if.h"
 #include "kudu/util/hdr_histogram.h"
 #include "kudu/util/metrics.h"
-#include "kudu/util/pb_util.h"
 #include "kudu/util/trace.h"
+#include "kudu/util/debug/trace_event.h"
+#include "kudu/util/jsonwriter.h"
+#include "kudu/util/pb_util.h"
 
 using google::protobuf::Message;
 
 namespace kudu {
 namespace rpc {
 
+namespace {
+
+// Wrapper for a protobuf message which lazily converts to JSON when
+// the trace buffer is dumped. This pushes the work of stringification
+// to the trace dumping process.
+class PbTracer : public debug::ConvertableToTraceFormat {
+ public:
+  enum {
+    kMaxFieldLengthToTrace = 100
+  };
+
+  explicit PbTracer(const Message& msg) : msg_(msg.New()) {
+    msg_->CopyFrom(msg);
+  }
+
+  virtual void AppendAsTraceFormat(std::string* out) const OVERRIDE {
+    pb_util::TruncateFields(msg_.get(), kMaxFieldLengthToTrace);
+    std::stringstream ss;
+    JsonWriter jw(&ss, JsonWriter::COMPACT);
+    jw.Protobuf(*msg_);
+    out->append(ss.str());
+  }
+ private:
+  const gscoped_ptr<Message> msg_;
+};
+
+scoped_refptr<debug::ConvertableToTraceFormat> TracePb(const Message& msg) {
+  return make_scoped_refptr(new PbTracer(msg));
+}
+} // anonymous namespace
+
 RpcContext::RpcContext(InboundCall *call,
                        const google::protobuf::Message *request_pb,
                        google::protobuf::Message *response_pb,
-                       const scoped_refptr<ResultTracker>& result_tracker)
+                       RpcMethodMetrics metrics)
   : call_(CHECK_NOTNULL(call)),
     request_pb_(request_pb),
     response_pb_(response_pb),
-    result_tracker_(result_tracker) {
+    metrics_(metrics) {
   VLOG(4) << call_->remote_method().service_name() << ": Received RPC request for "
-          << call_->ToString() << ":" << std::endl << SecureDebugString(*request_pb_);
+          << call_->ToString() << ":" << std::endl << request_pb_->DebugString();
   TRACE_EVENT_ASYNC_BEGIN2("rpc_call", "RPC", this,
                            "call", call_->ToString(),
-                           "request", pb_util::PbTracer::TracePb(*request_pb_));
+                           "request", TracePb(*request_pb_));
 }
 
 RpcContext::~RpcContext() {
 }
 
 void RpcContext::RespondSuccess() {
-  if (AreResultsTracked()) {
-    result_tracker_->RecordCompletionAndRespond(call_->header().request_id(),
-                                                response_pb_.get());
-  } else {
-    VLOG(4) << call_->remote_method().service_name() << ": Sending RPC success response for "
-        << call_->ToString() << ":" << std::endl << SecureDebugString(*response_pb_);
-    TRACE_EVENT_ASYNC_END2("rpc_call", "RPC", this,
-                           "response", pb_util::PbTracer::TracePb(*response_pb_),
-                           "trace", trace()->DumpToString());
-    call_->RespondSuccess(*response_pb_);
-    delete this;
-  }
-}
-
-void RpcContext::RespondNoCache() {
-  if (AreResultsTracked()) {
-    result_tracker_->FailAndRespond(call_->header().request_id(),
-                                    response_pb_.get());
-  } else {
-    VLOG(4) << call_->remote_method().service_name() << ": Sending RPC failure response for "
-        << call_->ToString() << ": " << SecureDebugString(*response_pb_);
-    TRACE_EVENT_ASYNC_END2("rpc_call", "RPC", this,
-                           "response", pb_util::PbTracer::TracePb(*response_pb_),
-                           "trace", trace()->DumpToString());
-    // This is a bit counter intuitive, but when we get the failure but set the error on the
-    // call's response we call RespondSuccess() instead of RespondFailure().
-    call_->RespondSuccess(*response_pb_);
-    delete this;
-  }
+  call_->RecordHandlingCompleted(metrics_.handler_latency);
+  VLOG(4) << call_->remote_method().service_name() << ": Sending RPC success response for "
+          << call_->ToString() << ":" << std::endl << response_pb_->DebugString();
+  TRACE_EVENT_ASYNC_END2("rpc_call", "RPC", this,
+                         "response", TracePb(*response_pb_),
+                         "trace", trace()->DumpToString(true));
+  call_->RespondSuccess(*response_pb_);
+  delete this;
 }
 
 void RpcContext::RespondFailure(const Status &status) {
-  if (AreResultsTracked()) {
-    result_tracker_->FailAndRespond(call_->header().request_id(),
-                                    ErrorStatusPB::ERROR_APPLICATION, status);
-  } else {
-    VLOG(4) << call_->remote_method().service_name() << ": Sending RPC failure response for "
-        << call_->ToString() << ": " << status.ToString();
-    TRACE_EVENT_ASYNC_END2("rpc_call", "RPC", this,
-                           "status", status.ToString(),
-                           "trace", trace()->DumpToString());
-    call_->RespondFailure(ErrorStatusPB::ERROR_APPLICATION, status);
-    delete this;
-  }
+  call_->RecordHandlingCompleted(metrics_.handler_latency);
+  VLOG(4) << call_->remote_method().service_name() << ": Sending RPC failure response for "
+          << call_->ToString() << ": " << status.ToString();
+  TRACE_EVENT_ASYNC_END2("rpc_call", "RPC", this,
+                         "status", status.ToString(),
+                         "trace", trace()->DumpToString(true));
+  call_->RespondFailure(ErrorStatusPB::ERROR_APPLICATION,
+                        status);
+  delete this;
 }
 
 void RpcContext::RespondRpcFailure(ErrorStatusPB_RpcErrorCodePB err, const Status& status) {
-  if (AreResultsTracked()) {
-    result_tracker_->FailAndRespond(call_->header().request_id(),
-                                    err, status);
-  } else {
-    VLOG(4) << call_->remote_method().service_name() << ": Sending RPC failure response for "
-        << call_->ToString() << ": " << status.ToString();
-    TRACE_EVENT_ASYNC_END2("rpc_call", "RPC", this,
-                           "status", status.ToString(),
-                           "trace", trace()->DumpToString());
-    call_->RespondFailure(err, status);
-    delete this;
-  }
+  call_->RecordHandlingCompleted(metrics_.handler_latency);
+  VLOG(4) << call_->remote_method().service_name() << ": Sending RPC failure response for "
+          << call_->ToString() << ": " << status.ToString();
+  TRACE_EVENT_ASYNC_END2("rpc_call", "RPC", this,
+                         "status", status.ToString(),
+                         "trace", trace()->DumpToString(true));
+  call_->RespondFailure(err, status);
+  delete this;
 }
 
 void RpcContext::RespondApplicationError(int error_ext_id, const std::string& message,
                                          const Message& app_error_pb) {
-  if (AreResultsTracked()) {
-    result_tracker_->FailAndRespond(call_->header().request_id(),
-                                    error_ext_id, message, app_error_pb);
-  } else {
-    if (VLOG_IS_ON(4)) {
-      ErrorStatusPB err;
-      InboundCall::ApplicationErrorToPB(error_ext_id, message, app_error_pb, &err);
-      VLOG(4) << call_->remote_method().service_name()
-          << ": Sending application error response for " << call_->ToString()
-          << ":" << std::endl << SecureDebugString(err);
-    }
+  call_->RecordHandlingCompleted(metrics_.handler_latency);
+  if (VLOG_IS_ON(4)) {
+    ErrorStatusPB err;
+    InboundCall::ApplicationErrorToPB(error_ext_id, message, app_error_pb, &err);
+    VLOG(4) << call_->remote_method().service_name() << ": Sending application error response for "
+            << call_->ToString() << ":" << std::endl << err.DebugString();
     TRACE_EVENT_ASYNC_END2("rpc_call", "RPC", this,
-                           "response", pb_util::PbTracer::TracePb(app_error_pb),
-                           "trace", trace()->DumpToString());
-    call_->RespondApplicationError(error_ext_id, message, app_error_pb);
-    delete this;
+                           "response", TracePb(app_error_pb),
+                           "trace", trace()->DumpToString(true));
   }
-}
-
-const rpc::RequestIdPB* RpcContext::request_id() const {
-  return call_->header().has_request_id() ? &call_->header().request_id() : nullptr;
+  call_->RespondApplicationError(error_ext_id, message, app_error_pb);
+  delete this;
 }
 
 Status RpcContext::AddRpcSidecar(gscoped_ptr<RpcSidecar> car, int* idx) {
-  return call_->AddRpcSidecar(std::move(car), idx);
+  return call_->AddRpcSidecar(car.Pass(), idx);
 }
 
-const RemoteUser& RpcContext::remote_user() const {
-  return call_->remote_user();
+const UserCredentials& RpcContext::user_credentials() const {
+  return call_->user_credentials();
 }
 
 const Sockaddr& RpcContext::remote_address() const {
@@ -154,16 +148,8 @@ const Sockaddr& RpcContext::remote_address() const {
 }
 
 std::string RpcContext::requestor_string() const {
-  return call_->remote_user().ToString() + " at " +
+  return call_->user_credentials().ToString() + " at " +
     call_->remote_address().ToString();
-}
-
-std::string RpcContext::method_name() const {
-  return call_->remote_method().method_name();
-}
-
-std::string RpcContext::service_name() const {
-  return call_->remote_method().service_name();
 }
 
 MonoTime RpcContext::GetClientDeadline() const {
@@ -181,7 +167,7 @@ void RpcContext::Panic(const char* filepath, int line_number, const string& mess
 #define MY_FATAL google::LogMessageFatal(filepath, line_number).stream()
 
   MY_ERROR << "Panic handling " << call_->ToString() << ": " << message;
-  MY_ERROR << "Request:\n" << SecureDebugString(*request_pb_);
+  MY_ERROR << "Request:\n" << request_pb_->DebugString();
   Trace* t = trace();
   if (t) {
     MY_ERROR << "RPC trace:";

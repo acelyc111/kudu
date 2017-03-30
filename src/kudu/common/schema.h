@@ -88,12 +88,6 @@ struct ColumnStorageAttributes {
       cfile_block_size(0) {
   }
 
-  ColumnStorageAttributes(EncodingType enc, CompressionType cmp)
-    : encoding(enc),
-      compression(cmp),
-      cfile_block_size(0) {
-  }
-
   string ToString() const;
 
   EncodingType encoding;
@@ -201,11 +195,6 @@ class ColumnSchema {
     return NULL;
   }
 
-  bool EqualsPhysicalType(const ColumnSchema& other) const {
-    return is_nullable_ == other.is_nullable_ &&
-           type_info()->physical_type() == other.type_info()->physical_type();
-  }
-
   bool EqualsType(const ColumnSchema &other) const {
     return is_nullable_ == other.is_nullable_ &&
            type_info()->type() == other.type_info()->type();
@@ -215,7 +204,7 @@ class ColumnSchema {
     if (!EqualsType(other) || this->name_ != other.name_)
       return false;
 
-    // For Key comparison checking the defaults doesn't make sense,
+    // For Key comparison checking the defauls doesn't make sense,
     // since we don't support them, for server vs user schema this comparison
     // will always fail, since the user does not specify the defaults.
     if (check_defaults) {
@@ -806,7 +795,7 @@ class Schema {
 //   Schema new_schema = builder.Build();
 class SchemaBuilder {
  public:
-  SchemaBuilder() { Reset(); }
+  explicit SchemaBuilder() { Reset(); }
   explicit SchemaBuilder(const Schema& schema) { Reset(schema); }
 
   void Reset();

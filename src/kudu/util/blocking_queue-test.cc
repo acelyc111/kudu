@@ -15,12 +15,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <boost/thread/thread.hpp>
 #include <glog/logging.h>
 #include <gtest/gtest.h>
-#include <map>
 #include <memory>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include "kudu/util/countdown_latch.h"
@@ -28,21 +27,20 @@
 
 using std::shared_ptr;
 using std::string;
-using std::thread;
 using std::vector;
 
 namespace kudu {
 
 BlockingQueue<int32_t> test1_queue(5);
 
-void InsertSomeThings() {
+void InsertSomeThings(void) {
   ASSERT_EQ(test1_queue.Put(1), QUEUE_SUCCESS);
   ASSERT_EQ(test1_queue.Put(2), QUEUE_SUCCESS);
   ASSERT_EQ(test1_queue.Put(3), QUEUE_SUCCESS);
 }
 
 TEST(BlockingQueueTest, Test1) {
-  thread inserter_thread(InsertSomeThings);
+  boost::thread inserter_thread(InsertSomeThings);
   int32_t i;
   ASSERT_TRUE(test1_queue.BlockingGet(&i));
   ASSERT_EQ(1, i);
@@ -50,7 +48,6 @@ TEST(BlockingQueueTest, Test1) {
   ASSERT_EQ(2, i);
   ASSERT_TRUE(test1_queue.BlockingGet(&i));
   ASSERT_EQ(3, i);
-  inserter_thread.join();
 }
 
 TEST(BlockingQueueTest, TestBlockingDrainTo) {
@@ -131,6 +128,8 @@ TEST(BlockingQueueTest, TestGscopedPtrMethods) {
 
 class MultiThreadTest {
  public:
+  typedef vector<shared_ptr<boost::thread> > thread_vec_t;
+
   MultiThreadTest()
    :  puts_(4),
       blocking_puts_(4),
@@ -169,14 +168,20 @@ class MultiThreadTest {
 
   void Run() {
     for (int i = 0; i < nthreads_; i++) {
-      threads_.emplace_back(&MultiThreadTest::InserterThread, this, i);
-      threads_.emplace_back(&MultiThreadTest::RemoverThread, this);
+      threads_.push_back(shared_ptr<boost::thread>(
+              new boost::thread(boost::bind(
+                &MultiThreadTest::InserterThread, this, i))));
+      threads_.push_back(shared_ptr<boost::thread>(
+              new boost::thread(boost::bind(
+                &MultiThreadTest::RemoverThread, this))));
     }
     // We add an extra thread to ensure that there aren't enough elements in
     // the queue to go around.  This way, we test removal after Shutdown.
-    threads_.emplace_back(&MultiThreadTest::RemoverThread, this);
-    for (auto& thread : threads_) {
-      thread.join();
+    threads_.push_back(shared_ptr<boost::thread>(
+            new boost::thread(boost::bind(
+              &MultiThreadTest::RemoverThread, this))));
+    for (const auto& thread : threads_) {
+      thread->join();
     }
     // Let's check to make sure we got what we should have.
     MutexLock guard(lock_);
@@ -196,7 +201,7 @@ class MultiThreadTest {
   BlockingQueue<int32_t> queue_;
   Mutex lock_;
   std::map<int32_t, int> gotten_;
-  vector<thread> threads_;
+  thread_vec_t threads_;
   int num_inserters_;
   CountDownLatch sync_latch_;
 };

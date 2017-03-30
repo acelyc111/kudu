@@ -18,7 +18,6 @@
 #ifndef KUDU_TABLET_WRITE_TRANSACTION_H_
 #define KUDU_TABLET_WRITE_TRANSACTION_H_
 
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -72,9 +71,8 @@ struct TabletComponents;
 // NOTE: this class isn't thread safe.
 class WriteTransactionState : public TransactionState {
  public:
-  WriteTransactionState(TabletPeer* tablet_peer,
-                        const tserver::WriteRequestPB *request,
-                        const rpc::RequestIdPB* request_id,
+  WriteTransactionState(TabletPeer* tablet_peer = NULL,
+                        const tserver::WriteRequestPB *request = NULL,
                         tserver::WriteResponsePB *response = NULL);
   virtual ~WriteTransactionState();
 
@@ -95,15 +93,16 @@ class WriteTransactionState : public TransactionState {
 
   // Returns the prepared response to the client that will be sent when this
   // transaction is completed, if this transaction was started by a client.
-  tserver::WriteResponsePB *response() const OVERRIDE {
+  tserver::WriteResponsePB *response() OVERRIDE {
     return response_;
   }
 
   // Set the MVCC transaction associated with this Write operation.
-  // This must be called exactly once, after the timestamp was acquired.
+  // This must be called exactly once, during the PREPARE phase just
+  // after the MvccManager has assigned a timestamp.
   // This also copies the timestamp from the MVCC transaction into the
   // WriteTransactionState object.
-  void SetMvccTx(gscoped_ptr<ScopedTransaction> mvcc_tx);
+  void SetMvccTxAndTimestamp(gscoped_ptr<ScopedTransaction> mvcc_tx);
 
   // Set the Tablet components that this transaction will write into.
   // Called exactly once at the beginning of Apply, before applying its
@@ -119,15 +118,14 @@ class WriteTransactionState : public TransactionState {
   // Release the already-acquired schema lock.
   void ReleaseSchemaLock();
 
-  void ReleaseMvccTxn(Transaction::TransactionResult result);
 
   void set_schema_at_decode_time(const Schema* schema) {
-    std::lock_guard<simple_spinlock> l(txn_state_lock_);
+    lock_guard<simple_spinlock> l(&txn_state_lock_);
     schema_at_decode_time_ = schema;
   }
 
   const Schema* schema_at_decode_time() const {
-    std::lock_guard<simple_spinlock> l(txn_state_lock_);
+    lock_guard<simple_spinlock> l(&txn_state_lock_);
     return schema_at_decode_time_;
   }
 
@@ -141,16 +139,21 @@ class WriteTransactionState : public TransactionState {
   // blocked on it).
   void StartApplying();
 
-  // Commits or aborts the MVCC transaction and releases all locks held.
+  // Commits the Mvcc transaction and releases the component lock. After
+  // this method is called all the inserts and mutations will become
+  // visible to other transactions.
   //
-  // In the case of COMMITTED, this method makes the inserts and mutations performed
-  // by this transaction visible to other transactions.
-  //
-  // Must be called exactly once.
+  // Only one of Commit() or Abort() should be called.
   // REQUIRES: StartApplying() was called.
   //
   // Note: request_ and response_ are set to NULL after this method returns.
-  void CommitOrAbort(Transaction::TransactionResult result);
+  void Commit();
+
+  // Aborts the mvcc transaction and releases the component lock.
+  // Only one of Commit() or Abort() should be called.
+  //
+  // REQUIRES: StartApplying() must never have been called.
+  void Abort();
 
   // Returns all the prepared row writes for this transaction. Usually called
   // on the apply phase to actually make changes to the tablet.
@@ -159,11 +162,14 @@ class WriteTransactionState : public TransactionState {
   }
 
   void swap_row_ops(std::vector<RowOp*>* new_ops) {
-    std::lock_guard<simple_spinlock> l(txn_state_lock_);
+    lock_guard<simple_spinlock> l(&txn_state_lock_);
     row_ops_.swap(*new_ops);
   }
 
   void UpdateMetricsForOp(const RowOp& op);
+
+  // Releases all the row locks acquired by this transaction.
+  void release_row_locks();
 
   // Resets this TransactionState, releasing all locks, destroying all prepared
   // writes, clearing the transaction result _and_ committing the current Mvcc
@@ -173,20 +179,13 @@ class WriteTransactionState : public TransactionState {
   virtual std::string ToString() const OVERRIDE;
 
  private:
-  // Releases all the row locks acquired by this transaction.
-  void ReleaseRowLocks();
-
   // Reset the RPC request, response, and row_ops_ (which refers to data
   // from the request).
   void ResetRpcFields();
 
-  // An owned version of the response, for follower transactions.
-  tserver::WriteResponsePB owned_response_;
-
-  // The lifecycle of these pointers request and response, is not managed by this class.
-  // These pointers are never null: 'request_' is always set on construction and 'response_' is
-  // either set to the response passed on the ctor, if there is one, or to point to
-  // 'owned_response_' if there isn't.
+  // pointers to the rpc context, request and response, lifecyle
+  // is managed by the rpc subsystem. These pointers maybe NULL if the
+  // transaction was not initiated by an RPC call.
   const tserver::WriteRequestPB* request_;
   tserver::WriteResponsePB* response_;
 
@@ -216,7 +215,7 @@ class WriteTransactionState : public TransactionState {
 // Executes a write transaction.
 class WriteTransaction : public Transaction {
  public:
-  WriteTransaction(std::unique_ptr<WriteTransactionState> tx_state, consensus::DriverType type);
+  WriteTransaction(WriteTransactionState* tx_state, consensus::DriverType type);
 
   virtual WriteTransactionState* state() OVERRIDE { return state_.get(); }
   virtual const WriteTransactionState* state() const OVERRIDE { return state_.get(); }
@@ -229,8 +228,6 @@ class WriteTransaction : public Transaction {
   // affected rows. This results in adding 'RowOp' objects for each of the operations
   // into the WriteTransactionState.
   virtual Status Prepare() OVERRIDE;
-
-  virtual void AbortPrepare() OVERRIDE;
 
   // Actually starts the Mvcc transaction and assigns a timestamp to this transaction.
   virtual Status Start() OVERRIDE;
@@ -255,6 +252,9 @@ class WriteTransaction : public Transaction {
   // algorithm.
   virtual Status Apply(gscoped_ptr<consensus::CommitMsg>* commit_msg) OVERRIDE;
 
+  // Releases the row locks (Early Lock Release).
+  virtual void PreCommit() OVERRIDE;
+
   // If result == COMMITTED, commits the mvcc transaction and updates
   // the metrics, if result == ABORTED aborts the mvcc transaction.
   virtual void Finish(TransactionResult result) OVERRIDE;
@@ -265,7 +265,7 @@ class WriteTransaction : public Transaction {
   // this transaction's start time
   MonoTime start_time_;
 
-  std::unique_ptr<WriteTransactionState> state_;
+  gscoped_ptr<WriteTransactionState> state_;
 
  private:
   DISALLOW_COPY_AND_ASSIGN(WriteTransaction);

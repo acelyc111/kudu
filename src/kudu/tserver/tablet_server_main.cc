@@ -23,7 +23,6 @@
 #include "kudu/util/flags.h"
 #include "kudu/util/init.h"
 #include "kudu/util/logging.h"
-#include "kudu/util/version_info.h"
 
 using kudu::tserver::TabletServer;
 
@@ -43,20 +42,12 @@ static int TabletServerMain(int argc, char** argv) {
   FLAGS_rpc_num_service_threads = 20;
   FLAGS_webserver_port = TabletServer::kDefaultWebPort;
 
-  GFlagsMap default_flags = GetFlagsMap();
-
   ParseCommandLineFlags(&argc, &argv, true);
   if (argc != 1) {
     std::cerr << "usage: " << argv[0] << std::endl;
     return 1;
   }
-  std::string nondefault_flags = GetNonDefaultFlags(default_flags);
   InitGoogleLoggingSafe(argv[0]);
-
-  LOG(INFO) << "Tablet server non-default flags:\n"
-            << nondefault_flags << '\n'
-            << "Tablet server version:\n"
-            << VersionInfo::GetAllVersionInfo();
 
   TabletServerOptions opts;
   TabletServer server(opts);

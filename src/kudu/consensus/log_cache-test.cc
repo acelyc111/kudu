@@ -53,7 +53,7 @@ class LogCacheTest : public KuduTest {
 
   virtual void SetUp() OVERRIDE {
     KuduTest::SetUp();
-    fs_manager_.reset(new FsManager(env_, GetTestPath("fs_root")));
+    fs_manager_.reset(new FsManager(env_.get(), GetTestPath("fs_root")));
     ASSERT_OK(fs_manager_->CreateInitialFileSystemLayout());
     ASSERT_OK(fs_manager_->Open());
     CHECK_OK(log::Log::Open(log::LogOptions(),
@@ -61,7 +61,7 @@ class LogCacheTest : public KuduTest {
                             kTestTablet,
                             schema_,
                             0, // schema_version
-                            nullptr,
+                            NULL,
                             &log_));
 
     CloseAndReopenCache(MinimumOpId());
@@ -74,6 +74,9 @@ class LogCacheTest : public KuduTest {
   }
 
   void CloseAndReopenCache(const OpId& preceding_id) {
+    // Blow away the memtrackers before creating the new cache.
+    cache_.reset();
+
     cache_.reset(new LogCache(metric_entity_,
                               log_.get(),
                               kPeerUuid,
@@ -169,12 +172,6 @@ TEST_F(LogCacheTest, TestAlwaysYieldsAtLeastOneMessage) {
   OpId preceding;
   ASSERT_OK(cache_->ReadOps(0, 100, &messages, &preceding));
   ASSERT_EQ(1, messages.size());
-
-  // Should yield one op also in the 'cache miss' case.
-  messages.clear();
-  cache_->EvictThroughOp(50);
-  ASSERT_OK(cache_->ReadOps(0, 100, &messages, &preceding));
-  ASSERT_EQ(1, messages.size());
 }
 
 // Tests that the cache returns Status::NotFound() if queried for messages after an
@@ -268,11 +265,6 @@ TEST_F(LogCacheTest, TestMemoryLimit) {
 }
 
 TEST_F(LogCacheTest, TestGlobalMemoryLimit) {
-  // Need to force the global cache memtracker to be destroyed before calling
-  // CloseAndreopenCache(), otherwise it'll just be reused instead of recreated
-  // with a new limit.
-  cache_.reset();
-
   FLAGS_global_log_cache_size_limit_mb = 4;
   CloseAndReopenCache(MinimumOpId());
 
@@ -294,7 +286,7 @@ TEST_F(LogCacheTest, TestGlobalMemoryLimit) {
 // consumption wasn't properly managed when messages were replaced.
 TEST_F(LogCacheTest, TestReplaceMessages) {
   const int kPayloadSize = 128 * 1024;
-  shared_ptr<MemTracker> tracker = cache_->tracker_;
+  shared_ptr<MemTracker> tracker = cache_->tracker_;;
   ASSERT_EQ(0, tracker->consumption());
 
   ASSERT_OK(AppendReplicateMessagesToCache(1, 1, kPayloadSize));
@@ -310,46 +302,6 @@ TEST_F(LogCacheTest, TestReplaceMessages) {
   EXPECT_EQ(Substitute("Pinned index: 2, LogCacheStats(num_ops=1, bytes=$0)",
                        size_with_one_msg),
             cache_->ToString());
-}
-
-// Test that the cache truncates any future messages when either explicitly
-// truncated or replacing any earlier message.
-TEST_F(LogCacheTest, TestTruncation) {
-  enum {
-    TRUNCATE_BY_APPEND,
-    TRUNCATE_EXPLICITLY
-  };
-
-  // Append 1 through 3.
-  AppendReplicateMessagesToCache(1, 3, 100);
-
-  for (auto mode : {TRUNCATE_BY_APPEND, TRUNCATE_EXPLICITLY}) {
-    SCOPED_TRACE(mode == TRUNCATE_BY_APPEND ? "by append" : "explicitly");
-    // Append messages 4 through 10.
-    AppendReplicateMessagesToCache(4, 7, 100);
-    ASSERT_EQ(10, cache_->metrics_.log_cache_num_ops->value());
-
-    switch (mode) {
-      case TRUNCATE_BY_APPEND:
-        AppendReplicateMessagesToCache(3, 1, 100);
-        break;
-      case TRUNCATE_EXPLICITLY:
-        cache_->TruncateOpsAfter(3);
-        break;
-    }
-
-    ASSERT_EQ(3, cache_->metrics_.log_cache_num_ops->value());
-
-    // Op 3 should still be in the cache.
-    OpId op;
-    ASSERT_OK(cache_->LookupOpId(3, &op));
-    ASSERT_TRUE(cache_->HasOpBeenWritten(3));
-
-    // Op 4 should have been removed.
-    Status s = cache_->LookupOpId(4, &op);
-    ASSERT_TRUE(s.IsIncomplete()) << "should be truncated, but got: " << s.ToString();
-    ASSERT_FALSE(cache_->HasOpBeenWritten(4));
-  }
 }
 
 } // namespace consensus

@@ -135,12 +135,14 @@ MonoTime TraceEventSyntheticDelay::CalculateEndTimeLocked(
     return MonoTime();
   else if (mode_ == ALTERNATING && trigger_count_++ % 2)
     return MonoTime();
-  return start_time + target_duration_;
+  MonoTime end = start_time;
+  end.AddDelta(target_duration_);
+  return end;
 }
 
 void TraceEventSyntheticDelay::ApplyDelay(const MonoTime& end_time) {
   TRACE_EVENT0("synthetic_delay", name_.c_str());
-  while (clock_->Now() < end_time) {
+  while (clock_->Now().ComesBefore(end_time)) {
     // Busy loop.
   }
 }
@@ -181,7 +183,7 @@ TraceEventSyntheticDelay* TraceEventSyntheticDelayRegistry::GetOrCreateDelay(
 }
 
 MonoTime TraceEventSyntheticDelayRegistry::Now() {
-  return MonoTime::Now();
+  return MonoTime::Now(MonoTime::FINE);
 }
 
 void TraceEventSyntheticDelayRegistry::ResetAllDelays() {

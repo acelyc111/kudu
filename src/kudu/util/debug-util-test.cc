@@ -23,7 +23,6 @@
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/util/countdown_latch.h"
 #include "kudu/util/debug-util.h"
-#include "kudu/util/scoped_cleanup.h"
 #include "kudu/util/test_util.h"
 #include "kudu/util/thread.h"
 
@@ -84,25 +83,24 @@ TEST_F(DebugUtilTest, TestSignalStackTrace) {
   CountDownLatch l(1);
   scoped_refptr<Thread> t;
   ASSERT_OK(Thread::Create("test", "test thread", &SleeperThread, &l, &t));
-  auto cleanup_thr = MakeScopedCleanup([&]() {
-      // Allow the thread to finish.
-      l.CountDown();
-      t->Join();
-    });
 
   // We have to loop a little bit because it takes a little while for the thread
   // to start up and actually call our function.
-  AssertEventually([&]() {
-      ASSERT_STR_CONTAINS(DumpThreadStack(t->tid()), "SleeperThread")
-    });
+  string stack;
+  for (int i = 0; i < 10000; i++) {
+    stack = DumpThreadStack(t->tid());
+    if (stack.find("SleeperThread") != string::npos) break;
+    SleepFor(MonoDelta::FromMicroseconds(100));
+  }
+  ASSERT_STR_CONTAINS(stack, "SleeperThread");
 
   // Test that we can change the signal and that the stack traces still work,
   // on the new signal.
-  ASSERT_FALSE(IsSignalHandlerRegistered(SIGHUP));
-  ASSERT_OK(SetStackTraceSignal(SIGHUP));
+  ASSERT_FALSE(IsSignalHandlerRegistered(SIGUSR1));
+  ASSERT_OK(SetStackTraceSignal(SIGUSR1));
 
   // Should now be registered.
-  ASSERT_TRUE(IsSignalHandlerRegistered(SIGHUP));
+  ASSERT_TRUE(IsSignalHandlerRegistered(SIGUSR1));
 
   // SIGUSR2 should be relinquished.
   ASSERT_FALSE(IsSignalHandlerRegistered(SIGUSR2));
@@ -113,23 +111,27 @@ TEST_F(DebugUtilTest, TestSignalStackTrace) {
   // Switch back to SIGUSR2 and ensure it changes back.
   ASSERT_OK(SetStackTraceSignal(SIGUSR2));
   ASSERT_TRUE(IsSignalHandlerRegistered(SIGUSR2));
-  ASSERT_FALSE(IsSignalHandlerRegistered(SIGHUP));
+  ASSERT_FALSE(IsSignalHandlerRegistered(SIGUSR1));
 
   // Stack traces should work using the new handler.
   ASSERT_STR_CONTAINS(DumpThreadStack(t->tid()), "SleeperThread");
 
-  // Register our own signal handler on SIGHUP, and ensure that
+  // Register our own signal handler on SIGUSR1, and ensure that
   // we get a bad Status if we try to use it.
-  signal(SIGHUP, &fake_signal_handler);
-  ASSERT_STR_CONTAINS(SetStackTraceSignal(SIGHUP).ToString(),
+  signal(SIGUSR1, &fake_signal_handler);
+  ASSERT_STR_CONTAINS(SetStackTraceSignal(SIGUSR1).ToString(),
                       "unable to install signal handler");
-  signal(SIGHUP, SIG_DFL);
+  signal(SIGUSR1, SIG_IGN);
 
   // Stack traces should be disabled
   ASSERT_STR_CONTAINS(DumpThreadStack(t->tid()), "unable to take thread stack");
 
   // Re-enable so that other tests pass.
   ASSERT_OK(SetStackTraceSignal(SIGUSR2));
+
+  // Allow the thread to finish.
+  l.CountDown();
+  t->Join();
 }
 
 // Test which dumps all known threads within this process.

@@ -24,21 +24,14 @@
 #include <string>
 
 #include "kudu/gutil/gscoped_ptr.h"
-#include "kudu/gutil/strings/split.h"
 
 #if defined(__APPLE__)
-#include <mutex>
+#include "kudu/util/locks.h"
 #endif // defined(__APPLE__)
 
 using std::string;
-using std::vector;
-using strings::SkipEmpty;
-using strings::Split;
 
 namespace kudu {
-
-const char kTmpInfix[] = ".kudutmp";
-const char kOldTmpInfix[] = ".tmp";
 
 std::string JoinPathSegments(const std::string &a,
                              const std::string &b) {
@@ -53,22 +46,11 @@ std::string JoinPathSegments(const std::string &a,
   }
 }
 
-vector<string> SplitPath(const string& path) {
-  if (path.empty()) return {};
-  vector<string> segments;
-  if (path[0] == '/') segments.push_back("/");
-  vector<StringPiece> pieces = Split(path, "/", SkipEmpty());
-  for (const StringPiece& piece : pieces) {
-    segments.emplace_back(piece.data(), piece.size());
-  }
-  return segments;
-}
-
 string DirName(const string& path) {
   gscoped_ptr<char[], FreeDeleter> path_copy(strdup(path.c_str()));
 #if defined(__APPLE__)
-  static std::mutex lock;
-  std::lock_guard<std::mutex> l(lock);
+  static Mutex lock;
+  lock_guard<Mutex> l(&lock);
 #endif // defined(__APPLE__)
   return ::dirname(path_copy.get());
 }

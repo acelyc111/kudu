@@ -20,7 +20,6 @@
 
 #include <memory>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 #include <llvm/IR/IRBuilder.h>
@@ -132,9 +131,10 @@ class ModuleBuilder {
   };
 
   void AddJITPromise(llvm::Function* llvm_f, FunctionAddress* actual_f);
-
-  // Returns the function names for the functions stored in the JITFutures.
-  std::unordered_set<std::string> GetFunctionNames() const;
+  // Returns a vector of the function names for the functions stored in the
+  // JITFutures. The pointers are valid so long as the futures_ vector's
+  // elements have valid llvm::Function* values.
+  std::vector<const char*> GetFunctionNames() const;
 
   MBState state_;
   std::vector<JITFuture> futures_;

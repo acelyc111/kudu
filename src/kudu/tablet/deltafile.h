@@ -17,7 +17,7 @@
 #ifndef KUDU_TABLET_DELTAFILE_H
 #define KUDU_TABLET_DELTAFILE_H
 
-#include <deque>
+#include <boost/ptr_container/ptr_deque.hpp>
 #include <memory>
 #include <string>
 #include <vector>
@@ -53,7 +53,7 @@ struct ApplyingVisitor;
 template<DeltaType Type>
 struct CollectingVisitor;
 template<DeltaType Type>
-struct LivenessVisitor;
+struct DeletingVisitor;
 
 class DeltaFileWriter {
  public:
@@ -65,13 +65,9 @@ class DeltaFileWriter {
   Status Start();
 
   // Closes the delta file, including the underlying writable block.
-  // Returns Status::Aborted() if no deltas were ever appended to this
-  // writer.
   Status Finish();
 
   // Closes the delta file, releasing the underlying block to 'closer'.
-  // Returns Status::Aborted() if no deltas were ever appended to this
-  // writer.
   Status FinishAndReleaseBlock(fs::ScopedWritableBlockCloser* closer);
 
   // Append a given delta to the file. This must be called in ascending order
@@ -80,7 +76,7 @@ class DeltaFileWriter {
   template<DeltaType Type>
   Status AppendDelta(const DeltaKey &key, const RowChangeList &delta);
 
-  void WriteDeltaStats(const DeltaStats& stats);
+  Status WriteDeltaStats(const DeltaStats& stats);
 
  private:
   Status DoAppendDelta(const DeltaKey &key, const RowChangeList &delta);
@@ -110,20 +106,20 @@ class DeltaFileReader : public DeltaStore,
   // Fully open a delta file using a previously opened block.
   //
   // After this call, the delta reader is safe for use.
-  static Status Open(gscoped_ptr<fs::ReadableBlock> block,
-                     DeltaType delta_type,
-                     cfile::ReaderOptions options,
-                     std::shared_ptr<DeltaFileReader>* reader_out);
+  static Status Open(gscoped_ptr<fs::ReadableBlock> file,
+                     const BlockId& block_id,
+                     std::shared_ptr<DeltaFileReader>* reader_out,
+                     DeltaType delta_type);
 
   // Lazily opens a delta file using a previously opened block. A lazy open
   // does not incur additional I/O, nor does it validate the contents of
   // the delta file.
   //
   // Init() must be called before using the file's stats.
-  static Status OpenNoInit(gscoped_ptr<fs::ReadableBlock> block,
-                           DeltaType delta_type,
-                           cfile::ReaderOptions options,
-                           std::shared_ptr<DeltaFileReader>* reader_out);
+  static Status OpenNoInit(gscoped_ptr<fs::ReadableBlock> file,
+                           const BlockId& block_id,
+                           std::shared_ptr<DeltaFileReader>* reader_out,
+                           DeltaType delta_type);
 
   virtual Status Init() OVERRIDE;
 
@@ -141,7 +137,7 @@ class DeltaFileReader : public DeltaStore,
 
   virtual uint64_t EstimateSize() const OVERRIDE;
 
-  const BlockId& block_id() const { return reader_->block_id(); }
+  const BlockId& block_id() const { return block_id_; }
 
   virtual const DeltaStats& delta_stats() const OVERRIDE {
     DCHECK(init_once_.initted());
@@ -149,20 +145,13 @@ class DeltaFileReader : public DeltaStore,
   }
 
   virtual std::string ToString() const OVERRIDE {
-    if (!init_once_.initted()) return reader_->ToString();
-    return strings::Substitute("$0 ($1)", reader_->ToString(), delta_stats_->ToString());
+    return reader_->ToString();
   }
 
   // Returns true if this delta file may include any deltas which need to be
   // applied when scanning the given snapshot, or if the file has not yet
   // been fully initialized.
   bool IsRelevantForSnapshot(const MvccSnapshot& snap) const;
-
-  // Clone this DeltaFileReader for testing and validation purposes (such as
-  // while in DEBUG mode). The resulting object will not be Initted().
-  Status CloneForDebugging(FsManager* fs_manager,
-                           const std::shared_ptr<MemTracker>& parent_mem_tracker,
-                           std::shared_ptr<DeltaFileReader>* out) const;
 
  private:
   friend class DeltaFileIterator;
@@ -173,7 +162,7 @@ class DeltaFileReader : public DeltaStore,
     return reader_;
   }
 
-  DeltaFileReader(gscoped_ptr<cfile::CFileReader> cf_reader,
+  DeltaFileReader(BlockId block_id, cfile::CFileReader *cf_reader,
                   DeltaType delta_type);
 
   // Callback used in 'init_once_' to initialize this delta file.
@@ -183,6 +172,8 @@ class DeltaFileReader : public DeltaStore,
 
   std::shared_ptr<cfile::CFileReader> reader_;
   gscoped_ptr<DeltaStats> delta_stats_;
+
+  const BlockId block_id_;
 
   // The type of this delta, i.e. UNDO or REDO.
   const DeltaType delta_type_;
@@ -207,7 +198,6 @@ class DeltaFileIterator : public DeltaIterator {
                                          Arena* arena) OVERRIDE;
   string ToString() const OVERRIDE;
   virtual bool HasNext() OVERRIDE;
-  bool MayHaveDeltas() override;
 
  private:
   friend class DeltaFileReader;
@@ -215,8 +205,8 @@ class DeltaFileIterator : public DeltaIterator {
   friend struct ApplyingVisitor<UNDO>;
   friend struct CollectingVisitor<REDO>;
   friend struct CollectingVisitor<UNDO>;
-  friend struct LivenessVisitor<REDO>;
-  friend struct LivenessVisitor<UNDO>;
+  friend struct DeletingVisitor<REDO>;
+  friend struct DeletingVisitor<UNDO>;
   friend struct FilterAndAppendVisitor;
 
   DISALLOW_COPY_AND_ASSIGN(DeltaFileIterator);
@@ -303,7 +293,7 @@ class DeltaFileIterator : public DeltaIterator {
 
   // After PrepareBatch(), the set of delta blocks in the delta file
   // which correspond to prepared_block_.
-  std::deque<std::unique_ptr<PreparedDeltaBlock>> delta_blocks_;
+  boost::ptr_deque<PreparedDeltaBlock> delta_blocks_;
 
   // Temporary buffer used in seeking.
   faststring tmp_buf_;

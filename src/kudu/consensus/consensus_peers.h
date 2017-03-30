@@ -55,47 +55,78 @@ class PeerMessageQueue;
 class VoteRequestPB;
 class VoteResponsePB;
 
-// A remote peer in consensus.
+// A peer in consensus (local or remote).
 //
-// Leaders use peers to update the remote replicas. Each peer
-// may have at most one outstanding request at a time. If a
-// request is signaled when there is already one outstanding,
-// the request will be generated once the outstanding one finishes.
+// Leaders use peers to update the local Log and remote replicas.
 //
 // Peers are owned by the consensus implementation and do not keep
-// state aside from the most recent request and response.
+// state aside from whether there are requests pending or if requests
+// are being processed.
 //
-// Peers are also responsible for sending periodic heartbeats
-// to assert liveness of the leader. The peer constructs a heartbeater
-// thread to trigger these heartbeats.
+// There are two external actions that trigger a state change:
 //
-// The actual request construction is delegated to a PeerMessageQueue
-// object, and performed on a thread pool (since it may do IO). When a
-// response is received, the peer updates the PeerMessageQueue
-// using PeerMessageQueue::ResponseFromPeer(...) on the same threadpool.
-class Peer : public std::enable_shared_from_this<Peer> {
+// SignalRequest(): Called by the consensus implementation, notifies
+// that the queue contains messages to be processed.
+//
+// ProcessResponse() Called a response from a peer is received.
+//
+// The following state diagrams describe what happens when a state
+// changing method is called.
+//
+//                        +
+//                        |
+//       SignalRequest()  |
+//                        |
+//                        |
+//                        v
+//              +------------------+
+//       +------+    processing ?  +-----+
+//       |      +------------------+     |
+//       |                               |
+//       | Yes                           | No
+//       |                               |
+//       v                               v
+//     return                      ProcessNextRequest()
+//                                 processing = true
+//                                 - get reqs. from queue
+//                                 - update peer async
+//                                 return
+//
+//                         +
+//                         |
+//      ProcessResponse()  |
+//      processing = false |
+//                         v
+//               +------------------+
+//        +------+   more pending?  +-----+
+//        |      +------------------+     |
+//        |                               |
+//        | Yes                           | No
+//        |                               |
+//        v                               v
+//  SignalRequest()                    return
+//
+class Peer {
  public:
-  // Initializes a peer and start sending periodic heartbeats.
+  // Initializes a peer and get its status.
   Status Init();
 
   // Signals that this peer has a new request to replicate/store.
-  // 'even_if_queue_empty' indicates whether the peer should force
+  // 'force_if_queue_empty' indicates whether the peer should force
   // send the request even if the queue is empty. This is used for
   // status-only requests.
-  Status SignalRequest(bool even_if_queue_empty = false);
+  Status SignalRequest(bool force_if_queue_empty = false);
 
   const RaftPeerPB& peer_pb() const { return peer_pb_; }
 
-  // Stop sending requests and periodic heartbeats.
-  //
-  // This does not block waiting on any current outstanding requests to finish.
-  // However, when they do finish, the results will be disregarded, so this
-  // is safe to call at any point.
-  //
-  // This method must be called before the Peer's associated ThreadPool
-  // is destructed. Once this method returns, it is safe to destruct
-  // the ThreadPool.
+  // Returns the PeerProxy if this is a remote peer or NULL if it
+  // isn't. Used for tests to fiddle with the proxy and emulate remote
+  // behavior.
+  PeerProxy* GetPeerProxyForTests();
+
   void Close();
+
+  void SetTermForTest(int term);
 
   ~Peer();
 
@@ -111,10 +142,10 @@ class Peer : public std::enable_shared_from_this<Peer> {
                               PeerMessageQueue* queue,
                               ThreadPool* thread_pool,
                               gscoped_ptr<PeerProxy> proxy,
-                              std::shared_ptr<Peer>* peer);
+                              gscoped_ptr<Peer>* peer);
 
  private:
-  Peer(const RaftPeerPB& peer_pb, std::string tablet_id, std::string leader_uuid,
+  Peer(const RaftPeerPB& peer, std::string tablet_id, std::string leader_uuid,
        gscoped_ptr<PeerProxy> proxy, PeerMessageQueue* queue,
        ThreadPool* thread_pool);
 
@@ -129,15 +160,15 @@ class Peer : public std::enable_shared_from_this<Peer> {
   // Run on 'thread_pool'. Does response handling that requires IO or may block.
   void DoProcessResponse();
 
-  // Fetch the desired tablet copy request from the queue and set up
-  // tc_request_ appropriately.
+  // Fetch the desired remote bootstrap request from the queue and send it
+  // to the peer. The callback goes to ProcessRemoteBootstrapResponse().
   //
-  // Returns a bad Status if tablet copy is disabled, or if the
+  // Returns a bad Status if remote bootstrap is disabled, or if the
   // request cannot be generated for some reason.
-  Status PrepareTabletCopyRequest();
+  Status SendRemoteBootstrapRequest();
 
-  // Handle RPC callback from initiating tablet copy.
-  void ProcessTabletCopyResponse();
+  // Handle RPC callback from initiating remote bootstrap.
+  void ProcessRemoteBootstrapResponse();
 
   // Signals there was an error sending the request to the peer.
   void ProcessResponseError(const Status& status);
@@ -160,9 +191,9 @@ class Peer : public std::enable_shared_from_this<Peer> {
   ConsensusRequestPB request_;
   ConsensusResponsePB response_;
 
-  // The latest tablet copy request and response.
-  StartTabletCopyRequestPB tc_request_;
-  StartTabletCopyResponsePB tc_response_;
+  // The latest remote bootstrap request and response.
+  StartRemoteBootstrapRequestPB rb_request_;
+  StartRemoteBootstrapResponsePB rb_response_;
 
   // Reference-counted pointers to any ReplicateMsgs which are in-flight to the peer. We
   // may have loaded these messages from the LogCache, in which case we are potentially
@@ -171,6 +202,13 @@ class Peer : public std::enable_shared_from_this<Peer> {
   std::vector<ReplicateRefPtr> replicate_msg_refs_;
 
   rpc::RpcController controller_;
+
+  // Held if there is an outstanding request.
+  // This is used in order to ensure that we only have a single request
+  // oustanding at a time, and to wait for the outstanding requests
+  // at Close().
+  Semaphore sem_;
+
 
   // Heartbeater for remote peer implementations.
   // This will send status only requests to the remote peers
@@ -181,12 +219,17 @@ class Peer : public std::enable_shared_from_this<Peer> {
   // Thread pool used to construct requests to this peer.
   ThreadPool* thread_pool_;
 
-  // lock that protects Peer state changes, initialization, etc.
-  mutable simple_spinlock peer_lock_;
-  bool request_pending_ = false;
-  bool closed_ = false;
-  bool has_sent_first_request_ = false;
+  enum State {
+    kPeerCreated,
+    kPeerStarted,
+    kPeerRunning,
+    kPeerClosed
+  };
 
+  // lock that protects Peer state changes, initialization, etc.
+  // Must not try to acquire sem_ while holding peer_lock_.
+  mutable simple_spinlock peer_lock_;
+  State state_;
 };
 
 // A proxy to another peer. Usually a thin wrapper around an rpc proxy but can
@@ -206,9 +249,9 @@ class PeerProxy {
                                          rpc::RpcController* controller,
                                          const rpc::ResponseCallback& callback) = 0;
 
-  // Instructs a peer to begin a tablet copy session.
-  virtual void StartTabletCopy(const StartTabletCopyRequestPB* request,
-                                    StartTabletCopyResponsePB* response,
+  // Instructs a peer to begin a remote bootstrap session.
+  virtual void StartRemoteBootstrap(const StartRemoteBootstrapRequestPB* request,
+                                    StartRemoteBootstrapResponsePB* response,
                                     rpc::RpcController* controller,
                                     const rpc::ResponseCallback& callback) {
     LOG(DFATAL) << "Not implemented";
@@ -244,8 +287,8 @@ class RpcPeerProxy : public PeerProxy {
                                          rpc::RpcController* controller,
                                          const rpc::ResponseCallback& callback) OVERRIDE;
 
-  virtual void StartTabletCopy(const StartTabletCopyRequestPB* request,
-                                    StartTabletCopyResponsePB* response,
+  virtual void StartRemoteBootstrap(const StartRemoteBootstrapRequestPB* request,
+                                    StartRemoteBootstrapResponsePB* response,
                                     rpc::RpcController* controller,
                                     const rpc::ResponseCallback& callback) OVERRIDE;
 

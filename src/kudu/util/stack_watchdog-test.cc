@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include "kudu/gutil/dynamic_annotations.h"
 #include "kudu/gutil/strings/join.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/util/stopwatch.h"
@@ -39,6 +40,8 @@ class StackWatchdogTest : public KuduTest {
   virtual void SetUp() OVERRIDE {
     KuduTest::SetUp();
     KernelStackWatchdog::GetInstance()->SaveLogsForTests(true);
+    ANNOTATE_BENIGN_RACE(&FLAGS_hung_task_check_interval_ms,
+                         "Integer flag change should be safe");
     FLAGS_hung_task_check_interval_ms = 10;
   }
 };

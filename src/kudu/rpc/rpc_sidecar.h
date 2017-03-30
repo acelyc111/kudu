@@ -52,7 +52,7 @@ namespace rpc {
 class RpcSidecar {
  public:
   // Generates a sidecar with the parameter faststring as its data.
-  explicit RpcSidecar(gscoped_ptr<faststring> data) : data_(std::move(data)) {}
+  explicit RpcSidecar(gscoped_ptr<faststring> data) : data_(data.Pass()) {}
 
   // Returns a Slice representation of the sidecar's data.
   Slice AsSlice() const { return *data_; }

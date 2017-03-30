@@ -85,8 +85,6 @@ class UpdateScanDeltaCompactionTest : public KuduTest {
     gscoped_ptr<KuduTableCreator> table_creator(client_->NewTableCreator());
     ASSERT_OK(table_creator->table_name(kTableName)
              .schema(&schema_)
-             .set_range_partition_columns({ "key" })
-             .num_replicas(1)
              .Create());
     ASSERT_OK(client_->OpenTable(kTableName, &table_));
   }
@@ -114,7 +112,7 @@ class UpdateScanDeltaCompactionTest : public KuduTest {
 
   void InitCluster() {
     // Start mini-cluster with 1 tserver.
-    cluster_.reset(new MiniCluster(env_, MiniClusterOptions()));
+    cluster_.reset(new MiniCluster(env_.get(), MiniClusterOptions()));
     ASSERT_OK(cluster_->Start());
     KuduClientBuilder client_builder;
     client_builder.add_master_server_addr(

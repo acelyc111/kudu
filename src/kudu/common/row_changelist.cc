@@ -43,15 +43,14 @@ string RowChangeList::ToString(const Schema &schema) const {
 
   if (decoder.is_delete()) {
     return string("DELETE");
-  }
-
-  string ret;
-  if (decoder.is_reinsert()) {
-    ret = "REINSERT ";
+  } else if (decoder.is_reinsert()) {
+    ConstContiguousRow row(&schema, decoder.remaining_);
+    return string("REINSERT ") + schema.DebugRow(row);
   } else {
     CHECK(decoder.is_update()) << "Unknown changelist type!";
-    ret = "SET ";
   }
+
+  string ret = "SET ";
 
   bool first = true;
   while (decoder.HasNext()) {
@@ -78,7 +77,7 @@ string RowChangeList::ToString(const Schema &schema) const {
       if (dec.null) {
         ret.append("NULL");
       } else {
-        ret.append(KUDU_REDACT(dec.raw_value.ToDebugString()));
+        ret.append(dec.raw_value.ToDebugString());
       }
     } else {
       // Known column.
@@ -96,19 +95,26 @@ string RowChangeList::ToString(const Schema &schema) const {
   return ret;
 }
 
+void RowChangeListEncoder::AddRawColumnUpdate(
+    int col_id, bool is_null, Slice new_val) {
+  if (type_ == RowChangeList::kUninitialized) {
+    SetType(RowChangeList::kUpdate);
+  } else {
+    DCHECK_EQ(RowChangeList::kUpdate, type_);
+  }
+
+  InlinePutVarint32(dst_, col_id);
+  if (is_null) {
+    dst_->push_back(0);
+  } else {
+    InlinePutVarint32(dst_, new_val.size() + 1);
+    dst_->append(new_val.data(), new_val.size());
+  }
+}
+
 void RowChangeListEncoder::AddColumnUpdate(const ColumnSchema& col_schema,
                                            int col_id,
                                            const void* cell_ptr) {
-  SetToUpdate();
-  EncodeColumnMutation(col_schema, col_id, cell_ptr);
-}
-
-void RowChangeListEncoder::EncodeColumnMutation(const ColumnSchema& col_schema,
-                                                int col_id,
-                                                const void* cell_ptr) {
-  DCHECK_NE(RowChangeList::kUninitialized, type_);
-  DCHECK(type_ == RowChangeList::kUpdate || type_ == RowChangeList::kReinsert);
-
   Slice val_slice;
   if (cell_ptr != nullptr) {
     if (col_schema.type_info()->physical_type() == BINARY) {
@@ -122,22 +128,7 @@ void RowChangeListEncoder::EncodeColumnMutation(const ColumnSchema& col_schema,
     DCHECK(col_schema.is_nullable());
   }
 
-  EncodeColumnMutationRaw(col_id, cell_ptr == nullptr, val_slice);
-}
-
-
-void RowChangeListEncoder::EncodeColumnMutationRaw(int col_id, bool is_null, Slice new_val) {
-  // The type must have been set beforehand.
-  DCHECK_NE(RowChangeList::kUninitialized, type_);
-  DCHECK(type_ == RowChangeList::kUpdate || type_ == RowChangeList::kReinsert);
-
-  InlinePutVarint32(dst_, col_id);
-  if (is_null) {
-    dst_->push_back(0);
-  } else {
-    InlinePutVarint32(dst_, new_val.size() + 1);
-    dst_->append(new_val.data(), new_val.size());
-  }
+  AddRawColumnUpdate(col_id, cell_ptr == nullptr, val_slice);
 }
 
 Status RowChangeListDecoder::Init() {
@@ -149,64 +140,74 @@ Status RowChangeListDecoder::Init() {
   if (PREDICT_FALSE(!was_valid || type_ == RowChangeList::kUninitialized)) {
     return Status::Corruption(Substitute("bad type enum value: $0 in $1",
                                          static_cast<int>(remaining_[0]),
-                                         KUDU_REDACT(remaining_.ToDebugString())));
+                                         remaining_.ToDebugString()));
   }
   if (PREDICT_FALSE(is_delete() && remaining_.size() != 1)) {
     return Status::Corruption("DELETE changelist too long",
-                              KUDU_REDACT(remaining_.ToDebugString()));
+                              remaining_.ToDebugString());
   }
 
   remaining_.remove_prefix(1);
-
-  // We should discard empty UPDATE RowChangeLists, so if after getting
-  // the type remaining_ is empty() return an error.
-  // Note that REINSERTs might have empty changelists when reinserting a row on a tablet that
-  // has only primary key columns.
-  if (is_update() && remaining_.empty()) {
-    return Status::Corruption("empty changelist - expected column updates");
-  }
   return Status::OK();
 }
 
-Status RowChangeListDecoder::ProjectChangeList(const DeltaProjector& projector,
-                                               const RowChangeList& src,
-                                               RowChangeListEncoder* out) {
+Status RowChangeListDecoder::GetReinsertedRowSlice(const Schema& schema, Slice* s) const {
+  DCHECK(is_reinsert());
+
+  int expected_size = ContiguousRowHelper::row_size(schema);
+  if (remaining_.size() != expected_size) {
+    return Status::Corruption(Substitute("REINSERT changelist wrong length (expected $0)",
+                                         expected_size,
+                                         remaining_.ToDebugString()));
+  }
+  *s = remaining_;
+  return Status::OK();
+}
+
+Status RowChangeListDecoder::ProjectUpdate(const DeltaProjector& projector,
+                                           const RowChangeList& src,
+                                           faststring *buf) {
   RowChangeListDecoder decoder(src);
   RETURN_NOT_OK(decoder.Init());
-  CHECK_EQ(DCHECK_NOTNULL(out)->type_, RowChangeList::kUninitialized);
 
+  buf->clear();
+  RowChangeListEncoder encoder(buf);
   if (decoder.is_delete()) {
-    out->SetToDelete();
-    return Status::OK();
-  }
+    encoder.SetToDelete();
+  } else if (decoder.is_reinsert()) {
+    Slice reinsert;
+    RETURN_NOT_OK(decoder.GetReinsertedRowSlice(*projector.delta_schema(), &reinsert));
 
-  DCHECK(decoder.is_reinsert() || decoder.is_update());
+    // ReInsert = MemStore Insert -> Delete -> (Re)Insert
+    ConstContiguousRow src_row = ConstContiguousRow(projector.delta_schema(),
+                                                    reinsert);
+    RowProjector row_projector(projector.delta_schema(), projector.projection());
+    size_t row_size = ContiguousRowHelper::row_size(*projector.projection());
+    uint8_t buffer[row_size];
+    ContiguousRow row(projector.projection(), buffer);
+    RETURN_NOT_OK(row_projector.Init());
+    RETURN_NOT_OK(row_projector.ProjectRowForRead(src_row, &row, static_cast<Arena*>(NULL)));
+    encoder.SetToReinsert(Slice(buffer, row_size));
+  } else if (decoder.is_update()) {
+    while (decoder.HasNext()) {
+      DecodedUpdate dec;
+      RETURN_NOT_OK(decoder.DecodeNext(&dec));
+      int col_idx;
+      const void* new_val;
+      RETURN_NOT_OK(dec.Validate(*projector.projection(), &col_idx, &new_val));
+      // If the new schema doesn't have this column, throw away the update.
+      if (col_idx == Schema::kColumnNotFound) {
+        continue;
+      }
 
-  while (decoder.HasNext()) {
-    DecodedUpdate dec;
-    RETURN_NOT_OK(decoder.DecodeNext(&dec));
-    int col_idx;
-    const void* new_val;
-    RETURN_NOT_OK(dec.Validate(*projector.projection(), &col_idx, &new_val));
-    // If the new schema doesn't have this column, throw away the update.
-    if (col_idx == Schema::kColumnNotFound) {
-      continue;
+      encoder.AddRawColumnUpdate(dec.col_id, dec.null, dec.raw_value);
     }
-
-    out->SetType(decoder.type_);
-    out->EncodeColumnMutationRaw(dec.col_id, dec.null, dec.raw_value);
   }
-
   return Status::OK();
 }
 
-Status RowChangeListDecoder::MutateRowAndCaptureChanges(RowBlockRow* dst_row,
-                                                        Arena* arena,
-                                                        RowChangeListEncoder* out) {
-
-  DCHECK(is_reinsert() || is_update());
-  DCHECK(out->is_initialized());
-
+Status RowChangeListDecoder::ApplyRowUpdate(RowBlockRow *dst_row,
+                                            Arena *arena, RowChangeListEncoder* undo_encoder) {
   const Schema* dst_schema = dst_row->schema();
 
   while (HasNext()) {
@@ -215,8 +216,6 @@ Status RowChangeListDecoder::MutateRowAndCaptureChanges(RowBlockRow* dst_row,
     int col_idx;
     const void* value;
     RETURN_NOT_OK(dec.Validate(*dst_schema, &col_idx, &value));
-    // Reinserts don't update keys so they shouldn't include the key columns.
-    DCHECK(!dst_schema->is_key_column(col_idx));
 
     // If the delta is for a column ID not part of the projection
     // we're scanning, just skip over it.
@@ -226,10 +225,10 @@ Status RowChangeListDecoder::MutateRowAndCaptureChanges(RowBlockRow* dst_row,
 
     const ColumnSchema& col_schema = dst_schema->column(col_idx);
     SimpleConstCell src(&col_schema, value);
-    RowBlockRow::Cell dst_cell = dst_row->cell(col_idx);
 
-    // save the old cell in 'out'
-    out->EncodeColumnMutation(col_schema, dec.col_id, dst_cell.ptr());
+    // save the old cell on the undo encoder
+    RowBlockRow::Cell dst_cell = dst_row->cell(col_idx);
+    undo_encoder->AddColumnUpdate(col_schema, dec.col_id, dst_cell.ptr());
 
     // copy the new cell to the row
     RETURN_NOT_OK(CopyCell(src, &dst_cell, arena));
@@ -242,7 +241,7 @@ Status RowChangeListDecoder::MutateRowAndCaptureChanges(RowBlockRow* dst_row,
 Status RowChangeListDecoder::ApplyToOneColumn(size_t row_idx, ColumnBlock* dst_col,
                                               const Schema& dst_schema,
                                               int col_idx, Arena *arena) {
-  DCHECK(is_reinsert() || is_update());
+  DCHECK_EQ(RowChangeList::kUpdate, type_);
 
   const ColumnSchema& col_schema = dst_schema.column(col_idx);
   ColumnId col_id = dst_schema.column_id(col_idx);
@@ -273,23 +272,19 @@ Status RowChangeListDecoder::RemoveColumnIdsFromChangeList(const RowChangeList& 
                                                            RowChangeListEncoder* out) {
   RowChangeListDecoder decoder(src);
   RETURN_NOT_OK(decoder.Init());
-
   if (decoder.is_delete()) {
     out->SetToDelete();
-    return Status::OK();
-  }
-
-  DCHECK(decoder.is_reinsert() || decoder.is_update());
-
-  while (decoder.HasNext()) {
-    DecodedUpdate dec;
-    RETURN_NOT_OK(decoder.DecodeNext(&dec));
-    if (!std::binary_search(col_ids.begin(), col_ids.end(), dec.col_id)) {
-      out->SetType(decoder.type_);
-      out->EncodeColumnMutationRaw(dec.col_id, dec.null, dec.raw_value);
+  } else if (decoder.is_reinsert()) {
+    out->SetToReinsert(decoder.remaining_);
+  } else if (decoder.is_update()) {
+    while (decoder.HasNext()) {
+      DecodedUpdate dec;
+      RETURN_NOT_OK(decoder.DecodeNext(&dec));
+      if (!std::binary_search(col_ids.begin(), col_ids.end(), dec.col_id)) {
+        out->AddRawColumnUpdate(dec.col_id, dec.null, dec.raw_value);
+      }
     }
   }
-
   return Status::OK();
 }
 
@@ -353,7 +348,7 @@ Status RowChangeListDecoder::DecodedUpdate::Validate(const Schema& schema,
   if (PREDICT_FALSE(col.type_info()->size() != this->raw_value.size())) {
     return Status::Corruption(Substitute(
                                   "invalid value $0 for column $1",
-                                  KUDU_REDACT(this->raw_value.ToDebugString()), col.ToString()));
+                                  this->raw_value.ToDebugString(), col.ToString()));
   }
 
   *value = reinterpret_cast<const void*>(this->raw_value.data());

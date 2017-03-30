@@ -17,6 +17,7 @@
 #ifndef KUDU_TABLET_DELTAMEMSTORE_H
 #define KUDU_TABLET_DELTAMEMSTORE_H
 
+#include <boost/thread/mutex.hpp>
 #include <deque>
 #include <gtest/gtest_prod.h>
 #include <memory>
@@ -61,10 +62,9 @@ struct DMSTreeTraits : public btree::BTreeTraits {
 class DeltaMemStore : public DeltaStore,
                       public std::enable_shared_from_this<DeltaMemStore> {
  public:
-  static Status Create(int64_t id, int64_t rs_id,
-                       log::LogAnchorRegistry* log_anchor_registry,
-                       std::shared_ptr<MemTracker> parent_tracker,
-                       std::shared_ptr<DeltaMemStore>* dms);
+  DeltaMemStore(int64_t id, int64_t rs_id,
+                log::LogAnchorRegistry* log_anchor_registry,
+                const std::shared_ptr<MemTracker>& parent_tracker = std::shared_ptr<MemTracker>());
 
   virtual Status Init() OVERRIDE;
 
@@ -80,11 +80,11 @@ class DeltaMemStore : public DeltaStore,
                 const consensus::OpId& op_id);
 
   size_t Count() const {
-    return tree_.count();
+    return tree_->count();
   }
 
   bool Empty() const {
-    return tree_.empty();
+    return tree_->empty();
   }
 
   // Dump a debug version of the tree to the logs. This is not thread-safe, so
@@ -114,13 +114,17 @@ class DeltaMemStore : public DeltaStore,
   virtual Status CheckRowDeleted(rowid_t row_idx, bool *deleted) const OVERRIDE;
 
   virtual uint64_t EstimateSize() const OVERRIDE {
-    return arena_->memory_footprint();
+    return memory_footprint();
   }
 
   const int64_t id() const { return id_; }
 
   typedef btree::CBTree<DMSTreeTraits> DMSTree;
   typedef btree::CBTreeIterator<DMSTreeTraits> DMSTreeIter;
+
+  size_t memory_footprint() const {
+    return arena_->memory_footprint();
+  }
 
   virtual std::string ToString() const OVERRIDE {
     return "DMS";
@@ -139,24 +143,20 @@ class DeltaMemStore : public DeltaStore,
  private:
   friend class DMSIterator;
 
-  DeltaMemStore(int64_t id,
-                int64_t rs_id,
-                log::LogAnchorRegistry* log_anchor_registry,
-                std::shared_ptr<MemTracker> parent_tracker);
-
   const DMSTree& tree() const {
-    return tree_;
+    return *tree_;
   }
 
   const int64_t id_;    // DeltaMemStore ID.
   const int64_t rs_id_; // Rowset ID.
 
+  std::shared_ptr<MemTracker> mem_tracker_;
   std::shared_ptr<MemoryTrackingBufferAllocator> allocator_;
 
   std::shared_ptr<ThreadSafeMemoryTrackingArena> arena_;
 
   // Concurrent B-Tree storing <key index> -> RowChangeList
-  DMSTree tree_;
+  gscoped_ptr<DMSTree> tree_;
 
   log::MinLogIndexAnchorer anchorer_;
 
@@ -203,8 +203,6 @@ class DMSIterator : public DeltaIterator {
   string ToString() const OVERRIDE;
 
   virtual bool HasNext() OVERRIDE;
-
-  bool MayHaveDeltas() override;
 
  private:
   DISALLOW_COPY_AND_ASSIGN(DMSIterator);
@@ -257,7 +255,11 @@ class DMSIterator : public DeltaIterator {
   };
   typedef std::deque<ColumnUpdate> UpdatesForColumn;
   std::vector<UpdatesForColumn> updates_by_col_;
-  std::deque<rowid_t> deleted_;
+  struct DeleteOrReinsert {
+    rowid_t row_id;
+    bool exists;
+  };
+  std::deque<DeleteOrReinsert> deletes_and_reinserts_;
 
   // State when prepared_for_ == PREPARED_FOR_COLLECT
   // ------------------------------------------------------------

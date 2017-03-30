@@ -24,7 +24,7 @@
 // Summary
 // ------------------------------------------------------------
 //
-// This API provides a basic set of metrics primitives along the lines of the Coda Hale's
+// This API provides a basic set of metrics primitives along the lines of the Code Hale's
 // metrics library along with JSON formatted output of running metrics.
 //
 // The metrics system has a few main concepts in its data model:
@@ -224,7 +224,6 @@
 /////////////////////////////////////////////////////
 
 #include <algorithm>
-#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -379,7 +378,6 @@ struct MetricUnit {
     kTasks,
     kMessages,
     kContextSwitches,
-    kDataDirectories,
   };
   static const char* Name(Type unit);
 };
@@ -488,7 +486,7 @@ class MetricEntity : public RefCountedThreadSafe<MetricEntity> {
   void SetAttribute(const std::string& key, const std::string& val);
 
   int num_metrics() const {
-    std::lock_guard<simple_spinlock> l(lock_);
+    lock_guard<simple_spinlock> l(&lock_);
     return metric_map_.size();
   }
 
@@ -582,7 +580,7 @@ class MetricRegistry {
 
   // Return the number of entities in this registry.
   int num_entities() const {
-    std::lock_guard<simple_spinlock> l(lock_);
+    lock_guard<simple_spinlock> l(&lock_);
     return entities_.size();
   }
 
@@ -852,7 +850,7 @@ template <typename T>
 class FunctionGauge : public Gauge {
  public:
   T value() const {
-    std::lock_guard<simple_spinlock> l(lock_);
+    lock_guard<simple_spinlock> l(&lock_);
     return function_.Run();
   }
 
@@ -864,7 +862,7 @@ class FunctionGauge : public Gauge {
   // This should be used during destruction. If you want a settable
   // Gauge, use a normal Gauge instead of a FunctionGauge.
   void DetachToConstant(T v) {
-    std::lock_guard<simple_spinlock> l(lock_);
+    lock_guard<simple_spinlock> l(&lock_);
     function_ = Bind(&FunctionGauge::Return, v);
   }
 
@@ -1014,10 +1012,6 @@ class ScopedLatencyMetric {
   MonoTime time_started_;
 };
 
-#define SCOPED_LATENCY_METRIC(_mtx, _h) \
-  ScopedLatencyMetric _h##_metric((_mtx) ? (_mtx)->_h.get() : NULL)
-
-
 ////////////////////////////////////////////////////////////
 // Inline implementations of template methods
 ////////////////////////////////////////////////////////////
@@ -1025,7 +1019,7 @@ class ScopedLatencyMetric {
 inline scoped_refptr<Counter> MetricEntity::FindOrCreateCounter(
     const CounterPrototype* proto) {
   CheckInstantiation(proto);
-  std::lock_guard<simple_spinlock> l(lock_);
+  lock_guard<simple_spinlock> l(&lock_);
   scoped_refptr<Counter> m = down_cast<Counter*>(FindPtrOrNull(metric_map_, proto).get());
   if (!m) {
     m = new Counter(proto);
@@ -1037,7 +1031,7 @@ inline scoped_refptr<Counter> MetricEntity::FindOrCreateCounter(
 inline scoped_refptr<Histogram> MetricEntity::FindOrCreateHistogram(
     const HistogramPrototype* proto) {
   CheckInstantiation(proto);
-  std::lock_guard<simple_spinlock> l(lock_);
+  lock_guard<simple_spinlock> l(&lock_);
   scoped_refptr<Histogram> m = down_cast<Histogram*>(FindPtrOrNull(metric_map_, proto).get());
   if (!m) {
     m = new Histogram(proto);
@@ -1051,7 +1045,7 @@ inline scoped_refptr<AtomicGauge<T> > MetricEntity::FindOrCreateGauge(
     const GaugePrototype<T>* proto,
     const T& initial_value) {
   CheckInstantiation(proto);
-  std::lock_guard<simple_spinlock> l(lock_);
+  lock_guard<simple_spinlock> l(&lock_);
   scoped_refptr<AtomicGauge<T> > m = down_cast<AtomicGauge<T>*>(
       FindPtrOrNull(metric_map_, proto).get());
   if (!m) {
@@ -1066,7 +1060,7 @@ inline scoped_refptr<FunctionGauge<T> > MetricEntity::FindOrCreateFunctionGauge(
     const GaugePrototype<T>* proto,
     const Callback<T()>& function) {
   CheckInstantiation(proto);
-  std::lock_guard<simple_spinlock> l(lock_);
+  lock_guard<simple_spinlock> l(&lock_);
   scoped_refptr<FunctionGauge<T> > m = down_cast<FunctionGauge<T>*>(
       FindPtrOrNull(metric_map_, proto).get());
   if (!m) {

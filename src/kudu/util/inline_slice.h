@@ -17,6 +17,8 @@
 #ifndef KUDU_UTIL_INLINE_SLICE_H
 #define KUDU_UTIL_INLINE_SLICE_H
 
+#include <boost/static_assert.hpp>
+
 #include "kudu/gutil/atomicops.h"
 #include "kudu/gutil/casts.h"
 #include "kudu/util/memory/arena.h"
@@ -67,10 +69,8 @@ class InlineSlice {
     kMaxInlineData = STORAGE_SIZE - 1
   };
 
-  static_assert(STORAGE_SIZE >= kPointerByteWidth,
-                "InlineSlice storage size must be greater than the width of a pointer");
-  static_assert(STORAGE_SIZE <= 256,
-                "InlineSlice storage size must be less than 256 bytes");
+  BOOST_STATIC_ASSERT(STORAGE_SIZE >= kPointerByteWidth);
+  BOOST_STATIC_ASSERT(STORAGE_SIZE <= 256);
  public:
   InlineSlice() {
   }

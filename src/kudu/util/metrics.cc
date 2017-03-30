@@ -17,7 +17,6 @@
 #include "kudu/util/metrics.h"
 
 #include <iostream>
-#include <sstream>
 #include <map>
 #include <set>
 
@@ -106,10 +105,7 @@ const char* MetricUnit::Name(Type unit) {
       return "messages";
     case kContextSwitches:
       return "context switches";
-    case kDataDirectories:
-      return "data directories";
     default:
-      DCHECK(false) << "Unknown unit with type = " << unit;
       return "UNKNOWN UNIT";
   }
 }
@@ -174,7 +170,7 @@ void MetricEntity::CheckInstantiation(const MetricPrototype* proto) const {
 }
 
 scoped_refptr<Metric> MetricEntity::FindOrNull(const MetricPrototype& prototype) const {
-  std::lock_guard<simple_spinlock> l(lock_);
+  lock_guard<simple_spinlock> l(&lock_);
   return FindPtrOrNull(metric_map_, &prototype);
 }
 
@@ -207,7 +203,7 @@ Status MetricEntity::WriteAsJson(JsonWriter* writer,
   AttributeMap attrs;
   {
     // Snapshot the metrics in this registry (not guaranteed to be a consistent snapshot)
-    std::lock_guard<simple_spinlock> l(lock_);
+    lock_guard<simple_spinlock> l(&lock_);
     attrs = attributes_;
     for (const MetricMap::value_type& val : metric_map_) {
       const MetricPrototype* prototype = val.first;
@@ -256,9 +252,9 @@ Status MetricEntity::WriteAsJson(JsonWriter* writer,
 }
 
 void MetricEntity::RetireOldMetrics() {
-  MonoTime now(MonoTime::Now());
+  MonoTime now(MonoTime::Now(MonoTime::FINE));
 
-  std::lock_guard<simple_spinlock> l(lock_);
+  lock_guard<simple_spinlock> l(&lock_);
   for (auto it = metric_map_.begin(); it != metric_map_.end();) {
     const scoped_refptr<Metric>& metric = it->second;
 
@@ -279,15 +275,16 @@ void MetricEntity::RetireOldMetrics() {
       VLOG(3) << "Metric " << it->first << " has become un-referenced. Will retire after "
               << "the retention interval";
       // This is the first time we've seen this metric as retirable.
-      metric->retire_time_ =
-          now + MonoDelta::FromMilliseconds(FLAGS_metrics_retirement_age_ms);
+      metric->retire_time_ = now;
+      metric->retire_time_.AddDelta(MonoDelta::FromMilliseconds(
+                                      FLAGS_metrics_retirement_age_ms));
       ++it;
       continue;
     }
 
     // If we've already seen this metric in a previous scan, check if it's
     // time to retire it yet.
-    if (now < metric->retire_time_) {
+    if (now.ComesBefore(metric->retire_time_)) {
       VLOG(3) << "Metric " << it->first << " is un-referenced, but still within "
               << "the retention interval";
       ++it;
@@ -301,17 +298,17 @@ void MetricEntity::RetireOldMetrics() {
 }
 
 void MetricEntity::NeverRetire(const scoped_refptr<Metric>& metric) {
-  std::lock_guard<simple_spinlock> l(lock_);
+  lock_guard<simple_spinlock> l(&lock_);
   never_retire_metrics_.push_back(metric);
 }
 
 void MetricEntity::SetAttributes(const AttributeMap& attrs) {
-  std::lock_guard<simple_spinlock> l(lock_);
+  lock_guard<simple_spinlock> l(&lock_);
   attributes_ = attrs;
 }
 
 void MetricEntity::SetAttribute(const string& key, const string& val) {
-  std::lock_guard<simple_spinlock> l(lock_);
+  lock_guard<simple_spinlock> l(&lock_);
   attributes_[key] = val;
 }
 
@@ -330,7 +327,7 @@ Status MetricRegistry::WriteAsJson(JsonWriter* writer,
                                    const MetricJsonOptions& opts) const {
   EntityMap entities;
   {
-    std::lock_guard<simple_spinlock> l(lock_);
+    lock_guard<simple_spinlock> l(&lock_);
     entities = entities_;
   }
 
@@ -352,7 +349,7 @@ Status MetricRegistry::WriteAsJson(JsonWriter* writer,
 }
 
 void MetricRegistry::RetireOldMetrics() {
-  std::lock_guard<simple_spinlock> l(lock_);
+  lock_guard<simple_spinlock> l(&lock_);
   for (auto it = entities_.begin(); it != entities_.end();) {
     it->second->RetireOldMetrics();
 
@@ -376,17 +373,17 @@ MetricPrototypeRegistry* MetricPrototypeRegistry::get() {
 }
 
 void MetricPrototypeRegistry::AddMetric(const MetricPrototype* prototype) {
-  std::lock_guard<simple_spinlock> l(lock_);
+  lock_guard<simple_spinlock> l(&lock_);
   metrics_.push_back(prototype);
 }
 
 void MetricPrototypeRegistry::AddEntity(const MetricEntityPrototype* prototype) {
-  std::lock_guard<simple_spinlock> l(lock_);
+  lock_guard<simple_spinlock> l(&lock_);
   entities_.push_back(prototype);
 }
 
 void MetricPrototypeRegistry::WriteAsJson(JsonWriter* writer) const {
-  std::lock_guard<simple_spinlock> l(lock_);
+  lock_guard<simple_spinlock> l(&lock_);
   MetricJsonOptions opts;
   opts.include_schema_info = true;
   writer->StartObject();
@@ -418,7 +415,7 @@ void MetricPrototypeRegistry::WriteAsJson(JsonWriter* writer) const {
 }
 
 void MetricPrototypeRegistry::WriteAsJsonAndExit() const {
-  std::ostringstream s;
+  std::stringstream s;
   JsonWriter w(&s, JsonWriter::PRETTY);
   WriteAsJson(&w);
   std::cout << s.str() << std::endl;
@@ -469,7 +466,7 @@ scoped_refptr<MetricEntity> MetricRegistry::FindOrCreateEntity(
     const MetricEntityPrototype* prototype,
     const std::string& id,
     const MetricEntity::AttributeMap& initial_attributes) {
-  std::lock_guard<simple_spinlock> l(lock_);
+  lock_guard<simple_spinlock> l(&lock_);
   scoped_refptr<MetricEntity> e = FindPtrOrNull(entities_, id);
   if (!e) {
     e = new MetricEntity(prototype, id, initial_attributes);
@@ -516,12 +513,12 @@ StringGauge::StringGauge(const GaugePrototype<string>* proto,
     : Gauge(proto), value_(std::move(initial_value)) {}
 
 std::string StringGauge::value() const {
-  std::lock_guard<simple_spinlock> l(lock_);
+  lock_guard<simple_spinlock> l(&lock_);
   return value_;
 }
 
 void StringGauge::set_value(const std::string& value) {
-  std::lock_guard<simple_spinlock> l(lock_);
+  lock_guard<simple_spinlock> l(&lock_);
   value_ = value;
 }
 
@@ -672,14 +669,14 @@ double Histogram::MeanValueForTests() const {
 ScopedLatencyMetric::ScopedLatencyMetric(Histogram* latency_hist)
   : latency_hist_(latency_hist) {
   if (latency_hist_) {
-    time_started_ = MonoTime::Now();
+    time_started_ = MonoTime::Now(MonoTime::FINE);
   }
 }
 
 ScopedLatencyMetric::~ScopedLatencyMetric() {
   if (latency_hist_ != nullptr) {
-    MonoTime time_now = MonoTime::Now();
-    latency_hist_->Increment((time_now - time_started_).ToMicroseconds());
+    MonoTime time_now = MonoTime::Now(MonoTime::FINE);
+    latency_hist_->Increment(time_now.GetDeltaSince(time_started_).ToMicroseconds());
   }
 }
 

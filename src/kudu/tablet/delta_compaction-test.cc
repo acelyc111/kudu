@@ -15,19 +15,19 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <string>
-#include <vector>
-
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
-#include "kudu/cfile/cfile_util.h"
+#include <string>
+#include <vector>
+
 #include "kudu/common/schema.h"
 #include "kudu/tablet/deltafile.h"
 #include "kudu/tablet/delta_compaction.h"
 #include "kudu/tablet/delta_iterator_merger.h"
 #include "kudu/gutil/strings/util.h"
+#include "kudu/gutil/algorithm.h"
 #include "kudu/util/test_macros.h"
 #include "kudu/util/stopwatch.h"
 #include "kudu/util/test_util.h"
@@ -43,13 +43,11 @@ DEFINE_int32(num_delta_files, 3, "number of delta files");
 using std::is_sorted;
 using std::shared_ptr;
 using std::string;
-using std::unique_ptr;
 using std::vector;
 
 namespace kudu {
 namespace tablet {
 
-using cfile::ReaderOptions;
 using fs::ReadableBlock;
 using fs::WritableBlock;
 
@@ -71,7 +69,7 @@ class TestDeltaCompaction : public KuduTest {
     gscoped_ptr<WritableBlock> block;
     RETURN_NOT_OK(fs_manager_->CreateNewBlock(&block));
     *block_id = block->id();
-    dfw->reset(new DeltaFileWriter(std::move(block)));
+    dfw->reset(new DeltaFileWriter(block.Pass()));
     RETURN_NOT_OK((*dfw)->Start());
     return Status::OK();
   }
@@ -81,13 +79,13 @@ class TestDeltaCompaction : public KuduTest {
     gscoped_ptr<ReadableBlock> block;
     RETURN_NOT_OK(fs_manager_->OpenBlock(block_id, &block));
     shared_ptr<DeltaFileReader> delta_reader;
-    return DeltaFileReader::Open(std::move(block), REDO, ReaderOptions(), dfr);
+    return DeltaFileReader::Open(block.Pass(), block_id, dfr, REDO);
   }
 
   virtual void SetUp() OVERRIDE {
     KuduTest::SetUp();
     SeedRandom();
-    fs_manager_.reset(new FsManager(env_, GetTestPath("fs_root")));
+    fs_manager_.reset(new FsManager(env_.get(), GetTestPath("fs_root")));
     ASSERT_OK(fs_manager_->CreateInitialFileSystemLayout());
     ASSERT_OK(fs_manager_->Open());
   }
@@ -151,7 +149,7 @@ TEST_F(TestDeltaCompaction, TestMergeMultipleSchemas) {
             break;
           case BINARY:
             {
-              string s = std::to_string(update_value);
+              string s = boost::lexical_cast<string>(update_value);
               Slice str_val(s);
               update.AddColumnUpdate(col_schema, col_id, &str_val);
             }
@@ -173,7 +171,7 @@ TEST_F(TestDeltaCompaction, TestMergeMultipleSchemas) {
       row_id++;
     }
 
-    dfw->WriteDeltaStats(stats);
+    ASSERT_OK(dfw->WriteDeltaStats(stats));
     ASSERT_OK(dfw->Finish());
     shared_ptr<DeltaFileReader> dfr;
     ASSERT_OK(GetDeltaFileReader(block_id, &dfr));
@@ -184,7 +182,7 @@ TEST_F(TestDeltaCompaction, TestMergeMultipleSchemas) {
   // Merge
   MvccSnapshot snap(MvccSnapshot::CreateSnapshotIncludingAllTransactions());
   const Schema& merge_schema = schemas.back();
-  unique_ptr<DeltaIterator> merge_iter;
+  shared_ptr<DeltaIterator> merge_iter;
   ASSERT_OK(DeltaIteratorMerger::Create(inputs, &merge_schema,
                                         snap, &merge_iter));
   gscoped_ptr<DeltaFileWriter> dfw;

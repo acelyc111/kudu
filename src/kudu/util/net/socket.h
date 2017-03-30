@@ -40,10 +40,10 @@ class Socket {
   explicit Socket(int fd);
 
   // Close the socket.  Errors will be ignored.
-  virtual ~Socket();
+  ~Socket();
 
   // Close the Socket, checking for errors.
-  virtual Status Close();
+  Status Close();
 
   // call shutdown() on the socket
   Status Shutdown(bool shut_read, bool shut_write);
@@ -66,9 +66,6 @@ class Socket {
 
   // Set or clear TCP_NODELAY
   Status SetNoDelay(bool enabled);
-
-  // Set or clear TCP_CORK
-  Status SetTcpCork(bool enabled);
 
   // Set or clear O_NONBLOCK
   Status SetNonBlocking(bool enabled);
@@ -99,12 +96,6 @@ class Socket {
   // Call getpeername to get the address of the connected peer.
   Status GetPeerAddress(Sockaddr *cur_addr) const;
 
-  // Return true if this socket is determined to be a loopback connection
-  // (i.e. the local and remote peer share an IP address).
-  //
-  // If any error occurs while determining this, returns false.
-  bool IsLoopbackConnection() const;
-
   // Call bind() to bind the socket to a given address.
   // If bind() fails and indicates that the requested port is already in use,
   // generates an informative log message by calling 'lsof' if available.
@@ -119,19 +110,19 @@ class Socket {
   // get the error status using getsockopt(2)
   Status GetSockError() const;
 
-  virtual Status Write(const uint8_t *buf, int32_t amt, int32_t *nwritten);
+  Status Write(const uint8_t *buf, int32_t amt, int32_t *nwritten);
 
-  virtual Status Writev(const struct ::iovec *iov, int iov_len, int32_t *nwritten);
+  Status Writev(const struct ::iovec *iov, int iov_len, int32_t *nwritten);
 
   // Blocking Write call, returns IOError unless full buffer is sent.
   // Underlying Socket expected to be in blocking mode. Fails if any Write() sends 0 bytes.
   // Returns OK if buflen bytes were sent, otherwise IOError.
-  // Upon return, nwritten will contain the number of bytes actually written.
+  // Upon return, num_written will contain the number of bytes actually written.
   // See also writen() from Stevens (2004) or Kerrisk (2010)
-  Status BlockingWrite(const uint8_t *buf, size_t buflen, size_t *nwritten,
+  Status BlockingWrite(const uint8_t *buf, size_t buflen, size_t *num_written,
       const MonoTime& deadline);
 
-  virtual Status Recv(uint8_t *buf, int32_t amt, int32_t *nread);
+  Status Recv(uint8_t *buf, int32_t amt, int32_t *nread);
 
   // Blocking Recv call, returns IOError unless requested amt bytes are read.
   // Underlying Socket expected to be in blocking mode. Fails if any Recv() reads 0 bytes.

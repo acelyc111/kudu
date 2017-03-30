@@ -18,53 +18,28 @@
 #define KUDU_COMMON_SCAN_SPEC_H
 
 #include <string>
-#include <unordered_map>
+#include <vector>
 
-#include "kudu/common/schema.h"
-#include "kudu/common/column_predicate.h"
+#include "kudu/common/scan_predicate.h"
 #include "kudu/common/encoded_key.h"
 
 namespace kudu {
 
-class AutoReleasePool;
-class Arena;
+using std::vector;
 
 class ScanSpec {
  public:
   ScanSpec()
-    : predicates_(),
-      lower_bound_key_(nullptr),
-      exclusive_upper_bound_key_(nullptr),
+    : lower_bound_key_(NULL),
+      exclusive_upper_bound_key_(NULL),
       lower_bound_partition_key_(),
       exclusive_upper_bound_partition_key_(),
       cache_blocks_(true) {
   }
 
-  // Add a predicate on the column.
-  //
-  // The new predicate is merged into the existing predicate for the column.
-  void AddPredicate(ColumnPredicate pred);
+  typedef vector<ColumnRangePredicate> PredicateList;
 
-  // Remove the predicate for the column.
-  void RemovePredicate(const std::string& column_name);
-
-  // Removes all column predicates.
-  void RemovePredicates();
-
-  // Returns true if the result set is known to be empty.
-  bool CanShortCircuit() const;
-
-  // Optimizes the scan by unifying the lower and upper bound constraints and
-  // the column predicates.
-  //
-  // If remove_pushed_predicates is true, then column predicates that are pushed
-  // into the upper or lower primary key bounds are removed.
-  //
-  // Idempotent.
-  void OptimizeScan(const Schema& schema,
-                    Arena* arena,
-                    AutoReleasePool* pool,
-                    bool remove_pushed_predicates);
+  void AddPredicate(const ColumnRangePredicate &pred);
 
   // Set the lower bound (inclusive) primary key for the scan.
   // Does not take ownership of 'key', which must remain valid.
@@ -90,15 +65,22 @@ class ScanSpec {
   // Only used in the client.
   void SetExclusiveUpperBoundPartitionKey(const Slice& slice);
 
-  // Returns the scan predicates.
-  const std::unordered_map<std::string, ColumnPredicate>& predicates() const {
+  const vector<ColumnRangePredicate> &predicates() const {
     return predicates_;
+  }
+
+  // Return a pointer to the list of predicates in this scan spec.
+  //
+  // Callers may use this during predicate pushdown to remove predicates
+  // from their caller if they're able to apply them lower down the
+  // iterator tree.
+  vector<ColumnRangePredicate> *mutable_predicates() {
+    return &predicates_;
   }
 
   const EncodedKey* lower_bound_key() const {
     return lower_bound_key_;
   }
-
   const EncodedKey* exclusive_upper_bound_key() const {
     return exclusive_upper_bound_key_;
   }
@@ -118,31 +100,14 @@ class ScanSpec {
     cache_blocks_ = cache_blocks;
   }
 
-  std::string ToString(const Schema& s) const;
+  std::string ToString() const;
+  std::string ToStringWithSchema(const Schema& s) const;
 
  private:
+  // Helper for the ToString*() methods. 's' may be NULL.
+  std::string ToStringWithOptionalSchema(const Schema* s) const;
 
-  // Lift implicit predicates specified as part of the lower and upper bound
-  // primary key constraints into the simplified predicate bounds.
-  //
-  // When the lower and exclusive upper bound primary keys have a prefix of
-  // equal components, the components can be lifted into an equality predicate
-  // over their associated column. Optionally, a single (pair) of range
-  // predicates can be lifted from the key component following the prefix of
-  // equal components.
-  void LiftPrimaryKeyBounds(const Schema& schema, Arena* arena);
-
-  // Encode the column predicates into lower and upper primary key bounds, and
-  // replace the existing bounds if the new bounds are more constrained.
-  //
-  // If remove_pushed_predicates is true, then the predicates in the primary key
-  // bound will be removed if the bound is replaced.
-  void PushPredicatesIntoPrimaryKeyBounds(const Schema& schema,
-                                          Arena* arena,
-                                          AutoReleasePool* pool,
-                                          bool remove_pushed_predicates);
-
-  std::unordered_map<std::string, ColumnPredicate> predicates_;
+  vector<ColumnRangePredicate> predicates_;
   const EncodedKey* lower_bound_key_;
   const EncodedKey* exclusive_upper_bound_key_;
   std::string lower_bound_partition_key_;

@@ -20,6 +20,7 @@
 #include <boost/bind.hpp>
 #include <string>
 
+#include "kudu/gutil/basictypes.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/rpc/messenger.h"
 #include "kudu/rpc/rpc_header.pb.h"
@@ -33,8 +34,8 @@ namespace kudu {
 namespace rpc {
 
 bool RpcRetrier::HandleResponse(Rpc* rpc, Status* out_status) {
-  DCHECK(rpc);
-  DCHECK(out_status);
+  ignore_result(DCHECK_NOTNULL(rpc));
+  ignore_result(DCHECK_NOTNULL(out_status));
 
   // Always retry a TOO_BUSY error.
   Status controller_status = controller_.status();
@@ -72,7 +73,8 @@ void RpcRetrier::DelayedRetryCb(Rpc* rpc, const Status& status) {
   if (new_status.ok()) {
     // Has this RPC timed out?
     if (deadline_.Initialized()) {
-      if (MonoTime::Now() > deadline_) {
+      MonoTime now = MonoTime::Now(MonoTime::FINE);
+      if (deadline_.ComesBefore(now)) {
         string err_str = Substitute("$0 passed its deadline", rpc->ToString());
         if (!last_error_.ok()) {
           SubstituteAndAppend(&err_str, ": $0", last_error_.ToString());

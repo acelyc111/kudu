@@ -15,11 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <boost/lexical_cast.hpp>
 #include <glog/logging.h>
 #include <gtest/gtest.h>
-#include <string>
 #include <vector>
-
 #include "kudu/util/knapsack_solver.h"
 #include "kudu/util/stopwatch.h"
 #include "kudu/util/test_util.h"
@@ -72,7 +71,7 @@ static string JoinInts(const vector<int> &ints) {
     if (i > 0) {
       ret.push_back(',');
     }
-    ret.append(std::to_string(ints[i]));
+    ret.append(boost::lexical_cast<string>(ints[i]));
   }
   return ret;
 }

@@ -21,7 +21,6 @@
 #include <gtest/gtest_prod.h>
 #include <memory>
 #include <string>
-#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -43,7 +42,6 @@ class MergeIterator : public RowwiseIterator {
   // a subset of the columns in 'iters'.
   MergeIterator(const Schema &schema,
                 const std::vector<std::shared_ptr<RowwiseIterator> > &iters);
-  virtual ~MergeIterator();
 
   // The passed-in iterators should be already initialized.
   Status Init(ScanSpec *spec) OVERRIDE;
@@ -70,7 +68,7 @@ class MergeIterator : public RowwiseIterator {
   // Holds the subiterators until Init is called.
   // This is required because we can't create a MergeIterState of an uninitialized iterator.
   std::deque<std::shared_ptr<RowwiseIterator> > orig_iters_;
-  std::vector<std::unique_ptr<MergeIterState> > iters_;
+  std::vector<std::shared_ptr<MergeIterState> > iters_;
 
   // When the underlying iterators are initialized, each needs its own
   // copy of the scan spec in order to do its own pushdown calculations, etc.
@@ -78,6 +76,7 @@ class MergeIterator : public RowwiseIterator {
   // when the UnionIterator goes out of scope.
   ObjectPool<ScanSpec> scan_spec_copies_;
 };
+
 
 // An iterator which unions the results of other iterators.
 // This is different from MergeIterator in that it lays the results out end-to-end
@@ -134,10 +133,10 @@ class UnionIterator : public RowwiseIterator {
 
 // An iterator which wraps a ColumnwiseIterator, materializing it into full rows.
 //
-// Column predicates are pushed down into this iterator. While materializing a
-// block, columns with associated predicates are materialized first, and the
-// predicates evaluated. If the predicates succeed in filtering out an entire
-// batch, then other columns may avoid doing any IO.
+// Predicates which only apply to a single column are pushed down into this iterator.
+// While materializing a block, columns with associated predicates are materialized
+// first, and the predicates evaluated. If the predicates succeed in filtering out
+// an entire batch, then other columns may avoid doing any IO.
 class MaterializingIterator : public RowwiseIterator {
  public:
   explicit MaterializingIterator(std::shared_ptr<ColumnwiseIterator> iter);
@@ -167,16 +166,15 @@ class MaterializingIterator : public RowwiseIterator {
 
   std::shared_ptr<ColumnwiseIterator> iter_;
 
-  // List of (column index, predicate) in order of most to least selective.
-  std::vector<std::tuple<int32_t, ColumnPredicate>> col_idx_predicates_;
+  std::unordered_multimap<size_t, ColumnRangePredicate> preds_by_column_;
 
-  // List of column indexes without predicates to materialize.
-  std::vector<int32_t> non_predicate_column_indexes_;
+  // The order in which the columns will be materialized.
+  std::vector<size_t> materialization_order_;
 
   // Set only by test code to disallow pushdown.
   bool disallow_pushdown_for_tests_;
-  bool disallow_decoder_eval_;
 };
+
 
 // An iterator which wraps another iterator and evaluates any predicates that the
 // wrapped iterator did not itself handle during push down.
@@ -215,14 +213,13 @@ class PredicateEvaluatingIterator : public RowwiseIterator {
   // Construct the evaluating iterator.
   // This is only called from ::InitAndMaybeWrap()
   // REQUIRES: base_iter is already Init()ed.
-  explicit PredicateEvaluatingIterator(std::shared_ptr<RowwiseIterator> base_iter);
+  explicit PredicateEvaluatingIterator(
+      std::shared_ptr<RowwiseIterator> base_iter);
 
   FRIEND_TEST(TestPredicateEvaluatingIterator, TestPredicateEvaluation);
 
   std::shared_ptr<RowwiseIterator> base_iter_;
-
-  // List of (column index, predicate) in order of most to least selective.
-  std::vector<ColumnPredicate> col_idx_predicates_;
+  std::vector<ColumnRangePredicate> predicates_;
 };
 
 } // namespace kudu

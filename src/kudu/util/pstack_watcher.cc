@@ -92,14 +92,15 @@ Status PstackWatcher::HasProgram(const char* progname) {
   proc.DisableStdout();
   RETURN_NOT_OK_PREPEND(proc.Start(),
       Substitute("HasProgram($0): error running 'which'", progname));
-  RETURN_NOT_OK(proc.Wait());
-  int exit_status;
-  string exit_info;
-  RETURN_NOT_OK(proc.GetExitStatus(&exit_status, &exit_info));
-  if (exit_status == 0) {
+  int wait_status = 0;
+  RETURN_NOT_OK(proc.Wait(&wait_status));
+  if ((WIFEXITED(wait_status)) && (0 == WEXITSTATUS(wait_status))) {
     return Status::OK();
   }
-  return Status::NotFound(Substitute("can't find $0: $1", progname, exit_info));
+  return Status::NotFound(Substitute("can't find $0: exited?=$1, status=$2",
+                                     progname,
+                                     static_cast<bool>(WIFEXITED(wait_status)),
+                                     WEXITSTATUS(wait_status)));
 }
 
 Status PstackWatcher::DumpStacks(int flags) {
@@ -172,13 +173,10 @@ Status PstackWatcher::RunStackDump(const string& prog, const vector<string>& arg
   if (::close(pstack_proc.ReleaseChildStdinFd()) == -1) {
     return Status::IOError("Unable to close child stdin", ErrnoToString(errno), errno);
   }
-  RETURN_NOT_OK_PREPEND(pstack_proc.Wait(), "RunStackDump proc.Wait() failed");
-  int exit_code;
-  string exit_info;
-  RETURN_NOT_OK_PREPEND(pstack_proc.GetExitStatus(&exit_code, &exit_info),
-                        "RunStackDump proc.GetExitStatus() failed");
-  if (exit_code != 0) {
-    return Status::RuntimeError("RunStackDump proc.Wait() error", exit_info);
+  int ret;
+  RETURN_NOT_OK_PREPEND(pstack_proc.Wait(&ret), "RunStackDump proc.Wait() failed");
+  if (ret == -1) {
+    return Status::RuntimeError("RunStackDump proc.Wait() error", ErrnoToString(errno), errno);
   }
   printf("************************* END STACKS ***************************\n");
   if (fflush(stdout) == EOF) {

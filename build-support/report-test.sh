@@ -69,12 +69,8 @@ fi
 if grep -q "KUDU_USE_UBSAN:UNINITIALIZED=1" $CMAKECACHE ; then
   BUILD_CONFIG="$BUILD_CONFIG ubsan"
 fi
-
-# We sometimes have flaky infrastructure where NTP is broken. In that case
-# do not report it as a failed test.
-if zgrep -q 'Clock considered unsynchronized' $LOGFILE ; then
-  echo Not reporting test that failed due to NTP issues.
-  exit 1
+if [ -n "$HEAPCHECK" ]; then
+  BUILD_CONFIG="$BUILD_CONFIG heapcheck"
 fi
 
 # Only upload a log if the test failed.

@@ -15,21 +15,22 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <memory>
-
 #include <gflags/gflags.h>
 #include <gtest/gtest.h>
+#include <memory>
 
-#include "kudu/cfile/cfile_util.h"
 #include "kudu/common/schema.h"
 #include "kudu/fs/fs-test-util.h"
-#include "kudu/gutil/strings/strcat.h"
 #include "kudu/tablet/delta_store.h"
-#include "kudu/tablet/delta_tracker.h"
 #include "kudu/tablet/deltafile.h"
-#include "kudu/util/test_util.h"
+#include "kudu/tablet/delta_tracker.h"
+#include "kudu/gutil/algorithm.h"
+#include "kudu/gutil/strings/strcat.h"
+#include "kudu/util/memenv/memenv.h"
+#include "kudu/util/test_macros.h"
 
 DECLARE_int32(deltafile_default_block_size);
+DECLARE_bool(log_block_manager_test_hole_punching);
 DEFINE_int32(first_row_to_update, 10000, "the first row to update");
 DEFINE_int32(last_row_to_update, 100000, "the last row to update");
 DEFINE_int32(n_verify, 1, "number of times to verify the updates"
@@ -41,21 +42,26 @@ using std::shared_ptr;
 namespace kudu {
 namespace tablet {
 
-using cfile::ReaderOptions;
 using fs::CountingReadableBlock;
 using fs::ReadableBlock;
 using fs::WritableBlock;
 
-class TestDeltaFile : public KuduTest {
+// Test path to write delta file to (in in-memory environment)
+const char kTestPath[] = "/tmp/test";
+
+class TestDeltaFile : public ::testing::Test {
  public:
   TestDeltaFile() :
+    env_(NewMemEnv(Env::Default())),
     schema_(CreateSchema()),
     arena_(1024, 1024) {
+    // Can't check on-disk file size with a memenv.
+    FLAGS_log_block_manager_test_hole_punching = false;
   }
 
  public:
   void SetUp() OVERRIDE {
-    fs_manager_.reset(new FsManager(env_, GetTestPath("fs")));
+    fs_manager_.reset(new FsManager(env_.get(), kTestPath));
     ASSERT_OK(fs_manager_->CreateInitialFileSystemLayout());
     ASSERT_OK(fs_manager_->Open());
   }
@@ -70,7 +76,7 @@ class TestDeltaFile : public KuduTest {
     gscoped_ptr<WritableBlock> block;
     ASSERT_OK(fs_manager_->CreateNewBlock(&block));
     test_block_ = block->id();
-    DeltaFileWriter dfw(std::move(block));
+    DeltaFileWriter dfw(block.Pass());
     ASSERT_OK(dfw.Start());
 
     // Update even numbered rows.
@@ -89,7 +95,7 @@ class TestDeltaFile : public KuduTest {
         ASSERT_OK_FAST(stats.UpdateStats(key.timestamp(), rcl));
       }
     }
-    dfw.WriteDeltaStats(stats);
+    ASSERT_OK(dfw.WriteDeltaStats(stats));
     ASSERT_OK(dfw.Finish());
   }
 
@@ -107,9 +113,10 @@ class TestDeltaFile : public KuduTest {
   Status OpenDeltaFileReader(const BlockId& block_id, shared_ptr<DeltaFileReader>* out) {
     gscoped_ptr<ReadableBlock> block;
     RETURN_NOT_OK(fs_manager_->OpenBlock(block_id, &block));
-    return DeltaFileReader::Open(std::move(block), REDO, ReaderOptions(), out);
+    return DeltaFileReader::Open(block.Pass(), block_id, out, REDO);
   }
 
+  // TODO handle UNDO deltas
   Status OpenDeltaFileIterator(const BlockId& block_id, gscoped_ptr<DeltaIterator>* out) {
     shared_ptr<DeltaFileReader> reader;
     RETURN_NOT_OK(OpenDeltaFileReader(block_id, &reader));
@@ -180,6 +187,7 @@ class TestDeltaFile : public KuduTest {
   }
 
  protected:
+  gscoped_ptr<Env> env_;
   gscoped_ptr<FsManager> fs_manager_;
   Schema schema_;
   Arena arena_;
@@ -220,7 +228,7 @@ TEST_F(TestDeltaFile, TestWriteDeltaFileIteratorToFile) {
   gscoped_ptr<WritableBlock> block;
   ASSERT_OK(fs_manager_->CreateNewBlock(&block));
   BlockId block_id(block->id());
-  DeltaFileWriter dfw(std::move(block));
+  DeltaFileWriter dfw(block.Pass());
   ASSERT_OK(dfw.Start());
   ASSERT_OK(WriteDeltaIteratorToFile<REDO>(it.get(),
                                            ITERATE_OVER_ALL_ROWS,
@@ -336,12 +344,12 @@ TEST_F(TestDeltaFile, TestLazyInit) {
   ASSERT_OK(fs_manager_->OpenBlock(test_block_, &block));
   size_t bytes_read = 0;
   gscoped_ptr<ReadableBlock> count_block(
-      new CountingReadableBlock(std::move(block), &bytes_read));
+      new CountingReadableBlock(block.Pass(), &bytes_read));
 
   // Lazily opening the delta file should not trigger any reads.
   shared_ptr<DeltaFileReader> reader;
   ASSERT_OK(DeltaFileReader::OpenNoInit(
-      std::move(count_block), REDO, ReaderOptions(), &reader));
+      count_block.Pass(), test_block_, &reader, REDO));
   ASSERT_EQ(0, bytes_read);
 
   // But initializing it should (only the first time).
@@ -355,31 +363,9 @@ TEST_F(TestDeltaFile, TestLazyInit) {
   // same number of bytes read.
   ASSERT_OK(fs_manager_->OpenBlock(test_block_, &block));
   bytes_read = 0;
-  count_block.reset(new CountingReadableBlock(std::move(block), &bytes_read));
-  ASSERT_OK(DeltaFileReader::Open(
-      std::move(count_block), REDO, ReaderOptions(), &reader));
+  count_block.reset(new CountingReadableBlock(block.Pass(), &bytes_read));
+  ASSERT_OK(DeltaFileReader::Open(count_block.Pass(), test_block_, &reader, REDO));
   ASSERT_EQ(bytes_read_after_init, bytes_read);
-}
-
-// Check that, if a delta file is opened but no deltas are written,
-// Finish() will return Status::Aborted().
-TEST_F(TestDeltaFile, TestEmptyFileIsAborted) {
-  gscoped_ptr<WritableBlock> block;
-  ASSERT_OK(fs_manager_->CreateNewBlock(&block));
-  test_block_ = block->id();
-  {
-    DeltaFileWriter dfw(std::move(block));
-    ASSERT_OK(dfw.Start());
-
-    // The block is only deleted when the DeltaFileWriter goes out of scope.
-    Status s = dfw.Finish();
-    ASSERT_TRUE(s.IsAborted());
-  }
-
-  // The block should have been deleted as well.
-  gscoped_ptr<ReadableBlock> rb;
-  Status s = fs_manager_->OpenBlock(test_block_, &rb);
-  ASSERT_TRUE(s.IsNotFound()) << s.ToString();
 }
 
 } // namespace tablet

@@ -18,7 +18,6 @@
 #define KUDU_TABLET_ROWSET_METADATA_H
 
 #include <map>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -34,12 +33,16 @@
 
 namespace kudu {
 
+namespace tools {
+class FsTool;
+} // namespace tools
+
 namespace tablet {
 
 class RowSetMetadataUpdate;
 class TabletMetadata;
 
-// Keeps track of the RowSet data blocks.
+// Keeps tracks of the RowSet data blocks.
 //
 // On each tablet MemRowSet flush, a new RowSetMetadata is created,
 // and the DiskRowSetWriter will create and write the "immutable" blocks for
@@ -86,13 +89,13 @@ class RowSetMetadata {
   }
 
   void set_bloom_block(const BlockId& block_id) {
-    std::lock_guard<LockType> l(lock_);
+    lock_guard<LockType> l(&lock_);
     DCHECK(bloom_block_.IsNull());
     bloom_block_ = block_id;
   }
 
   void set_adhoc_index_block(const BlockId& block_id) {
-    std::lock_guard<LockType> l(lock_);
+    lock_guard<LockType> l(&lock_);
     DCHECK(adhoc_index_block_.IsNull());
     adhoc_index_block_ = block_id;
   }
@@ -104,61 +107,61 @@ class RowSetMetadata {
   Status CommitUndoDeltaDataBlock(const BlockId& block_id);
 
   BlockId bloom_block() const {
-    std::lock_guard<LockType> l(lock_);
+    lock_guard<LockType> l(&lock_);
     return bloom_block_;
   }
 
   BlockId adhoc_index_block() const {
-    std::lock_guard<LockType> l(lock_);
+    lock_guard<LockType> l(&lock_);
     return adhoc_index_block_;
   }
 
   bool has_adhoc_index_block() const {
-    std::lock_guard<LockType> l(lock_);
+    lock_guard<LockType> l(&lock_);
     return !adhoc_index_block_.IsNull();
   }
 
   BlockId column_data_block_for_col_id(ColumnId col_id) {
-    std::lock_guard<LockType> l(lock_);
+    lock_guard<LockType> l(&lock_);
     return FindOrDie(blocks_by_col_id_, col_id);
   }
 
   ColumnIdToBlockIdMap GetColumnBlocksById() const {
-    std::lock_guard<LockType> l(lock_);
+    lock_guard<LockType> l(&lock_);
     return blocks_by_col_id_;
   }
 
   vector<BlockId> redo_delta_blocks() const {
-    std::lock_guard<LockType> l(lock_);
+    lock_guard<LockType> l(&lock_);
     return redo_delta_blocks_;
   }
 
   vector<BlockId> undo_delta_blocks() const {
-    std::lock_guard<LockType> l(lock_);
+    lock_guard<LockType> l(&lock_);
     return undo_delta_blocks_;
   }
 
   TabletMetadata *tablet_metadata() const { return tablet_metadata_; }
 
   int64_t last_durable_redo_dms_id() const {
-    std::lock_guard<LockType> l(lock_);
+    lock_guard<LockType> l(&lock_);
     return last_durable_redo_dms_id_;
   }
 
   void SetLastDurableRedoDmsIdForTests(int64_t redo_dms_id) {
-    std::lock_guard<LockType> l(lock_);
+    lock_guard<LockType> l(&lock_);
     last_durable_redo_dms_id_ = redo_dms_id;
   }
 
   bool HasDataForColumnIdForTests(ColumnId col_id) const {
     BlockId b;
-    std::lock_guard<LockType> l(lock_);
+    lock_guard<LockType> l(&lock_);
     if (!FindCopy(blocks_by_col_id_, col_id, &b)) return false;
     return fs_manager()->BlockExists(b);
   }
 
   bool HasBloomDataBlockForTests() const {
-    std::lock_guard<LockType> l(lock_);
+    lock_guard<LockType> l(&lock_);
     return !bloom_block_.IsNull() && fs_manager()->BlockExists(bloom_block_);
   }
 
@@ -169,12 +172,11 @@ class RowSetMetadata {
   // On success, calls TabletMetadata::AddOrphanedBlocks() on the removed blocks.
   Status CommitUpdate(const RowSetMetadataUpdate& update);
 
-  void ToProtobuf(RowSetDataPB *pb);
-
   std::vector<BlockId> GetAllBlocks();
 
  private:
   friend class TabletMetadata;
+  friend class kudu::tools::FsTool;
 
   typedef simple_spinlock LockType;
 
@@ -193,6 +195,8 @@ class RowSetMetadata {
   }
 
   Status InitFromPB(const RowSetDataPB& pb);
+
+  void ToProtobuf(RowSetDataPB *pb);
 
   TabletMetadata* const tablet_metadata_;
   bool initted_;
@@ -230,9 +234,6 @@ class RowSetMetadataUpdate {
   RowSetMetadataUpdate& ReplaceRedoDeltaBlocks(const std::vector<BlockId>& to_remove,
                                                const std::vector<BlockId>& to_add);
 
-  // Remove the specified undo delta blocks.
-  RowSetMetadataUpdate& RemoveUndoDeltaBlocks(const std::vector<BlockId>& to_remove);
-
   // Replace the CFile for the given column ID.
   RowSetMetadataUpdate& ReplaceColumnId(ColumnId col_id, const BlockId& block_id);
 
@@ -254,8 +255,6 @@ class RowSetMetadataUpdate {
     std::vector<BlockId> to_add;
   };
   std::vector<ReplaceDeltaBlocks> replace_redo_blocks_;
-
-  std::vector<BlockId> remove_undo_blocks_;
   BlockId new_undo_block_;
 
   DISALLOW_COPY_AND_ASSIGN(RowSetMetadataUpdate);

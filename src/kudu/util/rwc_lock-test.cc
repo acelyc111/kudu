@@ -15,9 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <mutex>
+#include <boost/thread/thread.hpp>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include "kudu/gutil/atomicops.h"
@@ -30,7 +29,6 @@ namespace kudu {
 using base::subtle::NoBarrier_Load;
 using base::subtle::Release_Store;
 using std::string;
-using std::thread;
 using std::vector;
 
 class RWCLockTest : public KuduTest {};
@@ -57,19 +55,19 @@ struct LockHoldersCount {
   }
 
   void AdjustReaders(int delta) {
-    std::lock_guard<simple_spinlock> l(lock);
+    boost::lock_guard<simple_spinlock> l(lock);
     num_readers += delta;
     CheckInvariants();
   }
 
   void AdjustWriters(int delta) {
-    std::lock_guard<simple_spinlock> l(lock);
+    boost::lock_guard<simple_spinlock> l(lock);
     num_writers += delta;
     CheckInvariants();
   }
 
   void AdjustCommitters(int delta) {
-    std::lock_guard<simple_spinlock> l(lock);
+    boost::lock_guard<simple_spinlock> l(lock);
     num_committers += delta;
     CheckInvariants();
   }
@@ -115,16 +113,16 @@ TEST_F(RWCLockTest, TestCorrectBehavior) {
   SharedState state;
   Release_Store(&state.stop, 0);
 
-  vector<thread> threads;
+  vector<boost::thread*> threads;
 
   const int kNumWriters = 5;
   const int kNumReaders = 5;
 
   for (int i = 0; i < kNumWriters; i++) {
-    threads.emplace_back(WriterThread, &state);
+    threads.push_back(new boost::thread(WriterThread, &state));
   }
   for (int i = 0; i < kNumReaders; i++) {
-    threads.emplace_back(ReaderThread, &state);
+    threads.push_back(new boost::thread(ReaderThread, &state));
   }
 
   if (AllowSlowTests()) {
@@ -135,9 +133,11 @@ TEST_F(RWCLockTest, TestCorrectBehavior) {
 
   Release_Store(&state.stop, 1);
 
-  for (thread& t : threads) {
-    t.join();
+  for (boost::thread* t : threads) {
+    t->join();
+    delete t;
   }
+
 }
 
 } // namespace kudu
