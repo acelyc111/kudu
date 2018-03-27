@@ -18,157 +18,127 @@
 #ifndef KUDU_CONSENSUS_CONSENSUS_PEERS_H_
 #define KUDU_CONSENSUS_CONSENSUS_PEERS_H_
 
+#include <cstdint>
 #include <memory>
+#include <ostream>
 #include <string>
 #include <vector>
+
+#include <glog/logging.h>
 
 #include "kudu/consensus/consensus.pb.h"
 #include "kudu/consensus/metadata.pb.h"
 #include "kudu/consensus/ref_counted_replicate.h"
+#include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/port.h"
 #include "kudu/rpc/response_callback.h"
 #include "kudu/rpc/rpc_controller.h"
-#include "kudu/util/countdown_latch.h"
 #include "kudu/util/locks.h"
-#include "kudu/util/resettable_heartbeater.h"
-#include "kudu/util/semaphore.h"
 #include "kudu/util/status.h"
 
 namespace kudu {
 class HostPort;
-class ThreadPool;
-
-namespace log {
-class Log;
-}
+class ThreadPoolToken;
 
 namespace rpc {
 class Messenger;
-class RpcController;
+class PeriodicTimer;
 }
 
 namespace consensus {
 class ConsensusServiceProxy;
-class OpId;
 class PeerProxy;
-class PeerProxyFactory;
 class PeerMessageQueue;
-class VoteRequestPB;
-class VoteResponsePB;
 
-// A peer in consensus (local or remote).
+// A remote peer in consensus.
 //
-// Leaders use peers to update the local Log and remote replicas.
+// Leaders use peers to update the remote replicas. Each peer
+// may have at most one outstanding request at a time. If a
+// request is signaled when there is already one outstanding,
+// the request will be generated once the outstanding one finishes.
 //
 // Peers are owned by the consensus implementation and do not keep
-// state aside from whether there are requests pending or if requests
-// are being processed.
+// state aside from the most recent request and response.
 //
-// There are two external actions that trigger a state change:
+// Peers are also responsible for sending periodic heartbeats
+// to assert liveness of the leader. The peer constructs a heartbeater
+// thread to trigger these heartbeats.
 //
-// SignalRequest(): Called by the consensus implementation, notifies
-// that the queue contains messages to be processed.
-//
-// ProcessResponse() Called a response from a peer is received.
-//
-// The following state diagrams describe what happens when a state
-// changing method is called.
-//
-//                        +
-//                        |
-//       SignalRequest()  |
-//                        |
-//                        |
-//                        v
-//              +------------------+
-//       +------+    processing ?  +-----+
-//       |      +------------------+     |
-//       |                               |
-//       | Yes                           | No
-//       |                               |
-//       v                               v
-//     return                      ProcessNextRequest()
-//                                 processing = true
-//                                 - get reqs. from queue
-//                                 - update peer async
-//                                 return
-//
-//                         +
-//                         |
-//      ProcessResponse()  |
-//      processing = false |
-//                         v
-//               +------------------+
-//        +------+   more pending?  +-----+
-//        |      +------------------+     |
-//        |                               |
-//        | Yes                           | No
-//        |                               |
-//        v                               v
-//  SignalRequest()                    return
-//
-class Peer {
+// The actual request construction is delegated to a PeerMessageQueue
+// object, and performed on a thread pool (since it may do IO). When a
+// response is received, the peer updates the PeerMessageQueue
+// using PeerMessageQueue::ResponseFromPeer(...) on the same thread pool.
+class Peer : public std::enable_shared_from_this<Peer> {
  public:
-  // Initializes a peer and get its status.
+  // Initializes a peer and start sending periodic heartbeats.
   Status Init();
 
   // Signals that this peer has a new request to replicate/store.
-  // 'force_if_queue_empty' indicates whether the peer should force
+  // 'even_if_queue_empty' indicates whether the peer should force
   // send the request even if the queue is empty. This is used for
   // status-only requests.
-  Status SignalRequest(bool force_if_queue_empty = false);
+  Status SignalRequest(bool even_if_queue_empty = false);
 
   const RaftPeerPB& peer_pb() const { return peer_pb_; }
 
-  // Returns the PeerProxy if this is a remote peer or NULL if it
-  // isn't. Used for tests to fiddle with the proxy and emulate remote
-  // behavior.
-  PeerProxy* GetPeerProxyForTests();
-
+  // Stop sending requests and periodic heartbeats.
+  //
+  // This does not block waiting on any current outstanding requests to finish.
+  // However, when they do finish, the results will be disregarded, so this
+  // is safe to call at any point.
+  //
+  // This method must be called before the Peer's associated ThreadPoolToken
+  // is destructed. Once this method returns, it is safe to destruct
+  // the ThreadPoolToken.
   void Close();
-
-  void SetTermForTest(int term);
 
   ~Peer();
 
   // Creates a new remote peer and makes the queue track it.'
   //
   // Requests to this peer (which may end up doing IO to read non-cached
-  // log entries) are assembled on 'thread_pool'.
+  // log entries) are assembled on 'raft_pool_token'.
   // Response handling may also involve IO related to log-entry lookups and is
-  // also done on 'thread_pool'.
-  static Status NewRemotePeer(const RaftPeerPB& peer_pb,
-                              const std::string& tablet_id,
-                              const std::string& leader_uuid,
+  // also done on 'raft_pool_token'.
+  static Status NewRemotePeer(RaftPeerPB peer_pb,
+                              std::string tablet_id,
+                              std::string leader_uuid,
                               PeerMessageQueue* queue,
-                              ThreadPool* thread_pool,
+                              ThreadPoolToken* raft_pool_token,
                               gscoped_ptr<PeerProxy> proxy,
-                              gscoped_ptr<Peer>* peer);
+                              std::shared_ptr<rpc::Messenger> messenger,
+                              std::shared_ptr<Peer>* peer);
 
  private:
-  Peer(const RaftPeerPB& peer, std::string tablet_id, std::string leader_uuid,
-       gscoped_ptr<PeerProxy> proxy, PeerMessageQueue* queue,
-       ThreadPool* thread_pool);
+  Peer(RaftPeerPB peer_pb,
+       std::string tablet_id,
+       std::string leader_uuid,
+       PeerMessageQueue* queue,
+       ThreadPoolToken* raft_pool_token,
+       gscoped_ptr<PeerProxy> proxy,
+       std::shared_ptr<rpc::Messenger> messenger);
 
   void SendNextRequest(bool even_if_queue_empty);
 
   // Signals that a response was received from the peer.
+  //
   // This method is called from the reactor thread and calls
-  // DoProcessResponse() on thread_pool_ to do any work that requires IO or
+  // DoProcessResponse() on raft_pool_token_ to do any work that requires IO or
   // lock-taking.
   void ProcessResponse();
 
-  // Run on 'thread_pool'. Does response handling that requires IO or may block.
+  // Run on 'raft_pool_token'. Does response handling that requires IO or may block.
   void DoProcessResponse();
 
-  // Fetch the desired remote bootstrap request from the queue and send it
-  // to the peer. The callback goes to ProcessRemoteBootstrapResponse().
+  // Fetch the desired tablet copy request from the queue and set up
+  // tc_request_ appropriately.
   //
-  // Returns a bad Status if remote bootstrap is disabled, or if the
+  // Returns a bad Status if tablet copy is disabled, or if the
   // request cannot be generated for some reason.
-  Status SendRemoteBootstrapRequest();
+  Status PrepareTabletCopyRequest();
 
-  // Handle RPC callback from initiating remote bootstrap.
-  void ProcessRemoteBootstrapResponse();
+  // Handle RPC callback from initiating tablet copy.
+  void ProcessTabletCopyResponse();
 
   // Signals there was an error sending the request to the peer.
   void ProcessResponseError(const Status& status);
@@ -191,9 +161,9 @@ class Peer {
   ConsensusRequestPB request_;
   ConsensusResponsePB response_;
 
-  // The latest remote bootstrap request and response.
-  StartRemoteBootstrapRequestPB rb_request_;
-  StartRemoteBootstrapResponsePB rb_response_;
+  // The latest tablet copy request and response.
+  StartTabletCopyRequestPB tc_request_;
+  StartTabletCopyResponsePB tc_response_;
 
   // Reference-counted pointers to any ReplicateMsgs which are in-flight to the peer. We
   // may have loaded these messages from the LogCache, in which case we are potentially
@@ -203,33 +173,22 @@ class Peer {
 
   rpc::RpcController controller_;
 
-  // Held if there is an outstanding request.
-  // This is used in order to ensure that we only have a single request
-  // oustanding at a time, and to wait for the outstanding requests
-  // at Close().
-  Semaphore sem_;
+  std::shared_ptr<rpc::Messenger> messenger_;
 
+  // Thread pool token used to construct requests to this peer.
+  //
+  // RaftConsensus owns this shared token and is responsible for destroying it.
+  ThreadPoolToken* raft_pool_token_;
 
-  // Heartbeater for remote peer implementations.
-  // This will send status only requests to the remote peers
-  // whenever we go more than 'FLAGS_raft_heartbeat_interval_ms'
-  // without sending actual data.
-  ResettableHeartbeater heartbeater_;
-
-  // Thread pool used to construct requests to this peer.
-  ThreadPool* thread_pool_;
-
-  enum State {
-    kPeerCreated,
-    kPeerStarted,
-    kPeerRunning,
-    kPeerClosed
-  };
+  // Repeating timer responsible for scheduling heartbeats to this peer.
+  std::shared_ptr<rpc::PeriodicTimer> heartbeater_;
 
   // lock that protects Peer state changes, initialization, etc.
-  // Must not try to acquire sem_ while holding peer_lock_.
   mutable simple_spinlock peer_lock_;
-  State state_;
+  bool request_pending_ = false;
+  bool closed_ = false;
+  bool has_sent_first_request_ = false;
+
 };
 
 // A proxy to another peer. Usually a thin wrapper around an rpc proxy but can
@@ -249,9 +208,9 @@ class PeerProxy {
                                          rpc::RpcController* controller,
                                          const rpc::ResponseCallback& callback) = 0;
 
-  // Instructs a peer to begin a remote bootstrap session.
-  virtual void StartRemoteBootstrap(const StartRemoteBootstrapRequestPB* request,
-                                    StartRemoteBootstrapResponsePB* response,
+  // Instructs a peer to begin a tablet copy session.
+  virtual void StartTabletCopy(const StartTabletCopyRequestPB* request,
+                                    StartTabletCopyResponsePB* response,
                                     rpc::RpcController* controller,
                                     const rpc::ResponseCallback& callback) {
     LOG(DFATAL) << "Not implemented";
@@ -269,6 +228,8 @@ class PeerProxyFactory {
                           gscoped_ptr<PeerProxy>* proxy) = 0;
 
   virtual ~PeerProxyFactory() {}
+
+  virtual const std::shared_ptr<rpc::Messenger>& messenger() const = 0;
 };
 
 // PeerProxy implementation that does RPC calls
@@ -287,8 +248,8 @@ class RpcPeerProxy : public PeerProxy {
                                          rpc::RpcController* controller,
                                          const rpc::ResponseCallback& callback) OVERRIDE;
 
-  virtual void StartRemoteBootstrap(const StartRemoteBootstrapRequestPB* request,
-                                    StartRemoteBootstrapResponsePB* response,
+  virtual void StartTabletCopy(const StartTabletCopyRequestPB* request,
+                                    StartTabletCopyResponsePB* response,
                                     rpc::RpcController* controller,
                                     const rpc::ResponseCallback& callback) OVERRIDE;
 
@@ -304,10 +265,15 @@ class RpcPeerProxyFactory : public PeerProxyFactory {
  public:
   explicit RpcPeerProxyFactory(std::shared_ptr<rpc::Messenger> messenger);
 
-  virtual Status NewProxy(const RaftPeerPB& peer_pb,
-                          gscoped_ptr<PeerProxy>* proxy) OVERRIDE;
+  Status NewProxy(const RaftPeerPB& peer_pb,
+                  gscoped_ptr<PeerProxy>* proxy) override;
 
-  virtual ~RpcPeerProxyFactory();
+  ~RpcPeerProxyFactory();
+
+  const std::shared_ptr<rpc::Messenger>& messenger() const override {
+    return messenger_;
+  }
+
  private:
   std::shared_ptr<rpc::Messenger> messenger_;
 };

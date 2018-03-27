@@ -2,26 +2,25 @@
 
 #include "kudu/gutil/strings/serialize.h"
 
-#include <stddef.h>
-#include <stdlib.h>
-#include <ext/hash_map>
-using __gnu_cxx::hash;
-using __gnu_cxx::hash_map;
+#include <cinttypes>
+#include <cstdlib>
 #include <string>
-using std::string;
 #include <utility>
-using std::make_pair;
-using std::pair;
+#include <unordered_map>
 #include <vector>
-using std::vector;
 
 #include "kudu/gutil/casts.h"
 #include "kudu/gutil/integral_types.h"
 #include "kudu/gutil/stringprintf.h"
-#include "kudu/gutil/strtoint.h"
 #include "kudu/gutil/strings/join.h"
 #include "kudu/gutil/strings/split.h"
-#include "kudu/gutil/hash/hash.h"
+#include "kudu/gutil/strtoint.h"
+
+using std::unordered_map;
+using std::make_pair;
+using std::pair;
+using std::string;
+using std::vector;
 
 // Convert a uint32 to a 4-byte string.
 string Uint32ToKey(uint32 u32) {
@@ -221,7 +220,7 @@ int64 ReverseOrderedStringToInt64(const StringPiece& key) {
 //   and commas to separate entries.
 // --------------------------------------------------------------------------
 
-string DictionaryInt32Encode(const hash_map<string, int32>* dictionary) {
+string DictionaryInt32Encode(const unordered_map<string, int32>* dictionary) {
   vector<string> entries;
   for (const auto& entry : *dictionary) {
     entries.push_back(StringPrintf("%s:%d", entry.first.c_str(), entry.second));
@@ -232,7 +231,7 @@ string DictionaryInt32Encode(const hash_map<string, int32>* dictionary) {
   return result;
 }
 
-string DictionaryInt64Encode(const hash_map<string, int64>* dictionary) {
+string DictionaryInt64Encode(const unordered_map<string, int64>* dictionary) {
   vector<string> entries;
   for (const auto& entry : *dictionary) {
     entries.push_back(StringPrintf("%s:%" PRId64,
@@ -244,7 +243,7 @@ string DictionaryInt64Encode(const hash_map<string, int64>* dictionary) {
   return result;
 }
 
-string DictionaryDoubleEncode(const hash_map<string, double>* dictionary) {
+string DictionaryDoubleEncode(const unordered_map<string, double>* dictionary) {
   vector<string> entries;
   for (const auto& entry : *dictionary) {
     entries.push_back(StringPrintf("%s:%g", entry.first.c_str(), entry.second));
@@ -269,7 +268,7 @@ bool DictionaryParse(const string& encoded_str,
   return true;
 }
 
-bool DictionaryInt32Decode(hash_map<string, int32>* dictionary,
+bool DictionaryInt32Decode(unordered_map<string, int32>* dictionary,
                            const string& encoded_str) {
   vector<pair<string, string> > items;
   if (!DictionaryParse(encoded_str, &items))
@@ -288,7 +287,7 @@ bool DictionaryInt32Decode(hash_map<string, int32>* dictionary,
   return true;
 }
 
-bool DictionaryInt64Decode(hash_map<string, int64>* dictionary,
+bool DictionaryInt64Decode(unordered_map<string, int64>* dictionary,
                            const string& encoded_str) {
   vector<pair<string, string> > items;
   if (!DictionaryParse(encoded_str, &items))
@@ -308,7 +307,7 @@ bool DictionaryInt64Decode(hash_map<string, int64>* dictionary,
 }
 
 
-bool DictionaryDoubleDecode(hash_map<string, double>* dictionary,
+bool DictionaryDoubleDecode(unordered_map<string, double>* dictionary,
                             const string& encoded_str) {
   vector<pair<string, string> > items;
   if (!DictionaryParse(encoded_str, &items))

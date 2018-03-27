@@ -17,17 +17,21 @@
 
 #include "kudu/util/monotime.h"
 
-#include <glog/logging.h>
-#include <limits>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/time.h>
-#include <time.h>
 
+#include <ctime>
+#include <limits>
+
+#include <glog/logging.h>
+
+#include "kudu/gutil/integral_types.h"
+#include "kudu/gutil/port.h"
 #include "kudu/gutil/stringprintf.h"
 #include "kudu/gutil/sysinfo.h"
-#include "kudu/gutil/walltime.h"
 #include "kudu/util/thread_restrictions.h"
+#if defined(__APPLE__)
+#include "kudu/gutil/walltime.h"
+#endif
 
 namespace kudu {
 
@@ -163,20 +167,12 @@ void MonoDelta::ToTimeSpec(struct timespec *ts) const {
 /// MonoTime
 ///
 
-MonoTime MonoTime::Now(enum Granularity granularity) {
+MonoTime MonoTime::Now() {
 #if defined(__APPLE__)
   return MonoTime(walltime_internal::GetMonoTimeNanos());
 # else
   struct timespec ts;
-  clockid_t clock;
-
-// Older systems do not support CLOCK_MONOTONIC_COARSE
-#ifdef CLOCK_MONOTONIC_COARSE
-  clock = (granularity == COARSE) ? CLOCK_MONOTONIC_COARSE : CLOCK_MONOTONIC;
-#else
-  clock = CLOCK_MONOTONIC;
-#endif
-  PCHECK(clock_gettime(clock, &ts) == 0);
+  PCHECK(clock_gettime(CLOCK_MONOTONIC, &ts) == 0);
   return MonoTime(ts);
 #endif // defined(__APPLE__)
 }
@@ -227,8 +223,23 @@ std::string MonoTime::ToString() const {
   return StringPrintf("%.3fs", ToSeconds());
 }
 
+void MonoTime::ToTimeSpec(struct timespec* ts) const {
+  DCHECK(Initialized());
+  MonoDelta::NanosToTimeSpec(nanos_, ts);
+}
+
 bool MonoTime::Equals(const MonoTime& other) const {
   return nanos_ == other.nanos_;
+}
+
+MonoTime& MonoTime::operator+=(const MonoDelta& delta) {
+  this->AddDelta(delta);
+  return *this;
+}
+
+MonoTime& MonoTime::operator-=(const MonoDelta& delta) {
+  this->AddDelta(MonoDelta(-1 * delta.nano_delta_));
+  return *this;
 }
 
 MonoTime::MonoTime(const struct timespec &ts) {
@@ -254,6 +265,70 @@ double MonoTime::ToSeconds() const {
 void SleepFor(const MonoDelta& delta) {
   ThreadRestrictions::AssertWaitAllowed();
   base::SleepForNanoseconds(delta.ToNanoseconds());
+}
+
+bool operator==(const MonoDelta &lhs, const MonoDelta &rhs) {
+  return lhs.Equals(rhs);
+}
+
+bool operator!=(const MonoDelta &lhs, const MonoDelta &rhs) {
+  return !lhs.Equals(rhs);
+}
+
+bool operator<(const MonoDelta &lhs, const MonoDelta &rhs) {
+  return lhs.LessThan(rhs);
+}
+
+bool operator<=(const MonoDelta &lhs, const MonoDelta &rhs) {
+  return lhs.LessThan(rhs) || lhs.Equals(rhs);
+}
+
+bool operator>(const MonoDelta &lhs, const MonoDelta &rhs) {
+  return lhs.MoreThan(rhs);
+}
+
+bool operator>=(const MonoDelta &lhs, const MonoDelta &rhs) {
+  return lhs.MoreThan(rhs) || lhs.Equals(rhs);
+}
+
+bool operator==(const MonoTime& lhs, const MonoTime& rhs) {
+  return lhs.Equals(rhs);
+}
+
+bool operator!=(const MonoTime& lhs, const MonoTime& rhs) {
+  return !lhs.Equals(rhs);
+}
+
+bool operator<(const MonoTime& lhs, const MonoTime& rhs) {
+  return lhs.ComesBefore(rhs);
+}
+
+bool operator<=(const MonoTime& lhs, const MonoTime& rhs) {
+  return lhs.ComesBefore(rhs) || lhs.Equals(rhs);
+}
+
+bool operator>(const MonoTime& lhs, const MonoTime& rhs) {
+  return rhs.ComesBefore(lhs);
+}
+
+bool operator>=(const MonoTime& lhs, const MonoTime& rhs) {
+  return rhs.ComesBefore(lhs) || rhs.Equals(lhs);
+}
+
+MonoTime operator+(const MonoTime& t, const MonoDelta& delta) {
+  MonoTime tmp(t);
+  tmp.AddDelta(delta);
+  return tmp;
+}
+
+MonoTime operator-(const MonoTime& t, const MonoDelta& delta) {
+  MonoTime tmp(t);
+  tmp.AddDelta(MonoDelta::FromNanoseconds(-delta.ToNanoseconds()));
+  return tmp;
+}
+
+MonoDelta operator-(const MonoTime& t_end, const MonoTime& t_beg) {
+  return t_end.GetDeltaSince(t_beg);
 }
 
 } // namespace kudu

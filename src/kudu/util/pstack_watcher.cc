@@ -17,18 +17,23 @@
 
 #include "kudu/util/pstack_watcher.h"
 
-#include <memory>
-#include <stdio.h>
-#include <string>
-#include <sys/types.h>
 #include <unistd.h>
+
+#include <cerrno>
+#include <cstdio>
+#include <memory>
+#include <string>
 #include <vector>
+
+#include <boost/bind.hpp>
+#include <glog/logging.h>
 
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/util/env.h"
 #include "kudu/util/errno.h"
 #include "kudu/util/status.h"
 #include "kudu/util/subprocess.h"
+#include "kudu/util/thread.h"
 
 namespace kudu {
 
@@ -38,7 +43,7 @@ using std::vector;
 using strings::Substitute;
 
 PstackWatcher::PstackWatcher(MonoDelta timeout)
-    : timeout_(std::move(timeout)), running_(true), cond_(&lock_) {
+    : timeout_(timeout), running_(true), cond_(&lock_) {
   CHECK_OK(Thread::Create("pstack_watcher", "pstack_watcher",
                  boost::bind(&PstackWatcher::Run, this), &thread_));
 }
@@ -74,7 +79,7 @@ void PstackWatcher::Wait() const {
 void PstackWatcher::Run() {
   MutexLock guard(lock_);
   if (!running_) return;
-  cond_.TimedWait(timeout_);
+  cond_.WaitFor(timeout_);
   if (!running_) return;
 
   WARN_NOT_OK(DumpStacks(DUMP_FULL), "Unable to print pstack from watcher");
@@ -83,24 +88,19 @@ void PstackWatcher::Run() {
 }
 
 Status PstackWatcher::HasProgram(const char* progname) {
-  string which("which");
-  vector<string> argv;
-  argv.push_back(which);
-  argv.push_back(progname);
-  Subprocess proc(which, argv);
+  Subprocess proc({ "which", progname } );
   proc.DisableStderr();
   proc.DisableStdout();
   RETURN_NOT_OK_PREPEND(proc.Start(),
       Substitute("HasProgram($0): error running 'which'", progname));
-  int wait_status = 0;
-  RETURN_NOT_OK(proc.Wait(&wait_status));
-  if ((WIFEXITED(wait_status)) && (0 == WEXITSTATUS(wait_status))) {
+  RETURN_NOT_OK(proc.Wait());
+  int exit_status;
+  string exit_info;
+  RETURN_NOT_OK(proc.GetExitStatus(&exit_status, &exit_info));
+  if (exit_status == 0) {
     return Status::OK();
   }
-  return Status::NotFound(Substitute("can't find $0: exited?=$1, status=$2",
-                                     progname,
-                                     static_cast<bool>(WIFEXITED(wait_status)),
-                                     WEXITSTATUS(wait_status)));
+  return Status::NotFound(Substitute("can't find $0: $1", progname, exit_info));
 }
 
 Status PstackWatcher::DumpStacks(int flags) {
@@ -130,53 +130,64 @@ Status PstackWatcher::DumpPidStacks(pid_t pid, int flags) {
 
 Status PstackWatcher::RunGdbStackDump(pid_t pid, int flags) {
   // Command: gdb -quiet -batch -nx -ex cmd1 -ex cmd2 /proc/$PID/exe $PID
-  string prog("gdb");
   vector<string> argv;
-  argv.push_back(prog);
-  argv.push_back("-quiet");
-  argv.push_back("-batch");
-  argv.push_back("-nx");
-  argv.push_back("-ex");
-  argv.push_back("set print pretty on");
-  argv.push_back("-ex");
-  argv.push_back("info threads");
-  argv.push_back("-ex");
-  argv.push_back("thread apply all bt");
+  argv.emplace_back("gdb");
+  // Don't print introductory version/copyright messages.
+  argv.emplace_back("-quiet");
+  // Exit after processing all of the commands below.
+  argv.emplace_back("-batch");
+  // Don't run commands from .gdbinit
+  argv.emplace_back("-nx");
+  // On RHEL6 and older Ubuntu, we occasionally would see gdb spin forever
+  // trying to collect backtraces. Setting a backtrace limit is a reasonable
+  // workaround, since we don't really expect >100-deep stacks anyway.
+  //
+  // See https://bugs.launchpad.net/ubuntu/+source/gdb/+bug/434168
+  argv.emplace_back("-ex");
+  argv.emplace_back("set backtrace limit 100");
+  argv.emplace_back("-ex");
+  argv.emplace_back("set print pretty on");
+  argv.emplace_back("-ex");
+  argv.emplace_back("info threads");
+  argv.emplace_back("-ex");
+  argv.emplace_back("thread apply all bt");
   if (flags & DUMP_FULL) {
-    argv.push_back("-ex");
-    argv.push_back("thread apply all bt full");
+    argv.emplace_back("-ex");
+    argv.emplace_back("thread apply all bt full");
   }
   string executable;
   Env* env = Env::Default();
   RETURN_NOT_OK(env->GetExecutablePath(&executable));
   argv.push_back(executable);
   argv.push_back(Substitute("$0", pid));
-  return RunStackDump(prog, argv);
+  return RunStackDump(argv);
 }
 
 Status PstackWatcher::RunPstack(const std::string& progname, pid_t pid) {
-  string prog(progname);
   string pid_string(Substitute("$0", pid));
   vector<string> argv;
-  argv.push_back(prog);
+  argv.push_back(progname);
   argv.push_back(pid_string);
-  return RunStackDump(prog, argv);
+  return RunStackDump(argv);
 }
 
-Status PstackWatcher::RunStackDump(const string& prog, const vector<string>& argv) {
+Status PstackWatcher::RunStackDump(const vector<string>& argv) {
   printf("************************ BEGIN STACKS **************************\n");
   if (fflush(stdout) == EOF) {
     return Status::IOError("Unable to flush stdout", ErrnoToString(errno), errno);
   }
-  Subprocess pstack_proc(prog, argv);
+  Subprocess pstack_proc(argv);
   RETURN_NOT_OK_PREPEND(pstack_proc.Start(), "RunStackDump proc.Start() failed");
   if (::close(pstack_proc.ReleaseChildStdinFd()) == -1) {
     return Status::IOError("Unable to close child stdin", ErrnoToString(errno), errno);
   }
-  int ret;
-  RETURN_NOT_OK_PREPEND(pstack_proc.Wait(&ret), "RunStackDump proc.Wait() failed");
-  if (ret == -1) {
-    return Status::RuntimeError("RunStackDump proc.Wait() error", ErrnoToString(errno), errno);
+  RETURN_NOT_OK_PREPEND(pstack_proc.Wait(), "RunStackDump proc.Wait() failed");
+  int exit_code;
+  string exit_info;
+  RETURN_NOT_OK_PREPEND(pstack_proc.GetExitStatus(&exit_code, &exit_info),
+                        "RunStackDump proc.GetExitStatus() failed");
+  if (exit_code != 0) {
+    return Status::RuntimeError("RunStackDump proc.Wait() error", exit_info);
   }
   printf("************************* END STACKS ***************************\n");
   if (fflush(stdout) == EOF) {

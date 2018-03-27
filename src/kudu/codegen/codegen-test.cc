@@ -15,42 +15,58 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <ostream>
 #include <string>
 #include <vector>
 
+#include <gflags/gflags_declare.h>
 #include <glog/logging.h>
-#include <gmock/gmock.h>
+#include <glog/stl_logging.h> // IWYU pragma: keep
+#include <gmock/gmock-matchers.h>
+#include <gtest/gtest.h>
 
 #include "kudu/codegen/code_generator.h"
+#include "kudu/codegen/compilation_manager.h"
 #include "kudu/codegen/row_projector.h"
+#include "kudu/common/common.pb.h"
 #include "kudu/common/row.h"
 #include "kudu/common/rowblock.h"
 #include "kudu/common/schema.h"
 #include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/macros.h"
 #include "kudu/gutil/ref_counted.h"
-#include "kudu/util/bitmap.h"
+#include "kudu/gutil/singleton.h"
 #include "kudu/util/logging_test_util.h"
+#include "kudu/util/memory/arena.h"
 #include "kudu/util/random.h"
 #include "kudu/util/random_util.h"
+#include "kudu/util/slice.h"
+#include "kudu/util/status.h"
+#include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
 
 using std::string;
 using std::vector;
 
 DECLARE_bool(codegen_dump_mc);
+DECLARE_int32(codegen_cache_capacity);
 
 namespace kudu {
 
 typedef RowProjector NoCodegenRP;
 typedef codegen::RowProjector CodegenRP;
 
+using codegen::CompilationManager;
+
 class CodegenTest : public KuduTest {
  public:
   CodegenTest()
     : random_(SeedRandom()),
-      // Set the arena size as small as possible to catch errors during relocation,
-      // for its initial size and its eventual max size.
-      projections_arena_(16, kIndirectPerProjection * 2) {
+      // Set the initial Arena size as small as possible to catch errors during relocation.
+      projections_arena_(16) {
     // Create the base schema.
     vector<ColumnSchema> cols = { ColumnSchema("key           ", UINT64, false),
                                   ColumnSchema("int32         ",  INT32, false),
@@ -63,14 +79,14 @@ class CodegenTest : public KuduTest {
     base_ = SchemaBuilder(base_).Build(); // add IDs
 
     // Create an extended default schema
-    cols.push_back(ColumnSchema("int32-R ",  INT32, false, kI32R,  nullptr));
-    cols.push_back(ColumnSchema("int32-RW",  INT32, false, kI32R, kI32W));
-    cols.push_back(ColumnSchema("str32-R ", STRING, false, kStrR,  nullptr));
-    cols.push_back(ColumnSchema("str32-RW", STRING, false, kStrR, kStrW));
+    cols.emplace_back("int32-R ",  INT32, false, kI32R,  nullptr);
+    cols.emplace_back("int32-RW",  INT32, false, kI32R, kI32W);
+    cols.emplace_back("str32-R ", STRING, false, kStrR,  nullptr);
+    cols.emplace_back("str32-RW", STRING, false, kStrR, kStrW);
     defaults_.Reset(cols, 1);
     defaults_ = SchemaBuilder(defaults_).Build(); // add IDs
 
-    test_rows_arena_.reset(new Arena(2 * 1024, 1024 * 1024));
+    test_rows_arena_.reset(new Arena(2 * 1024));
     RowBuilder rb(base_);
     for (int i = 0; i < kNumTestRows; ++i) {
       rb.AddUint64(i);
@@ -252,6 +268,14 @@ TEST_F(CodegenTest, ObservablesTest) {
   ASSERT_EQ(iwith->is_identity(), iwithout.is_identity());
   ASSERT_TRUE(iwith->is_identity());
 }
+
+// Test empty projection
+TEST_F(CodegenTest, TestEmpty) {
+  Schema empty;
+  TestProjection<true>(&empty);
+  TestProjection<false>(&empty);
+}
+
 // Test key projection
 TEST_F(CodegenTest, TestKey) {
   Schema key = base_.CreateKeyProjection();
@@ -350,13 +374,55 @@ TEST_F(CodegenTest, TestDumpMC) {
   ScopedRegisterSink srs(&sink);
 
   Schema ints;
-  vector<size_t> part_cols = { kI32Col, kI32NullValCol, kI32NullCol };
+  vector<size_t> part_cols = { kI32Col, kI32NullValCol, kI32NullCol, kStrCol };
   ASSERT_OK(CreatePartialSchema(part_cols, &ints));
   TestProjection<true>(&ints);
 
   const vector<string>& msgs = sink.logged_msgs();
   ASSERT_EQ(msgs.size(), 1);
   EXPECT_THAT(msgs[0], testing::ContainsRegex("retq"));
+}
+
+// Basic test for the CompilationManager code cache.
+// This runs a bunch of compilation tasks and ensures that the cache
+// sometimes hits on the second attempt for the same projection.
+TEST_F(CodegenTest, TestCodeCache) {
+  Singleton<CompilationManager>::UnsafeReset();
+  FLAGS_codegen_cache_capacity = 10;
+  CompilationManager* cm = CompilationManager::GetSingleton();
+
+  for (int pass = 0; pass < 2; pass++) {
+    int num_hits = 0;
+
+    // Generate all permutations of the first four columns (24 permutations).
+    // For each such permutation, we'll create a projection and request code generation.
+    vector<size_t> perm = { 0, 1, 2, 3 };
+    do {
+      SCOPED_TRACE(perm);
+      Schema projection;
+      ASSERT_OK(CreatePartialSchema(perm, &projection));
+
+      gscoped_ptr<CodegenRP> projector;
+      if (cm->RequestRowProjector(&base_, &projection, &projector)) {
+        num_hits++;
+      }
+      cm->Wait();
+    } while (std::next_permutation(perm.begin(), perm.end()));
+
+    if (pass == 0) {
+      // On the first pass, the cache should have been empty and gotten 0 hits.
+      ASSERT_EQ(0, num_hits);
+    } else {
+      // Otherwise, we expect to have gotten some hits.
+      // If our cache were a perfect LRU implementation, then we would actually
+      // expect 0 hits here as well, since we are accessing the entries in
+      // exactly the same order as we inserted them, and thus would evict
+      // an entry before we look for it again. But, our LRU cache is sharded
+      // so we expect to get some hits on the second time.
+      ASSERT_GT(num_hits, 0);
+      ASSERT_LT(num_hits, 24);
+    }
+  }
 }
 
 } // namespace kudu

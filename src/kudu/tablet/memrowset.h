@@ -14,32 +14,55 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-#ifndef KUDU_TABLET_MEMROWSET_H
-#define KUDU_TABLET_MEMROWSET_H
+#pragma once
 
-#include <boost/optional.hpp>
+#include <atomic>
+#include <cstdint>
+#include <cstring>
 #include <memory>
+#include <mutex>
+#include <ostream>
 #include <string>
 #include <vector>
 
-#include "kudu/common/scan_spec.h"
-#include "kudu/common/rowblock.h"
+#include <boost/optional/optional.hpp>
+#include <glog/logging.h>
+
+#include "kudu/common/common.pb.h"
+#include "kudu/common/iterator.h"
+#include "kudu/common/row.h"
+#include "kudu/common/rowid.h"
 #include "kudu/common/schema.h"
+#include "kudu/common/timestamp.h"
 #include "kudu/consensus/log_anchor_registry.h"
+#include "kudu/gutil/atomicops.h"
+#include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/macros.h"
 #include "kudu/tablet/concurrent_btree.h"
-#include "kudu/tablet/mutation.h"
+#include "kudu/tablet/mvcc.h"
 #include "kudu/tablet/rowset.h"
-#include "kudu/tablet/tablet.pb.h"
+#include "kudu/tablet/rowset_metadata.h"
+#include "kudu/util/faststring.h"
 #include "kudu/util/memory/arena.h"
-#include "kudu/util/memory/memory.h"
+#include "kudu/util/monotime.h"
+#include "kudu/util/slice.h"
 #include "kudu/util/status.h"
 
 namespace kudu {
 
 class MemTracker;
+class MemoryTrackingBufferAllocator;
+class RowBlock;
+class RowBlockRow;
+class RowChangeList;
+class ScanSpec;
+struct IteratorStats;
+
+namespace consensus {
+class OpId;
+}
 
 namespace tablet {
-
 //
 // Implementation notes:
 // --------------------------
@@ -55,7 +78,10 @@ namespace tablet {
 // NOTE: all allocations done by the MemRowSet are done inside its associated
 // thread-safe arena, and then freed in bulk when the MemRowSet is destructed.
 
+class CompactionInput;
 class MemRowSet;
+class Mutation;
+class OperationResultPB;
 
 // The value stored in the CBTree for a single row.
 class MRSRow {
@@ -75,6 +101,12 @@ class MRSRow {
   Timestamp insertion_timestamp() const { return header_->insertion_timestamp; }
 
   Mutation* redo_head() { return header_->redo_head; }
+
+  // Load 'redo_head' with an 'Acquire' memory barrier.
+  Mutation* acquire_redo_head() {
+    return reinterpret_cast<Mutation*>(
+        base::subtle::Acquire_Load(reinterpret_cast<AtomicWord*>(&header_->redo_head)));
+  }
   const Mutation* redo_head() const { return header_->redo_head; }
 
   const Slice &row_slice() const { return row_slice_; }
@@ -174,11 +206,11 @@ class MemRowSet : public RowSet,
  public:
   class Iterator;
 
-  MemRowSet(int64_t id,
-            const Schema &schema,
-            log::LogAnchorRegistry* log_anchor_registry,
-            const std::shared_ptr<MemTracker>& parent_tracker =
-            std::shared_ptr<MemTracker>());
+  static Status Create(int64_t id,
+                       const Schema &schema,
+                       log::LogAnchorRegistry* log_anchor_registry,
+                       std::shared_ptr<MemTracker> parent_tracker,
+                       std::shared_ptr<MemRowSet>* mrs);
 
   ~MemRowSet();
 
@@ -205,7 +237,7 @@ class MemRowSet : public RowSet,
                            const RowChangeList &delta,
                            const consensus::OpId& op_id,
                            ProbeStats* stats,
-                           OperationResultPB *result) OVERRIDE;
+                           OperationResultPB *result) override;
 
   // Return the number of entries in the memrowset.
   // NOTE: this requires iterating all data, and is thus
@@ -215,24 +247,40 @@ class MemRowSet : public RowSet,
   }
 
   // Conform entry_count to RowSet
-  Status CountRows(rowid_t *count) const OVERRIDE {
+  Status CountRows(rowid_t *count) const override {
     *count = entry_count();
     return Status::OK();
   }
 
-  virtual Status GetBounds(Slice *min_encoded_key,
-                           Slice *max_encoded_key) const OVERRIDE;
+  virtual Status GetBounds(std::string *min_encoded_key,
+                           std::string *max_encoded_key) const override;
 
-  uint64_t EstimateOnDiskSize() const OVERRIDE {
+  uint64_t OnDiskSize() const override {
     return 0;
   }
 
-  boost::mutex *compact_flush_lock() OVERRIDE {
+  uint64_t OnDiskBaseDataSize() const override {
+    return 0;
+  }
+
+  uint64_t OnDiskBaseDataSizeWithRedos() const override {
+    return 0;
+  }
+
+  std::mutex *compact_flush_lock() override {
     return &compact_flush_lock_;
   }
 
+  bool has_been_compacted() const override {
+    return has_been_compacted_.load();
+  }
+
+  void set_has_been_compacted() override {
+    has_been_compacted_.store(true);
+  }
+
   // MemRowSets are never available for compaction, currently.
-  virtual bool IsAvailableForCompaction() OVERRIDE {
+  virtual bool IsAvailableForCompaction() override {
     return false;
   }
 
@@ -241,9 +289,9 @@ class MemRowSet : public RowSet,
     return tree_.empty();
   }
 
-  // TODO: unit test me
+  // TODO(todd): unit test me
   Status CheckRowPresent(const RowSetKeyProbe &probe, bool *present,
-                         ProbeStats* stats) const OVERRIDE;
+                         ProbeStats* stats) const override;
 
   // Return the memory footprint of this memrowset.
   // Note that this may be larger than the sum of the data
@@ -259,7 +307,7 @@ class MemRowSet : public RowSet,
   // referring to this MemRowSet. Otherwise, this will throw
   // a C++ exception and all bets are off.
   //
-  // TODO: clarify the consistency of this iterator in the method doc
+  // TODO(todd): clarify the consistency of this iterator in the method doc
   Iterator *NewIterator() const;
   Iterator *NewIterator(const Schema *projection,
                         const MvccSnapshot &snap) const;
@@ -267,12 +315,13 @@ class MemRowSet : public RowSet,
   // Alias to conform to DiskRowSet interface
   virtual Status NewRowIterator(const Schema* projection,
                                 const MvccSnapshot& snap,
-                                gscoped_ptr<RowwiseIterator>* out) const OVERRIDE;
+                                OrderMode order,
+                                gscoped_ptr<RowwiseIterator>* out) const override;
 
   // Create compaction input.
   virtual Status NewCompactionInput(const Schema* projection,
                                     const MvccSnapshot& snap,
-                                    gscoped_ptr<CompactionInput>* out) const OVERRIDE;
+                                    gscoped_ptr<CompactionInput>* out) const override;
 
   // Return the Schema for the rows in this memrowset.
    const Schema &schema() const {
@@ -288,7 +337,7 @@ class MemRowSet : public RowSet,
     return id_;
   }
 
-  std::shared_ptr<RowSetMetadata> metadata() OVERRIDE {
+  std::shared_ptr<RowSetMetadata> metadata() override {
     return std::shared_ptr<RowSetMetadata>(
         reinterpret_cast<RowSetMetadata *>(NULL));
   }
@@ -297,10 +346,10 @@ class MemRowSet : public RowSet,
   // If 'lines' is NULL, dumps to LOG(INFO).
   //
   // This dumps every row, so should only be used in tests, etc.
-  virtual Status DebugDump(vector<string> *lines = NULL) OVERRIDE;
+  virtual Status DebugDump(std::vector<std::string> *lines) override;
 
-  string ToString() const OVERRIDE {
-    return string("memrowset");
+  std::string ToString() const override {
+    return "memrowset";
   }
 
   // Mark the memrowset as frozen. See CBTree::Freeze()
@@ -315,38 +364,65 @@ class MemRowSet : public RowSet,
     return debug_update_count_;
   }
 
-  size_t DeltaMemStoreSize() const OVERRIDE { return 0; }
+  size_t DeltaMemStoreSize() const override { return 0; }
 
-  bool DeltaMemStoreEmpty() const OVERRIDE { return true; }
+  bool DeltaMemStoreEmpty() const override { return true; }
 
-  int64_t MinUnflushedLogIndex() const OVERRIDE {
+  int64_t MinUnflushedLogIndex() const override {
     return anchorer_.minimum_log_index();
   }
 
-  double DeltaStoresCompactionPerfImprovementScore(DeltaCompactionType type) const OVERRIDE {
+  double DeltaStoresCompactionPerfImprovementScore(
+      DeltaCompactionType /*type*/) const override {
     return 0;
   }
 
-  Status FlushDeltas() OVERRIDE { return Status::OK(); }
+  Status EstimateBytesInPotentiallyAncientUndoDeltas(Timestamp /*ancient_history_mark*/,
+                                                     int64_t* bytes) override {
+    DCHECK(bytes);
+    *bytes = 0;
+    return Status::OK();
+  }
 
-  Status MinorCompactDeltaStores() OVERRIDE { return Status::OK(); }
+  Status InitUndoDeltas(Timestamp /*ancient_history_mark*/,
+                        MonoTime /*deadline*/,
+                        int64_t* delta_blocks_initialized,
+                        int64_t* bytes_in_ancient_undos) override {
+    if (delta_blocks_initialized) *delta_blocks_initialized = 0;
+    if (bytes_in_ancient_undos) *bytes_in_ancient_undos = 0;
+    return Status::OK();
+  }
+
+  Status DeleteAncientUndoDeltas(Timestamp /*ancient_history_mark*/,
+                                 int64_t* blocks_deleted, int64_t* bytes_deleted) override {
+    if (blocks_deleted) *blocks_deleted = 0;
+    if (bytes_deleted) *bytes_deleted = 0;
+    return Status::OK();
+  }
+
+  Status FlushDeltas() override { return Status::OK(); }
+
+  Status MinorCompactDeltaStores() override { return Status::OK(); }
 
  private:
   friend class Iterator;
 
+  MemRowSet(int64_t id,
+            const Schema &schema,
+            log::LogAnchorRegistry* log_anchor_registry,
+            std::shared_ptr<MemTracker> parent_tracker);
+
   // Perform a "Reinsert" -- handle an insertion into a row which was previously
   // inserted and deleted, but still has an entry in the MemRowSet.
   Status Reinsert(Timestamp timestamp,
-                  const ConstContiguousRow& row_data,
-                  MRSRow *row);
+                  const ConstContiguousRow& row,
+                  MRSRow *ms_row);
 
   typedef btree::CBTree<MSBTreeTraits> MSBTree;
 
   int64_t id_;
 
   const Schema schema_;
-  std::shared_ptr<MemTracker> parent_tracker_;
-  std::shared_ptr<MemTracker> mem_tracker_;
   std::shared_ptr<MemoryTrackingBufferAllocator> allocator_;
   std::shared_ptr<ThreadSafeMemoryTrackingArena> arena_;
 
@@ -360,11 +436,13 @@ class MemRowSet : public RowSet,
   volatile uint64_t debug_insert_count_;
   volatile uint64_t debug_update_count_;
 
-  boost::mutex compact_flush_lock_;
-
-  Atomic32 has_logged_throttling_;
+  std::mutex compact_flush_lock_;
 
   log::MinLogIndexAnchorer anchorer_;
+
+  // Flag indicating whether the rowset has been removed from a rowset tree,
+  // and thus should not be scheduled for further compactions.
+  std::atomic<bool> has_been_compacted_;
 
   DISALLOW_COPY_AND_ASSIGN(MemRowSet);
 };
@@ -385,11 +463,11 @@ class MemRowSet::Iterator : public RowwiseIterator {
 
   virtual ~Iterator();
 
-  virtual Status Init(ScanSpec *spec) OVERRIDE;
+  virtual Status Init(ScanSpec *spec) override;
 
   Status SeekAtOrAfter(const Slice &key, bool *exact);
 
-  virtual Status NextBlock(RowBlock *dst) OVERRIDE;
+  virtual Status NextBlock(RowBlock *dst) override;
 
   bool has_upper_bound() const {
     return exclusive_upper_bound_.is_initialized();
@@ -406,7 +484,7 @@ class MemRowSet::Iterator : public RowwiseIterator {
     return iter_->remaining_in_leaf();
   }
 
-  virtual bool HasNext() const OVERRIDE {
+  virtual bool HasNext() const override {
     DCHECK_NE(state_, kUninitialized) << "not initted";
     return state_ != kFinished && iter_->IsValid();
   }
@@ -423,7 +501,7 @@ class MemRowSet::Iterator : public RowwiseIterator {
   // Copy the current MRSRow to the 'dst_row' provided using the iterator projection schema.
   Status GetCurrentRow(RowBlockRow* dst_row,
                        Arena* row_arena,
-                       const Mutation** redo_head,
+                       Mutation** redo_head,
                        Arena* mutation_arena,
                        Timestamp* insertion_timestamp);
 
@@ -432,15 +510,15 @@ class MemRowSet::Iterator : public RowwiseIterator {
     return iter_->Next();
   }
 
-  string ToString() const OVERRIDE {
+  std::string ToString() const override {
     return "memrowset iterator";
   }
 
-  const Schema& schema() const OVERRIDE {
+  const Schema& schema() const override {
     return *projection_;
   }
 
-  virtual void GetIteratorStats(std::vector<IteratorStats>* stats) const OVERRIDE {
+  virtual void GetIteratorStats(std::vector<IteratorStats>* stats) const override {
     // Currently we do not expose any non-disk related statistics in
     // IteratorStats.  However, callers of GetIteratorStats expected
     // an IteratorStats object for every column; vector::resize() is
@@ -490,8 +568,6 @@ class MemRowSet::Iterator : public RowwiseIterator {
   // Temporary buffer used for RowChangeList projection.
   faststring delta_buf_;
 
-  size_t prepared_count_;
-
   // Temporary local buffer used for seeking to hold the encoded
   // seek target.
   faststring tmp_buf;
@@ -511,5 +587,3 @@ inline const Schema* MRSRow::schema() const {
 
 } // namespace tablet
 } // namespace kudu
-
-#endif

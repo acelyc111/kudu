@@ -18,22 +18,24 @@
 #include "kudu/util/net/sockaddr.h"
 
 #include <arpa/inet.h>
-#include <errno.h>
 #include <netdb.h>
-#include <stdio.h>
-#include <string.h>
+#include <sys/socket.h>
+
+#include <cerrno>
+#include <cstring>
 #include <string>
 
 #include "kudu/gutil/endian.h"
-#include "kudu/gutil/macros.h"
-#include "kudu/gutil/stringprintf.h"
+#include "kudu/gutil/hash/builtin_type_hash.h"
+#include "kudu/gutil/port.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/util/net/net_util.h"
 #include "kudu/util/stopwatch.h"
 
-namespace kudu {
-
+using std::string;
 using strings::Substitute;
+
+namespace kudu {
 
 ///
 /// Sockaddr
@@ -73,9 +75,9 @@ bool Sockaddr::operator<(const Sockaddr &rhs) const {
 }
 
 uint32_t Sockaddr::HashCode() const {
-  uint32_t ret = addr_.sin_addr.s_addr;
-  ret ^= (addr_.sin_port * 7919);
-  return ret;
+  uint32_t hash = Hash32NumWithSeed(addr_.sin_addr.s_addr, 0);
+  hash = Hash32NumWithSeed(addr_.sin_port, hash);
+  return hash;
 }
 
 void Sockaddr::set_port(int port) {
@@ -97,9 +99,7 @@ const struct sockaddr_in& Sockaddr::addr() const {
 }
 
 std::string Sockaddr::ToString() const {
-  char str[INET_ADDRSTRLEN];
-  ::inet_ntop(AF_INET, &addr_.sin_addr, str, INET_ADDRSTRLEN);
-  return StringPrintf("%s:%d", str, port());
+  return Substitute("$0:$1", host(), port());
 }
 
 bool Sockaddr::IsWildcard() const {

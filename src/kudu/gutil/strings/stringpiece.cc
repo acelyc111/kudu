@@ -6,21 +6,17 @@
 
 #include <algorithm>
 #include <climits>
-#include <glog/logging.h>
-#include <string.h>
+#include <cstring>
+#include <ostream>
 #include <string>
 
-#include "kudu/gutil/hash/hash.h"
-#include "kudu/gutil/logging-inl.h"
+#include <glog/logging.h>
+
+#include "kudu/gutil/hash/legacy_hash.h"
 #include "kudu/gutil/stl_util.h"
 #include "kudu/gutil/strings/memutil.h"
 
-using std::copy;
-using std::max;
 using std::min;
-using std::reverse;
-using std::sort;
-using std::swap;
 using std::string;
 
 namespace std {

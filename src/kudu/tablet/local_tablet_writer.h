@@ -32,7 +32,7 @@ namespace kudu {
 namespace tablet {
 
 // Helper class to write directly into a local tablet, without going
-// through TabletPeer, consensus, etc.
+// through TabletReplica, consensus, etc.
 //
 // This is useful for unit-testing the Tablet code paths with no consensus
 // implementation or thread pools.
@@ -63,6 +63,10 @@ class LocalTabletWriter {
     return Write(RowOperationsPB::INSERT, row);
   }
 
+  Status Upsert(const KuduPartialRow& row) {
+    return Write(RowOperationsPB::UPSERT, row);
+  }
+
   Status Delete(const KuduPartialRow& row) {
     return Write(RowOperationsPB::DELETE, row);
   }
@@ -75,8 +79,8 @@ class LocalTabletWriter {
   // Returns a bad Status if the applied operation had a per-row error.
   Status Write(RowOperationsPB::Type type,
                const KuduPartialRow& row) {
-    vector<Op> ops;
-    ops.push_back(Op(type, &row));
+    std::vector<Op> ops;
+    ops.emplace_back(type, &row);
     return WriteBatch(ops);
   }
 
@@ -92,16 +96,15 @@ class LocalTabletWriter {
 
     RETURN_NOT_OK(tablet_->DecodeWriteOperations(client_schema_, tx_state_.get()));
     RETURN_NOT_OK(tablet_->AcquireRowLocks(tx_state_.get()));
-    tablet_->StartTransaction(tx_state_.get());
+    tablet_->AssignTimestampAndStartTransactionForTests(tx_state_.get());
 
     // Create a "fake" OpId and set it in the TransactionState for anchoring.
     tx_state_->mutable_op_id()->CopyFrom(consensus::MaximumOpId());
-    tablet_->ApplyRowOperations(tx_state_.get());
+    RETURN_NOT_OK(tablet_->ApplyRowOperations(tx_state_.get()));
 
     tx_state_->ReleaseTxResultPB(&result_);
-    tx_state_->Commit();
-    tx_state_->release_row_locks();
-    tx_state_->ReleaseSchemaLock();
+    tablet_->mvcc_manager()->AdjustSafeTime(tx_state_->timestamp());
+    tx_state_->CommitOrAbort(Transaction::COMMITTED);
 
     // Return the status of first failed op.
     int op_idx = 0;

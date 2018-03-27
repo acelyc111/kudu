@@ -17,13 +17,15 @@
 #ifndef KUDU_COMMON_ROW_H
 #define KUDU_COMMON_ROW_H
 
-#include <glog/logging.h>
+#include <cstring>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "kudu/common/types.h"
+#include <glog/logging.h>
+
 #include "kudu/common/schema.h"
+#include "kudu/common/types.h"
 #include "kudu/gutil/macros.h"
 #include "kudu/gutil/map-util.h"
 #include "kudu/util/memory/arena.h"
@@ -154,7 +156,6 @@ class RowProjector {
     base_schema_ = base_schema;
     projection_ = projection;
     base_cols_mapping_.clear();
-    adapter_cols_mapping_.clear();
     projection_defaults_.clear();
     is_identity_ = base_schema->Equals(*projection);
     return Init();
@@ -187,29 +188,23 @@ class RowProjector {
 
   // Returns the mapping between base schema and projection schema columns
   // first: is the projection column index, second: is the base_schema  index
-  const vector<ProjectionIdxMapping>& base_cols_mapping() const { return base_cols_mapping_; }
-
-  // Returns the mapping between base schema and projection schema columns
-  // that requires a type adapter.
-  // first: is the projection column index, second: is the base_schema  index
-  const vector<ProjectionIdxMapping>& adapter_cols_mapping() const { return adapter_cols_mapping_; }
+  const std::vector<ProjectionIdxMapping>& base_cols_mapping() const {
+    return base_cols_mapping_;
+  }
 
   // Returns the projection indexes of the columns to add with a default value.
   //
   // These are columns which are present in 'projection_' but not in 'base_schema',
   // and for which 'projection' has a default.
-  const vector<size_t>& projection_defaults() const { return projection_defaults_; }
+  const std::vector<size_t>& projection_defaults() const {
+    return projection_defaults_;
+  }
 
  private:
   friend class Schema;
 
   Status ProjectBaseColumn(size_t proj_col_idx, size_t base_col_idx) {
-    base_cols_mapping_.push_back(ProjectionIdxMapping(proj_col_idx, base_col_idx));
-    return Status::OK();
-  }
-
-  Status ProjectAdaptedColumn(size_t proj_col_idx, size_t base_col_idx) {
-    adapter_cols_mapping_.push_back(ProjectionIdxMapping(proj_col_idx, base_col_idx));
+    base_cols_mapping_.emplace_back(proj_col_idx, base_col_idx);
     return Status::OK();
   }
 
@@ -240,9 +235,6 @@ class RowProjector {
       RETURN_NOT_OK(CopyCell(src_cell, &dst_cell, dst_arena));
     }
 
-    // TODO: Copy Adapted base Data
-    DCHECK(adapter_cols_mapping_.size() == 0) << "Value Adapter not supported yet";
-
     // Fill with Defaults
     for (auto proj_idx : projection_defaults_) {
       const ColumnSchema& col_proj = projection_->column(proj_idx);
@@ -259,9 +251,8 @@ class RowProjector {
  private:
   DISALLOW_COPY_AND_ASSIGN(RowProjector);
 
-  vector<ProjectionIdxMapping> base_cols_mapping_;
-  vector<ProjectionIdxMapping> adapter_cols_mapping_;
-  vector<size_t> projection_defaults_;
+  std::vector<ProjectionIdxMapping> base_cols_mapping_;
+  std::vector<size_t> projection_defaults_;
 
   const Schema* base_schema_;
   const Schema* projection_;
@@ -302,17 +293,9 @@ class DeltaProjector {
     return FindCopy(base_cols_mapping_, proj_col_idx, base_col_idx);
   }
 
-  bool get_adapter_col_from_proj_idx(size_t proj_col_idx, size_t *base_col_idx) const {
-    return FindCopy(adapter_cols_mapping_, proj_col_idx, base_col_idx);
-  }
-
   // TODO: Discourage the use of this. At the moment is only in RowChangeList::Project
   bool get_proj_col_from_base_id(size_t col_id, size_t *proj_col_idx) const {
     return FindCopy(rbase_cols_mapping_, col_id, proj_col_idx);
-  }
-
-  bool get_proj_col_from_adapter_id(size_t col_id, size_t *proj_col_idx) const {
-    return FindCopy(radapter_cols_mapping_, col_id, proj_col_idx);
   }
 
  private:
@@ -324,16 +307,6 @@ class DeltaProjector {
       rbase_cols_mapping_[delta_schema_->column_id(base_col_idx)] = proj_col_idx;
     } else {
       rbase_cols_mapping_[proj_col_idx] = proj_col_idx;
-    }
-    return Status::OK();
-  }
-
-  Status ProjectAdaptedColumn(size_t proj_col_idx, size_t base_col_idx) {
-    adapter_cols_mapping_[proj_col_idx] = base_col_idx;
-    if (delta_schema_->has_column_ids()) {
-      radapter_cols_mapping_[delta_schema_->column_id(base_col_idx)] = proj_col_idx;
-    } else {
-      radapter_cols_mapping_[proj_col_idx] = proj_col_idx;
     }
     return Status::OK();
   }
@@ -357,9 +330,6 @@ class DeltaProjector {
   std::unordered_map<size_t, size_t> base_cols_mapping_;     // [proj_idx] = base_idx
   std::unordered_map<size_t, size_t> rbase_cols_mapping_;    // [id] = proj_idx
 
-  std::unordered_map<size_t, size_t> adapter_cols_mapping_;  // [proj_idx] = base_idx
-  std::unordered_map<size_t, size_t> radapter_cols_mapping_; // [id] = proj_idx
-
   const Schema* delta_schema_;
   const Schema* projection_;
   bool is_identity_;
@@ -373,8 +343,27 @@ class DeltaProjector {
 template <class RowType, class ArenaType>
 inline Status RelocateIndirectDataToArena(RowType *row, ArenaType *dst_arena) {
   const Schema* schema = row->schema();
-  // For any Slice columns, copy the sliced data into the arena
-  // and update the pointers
+  // First calculate the total size we'll need to allocate in the arena.
+  int size = 0;
+  for (int i = 0; i < schema->num_columns(); i++) {
+    typename RowType::Cell cell = row->cell(i);
+    if (cell.typeinfo()->physical_type() == BINARY) {
+      if (cell.is_nullable() && cell.is_null()) {
+        continue;
+      }
+
+      const Slice *slice = reinterpret_cast<const Slice *>(cell.ptr());
+      size += slice->size();
+    }
+  }
+  if (size == 0) return Status::OK();
+
+  // Then allocate it in one shot and copy the actual data.
+  // Even though Arena allocation is cheap, a row may have hundreds of
+  // small string columns and each operation is at least one CAS. With
+  // many concurrent threads copying into a single arena, this avoids
+  // a lot of contention.
+  uint8_t* dst = static_cast<uint8_t*>(dst_arena->AllocateBytes(size));
   for (int i = 0; i < schema->num_columns(); i++) {
     typename RowType::Cell cell = row->cell(i);
     if (cell.typeinfo()->physical_type() == BINARY) {
@@ -383,9 +372,8 @@ inline Status RelocateIndirectDataToArena(RowType *row, ArenaType *dst_arena) {
       }
 
       Slice *slice = reinterpret_cast<Slice *>(cell.mutable_ptr());
-      if (!dst_arena->RelocateSlice(*slice, slice)) {
-        return Status::IOError("Unable to relocate slice");
-      }
+      slice->relocate(dst);
+      dst += slice->size();
     }
   }
   return Status::OK();
@@ -467,7 +455,7 @@ class ContiguousRow {
  public:
   typedef ContiguousRowCell<ContiguousRow> Cell;
 
-  ContiguousRow(const Schema* schema, uint8_t *row_data = NULL)
+  explicit ContiguousRow(const Schema* schema, uint8_t *row_data = NULL)
     : schema_(schema), row_data_(row_data) {
   }
 
@@ -577,7 +565,7 @@ class RowBuilder {
  public:
   explicit RowBuilder(const Schema& schema)
     : schema_(schema),
-      arena_(1024, 1024*1024),
+      arena_(1024),
       bitmap_size_(ContiguousRowHelper::null_bitmap_size(schema)) {
     Reset();
   }
@@ -604,7 +592,7 @@ class RowBuilder {
     AddSlice(slice);
   }
 
-  void AddString(const string &str) {
+  void AddString(const std::string &str) {
     CheckNextType(STRING);
     AddSlice(str);
   }
@@ -614,7 +602,7 @@ class RowBuilder {
     AddSlice(slice);
   }
 
-  void AddBinary(const string &str) {
+  void AddBinary(const std::string &str) {
     CheckNextType(BINARY);
     AddSlice(str);
   }
@@ -662,7 +650,7 @@ class RowBuilder {
   }
 
   void AddTimestamp(int64_t micros_utc_since_epoch) {
-    CheckNextType(TIMESTAMP);
+    CheckNextType(UNIXTIME_MICROS);
     *reinterpret_cast<int64_t *>(&buf_[byte_idx_]) = micros_utc_since_epoch;
     Advance();
   }
@@ -725,7 +713,7 @@ class RowBuilder {
     Advance();
   }
 
-  void AddSlice(const string &str) {
+  void AddSlice(const std::string &str) {
     uint8_t *in_arena = arena_.AddSlice(str);
     CHECK(in_arena) << "could not allocate space in arena";
 

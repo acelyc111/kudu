@@ -19,11 +19,14 @@
 
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "kudu/gutil/callback.h"
+#include "kudu/gutil/macros.h"
+#include "kudu/gutil/ref_counted.h"
 #include "kudu/rpc/rpc_controller.h"
 #include "kudu/util/monotime.h"
-#include "kudu/util/status_callback.h"
+#include "kudu/util/status.h"
 
 namespace kudu {
 
@@ -32,6 +35,75 @@ namespace rpc {
 class Messenger;
 class Rpc;
 
+// Result status of a retriable Rpc.
+//
+// TODO Consider merging this with ScanRpcStatus.
+struct RetriableRpcStatus {
+  enum Result {
+    // There was no error, i.e. the Rpc was successful.
+    OK,
+
+    // The Rpc got an error and it's not retriable.
+    NON_RETRIABLE_ERROR,
+
+    // The server couldn't be reached, i.e. there was a network error while
+    // reaching the replica or a DNS resolution problem.
+    SERVER_NOT_ACCESSIBLE,
+
+    // The server received the request but it was not ready to serve it right
+    // away. It might happen that the server was too busy and did not have
+    // necessary resources or information to serve the request but it
+    // anticipates it should be ready to serve the request really soon, so it's
+    // worth retrying the request at a later time.
+    SERVICE_UNAVAILABLE,
+
+    // For rpc's that are meant only for the leader of a shared resource, when the server
+    // we're interacting with is not the leader.
+    REPLICA_NOT_LEADER,
+
+    // The server doesn't know the resource we're interacting with. For instance a TabletServer
+    // is not part of the config for the tablet we're trying to write to.
+    RESOURCE_NOT_FOUND,
+
+    // The authentication token supplied with the operation was found invalid
+    // by the server. Most likely, the token has expired. If so, get a new token
+    // using client credentials and retry the operation with it.
+    INVALID_AUTHENTICATION_TOKEN,
+  };
+
+  Result result;
+  Status status;
+};
+
+// This class picks a server among a possible set of servers serving a given resource.
+//
+// TODO Currently this only picks the leader, though it wouldn't be unfeasible to have this
+// have an enum so that it can pick any server.
+template <class Server>
+class ServerPicker : public RefCountedThreadSafe<ServerPicker<Server>> {
+ public:
+  virtual ~ServerPicker() {}
+
+  typedef Callback<void(const Status& status, Server* server)> ServerPickedCallback;
+
+  // Picks the leader among the replicas serving a resource.
+  // If the leader was found, it calls the callback with Status::OK() and
+  // with 'server' set to the current leader, otherwise calls the callback
+  // with 'status' set to the failure reason, and 'server' set to nullptr.
+  // If picking a leader takes longer than 'deadline' the callback is called with
+  // Status::TimedOut().
+  virtual void PickLeader(const ServerPickedCallback& callback, const MonoTime& deadline) = 0;
+
+  // Marks a server as failed/unacessible.
+  virtual void MarkServerFailed(Server *server, const Status &status) = 0;
+
+  // Marks a server as not the leader of config serving the resource we're trying to interact with.
+  virtual void MarkReplicaNotLeader(Server* replica) = 0;
+
+  // Marks a server as not serving the resource we want.
+  virtual void MarkResourceNotFound(Server *replica) = 0;
+};
+
 // Provides utilities for retrying failed RPCs.
 //
 // All RPCs should use HandleResponse() to retry certain generic errors.
@@ -39,7 +111,7 @@ class RpcRetrier {
  public:
   RpcRetrier(MonoTime deadline, std::shared_ptr<rpc::Messenger> messenger)
       : attempt_num_(1),
-        deadline_(std::move(deadline)),
+        deadline_(deadline),
         messenger_(std::move(messenger)) {
     if (deadline_.Initialized()) {
       controller_.set_deadline(deadline_);
@@ -108,8 +180,8 @@ class RpcRetrier {
 class Rpc {
  public:
   Rpc(const MonoTime& deadline,
-      const std::shared_ptr<rpc::Messenger>& messenger)
-  : retrier_(deadline, messenger) {
+      std::shared_ptr<rpc::Messenger> messenger)
+      : retrier_(deadline, std::move(messenger)) {
   }
 
   virtual ~Rpc() {}

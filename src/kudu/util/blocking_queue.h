@@ -17,7 +17,6 @@
 #ifndef KUDU_UTIL_BLOCKING_QUEUE_H
 #define KUDU_UTIL_BLOCKING_QUEUE_H
 
-#include <boost/type_traits/remove_pointer.hpp>
 #include <list>
 #include <string>
 #include <type_traits>
@@ -27,7 +26,9 @@
 #include "kudu/gutil/basictypes.h"
 #include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/util/condition_variable.h"
+#include "kudu/util/monotime.h"
 #include "kudu/util/mutex.h"
+#include "kudu/util/status.h"
 
 namespace kudu {
 
@@ -52,7 +53,7 @@ class BlockingQueue {
   // If T is a pointer, this will be the base type.  If T is not a pointer, you
   // can ignore this and the functions which make use of it.
   // Template substitution failure is not an error.
-  typedef typename boost::remove_pointer<T>::type T_VAL;
+  typedef typename std::remove_pointer<T>::type T_VAL;
 
   explicit BlockingQueue(size_t max_size)
     : shutdown_(false),
@@ -100,9 +101,20 @@ class BlockingQueue {
     return true;
   }
 
-  // Get all elements from the queue and append them to a
-  // vector. Returns false if shutdown prior to getting the elements.
-  bool BlockingDrainTo(std::vector<T>* out) {
+  // Get all elements from the queue and append them to a vector.
+  //
+  // If 'deadline' passes and no elements have been returned from the
+  // queue, returns Status::TimedOut(). If 'deadline' is uninitialized,
+  // no deadline is used.
+  //
+  // If the queue has been shut down, but there are still elements waiting,
+  // then it returns those elements as if the queue were not yet shut down.
+  //
+  // Returns:
+  // - OK if successful
+  // - TimedOut if the deadline passed
+  // - Aborted if the queue shut down
+  Status BlockingDrainTo(std::vector<T>* out, MonoTime deadline = MonoTime()) {
     MutexLock l(lock_);
     while (true) {
       if (!list_.empty()) {
@@ -113,12 +125,16 @@ class BlockingQueue {
         }
         list_.clear();
         not_full_.Signal();
-        return true;
+        return Status::OK();
       }
-      if (shutdown_) {
-        return false;
+      if (PREDICT_FALSE(shutdown_)) {
+        return Status::Aborted("");
       }
-      not_empty_.Wait();
+      if (!deadline.Initialized()) {
+        not_empty_.Wait();
+      } else if (PREDICT_FALSE(!not_empty_.WaitUntil(deadline))) {
+        return Status::TimedOut("");
+      }
     }
   }
 

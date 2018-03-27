@@ -15,20 +15,39 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <cstdint>
+#include <cstdlib>
+#include <ostream>
 #include <memory>
 #include <string>
 #include <vector>
 
+#include <gflags/gflags.h>
+#include <gflags/gflags_declare.h>
+#include <glog/logging.h>
+#include <gtest/gtest.h>
+
 #include "kudu/client/callbacks.h"
 #include "kudu/client/client.h"
 #include "kudu/client/row_result.h"
+#include "kudu/client/schema.h"
+#include "kudu/client/shared_ptr.h"
+#include "kudu/client/write_op.h"
+#include "kudu/common/partial_row.h"
+#include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/port.h"
+#include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/strings/strcat.h"
-#include "kudu/integration-tests/mini_cluster.h"
 #include "kudu/master/mini_master.h"
+#include "kudu/mini-cluster/internal_mini_cluster.h"
 #include "kudu/tserver/mini_tablet_server.h"
+#include "kudu/util/async_util.h"
 #include "kudu/util/countdown_latch.h"
 #include "kudu/util/curl_util.h"
+#include "kudu/util/faststring.h"
 #include "kudu/util/monotime.h"
+#include "kudu/util/net/sockaddr.h"
+#include "kudu/util/status.h"
 #include "kudu/util/stopwatch.h"
 #include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
@@ -41,6 +60,9 @@ DEFINE_int32(mbs_for_flushes_and_rolls, 1, "How many MBs are needed to flush and
 DEFINE_int32(row_count, 2000, "How many rows will be used in this test for the base data");
 DEFINE_int32(seconds_to_run, 4,
              "How long this test runs for, after inserting the base data, in seconds");
+
+using std::string;
+using std::vector;
 
 namespace kudu {
 namespace tablet {
@@ -60,6 +82,8 @@ using client::KuduTable;
 using client::KuduTableCreator;
 using client::KuduUpdate;
 using client::sp::shared_ptr;
+using cluster::InternalMiniCluster;
+using cluster::InternalMiniClusterOptions;
 
 // This integration test tries to trigger all the update-related bits while also serving as a
 // foundation for benchmarking. It first inserts 'row_count' rows and then starts two threads,
@@ -85,6 +109,8 @@ class UpdateScanDeltaCompactionTest : public KuduTest {
     gscoped_ptr<KuduTableCreator> table_creator(client_->NewTableCreator());
     ASSERT_OK(table_creator->table_name(kTableName)
              .schema(&schema_)
+             .set_range_partition_columns({ "key" })
+             .num_replicas(1)
              .Create());
     ASSERT_OK(client_->OpenTable(kTableName, &table_));
   }
@@ -112,7 +138,7 @@ class UpdateScanDeltaCompactionTest : public KuduTest {
 
   void InitCluster() {
     // Start mini-cluster with 1 tserver.
-    cluster_.reset(new MiniCluster(env_.get(), MiniClusterOptions()));
+    cluster_.reset(new InternalMiniCluster(env_, InternalMiniClusterOptions()));
     ASSERT_OK(cluster_->Start());
     KuduClientBuilder client_builder;
     client_builder.add_master_server_addr(
@@ -122,7 +148,7 @@ class UpdateScanDeltaCompactionTest : public KuduTest {
 
   shared_ptr<KuduSession> CreateSession() {
     shared_ptr<KuduSession> session = client_->NewSession();
-    session->SetTimeoutMillis(5000);
+    session->SetTimeoutMillis(30000);
     CHECK_OK(session->SetFlushMode(KuduSession::MANUAL_FLUSH));
     return session;
   }
@@ -148,7 +174,7 @@ class UpdateScanDeltaCompactionTest : public KuduTest {
                                   shared_ptr<KuduSession> session);
 
   KuduSchema schema_;
-  std::shared_ptr<MiniCluster> cluster_;
+  std::shared_ptr<InternalMiniCluster> cluster_;
   shared_ptr<KuduTable> table_;
   shared_ptr<KuduClient> client_;
 };
@@ -259,6 +285,11 @@ void UpdateScanDeltaCompactionTest::UpdateRows(CountDownLatch* stop_latch) {
 void UpdateScanDeltaCompactionTest::ScanRows(CountDownLatch* stop_latch) const {
   while (stop_latch->count() > 0) {
     KuduScanner scanner(table_.get());
+    // Sometimes use fault-tolerant scans, to get more coverage of the
+    // MergeIterator code paths.
+    if (rand() % 2 == 1) {
+      CHECK_OK(scanner.SetFaultTolerant());
+    }
     LOG_TIMING(INFO, "Scan") {
       CHECK_OK(scanner.Open());
       vector<KuduRowResult> rows;

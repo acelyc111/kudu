@@ -16,25 +16,33 @@
 // under the License.
 
 #include <algorithm>
-#include <boost/bind.hpp>
-#include <gtest/gtest.h>
-#include <gflags/gflags.h>
+#include <cstdint>
 #include <string>
 #include <vector>
 
+#include <boost/bind.hpp>
+#include <glog/logging.h>
+#include <gtest/gtest.h>
+
 #include "kudu/benchmarks/tpch/rpc_line_item_dao.h"
 #include "kudu/benchmarks/tpch/tpch-schemas.h"
+#include "kudu/client/row_result.h"
 #include "kudu/common/partial_row.h"
+#include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/port.h"
 #include "kudu/gutil/stringprintf.h"
-#include "kudu/integration-tests/mini_cluster.h"
 #include "kudu/master/mini_master.h"
+#include "kudu/mini-cluster/internal_mini_cluster.h"
+#include "kudu/util/slice.h"
 #include "kudu/util/status.h"
+#include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
 
 namespace kudu {
 
 using client::KuduRowResult;
-using client::KuduSchema;
+using cluster::InternalMiniCluster;
+using cluster::InternalMiniClusterOptions;
 using std::string;
 using std::vector;
 
@@ -47,14 +55,18 @@ class RpcLineItemDAOTest : public KuduTest {
     KuduTest::SetUp();
 
     // Start minicluster
-    cluster_.reset(new MiniCluster(env_.get(), MiniClusterOptions()));
+    cluster_.reset(new InternalMiniCluster(env_, InternalMiniClusterOptions()));
     ASSERT_OK(cluster_->Start());
 
     const char *kTableName = "tpch1";
 
     // Create the table and Connect to it.
     string master_address(cluster_->mini_master()->bound_rpc_addr_str());
-    dao_.reset(new kudu::RpcLineItemDAO(master_address, kTableName, 5));
+    dao_.reset(new kudu::RpcLineItemDAO(master_address, kTableName,
+                                        /* batch size */ 5,
+                                        /* timeout_ms */ 5000,
+                                        RpcLineItemDAO::RANGE,
+                                        /* num_buckets */ 1));
     dao_->Init();
   }
 
@@ -64,7 +76,7 @@ class RpcLineItemDAOTest : public KuduTest {
   }
 
  protected:
-  gscoped_ptr<MiniCluster> cluster_;
+  gscoped_ptr<InternalMiniCluster> cluster_;
   gscoped_ptr<RpcLineItemDAO> dao_;
 
   // Builds a test row to be inserted into the lineitem table.

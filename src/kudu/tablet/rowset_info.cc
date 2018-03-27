@@ -18,24 +18,28 @@
 #include "kudu/tablet/rowset_info.h"
 
 #include <algorithm>
+#include <cstdint>
+#include <cstring>
 #include <memory>
-#include <unordered_map>
+#include <ostream>
 #include <string>
+#include <type_traits>
+#include <unordered_map>
 #include <utility>
 
 #include <glog/logging.h>
-#include <inttypes.h>
 
-#include "kudu/gutil/algorithm.h"
 #include "kudu/gutil/casts.h"
 #include "kudu/gutil/endian.h"
-#include "kudu/gutil/map-util.h"
-#include "kudu/gutil/strings/util.h"
+#include "kudu/gutil/stringprintf.h"
 #include "kudu/tablet/rowset.h"
 #include "kudu/tablet/rowset_tree.h"
+#include "kudu/util/logging.h"
 #include "kudu/util/slice.h"
+#include "kudu/util/status.h"
 
 using std::shared_ptr;
+using std::string;
 using std::unordered_map;
 using std::vector;
 
@@ -48,20 +52,14 @@ namespace tablet {
 
 namespace {
 
-// Less-than comparison by minimum key (both by actual key slice and cdf)
+// Less-than comparison by minimum key (both by actual encoded key and cdf)
 bool LessCDFAndRSMin(const RowSetInfo& a, const RowSetInfo& b) {
-  Slice amin, bmin, max;
-  a.rowset()->GetBounds(&amin, &max);
-  b.rowset()->GetBounds(&bmin, &max);
-  return a.cdf_min_key() < b.cdf_min_key() && amin.compare(bmin) < 0;
+  return a.cdf_min_key() < b.cdf_min_key() && a.min_key().compare(b.min_key()) < 0;
 }
 
 // Less-than comparison by maximum key (both by actual key slice and cdf)
 bool LessCDFAndRSMax(const RowSetInfo& a, const RowSetInfo& b) {
-  Slice amax, bmax, min;
-  a.rowset()->GetBounds(&min, &amax);
-  b.rowset()->GetBounds(&min, &bmax);
-  return a.cdf_max_key() < b.cdf_max_key() && amax.compare(bmax) < 0;
+  return a.cdf_max_key() < b.cdf_max_key() && a.max_key().compare(b.max_key()) < 0;
 }
 
 // Debug-checks that min <= imin <= imax <= max
@@ -85,15 +83,15 @@ int CommonPrefix(const Slice& min, const Slice& max) {
 }
 
 void DCheckCommonPrefix(const Slice& min, const Slice& imin,
-                       const Slice& imax, int common_prefix) {
+                        const Slice& imax, int common_prefix) {
   DCHECK_EQ(memcmp(min.data(), imin.data(), common_prefix), 0)
     << "slices should share common prefix:\n"
-    << "\t" << min.ToDebugString() << "\n"
-    << "\t" << imin.ToDebugString();
+    << "\t" << KUDU_REDACT(min.ToDebugString()) << "\n"
+    << "\t" << KUDU_REDACT(imin.ToDebugString());
   DCHECK_EQ(memcmp(min.data(), imax.data(), common_prefix), 0)
     << "slices should share common prefix:\n"
-    << "\t" << min.ToDebugString() << "\n"
-    << "\t" << imin.ToDebugString();
+    << "\t" << KUDU_REDACT(min.ToDebugString()) << "\n"
+    << "\t" << KUDU_REDACT(imin.ToDebugString());
 }
 
 uint64_t SliceTailToInt(const Slice& slice, int start) {
@@ -107,12 +105,13 @@ uint64_t SliceTailToInt(const Slice& slice, int start) {
 
 // Finds fraction (imin, imax) takes up of rs->GetBounds().
 // Requires that (imin, imax) is contained in rs->GetBounds().
-double StringFractionInRange(const RowSet* rs,
+double StringFractionInRange(const RowSetInfo* rsi,
                              const Slice& imin,
                              const Slice& imax) {
-  Slice min, max;
-  if (!rs->GetBounds(&min, &max).ok()) {
-    VLOG(2) << "Ignoring " << rs->ToString() << " in CDF calculation";
+  Slice min(rsi->min_key());
+  Slice max(rsi->max_key());
+  if (!rsi->has_bounds()) {
+    VLOG(2) << "Ignoring " << rsi->rowset()->ToString() << " in CDF calculation";
     return 0;
   }
   DCheckInside(min, max, imin, imax);
@@ -131,9 +130,6 @@ double StringFractionInRange(const RowSet* rs,
   return static_cast<double>(imax_int - imin_int) / (max_int - min_int);
 }
 
-// Typedef needed to use boost foreach macro
-typedef unordered_map<RowSet*, RowSetInfo*>::value_type RowSetRowSetInfoPair;
-
 // Computes the "width" of an interval [prev, next] according to the amount
 // of data estimated to be inside the interval, where this is calculated by
 // multiplying the fraction that the interval takes up in the keyspace of
@@ -144,10 +140,9 @@ double WidthByDataSize(const Slice& prev, const Slice& next,
                        const unordered_map<RowSet*, RowSetInfo*>& active) {
   double weight = 0;
 
-  for (const RowSetRowSetInfoPair& rsi : active) {
-    RowSet* rs = rsi.first;
-    double fraction = StringFractionInRange(rs, prev, next);
-    weight += rs->EstimateOnDiskSize() * fraction;
+  for (const auto& rs_rsi : active) {
+    double fraction = StringFractionInRange(rs_rsi.second, prev, next);
+    weight += rs_rsi.second->size_bytes() * fraction;
   }
 
   return weight;
@@ -224,8 +219,8 @@ void RowSetInfo::CollectOrdered(const RowSetTree& tree,
     double interval_width = WidthByDataSize(prev, next, active);
 
     // Increment active rowsets in min_key by the interval_width.
-    for (const RowSetRowSetInfoPair& rsi : active) {
-      RowSetInfo& cdf_rs = *rsi.second;
+    for (const auto& rs_rsi : active) {
+      RowSetInfo& cdf_rs = *rs_rsi.second;
       cdf_rs.cdf_max_key_ += interval_width;
     }
 
@@ -250,7 +245,7 @@ void RowSetInfo::CollectOrdered(const RowSetTree& tree,
                  << " or RowSetTree::STOP=" << RowSetTree::STOP << ".\n"
                  << "\tRecieved:\n"
                  << "\t\tRowSet=" << rs->ToString() << "\n"
-                 << "\t\tKey=" << next << "\n"
+                 << "\t\tKey=" << KUDU_REDACT(next.ToDebugString()) << "\n"
                  << "\t\tEndpointType=" << rse.endpoint_;
     }
   }
@@ -262,11 +257,13 @@ void RowSetInfo::CollectOrdered(const RowSetTree& tree,
 }
 
 RowSetInfo::RowSetInfo(RowSet* rs, double init_cdf)
-  : rowset_(rs),
-    size_mb_(std::max(implicit_cast<int>(rs->EstimateOnDiskSize() / 1024 / 1024),
-                      kMinSizeMb)),
-    cdf_min_key_(init_cdf),
-    cdf_max_key_(init_cdf) {
+    : cdf_min_key_(init_cdf),
+      cdf_max_key_(init_cdf),
+      extra_(new ExtraData()) {
+  extra_->rowset = rs;
+  extra_->size_bytes = rs->OnDiskBaseDataSizeWithRedos();
+  extra_->has_bounds = rs->GetBounds(&extra_->min_key, &extra_->max_key).ok();
+  size_mb_ = std::max(implicit_cast<int>(extra_->size_bytes / 1024 / 1024), kMinSizeMb);
 }
 
 void RowSetInfo::FinalizeCDFVector(vector<RowSetInfo>* vec,
@@ -274,8 +271,8 @@ void RowSetInfo::FinalizeCDFVector(vector<RowSetInfo>* vec,
   if (quot == 0) return;
   for (RowSetInfo& cdf_rs : *vec) {
     CHECK_GT(cdf_rs.size_mb_, 0) << "Expected file size to be at least 1MB "
-                                 << "for RowSet " << cdf_rs.rowset_->ToString()
-                                 << ", was " << cdf_rs.rowset_->EstimateOnDiskSize()
+                                 << "for RowSet " << cdf_rs.rowset()->ToString()
+                                 << ", was " << cdf_rs.size_bytes()
                                  << " bytes.";
     cdf_rs.cdf_min_key_ /= quot;
     cdf_rs.cdf_max_key_ /= quot;
@@ -286,13 +283,12 @@ void RowSetInfo::FinalizeCDFVector(vector<RowSetInfo>* vec,
 
 string RowSetInfo::ToString() const {
   string ret;
-  ret.append(rowset_->ToString());
+  ret.append(rowset()->ToString());
   StringAppendF(&ret, "(% 3dM) [%.04f, %.04f]", size_mb_,
                 cdf_min_key_, cdf_max_key_);
-  Slice min, max;
-  if (rowset_->GetBounds(&min, &max).ok()) {
-    ret.append(" [").append(min.ToDebugString());
-    ret.append(",").append(max.ToDebugString());
+  if (extra_->has_bounds) {
+    ret.append(" [").append(KUDU_REDACT(Slice(extra_->min_key).ToDebugString()));
+    ret.append(",").append(KUDU_REDACT(Slice(extra_->max_key).ToDebugString()));
     ret.append("]");
   }
   return ret;

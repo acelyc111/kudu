@@ -15,37 +15,70 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <ostream>
+#include <stdlib.h>
+#include <string>
+#include <thread>
+#include <unordered_set>
+#include <vector>
 
+#include <gflags/gflags.h>
+#include <gflags/gflags_declare.h>
+#include <glog/logging.h>
+#include <google/protobuf/util/message_differencer.h>
+#include <gtest/gtest.h>
 
+#include "kudu/fs/block_id.h"
+#include "kudu/fs/block_manager.h"
+#include "kudu/fs/data_dirs.h"
+#include "kudu/fs/error_manager.h"
 #include "kudu/fs/file_block_manager.h"
+#include "kudu/fs/fs.pb.h"
+#include "kudu/fs/fs_report.h"
 #include "kudu/fs/log_block_manager.h"
+#include "kudu/gutil/basictypes.h"
+#include "kudu/gutil/bind.h"
+#include "kudu/gutil/casts.h"
+#include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/map-util.h"
-#include "kudu/gutil/stl_util.h"
+#include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/strings/substitute.h"
-#include "kudu/gutil/strings/util.h"
+#include "kudu/util/array_view.h" // IWYU pragma: keep
+#include "kudu/util/env.h"
 #include "kudu/util/mem_tracker.h"
 #include "kudu/util/metrics.h"
+#include "kudu/util/monotime.h"
 #include "kudu/util/path_util.h"
 #include "kudu/util/pb_util.h"
 #include "kudu/util/random.h"
+#include "kudu/util/slice.h"
+#include "kudu/util/status.h"
 #include "kudu/util/stopwatch.h"
+#include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
 #include "kudu/util/thread.h"
 
+using google::protobuf::util::MessageDifferencer;
 using std::shared_ptr;
 using std::string;
+using std::unique_ptr;
 using std::vector;
 using strings::Substitute;
 
-// LogBlockManager opens two files per container, and CloseManyBlocksTest
-// uses one container for each block. To simplify testing (i.e. no need to
-// raise the ulimit on open files), the default is kept low.
-DEFINE_int32(num_blocks_close, 500,
-             "Number of blocks to simultaneously close in CloseManyBlocksTest");
-
+DECLARE_double(log_container_live_metadata_before_compact_ratio);
 DECLARE_uint64(log_container_preallocate_bytes);
 DECLARE_uint64(log_container_max_size);
+DECLARE_int64(fs_data_dirs_reserved_bytes);
+DECLARE_int64(disk_reserved_bytes_free_for_testing);
+DECLARE_int32(fs_data_dirs_full_disk_cache_seconds);
+DECLARE_int32(fs_target_data_dirs_per_tablet);
+DECLARE_string(block_manager);
+DECLARE_double(env_inject_eio);
+DECLARE_bool(crash_on_eio);
 
 // Generic block manager metrics.
 METRIC_DECLARE_gauge_uint64(block_manager_blocks_open_reading);
@@ -55,68 +88,218 @@ METRIC_DECLARE_counter(block_manager_total_readable_blocks);
 METRIC_DECLARE_counter(block_manager_total_bytes_written);
 METRIC_DECLARE_counter(block_manager_total_bytes_read);
 
-// Log block manager metrics.
-METRIC_DECLARE_gauge_uint64(log_block_manager_bytes_under_management);
-METRIC_DECLARE_gauge_uint64(log_block_manager_blocks_under_management);
-METRIC_DECLARE_counter(log_block_manager_containers);
-METRIC_DECLARE_counter(log_block_manager_full_containers);
+// Data directory metrics.
+METRIC_DECLARE_gauge_uint64(data_dirs_full);
+
+// The LogBlockManager is only supported on Linux, since it requires hole punching.
+#define RETURN_NOT_LOG_BLOCK_MANAGER() \
+  do { \
+    if (FLAGS_block_manager != "log") { \
+      LOG(INFO) << "This platform does not use the log block manager by default. Skipping test."; \
+      return; \
+    } \
+  } while (false)
 
 namespace kudu {
 namespace fs {
+
+static const char* kTestData = "test data";
 
 template <typename T>
 class BlockManagerTest : public KuduTest {
  public:
   BlockManagerTest() :
+    test_tablet_name_("test_tablet"),
+    test_block_opts_(CreateBlockOptions({ test_tablet_name_ })),
+    test_error_manager_(new FsErrorManager()),
     bm_(CreateBlockManager(scoped_refptr<MetricEntity>(),
-                           shared_ptr<MemTracker>(),
-                           { GetTestDataDirectory() })) {
+                           shared_ptr<MemTracker>())) {
   }
 
-  virtual void SetUp() OVERRIDE {
-    CHECK_OK(bm_->Create());
-    CHECK_OK(bm_->Open());
+  virtual void SetUp() override {
+    // Pass in a report to prevent the block manager from logging unnecessarily.
+    FsReport report;
+    ASSERT_OK(bm_->Open(&report));
+    ASSERT_OK(dd_manager_->CreateDataDirGroup(test_tablet_name_));
+    ASSERT_OK(dd_manager_->GetDataDirGroupPB(test_tablet_name_, &test_group_pb_));
+  }
+
+  void DistributeBlocksAcrossDirs(int num_dirs, int num_blocks_per_dir) {
+    // Create a data directory group that contains 'num_dirs' data directories.
+    string tablet_name = Substitute("$0_disks", num_dirs);
+    CreateBlockOptions opts({ tablet_name });
+    FLAGS_fs_target_data_dirs_per_tablet = num_dirs;
+    ASSERT_OK(dd_manager_->CreateDataDirGroup(tablet_name));
+    int num_blocks = num_dirs * num_blocks_per_dir;
+
+    // Write 'num_blocks' blocks to this data dir group.
+    unique_ptr<BlockCreationTransaction> transaction = bm_->NewCreationTransaction();
+    for (int i = 0; i < num_blocks; i++) {
+      unique_ptr<WritableBlock> written_block;
+      ASSERT_OK(bm_->CreateBlock(opts, &written_block));
+      ASSERT_OK(written_block->Append(kTestData));
+      transaction->AddCreatedBlock(std::move(written_block));
+    }
+    ASSERT_OK(transaction->CommitCreatedBlocks());
   }
 
  protected:
   T* CreateBlockManager(const scoped_refptr<MetricEntity>& metric_entity,
-                                   const shared_ptr<MemTracker>& parent_mem_tracker,
-                                   const vector<string>& paths) {
+                        const shared_ptr<MemTracker>& parent_mem_tracker) {
+    if (!dd_manager_) {
+      // Create a new directory manager if necessary.
+      CHECK_OK(DataDirManager::CreateNewForTests(env_, { test_dir_ },
+          DataDirManagerOptions(), &dd_manager_));
+    }
     BlockManagerOptions opts;
     opts.metric_entity = metric_entity;
     opts.parent_mem_tracker = parent_mem_tracker;
-    opts.root_paths = paths;
-    return new T(env_.get(), opts);
+    return new T(env_, this->dd_manager_.get(), test_error_manager_.get(),
+                 std::move(opts));
   }
 
-  void ReopenBlockManager(const scoped_refptr<MetricEntity>& metric_entity,
-                          const shared_ptr<MemTracker>& parent_mem_tracker,
-                          const vector<string>& paths,
-                          bool create) {
-    // Blow away old memtrackers first.
+  Status ReopenBlockManager(const scoped_refptr<MetricEntity>& metric_entity,
+                            const shared_ptr<MemTracker>& parent_mem_tracker,
+                            const vector<string>& paths,
+                            bool create,
+                            bool load_test_group = true) {
+    // The directory manager must outlive the block manager. Destroy the block
+    // manager first to enforce this.
     bm_.reset();
-    bm_.reset(CreateBlockManager(metric_entity, parent_mem_tracker, paths));
+    DataDirManagerOptions opts;
+    opts.metric_entity = metric_entity;
     if (create) {
-      ASSERT_OK(bm_->Create());
+      RETURN_NOT_OK(DataDirManager::CreateNewForTests(
+          env_, paths, std::move(opts), &dd_manager_));
+    } else {
+      RETURN_NOT_OK(DataDirManager::OpenExistingForTests(
+          env_, paths, std::move(opts), &dd_manager_));
     }
-    ASSERT_OK(bm_->Open());
+    bm_.reset(CreateBlockManager(metric_entity, parent_mem_tracker));
+    RETURN_NOT_OK(bm_->Open(nullptr));
+
+    // Certain tests may maintain their own directory groups, in which case
+    // the default test group should not be used.
+    if (load_test_group) {
+      RETURN_NOT_OK(dd_manager_->LoadDataDirGroupFromPB(test_tablet_name_, test_group_pb_));
+    }
+    return Status::OK();
   }
 
   void RunMultipathTest(const vector<string>& paths);
 
-  void RunLogMetricsTest();
-
-  void RunLogContainerPreallocationTest();
-
   void RunMemTrackerTest();
 
-  gscoped_ptr<T> bm_;
+  void RunBlockDistributionTest(const vector<string>& paths);
+
+  static Status CountFilesCb(int* num_files, Env::FileType type,
+                      const string& /*dirname*/,
+                      const string& basename) {
+    if (basename == kInstanceMetadataFileName) {
+      return Status::OK();
+    }
+    if (type == Env::FILE_TYPE) {
+      *num_files += 1;
+    }
+    return Status::OK();
+  }
+
+  // Utility function that counts the number of files within a directory
+  // hierarchy, ignoring '.', '..', and file 'kInstanceMetadataFileName'.
+  Status CountFiles(const string& root, int* num_files) {
+    *num_files = 0;
+    RETURN_NOT_OK(env_->Walk(root, Env::PRE_ORDER,
+                             Bind(BlockManagerTest::CountFilesCb, num_files)));
+    return Status::OK();
+  }
+
+  // Keep an internal copy of the data dir group to act as metadata.
+  DataDirGroupPB test_group_pb_;
+  string test_tablet_name_;
+  CreateBlockOptions test_block_opts_;
+  unique_ptr<FsErrorManager> test_error_manager_;
+  unique_ptr<DataDirManager> dd_manager_;
+  unique_ptr<T> bm_;
 };
+
+template <>
+void BlockManagerTest<LogBlockManager>::SetUp() {
+  RETURN_NOT_LOG_BLOCK_MANAGER();
+  // Pass in a report to prevent the block manager from logging unnecessarily.
+  FsReport report;
+  ASSERT_OK(bm_->Open(&report));
+  ASSERT_OK(dd_manager_->CreateDataDirGroup(test_tablet_name_));
+
+  // Store the DataDirGroupPB for tests that reopen the block manager.
+  ASSERT_OK(dd_manager_->GetDataDirGroupPB(test_tablet_name_, &test_group_pb_));
+}
+
+template <>
+void BlockManagerTest<FileBlockManager>::RunBlockDistributionTest(const vector<string>& paths) {
+  vector<int> blocks_in_each_path(paths.size());
+  // Writes 'num_blocks_per_dir' per directory. This will not necessarily write exactly
+  // 'num_blocks_per_dir' in each directory, but will ensure blocks are written to all directories
+  // with a high probability.
+  // Running this 5000 times yielded no failures.
+  int num_blocks_per_dir = 30;
+
+  // Spread across 1, then 3, then 5 data directories.
+  for (int d: { 1, 3, 5 }) {
+    DistributeBlocksAcrossDirs(d, num_blocks_per_dir);
+    // Iterate through the data directories, counting the number of blocks in each directory, and
+    // comparing against the number of blocks in that data directory in the previous iteration. A
+    // difference indicates that new blocks have been written to the directory.
+    int num_paths_added_to = 0;
+    int total_blocks_across_paths = 0;
+    for (int path_idx = 0; path_idx < paths.size(); path_idx++) {
+      int num_blocks = 0;
+      ASSERT_OK(CountFiles(paths[path_idx], &num_blocks));
+      int new_blocks = num_blocks - blocks_in_each_path[path_idx];
+      if (new_blocks > 0) {
+        num_paths_added_to++;
+        total_blocks_across_paths += new_blocks;
+        blocks_in_each_path[path_idx] = num_blocks;
+      }
+    }
+    ASSERT_EQ(d * num_blocks_per_dir, total_blocks_across_paths);
+    ASSERT_EQ(d, num_paths_added_to);
+  }
+}
+
+template <>
+void BlockManagerTest<LogBlockManager>::RunBlockDistributionTest(const vector<string>& paths) {
+  vector<int> files_in_each_path(paths.size());
+  int num_blocks_per_dir = 30;
+  // Spread across 1, then 3, then 5 data directories.
+  for (int d: { 1, 3, 5 }) {
+    DistributeBlocksAcrossDirs(d, num_blocks_per_dir);
+
+    // Check that upon each addition of new paths to data dir groups, new files are being created.
+    // Since log blocks are placed and used randomly within a data dir group, the only expected
+    // behavior is that the total number of files and the number of paths with files will increase.
+    bool some_new_files = false;
+    bool some_new_paths = false;
+    for (int path_idx = 0; path_idx < paths.size(); path_idx++) {
+      int num_files = 0;
+      ASSERT_OK(CountFiles(paths[path_idx], &num_files));
+      int new_files = num_files - files_in_each_path[path_idx];
+      if (new_files > 0) {
+        some_new_files = true;
+        if (files_in_each_path[path_idx] == 0) {
+          some_new_paths = true;
+        }
+        files_in_each_path[path_idx] = num_files;
+      }
+    }
+    ASSERT_TRUE(some_new_paths);
+    ASSERT_TRUE(some_new_files);
+  }
+}
 
 template <>
 void BlockManagerTest<FileBlockManager>::RunMultipathTest(const vector<string>& paths) {
   // Ensure that each path has an instance file and that it's well-formed.
-  for (const string& path : paths) {
+  for (const string& path : dd_manager_->GetDataDirs()) {
     vector<string> children;
     ASSERT_OK(env_->GetChildren(path, &children));
     ASSERT_EQ(3, children.size());
@@ -125,17 +308,24 @@ void BlockManagerTest<FileBlockManager>::RunMultipathTest(const vector<string>& 
         continue;
       }
       PathInstanceMetadataPB instance;
-      ASSERT_OK(pb_util::ReadPBContainerFromPath(env_.get(),
+      ASSERT_OK(pb_util::ReadPBContainerFromPath(env_,
                                                  JoinPathSegments(path, child),
                                                  &instance));
     }
   }
+  // Create a DataDirGroup for the data that's about to be inserted.
+  // Spread the data across all 3 paths. Writing twenty blocks randomly within
+  // this group should result in blocks being placed in every directory with a
+  // high probability.
+  CreateBlockOptions opts({ "multipath_test" });
+  FLAGS_fs_target_data_dirs_per_tablet = 3;
+  ASSERT_OK(dd_manager_->CreateDataDirGroup("multipath_test"));
 
-  // Write ten blocks.
+  // Write twenty blocks.
   const char* kTestData = "test data";
-  for (int i = 0; i < 10; i++) {
-    gscoped_ptr<WritableBlock> written_block;
-    ASSERT_OK(bm_->CreateBlock(&written_block));
+  for (int i = 0; i < 20; i++) {
+    unique_ptr<WritableBlock> written_block;
+    ASSERT_OK(bm_->CreateBlock(opts, &written_block));
     ASSERT_OK(written_block->Append(kTestData));
     ASSERT_OK(written_block->Close());
   }
@@ -143,184 +333,63 @@ void BlockManagerTest<FileBlockManager>::RunMultipathTest(const vector<string>& 
   // Each path should now have some additional block subdirectories. We
   // can't know for sure exactly how many (depends on the block IDs
   // generated), but this ensures that at least some change were made.
+  int num_blocks = 0;
   for (const string& path : paths) {
     vector<string> children;
     ASSERT_OK(env_->GetChildren(path, &children));
-    ASSERT_GT(children.size(), 3);
+    int blocks_in_path = 0;
+    ASSERT_OK(CountFiles(path, &blocks_in_path));
+    num_blocks += blocks_in_path;
   }
+  ASSERT_EQ(20, num_blocks);
 }
 
 template <>
 void BlockManagerTest<LogBlockManager>::RunMultipathTest(const vector<string>& paths) {
   // Write (3 * numPaths * 2) blocks, in groups of (numPaths * 2). That should
   // yield two containers per path.
-  const char* kTestData = "test data";
-  for (int i = 0; i < 3; i++) {
-    ScopedWritableBlockCloser closer;
-    for (int j = 0; j < paths.size() * 2; j++) {
-      gscoped_ptr<WritableBlock> block;
-      ASSERT_OK(bm_->CreateBlock(&block));
-      ASSERT_OK(block->Append(kTestData));
-      closer.AddBlock(block.Pass());
-    }
-    ASSERT_OK(closer.CloseBlocks());
-  }
+  CreateBlockOptions opts({ "multipath_test" });
+  FLAGS_fs_target_data_dirs_per_tablet = 3;
+  ASSERT_OK(dd_manager_->CreateDataDirGroup("multipath_test"));
 
-  // Verify the results: 7 children = dot, dotdot, instance file, and two
-  // containers (two files per container).
+  const char* kTestData = "test data";
+  unique_ptr<BlockCreationTransaction> transaction = bm_->NewCreationTransaction();
+  // Creates (numPaths * 2) containers.
+  for (int j = 0; j < paths.size() * 2; j++) {
+    unique_ptr<WritableBlock> block;
+    ASSERT_OK(bm_->CreateBlock(opts, &block));
+    ASSERT_OK(block->Append(kTestData));
+    transaction->AddCreatedBlock(std::move(block));
+  }
+  ASSERT_OK(transaction->CommitCreatedBlocks());
+
+  // Verify the results. (numPaths * 2) containers were created, each
+  // consisting of 2 files. Thus, there should be a total of
+  // (numPaths * 4) files, ignoring '.', '..', and instance files.
+  int sum = 0;
   for (const string& path : paths) {
     vector<string> children;
     ASSERT_OK(env_->GetChildren(path, &children));
-    ASSERT_EQ(children.size(), 7);
+    int files_in_path = 0;
+    ASSERT_OK(CountFiles(path, &files_in_path));
+    sum += files_in_path;
   }
-}
-
-template <>
-void BlockManagerTest<FileBlockManager>::RunLogMetricsTest() {
-  LOG(INFO) << "Test skipped; wrong block manager";
-}
-
-static void CheckLogMetrics(const scoped_refptr<MetricEntity>& entity,
-                            int bytes_under_management, int blocks_under_management,
-                            int containers, int full_containers) {
-  ASSERT_EQ(bytes_under_management, down_cast<AtomicGauge<uint64_t>*>(
-                entity->FindOrNull(METRIC_log_block_manager_bytes_under_management)
-                .get())->value());
-  ASSERT_EQ(blocks_under_management, down_cast<AtomicGauge<uint64_t>*>(
-                entity->FindOrNull(METRIC_log_block_manager_blocks_under_management)
-                .get())->value());
-  ASSERT_EQ(containers, down_cast<Counter*>(
-                entity->FindOrNull(METRIC_log_block_manager_containers)
-                .get())->value());
-  ASSERT_EQ(full_containers, down_cast<Counter*>(
-                entity->FindOrNull(METRIC_log_block_manager_full_containers)
-                .get())->value());
-}
-
-template <>
-void BlockManagerTest<LogBlockManager>::RunLogMetricsTest() {
-  MetricRegistry registry;
-  scoped_refptr<MetricEntity> entity = METRIC_ENTITY_server.Instantiate(&registry, "test");
-  this->ReopenBlockManager(entity,
-                           shared_ptr<MemTracker>(),
-                           { GetTestDataDirectory() },
-                           false);
-  ASSERT_NO_FATAL_FAILURE(CheckLogMetrics(entity, 0, 0, 0, 0));
-
-  // Lower the max container size so that we can more easily test full
-  // container metrics.
-  FLAGS_log_container_max_size = 1024;
-
-  // One block --> one container.
-  gscoped_ptr<WritableBlock> writer;
-  ASSERT_OK(this->bm_->CreateBlock(&writer));
-  ASSERT_NO_FATAL_FAILURE(CheckLogMetrics(entity, 0, 0, 1, 0));
-
-  // And when the block is closed, it becomes "under management".
-  ASSERT_OK(writer->Close());
-  ASSERT_NO_FATAL_FAILURE(CheckLogMetrics(entity, 0, 1, 1, 0));
-
-  // Create 10 blocks concurrently. We reuse the existing container and
-  // create 9 new ones. All of them get filled.
-  BlockId saved_id;
-  {
-    Random rand(SeedRandom());
-    ScopedWritableBlockCloser closer;
-    for (int i = 0; i < 10; i++) {
-      gscoped_ptr<WritableBlock> b;
-      ASSERT_OK(this->bm_->CreateBlock(&b));
-      if (saved_id.IsNull()) {
-        saved_id = b->id();
-      }
-      uint8_t data[1024];
-      for (int i = 0; i < sizeof(data); i += sizeof(uint32_t)) {
-        data[i] = rand.Next();
-      }
-      b->Append(Slice(data, sizeof(data)));
-      closer.AddBlock(b.Pass());
-    }
-    ASSERT_NO_FATAL_FAILURE(CheckLogMetrics(entity, 0, 1, 10, 0));
-
-    // Only when the blocks are closed are the containers considered full.
-    ASSERT_OK(closer.CloseBlocks());
-    ASSERT_NO_FATAL_FAILURE(CheckLogMetrics(entity, 10 * 1024, 11, 10, 10));
-  }
-
-  // Reopen the block manager and test the metrics. They're all based on
-  // persistent information so they should be the same.
-  MetricRegistry new_registry;
-  scoped_refptr<MetricEntity> new_entity = METRIC_ENTITY_server.Instantiate(&new_registry, "test");
-  ASSERT_NO_FATAL_FAILURE(this->ReopenBlockManager(new_entity,
-                                                   shared_ptr<MemTracker>(),
-                                                   { GetTestDataDirectory() },
-                                                   false));
-  ASSERT_NO_FATAL_FAILURE(CheckLogMetrics(new_entity, 10 * 1024, 11, 10, 10));
-
-  // Delete a block. Its contents should no longer be under management.
-  ASSERT_OK(this->bm_->DeleteBlock(saved_id));
-  ASSERT_NO_FATAL_FAILURE(CheckLogMetrics(new_entity, 9 * 1024, 10, 10, 10));
-}
-
-template <>
-void BlockManagerTest<FileBlockManager>::RunLogContainerPreallocationTest() {
-  LOG(INFO) << "Test skipped; wrong block manager";
-}
-
-template <>
-void BlockManagerTest<LogBlockManager>::RunLogContainerPreallocationTest() {
-  // Create a block with some test data. This should also trigger
-  // preallocation of the container, provided it's supported by the kernel.
-  gscoped_ptr<WritableBlock> written_block;
-  ASSERT_OK(this->bm_->CreateBlock(&written_block));
-  ASSERT_OK(written_block->Close());
-
-  // Now reopen the block manager and create another block. More
-  // preallocation, but it should be from the end of the previous block,
-  // not from the end of the file.
-  ASSERT_NO_FATAL_FAILURE(this->ReopenBlockManager(scoped_refptr<MetricEntity>(),
-                                                   shared_ptr<MemTracker>(),
-                                                   { GetTestDataDirectory() },
-                                                   false));
-  ASSERT_OK(this->bm_->CreateBlock(&written_block));
-  ASSERT_OK(written_block->Close());
-
-  // dot, dotdot, test metadata, instance file, and one container file pair.
-  vector<string> children;
-  ASSERT_OK(this->env_->GetChildren(GetTestDataDirectory(), &children));
-  ASSERT_EQ(6, children.size());
-
-  // If preallocation was done from the end of the file (rather than the
-  // end of the previous block), the file's size would be twice the
-  // preallocation amount. That would be wrong.
-  //
-  // Instead, we expect the size to either be 0 (preallocation isn't
-  // supported) or equal to the preallocation amount.
-  bool found = false;
-  for (const string& child : children) {
-    if (HasSuffixString(child, ".data")) {
-      found = true;
-      uint64_t size;
-      ASSERT_OK(this->env_->GetFileSizeOnDisk(
-          JoinPathSegments(GetTestDataDirectory(), child), &size));
-      ASSERT_TRUE(size == 0 || size == FLAGS_log_container_preallocate_bytes);
-    }
-  }
-  ASSERT_TRUE(found);
+  ASSERT_EQ(paths.size() * 4, sum);
 }
 
 template <>
 void BlockManagerTest<FileBlockManager>::RunMemTrackerTest() {
   shared_ptr<MemTracker> tracker = MemTracker::CreateTracker(-1, "test tracker");
-  ASSERT_NO_FATAL_FAILURE(this->ReopenBlockManager(scoped_refptr<MetricEntity>(),
-                                                   tracker,
-                                                   { GetTestDataDirectory() },
-                                                   false));
+  ASSERT_OK(ReopenBlockManager(scoped_refptr<MetricEntity>(),
+                               tracker,
+                               { test_dir_ },
+                               false /* create */));
 
   // The file block manager does not allocate memory for persistent data.
   int64_t initial_mem = tracker->consumption();
   ASSERT_EQ(initial_mem, 0);
-  gscoped_ptr<WritableBlock> writer;
-  ASSERT_OK(this->bm_->CreateBlock(&writer));
+  unique_ptr<WritableBlock> writer;
+  ASSERT_OK(bm_->CreateBlock(test_block_opts_, &writer));
   ASSERT_OK(writer->Close());
   ASSERT_EQ(tracker->consumption(), initial_mem);
 }
@@ -328,18 +397,18 @@ void BlockManagerTest<FileBlockManager>::RunMemTrackerTest() {
 template <>
 void BlockManagerTest<LogBlockManager>::RunMemTrackerTest() {
   shared_ptr<MemTracker> tracker = MemTracker::CreateTracker(-1, "test tracker");
-  ASSERT_NO_FATAL_FAILURE(this->ReopenBlockManager(scoped_refptr<MetricEntity>(),
-                                                   tracker,
-                                                   { GetTestDataDirectory() },
-                                                   false));
+  ASSERT_OK(ReopenBlockManager(scoped_refptr<MetricEntity>(),
+                               tracker,
+                               { test_dir_ },
+                               false /* create */));
 
   // The initial consumption should be non-zero due to the block map.
   int64_t initial_mem = tracker->consumption();
   ASSERT_GT(initial_mem, 0);
 
   // Allocating a persistent block should increase the consumption.
-  gscoped_ptr<WritableBlock> writer;
-  ASSERT_OK(this->bm_->CreateBlock(&writer));
+  unique_ptr<WritableBlock> writer;
+  ASSERT_OK(bm_->CreateBlock(test_block_opts_, &writer));
   ASSERT_OK(writer->Close());
   ASSERT_GT(tracker->consumption(), initial_mem);
 }
@@ -355,8 +424,8 @@ TYPED_TEST_CASE(BlockManagerTest, BlockManagers);
 // Test the entire lifecycle of a block.
 TYPED_TEST(BlockManagerTest, EndToEndTest) {
   // Create a block.
-  gscoped_ptr<WritableBlock> written_block;
-  ASSERT_OK(this->bm_->CreateBlock(&written_block));
+  unique_ptr<WritableBlock> written_block;
+  ASSERT_OK(this->bm_->CreateBlock(this->test_block_opts_, &written_block));
 
   // Write some data to it.
   string test_data = "test data";
@@ -364,108 +433,145 @@ TYPED_TEST(BlockManagerTest, EndToEndTest) {
   ASSERT_OK(written_block->Close());
 
   // Read the data back.
-  gscoped_ptr<ReadableBlock> read_block;
+  unique_ptr<ReadableBlock> read_block;
   ASSERT_OK(this->bm_->OpenBlock(written_block->id(), &read_block));
   uint64_t sz;
   ASSERT_OK(read_block->Size(&sz));
   ASSERT_EQ(test_data.length(), sz);
-  Slice data;
-  gscoped_ptr<uint8_t[]> scratch(new uint8_t[test_data.length()]);
-  ASSERT_OK(read_block->Read(0, test_data.length(), &data, scratch.get()));
+  uint8_t scratch[test_data.length()];
+  Slice data(scratch, test_data.length());
+  ASSERT_OK(read_block->Read(0, data));
   ASSERT_EQ(test_data, data);
 
+  // Read the data back into multiple slices
+  size_t size1 = 5;
+  uint8_t scratch1[size1];
+  Slice data1(scratch1, size1);
+  size_t size2 = 4;
+  uint8_t scratch2[size2];
+  Slice data2(scratch2, size2);
+  vector<Slice> results = { data1, data2 };
+  ASSERT_OK(read_block->ReadV(0, results));
+  ASSERT_EQ(test_data.substr(0, size1), data1);
+  ASSERT_EQ(test_data.substr(size1, size2), data2);
+
+  // We don't actually do anything with the result of this call; we just want
+  // to make sure it doesn't trigger a crash (see KUDU-1931).
+  LOG(INFO) << "Block memory footprint: " << read_block->memory_footprint();
+
   // Delete the block.
-  ASSERT_OK(this->bm_->DeleteBlock(written_block->id()));
+  shared_ptr<BlockDeletionTransaction> deletion_transaction =
+      this->bm_->NewDeletionTransaction();
+  deletion_transaction->AddDeletedBlock(written_block->id());
+  vector<BlockId> deleted;
+  ASSERT_OK(deletion_transaction->CommitDeletedBlocks(&deleted));
+  ASSERT_EQ(1, deleted.size());
   ASSERT_TRUE(this->bm_->OpenBlock(written_block->id(), nullptr)
               .IsNotFound());
+}
+
+TYPED_TEST(BlockManagerTest, CreateBlocksInDataDirs) {
+  // Create a block before creating a data dir group.
+  CreateBlockOptions fake_block_opts({ "fake_tablet_name" });
+  Status s = this->bm_->CreateBlock(fake_block_opts, nullptr);
+  ASSERT_TRUE(s.IsNotFound()) << s.ToString();
+  ASSERT_STR_CONTAINS(s.ToString(), "Tried to get directory but no "
+                                    "directory group registered for tablet");
+
+  // Ensure the data dir groups can only be created once.
+  s = this->dd_manager_->CreateDataDirGroup(this->test_tablet_name_);
+  ASSERT_TRUE(s.IsAlreadyPresent()) << s.ToString();
+  ASSERT_STR_CONTAINS(s.ToString(), "Tried to create directory group for tablet "
+                                    "but one is already registered");
+
+  DataDirGroupPB test_group_pb;
+  // Check that the in-memory DataDirGroup did not change.
+  ASSERT_OK(this->dd_manager_->GetDataDirGroupPB(
+      this->test_tablet_name_, &test_group_pb));
+  ASSERT_TRUE(MessageDifferencer::Equals(test_group_pb, this->test_group_pb_));
 }
 
 // Test that we can still read from an opened block after deleting it
 // (even if we can't open it again).
 TYPED_TEST(BlockManagerTest, ReadAfterDeleteTest) {
   // Write a new block.
-  gscoped_ptr<WritableBlock> written_block;
-  ASSERT_OK(this->bm_->CreateBlock(&written_block));
+  unique_ptr<WritableBlock> written_block;
+  ASSERT_OK(this->bm_->CreateBlock(this->test_block_opts_, &written_block));
   string test_data = "test data";
   ASSERT_OK(written_block->Append(test_data));
   ASSERT_OK(written_block->Close());
 
   // Open it for reading, then delete it. Subsequent opens should fail.
-  gscoped_ptr<ReadableBlock> read_block;
+  unique_ptr<ReadableBlock> read_block;
   ASSERT_OK(this->bm_->OpenBlock(written_block->id(), &read_block));
-  ASSERT_OK(this->bm_->DeleteBlock(written_block->id()));
+  shared_ptr<BlockDeletionTransaction> deletion_transaction =
+      this->bm_->NewDeletionTransaction();
+  deletion_transaction->AddDeletedBlock(written_block->id());
+  vector<BlockId> deleted;
+  ASSERT_OK(deletion_transaction->CommitDeletedBlocks(&deleted));
+  ASSERT_EQ(1, deleted.size());
   ASSERT_TRUE(this->bm_->OpenBlock(written_block->id(), nullptr)
               .IsNotFound());
 
   // But we should still be able to read from the opened block.
-  Slice data;
   gscoped_ptr<uint8_t[]> scratch(new uint8_t[test_data.length()]);
-  ASSERT_OK(read_block->Read(0, test_data.length(), &data, scratch.get()));
+  Slice data(scratch.get(), test_data.length());
+  ASSERT_OK(read_block->Read(0, data));
   ASSERT_EQ(test_data, data);
 }
 
 TYPED_TEST(BlockManagerTest, CloseTwiceTest) {
   // Create a new block and close it repeatedly.
-  gscoped_ptr<WritableBlock> written_block;
-  ASSERT_OK(this->bm_->CreateBlock(&written_block));
+  unique_ptr<WritableBlock> written_block;
+  ASSERT_OK(this->bm_->CreateBlock(this->test_block_opts_, &written_block));
   ASSERT_OK(written_block->Close());
   ASSERT_OK(written_block->Close());
 
   // Open it for reading and close it repeatedly.
-  gscoped_ptr<ReadableBlock> read_block;
+  unique_ptr<ReadableBlock> read_block;
   ASSERT_OK(this->bm_->OpenBlock(written_block->id(), &read_block));
   ASSERT_OK(read_block->Close());
   ASSERT_OK(read_block->Close());
 }
 
 TYPED_TEST(BlockManagerTest, CloseManyBlocksTest) {
+  const int kNumBlocks = 1000;
+
   if (!AllowSlowTests()) {
     LOG(INFO) << "Not running in slow-tests mode";
     return;
   }
 
-  // Disable preallocation for this test as it creates many containers.
-  FLAGS_log_container_preallocate_bytes = 0;
-
   Random rand(SeedRandom());
-  vector<WritableBlock*> dirty_blocks;
-  ElementDeleter deleter(&dirty_blocks);
-  LOG(INFO) << "Creating " <<  FLAGS_num_blocks_close << " blocks";
-  for (int i = 0; i < FLAGS_num_blocks_close; i++) {
-    // Create a block.
-    gscoped_ptr<WritableBlock> written_block;
-    ASSERT_OK(this->bm_->CreateBlock(&written_block));
+  unique_ptr<BlockCreationTransaction> creation_transaction =
+      this->bm_->NewCreationTransaction();
+  LOG_TIMING(INFO, Substitute("creating $0 blocks", kNumBlocks)) {
+    for (int i = 0; i < kNumBlocks; i++) {
+      // Create a block.
+      unique_ptr<WritableBlock> written_block;
+      ASSERT_OK(this->bm_->CreateBlock(this->test_block_opts_, &written_block));
 
-    // Write 64k bytes of random data into it.
-    uint8_t data[65536];
-    for (int i = 0; i < sizeof(data); i += sizeof(uint32_t)) {
-      data[i] = rand.Next();
+      // Write 64k bytes of random data into it.
+      uint8_t data[65536];
+      for (int i = 0; i < sizeof(data); i += sizeof(uint32_t)) {
+        data[i] = rand.Next();
+      }
+      written_block->Append(Slice(data, sizeof(data)));
+      written_block->Finalize();
+      creation_transaction->AddCreatedBlock(std::move(written_block));
     }
-    written_block->Append(Slice(data, sizeof(data)));
-
-    dirty_blocks.push_back(written_block.release());
   }
 
-  LOG_TIMING(INFO, Substitute("closing $0 blocks", FLAGS_num_blocks_close)) {
-    ASSERT_OK(this->bm_->CloseBlocks(dirty_blocks));
+  LOG_TIMING(INFO, Substitute("closing $0 blocks", kNumBlocks)) {
+    ASSERT_OK(creation_transaction->CommitCreatedBlocks());
   }
-}
-
-// We can't really test that FlushDataAsync() "works", but we can test that
-// it doesn't break anything.
-TYPED_TEST(BlockManagerTest, FlushDataAsyncTest) {
-  gscoped_ptr<WritableBlock> written_block;
-  ASSERT_OK(this->bm_->CreateBlock(&written_block));
-  string test_data = "test data";
-  ASSERT_OK(written_block->Append(test_data));
-  ASSERT_OK(written_block->FlushDataAsync());
 }
 
 TYPED_TEST(BlockManagerTest, WritableBlockStateTest) {
-  gscoped_ptr<WritableBlock> written_block;
+  unique_ptr<WritableBlock> written_block;
 
   // Common flow: CLEAN->DIRTY->CLOSED.
-  ASSERT_OK(this->bm_->CreateBlock(&written_block));
+  ASSERT_OK(this->bm_->CreateBlock(this->test_block_opts_, &written_block));
   ASSERT_EQ(WritableBlock::CLEAN, written_block->state());
   string test_data = "test data";
   ASSERT_OK(written_block->Append(test_data));
@@ -475,137 +581,29 @@ TYPED_TEST(BlockManagerTest, WritableBlockStateTest) {
   ASSERT_OK(written_block->Close());
   ASSERT_EQ(WritableBlock::CLOSED, written_block->state());
 
-  // Test FLUSHING->CLOSED transition.
-  ASSERT_OK(this->bm_->CreateBlock(&written_block));
+  // Test FINALIZED->CLOSED transition.
+  ASSERT_OK(this->bm_->CreateBlock(this->test_block_opts_, &written_block));
   ASSERT_OK(written_block->Append(test_data));
-  ASSERT_OK(written_block->FlushDataAsync());
-  ASSERT_EQ(WritableBlock::FLUSHING, written_block->state());
+  ASSERT_OK(written_block->Finalize());
+  ASSERT_EQ(WritableBlock::FINALIZED, written_block->state());
   ASSERT_OK(written_block->Close());
   ASSERT_EQ(WritableBlock::CLOSED, written_block->state());
 
   // Test CLEAN->CLOSED transition.
-  ASSERT_OK(this->bm_->CreateBlock(&written_block));
+  ASSERT_OK(this->bm_->CreateBlock(this->test_block_opts_, &written_block));
   ASSERT_OK(written_block->Close());
   ASSERT_EQ(WritableBlock::CLOSED, written_block->state());
 
-  // Test FlushDataAsync() no-op.
-  ASSERT_OK(this->bm_->CreateBlock(&written_block));
-  ASSERT_OK(written_block->FlushDataAsync());
-  ASSERT_EQ(WritableBlock::FLUSHING, written_block->state());
+  // Test Finalize() no-op.
+  ASSERT_OK(this->bm_->CreateBlock(this->test_block_opts_, &written_block));
+  ASSERT_OK(written_block->Finalize());
+  ASSERT_EQ(WritableBlock::FINALIZED, written_block->state());
 
   // Test DIRTY->CLOSED transition.
-  ASSERT_OK(this->bm_->CreateBlock(&written_block));
+  ASSERT_OK(this->bm_->CreateBlock(this->test_block_opts_, &written_block));
   ASSERT_OK(written_block->Append(test_data));
   ASSERT_OK(written_block->Close());
   ASSERT_EQ(WritableBlock::CLOSED, written_block->state());
-}
-
-TYPED_TEST(BlockManagerTest, AbortTest) {
-  gscoped_ptr<WritableBlock> written_block;
-  ASSERT_OK(this->bm_->CreateBlock(&written_block));
-  string test_data = "test data";
-  ASSERT_OK(written_block->Append(test_data));
-  ASSERT_OK(written_block->Abort());
-  ASSERT_EQ(WritableBlock::CLOSED, written_block->state());
-  ASSERT_TRUE(this->bm_->OpenBlock(written_block->id(), nullptr)
-              .IsNotFound());
-
-  ASSERT_OK(this->bm_->CreateBlock(&written_block));
-  ASSERT_OK(written_block->Append(test_data));
-  ASSERT_OK(written_block->FlushDataAsync());
-  ASSERT_OK(written_block->Abort());
-  ASSERT_EQ(WritableBlock::CLOSED, written_block->state());
-  ASSERT_TRUE(this->bm_->OpenBlock(written_block->id(), nullptr)
-              .IsNotFound());
-}
-
-TYPED_TEST(BlockManagerTest, PersistenceTest) {
-  // Create three blocks:
-  // 1. Empty.
-  // 2. Non-empty.
-  // 3. Deleted.
-  gscoped_ptr<WritableBlock> written_block1;
-  gscoped_ptr<WritableBlock> written_block2;
-  gscoped_ptr<WritableBlock> written_block3;
-  ASSERT_OK(this->bm_->CreateBlock(&written_block1));
-  ASSERT_OK(written_block1->Close());
-  ASSERT_OK(this->bm_->CreateBlock(&written_block2));
-  string test_data = "test data";
-  ASSERT_OK(written_block2->Append(test_data));
-  ASSERT_OK(written_block2->Close());
-  ASSERT_OK(this->bm_->CreateBlock(&written_block3));
-  ASSERT_OK(written_block3->Append(test_data));
-  ASSERT_OK(written_block3->Close());
-  ASSERT_OK(this->bm_->DeleteBlock(written_block3->id()));
-
-  // Reopen the block manager. This may read block metadata from disk.
-  //
-  // The existing block manager is left open, which proxies for the process
-  // having crashed without cleanly shutting down the block manager. The
-  // on-disk metadata should still be clean.
-  gscoped_ptr<BlockManager> new_bm(this->CreateBlockManager(
-      scoped_refptr<MetricEntity>(),
-      MemTracker::CreateTracker(-1, "other tracker"),
-      { GetTestDataDirectory() }));
-  ASSERT_OK(new_bm->Open());
-
-  // Test that the state of all three blocks is properly reflected.
-  gscoped_ptr<ReadableBlock> read_block;
-  ASSERT_OK(new_bm->OpenBlock(written_block1->id(), &read_block));
-  uint64_t sz;
-  ASSERT_OK(read_block->Size(&sz));
-  ASSERT_EQ(0, sz);
-  ASSERT_OK(read_block->Close());
-  ASSERT_OK(new_bm->OpenBlock(written_block2->id(), &read_block));
-  ASSERT_OK(read_block->Size(&sz));
-  ASSERT_EQ(test_data.length(), sz);
-  Slice data;
-  gscoped_ptr<uint8_t[]> scratch(new uint8_t[test_data.length()]);
-  ASSERT_OK(read_block->Read(0, test_data.length(), &data, scratch.get()));
-  ASSERT_EQ(test_data, data);
-  ASSERT_OK(read_block->Close());
-  ASSERT_TRUE(new_bm->OpenBlock(written_block3->id(), nullptr)
-              .IsNotFound());
-}
-
-TYPED_TEST(BlockManagerTest, MultiPathTest) {
-  // Recreate the block manager with three paths.
-  vector<string> paths;
-  for (int i = 0; i < 3; i++) {
-    paths.push_back(this->GetTestPath(Substitute("path$0", i)));
-  }
-  ASSERT_NO_FATAL_FAILURE(this->ReopenBlockManager(
-      scoped_refptr<MetricEntity>(),
-      shared_ptr<MemTracker>(),
-      paths,
-      true));
-
-  ASSERT_NO_FATAL_FAILURE(this->RunMultipathTest(paths));
-}
-
-static void CloseHelper(ReadableBlock* block) {
-  CHECK_OK(block->Close());
-}
-
-// Tests that ReadableBlock::Close() is thread-safe and idempotent.
-TYPED_TEST(BlockManagerTest, ConcurrentCloseReadableBlockTest) {
-  gscoped_ptr<WritableBlock> writer;
-  ASSERT_OK(this->bm_->CreateBlock(&writer));
-  ASSERT_OK(writer->Close());
-
-  gscoped_ptr<ReadableBlock> reader;
-  ASSERT_OK(this->bm_->OpenBlock(writer->id(), &reader));
-
-  vector<scoped_refptr<Thread> > threads;
-  for (int i = 0; i < 100; i++) {
-    scoped_refptr<Thread> t;
-    ASSERT_OK(Thread::Create("test", Substitute("t$0", i),
-                             &CloseHelper, reader.get(), &t));
-    threads.push_back(t);
-  }
-  for (const scoped_refptr<Thread>& t : threads) {
-    t->Join();
-  }
 }
 
 static void CheckMetrics(const scoped_refptr<MetricEntity>& metrics,
@@ -626,22 +624,160 @@ static void CheckMetrics(const scoped_refptr<MetricEntity>& metrics,
                 metrics->FindOrNull(METRIC_block_manager_total_bytes_written).get())->value());
 }
 
+TYPED_TEST(BlockManagerTest, AbortTest) {
+  MetricRegistry registry;
+  scoped_refptr<MetricEntity> entity = METRIC_ENTITY_server.Instantiate(&registry, "test");
+  ASSERT_OK(this->ReopenBlockManager(entity,
+                                     shared_ptr<MemTracker>(),
+                                     { this->test_dir_ },
+                                     false /* create */));
+
+  unique_ptr<WritableBlock> written_block;
+  ASSERT_OK(this->bm_->CreateBlock(this->test_block_opts_, &written_block));
+  string test_data = "test data";
+  ASSERT_OK(written_block->Append(test_data));
+  ASSERT_OK(written_block->Abort());
+  ASSERT_EQ(WritableBlock::CLOSED, written_block->state());
+  ASSERT_TRUE(this->bm_->OpenBlock(written_block->id(), nullptr)
+              .IsNotFound());
+
+  ASSERT_OK(this->bm_->CreateBlock(this->test_block_opts_, &written_block));
+  ASSERT_OK(written_block->Append(test_data));
+  ASSERT_OK(written_block->Finalize());
+  ASSERT_OK(written_block->Abort());
+  ASSERT_EQ(WritableBlock::CLOSED, written_block->state());
+  ASSERT_TRUE(this->bm_->OpenBlock(written_block->id(), nullptr)
+              .IsNotFound());
+
+  ASSERT_NO_FATAL_FAILURE(CheckMetrics(entity, 0, 0, 0, 2, 0, test_data.size() * 2));
+}
+
+TYPED_TEST(BlockManagerTest, PersistenceTest) {
+  // Create three blocks:
+  // 1. Empty.
+  // 2. Non-empty.
+  // 3. Deleted.
+  unique_ptr<WritableBlock> written_block1;
+  unique_ptr<WritableBlock> written_block2;
+  unique_ptr<WritableBlock> written_block3;
+  ASSERT_OK(this->bm_->CreateBlock(this->test_block_opts_, &written_block1));
+  ASSERT_OK(written_block1->Close());
+  ASSERT_OK(this->bm_->CreateBlock(this->test_block_opts_, &written_block2));
+  string test_data = "test data";
+  ASSERT_OK(written_block2->Append(test_data));
+  ASSERT_OK(written_block2->Close());
+  ASSERT_OK(this->bm_->CreateBlock(this->test_block_opts_, &written_block3));
+  ASSERT_OK(written_block3->Append(test_data));
+  ASSERT_OK(written_block3->Close());
+  {
+    shared_ptr<BlockDeletionTransaction> deletion_transaction =
+        this->bm_->NewDeletionTransaction();
+    deletion_transaction->AddDeletedBlock(written_block3->id());
+    vector<BlockId> deleted;
+    ASSERT_OK(deletion_transaction->CommitDeletedBlocks(&deleted));
+    ASSERT_EQ(1, deleted.size());
+  }
+
+  // Reopen the block manager. This may read block metadata from disk.
+  //
+  // The existing block manager is left open, which proxies for the process
+  // having crashed without cleanly shutting down the block manager. The
+  // on-disk metadata should still be clean.
+  gscoped_ptr<BlockManager> new_bm(this->CreateBlockManager(
+      scoped_refptr<MetricEntity>(),
+      MemTracker::CreateTracker(-1, "other tracker")));
+  ASSERT_OK(new_bm->Open(nullptr));
+
+  // Test that the state of all three blocks is properly reflected.
+  unique_ptr<ReadableBlock> read_block;
+  ASSERT_OK(new_bm->OpenBlock(written_block1->id(), &read_block));
+  uint64_t sz;
+  ASSERT_OK(read_block->Size(&sz));
+  ASSERT_EQ(0, sz);
+  ASSERT_OK(read_block->Close());
+  ASSERT_OK(new_bm->OpenBlock(written_block2->id(), &read_block));
+  ASSERT_OK(read_block->Size(&sz));
+  ASSERT_EQ(test_data.length(), sz);
+  gscoped_ptr<uint8_t[]> scratch(new uint8_t[test_data.length()]);
+  Slice data(scratch.get(), test_data.length());
+  ASSERT_OK(read_block->Read(0, data));
+  ASSERT_EQ(test_data, data);
+  ASSERT_OK(read_block->Close());
+  ASSERT_TRUE(new_bm->OpenBlock(written_block3->id(), nullptr)
+              .IsNotFound());
+}
+
+TYPED_TEST(BlockManagerTest, BlockDistributionTest) {
+  vector<string> paths;
+  for (int i = 0; i < 5; i++) {
+    paths.push_back(this->GetTestPath(Substitute("block_dist_path$0", i)));
+    ASSERT_OK(this->env_->CreateDir(paths[i]));
+  }
+  ASSERT_OK(this->ReopenBlockManager(scoped_refptr<MetricEntity>(),
+                                     shared_ptr<MemTracker>(),
+                                     paths,
+                                     true /* create */,
+                                     false /* load_test_group */));
+  ASSERT_NO_FATAL_FAILURE(this->RunBlockDistributionTest(paths));
+}
+
+TYPED_TEST(BlockManagerTest, MultiPathTest) {
+  // Recreate the block manager with three paths.
+  vector<string> paths;
+  for (int i = 0; i < 3; i++) {
+    paths.push_back(this->GetTestPath(Substitute("path$0", i)));
+    ASSERT_OK(this->env_->CreateDir(paths[i]));
+  }
+  ASSERT_OK(this->ReopenBlockManager(scoped_refptr<MetricEntity>(),
+                                     shared_ptr<MemTracker>(),
+                                     paths,
+                                     true /* create */,
+                                     false /* load_test_group */));
+
+  ASSERT_NO_FATAL_FAILURE(this->RunMultipathTest(paths));
+}
+
+static void CloseHelper(ReadableBlock* block) {
+  CHECK_OK(block->Close());
+}
+
+// Tests that ReadableBlock::Close() is thread-safe and idempotent.
+TYPED_TEST(BlockManagerTest, ConcurrentCloseReadableBlockTest) {
+  unique_ptr<WritableBlock> writer;
+  ASSERT_OK(this->bm_->CreateBlock(this->test_block_opts_, &writer));
+  ASSERT_OK(writer->Close());
+
+  unique_ptr<ReadableBlock> reader;
+  ASSERT_OK(this->bm_->OpenBlock(writer->id(), &reader));
+
+  vector<scoped_refptr<Thread> > threads;
+  for (int i = 0; i < 100; i++) {
+    scoped_refptr<Thread> t;
+    ASSERT_OK(Thread::Create("test", Substitute("t$0", i),
+                             &CloseHelper, reader.get(), &t));
+    threads.push_back(t);
+  }
+  for (const scoped_refptr<Thread>& t : threads) {
+    t->Join();
+  }
+}
+
 TYPED_TEST(BlockManagerTest, MetricsTest) {
   const string kTestData = "test data";
   MetricRegistry registry;
   scoped_refptr<MetricEntity> entity = METRIC_ENTITY_server.Instantiate(&registry, "test");
-  ASSERT_NO_FATAL_FAILURE(this->ReopenBlockManager(entity,
-                                                   shared_ptr<MemTracker>(),
-                                                   { GetTestDataDirectory() },
-                                                   false));
+  ASSERT_OK(this->ReopenBlockManager(entity,
+                                     shared_ptr<MemTracker>(),
+                                     { this->test_dir_ },
+                                     false));
   ASSERT_NO_FATAL_FAILURE(CheckMetrics(entity, 0, 0, 0, 0, 0, 0));
 
   for (int i = 0; i < 3; i++) {
-    gscoped_ptr<WritableBlock> writer;
-    gscoped_ptr<ReadableBlock> reader;
+    unique_ptr<WritableBlock> writer;
+    unique_ptr<ReadableBlock> reader;
 
     // An open writer. Also reflected in total_writable_blocks.
-    ASSERT_OK(this->bm_->CreateBlock(&writer));
+    ASSERT_OK(this->bm_->CreateBlock(this->test_block_opts_, &writer));
     ASSERT_NO_FATAL_FAILURE(CheckMetrics(
         entity, 0, 1, i, i + 1,
         i * kTestData.length(), i * kTestData.length()));
@@ -661,9 +797,9 @@ TYPED_TEST(BlockManagerTest, MetricsTest) {
         i * kTestData.length(), (i + 1) * kTestData.length()));
 
     // The read is reflected in total_bytes_read.
-    Slice data;
     gscoped_ptr<uint8_t[]> scratch(new uint8_t[kTestData.length()]);
-    ASSERT_OK(reader->Read(0, kTestData.length(), &data, scratch.get()));
+    Slice data(scratch.get(), kTestData.length());
+    ASSERT_OK(reader->Read(0, data));
     ASSERT_NO_FATAL_FAILURE(CheckMetrics(
         entity, 1, 0, i + 1, i + 1,
         (i + 1) * kTestData.length(), (i + 1) * kTestData.length()));
@@ -676,83 +812,343 @@ TYPED_TEST(BlockManagerTest, MetricsTest) {
   }
 }
 
-TYPED_TEST(BlockManagerTest, LogMetricsTest) {
-  ASSERT_NO_FATAL_FAILURE(this->RunLogMetricsTest());
-}
-
-TYPED_TEST(BlockManagerTest, LogContainerPreallocationTest) {
-  ASSERT_NO_FATAL_FAILURE(this->RunLogContainerPreallocationTest());
-}
-
 TYPED_TEST(BlockManagerTest, MemTrackerTest) {
   ASSERT_NO_FATAL_FAILURE(this->RunMemTrackerTest());
 }
 
-// The LogBlockManager is only supported on Linux, since it requires hole punching.
-#if defined(__linux__)
-// LogBlockManager-specific tests
-class LogBlockManagerTest : public BlockManagerTest<LogBlockManager> {
-};
+TYPED_TEST(BlockManagerTest, TestDiskSpaceCheck) {
+  // Reopen the block manager with metrics enabled.
+  MetricRegistry registry;
+  scoped_refptr<MetricEntity> entity = METRIC_ENTITY_server.Instantiate(&registry, "test");
+  ASSERT_OK(this->ReopenBlockManager(entity,
+                                     shared_ptr<MemTracker>(),
+                                     { GetTestDataDirectory() },
+                                     false /* create */));
 
-// Regression test for KUDU-1190, a crash at startup when a block ID has been
-// reused.
-TEST_F(LogBlockManagerTest, TestReuseBlockIds) {
-  // Set a deterministic random seed, so that we can reproduce the sequence
-  // of random numbers.
-  bm_->rand_.Reset(1);
-  vector<BlockId> block_ids;
+  FLAGS_fs_data_dirs_full_disk_cache_seconds = 0; // Don't cache device fullness.
+  FLAGS_fs_data_dirs_reserved_bytes = 1; // Keep at least 1 byte reserved in the FS.
+  FLAGS_log_container_preallocate_bytes = 0; // Disable preallocation.
+  FLAGS_fs_target_data_dirs_per_tablet = 3; // Use a subset of directories instead of all.
 
-  // Create 4 containers, with the first four block IDs in the random sequence.
-  {
-    ScopedWritableBlockCloser closer;
-    for (int i = 0; i < 4; i++) {
-      gscoped_ptr<WritableBlock> writer;
-      ASSERT_OK(bm_->CreateBlock(&writer));
-      block_ids.push_back(writer->id());
-      closer.AddBlock(writer.Pass());
+  // Normally, a data dir is checked for fullness only after a block is closed;
+  // if it's now full, the next attempt at block creation will fail. Only when
+  // a data dir was last observed as full is it also checked before block creation.
+  //
+  // This behavior enforces a "soft" limit on disk space consumption but
+  // complicates testing somewhat.
+  bool data_dir_observed_full = false;
+
+  int i = 0;
+  for (int free_space : { 0, 2, 0 }) {
+    FLAGS_disk_reserved_bytes_free_for_testing = free_space;
+
+    for (int attempt = 0; attempt < 3; attempt++) {
+      unique_ptr<WritableBlock> writer;
+      LOG(INFO) << "Attempt #" << ++i;
+      Status s = this->bm_->CreateBlock(this->test_block_opts_, &writer);
+      if (FLAGS_disk_reserved_bytes_free_for_testing < FLAGS_fs_data_dirs_reserved_bytes) {
+        if (data_dir_observed_full) {
+          // The dir was previously observed as full, so CreateBlock() checked
+          // fullness again and failed.
+          ASSERT_TRUE(s.IsIOError()) << s.ToString();
+          ASSERT_STR_CONTAINS(s.ToString(), "No directories available to add to test_tablet's "
+                                            "directory group");
+        } else {
+          ASSERT_OK(s);
+          ASSERT_OK(writer->Append("test data"));
+          ASSERT_OK(writer->Close());
+
+          // The dir was not previously full so CreateBlock() did not check for
+          // fullness, but given the parameters of the test, we know that the
+          // dir was observed as full at Close().
+          data_dir_observed_full = true;
+        }
+        ASSERT_EQ(1, down_cast<AtomicGauge<uint64_t>*>(
+            entity->FindOrNull(METRIC_data_dirs_full).get())->value());
+      } else {
+        // CreateBlock() succeeded regardless of the previously fullness state,
+        // and the new state is definitely not full.
+        ASSERT_OK(s);
+        ASSERT_OK(writer->Append("test data"));
+        ASSERT_OK(writer->Close());
+        data_dir_observed_full = false;
+        ASSERT_EQ(0, down_cast<AtomicGauge<uint64_t>*>(
+            entity->FindOrNull(METRIC_data_dirs_full).get())->value());
+      }
     }
-    ASSERT_OK(closer.CloseBlocks());
   }
-
-  // Create one more block, which should reuse the first container.
-  {
-    gscoped_ptr<WritableBlock> writer;
-    ASSERT_OK(bm_->CreateBlock(&writer));
-    ASSERT_OK(writer->Close());
-  }
-
-  ASSERT_EQ(4, bm_->available_containers_.size());
-
-  // Delete the original blocks.
-  for (const BlockId& b : block_ids) {
-    ASSERT_OK(bm_->DeleteBlock(b));
-  }
-
-  // Reset the random seed and re-create new blocks which should reuse the same
-  // block IDs (allowed since the blocks were deleted).
-  bm_->rand_.Reset(1);
-  for (int i = 0; i < 4; i++) {
-    gscoped_ptr<WritableBlock> writer;
-    ASSERT_OK(bm_->CreateBlock(&writer));
-    ASSERT_EQ(writer->id(), block_ids[i]);
-    ASSERT_OK(writer->Close());
-  }
-
-  // Now we have 4 containers with the following metadata:
-  //   1: CREATE(1) CREATE (5) DELETE(1) CREATE(4)
-  //   2: CREATE(2) DELETE(2) CREATE(1)
-  //   3: CREATE(3) DELETE(3) CREATE(2)
-  //   4: CREATE(4) DELETE(4) CREATE(3)
-
-  // Re-open the block manager and make sure it can deal with this case where
-  // block IDs have been reused.
-  NO_FATALS(ReopenBlockManager(
-      scoped_refptr<MetricEntity>(),
-      shared_ptr<MemTracker>(),
-      { GetTestDataDirectory() },
-      false));
 }
-#endif // defined(__linux__)
+
+// Regression test for KUDU-1793.
+TYPED_TEST(BlockManagerTest, TestMetadataOkayDespiteFailure) {
+  const int kNumTries = 3;
+  const int kNumBlockTries = 500;
+  const int kNumAppends = 4;
+  const string kLongTestData = string(3000, 'L');
+  const string kShortTestData = string(40, 's');
+
+  // Since we're appending so little data, reconfigure these to ensure quite a
+  // few containers and a good amount of preallocating.
+  FLAGS_log_container_max_size = 256 * 1024;
+  FLAGS_log_container_preallocate_bytes = 8 * 1024;
+
+  // Force some file operations to fail.
+  FLAGS_crash_on_eio = false;
+  FLAGS_env_inject_eio = 0.1;
+
+  // Compact log block manager metadata aggressively at startup; injected
+  // errors may also crop up here.
+  FLAGS_log_container_live_metadata_before_compact_ratio = 0.5;
+
+  // Creates a block with the given 'test_data', writing the result
+  // to 'out' on success.
+  auto create_a_block = [&](BlockId* out, const string& test_data) -> Status {
+    unique_ptr<WritableBlock> block;
+    RETURN_NOT_OK(this->bm_->CreateBlock(this->test_block_opts_, &block));
+    for (int i = 0; i < kNumAppends; i++) {
+      RETURN_NOT_OK(block->Append(test_data));
+    }
+
+    RETURN_NOT_OK(block->Finalize());
+    RETURN_NOT_OK(block->Close());
+    *out = block->id();
+    return Status::OK();
+  };
+
+  // Reads a block given by 'id', comparing its contents. Note that
+  // we need to compare with both kLongTestData and kShortTestData as we
+  // do not know the blocks' content ahead.
+  auto read_a_block = [&](const BlockId& id) -> Status {
+    unique_ptr<ReadableBlock> block;
+    RETURN_NOT_OK(this->bm_->OpenBlock(id, &block));
+    uint64_t size;
+    RETURN_NOT_OK(block->Size(&size));
+    uint8_t buf[size];
+    Slice slice(buf, size);
+    RETURN_NOT_OK(block->Read(0, slice));
+
+    string data = slice.ToString();
+    const string* string_to_check =
+        kNumAppends * kShortTestData.size() == size ? &kShortTestData : &kLongTestData;
+    for (int i = 0; i < kNumAppends; i++) {
+      CHECK_EQ(*string_to_check,
+               data.substr(i * string_to_check->size(), string_to_check->size()));
+    }
+    return Status::OK();
+  };
+
+  // For each iteration:
+  // 1. Try to create kNumTries new blocks.
+  // 2. Try to delete every other block.
+  // 3. Read and test every block.
+  // 4. Restart the block manager, forcing the on-disk metadata to be reloaded.
+  BlockIdSet ids;
+  for (int attempt = 0; attempt < kNumTries; attempt++) {
+    int num_created = 0;
+    for (int i = 0; i < kNumBlockTries; i++) {
+      BlockId id;
+      // Inject different size of data to better simulate
+      // real world case.
+      Status s = create_a_block(&id, i % 2 ? kShortTestData : kLongTestData);
+
+      if (s.ok()) {
+        InsertOrDie(&ids, id);
+        num_created++;
+      }
+    }
+    LOG(INFO) << Substitute("Successfully created $0 blocks on $1 attempts",
+                            num_created, kNumBlockTries);
+
+    int num_deleted = 0;
+    int num_deleted_attempts = 0;
+    vector<BlockId> deleted;
+    {
+      shared_ptr<BlockDeletionTransaction> deletion_transaction =
+          this->bm_->NewDeletionTransaction();
+      for (auto it = ids.begin(); it != ids.end();) {
+        // TODO(adar): the lbm removes a block from its block map even if the
+        // on-disk deletion fails. When that's fixed, update this code to
+        // erase() only if s.ok().
+        deletion_transaction->AddDeletedBlock(*it);
+        it = ids.erase(it);
+        num_deleted_attempts++;
+
+        // Skip every other block.
+        if (it != ids.end()) {
+          it++;
+        }
+      }
+      ignore_result(deletion_transaction->CommitDeletedBlocks(&deleted));
+    }
+    num_deleted += deleted.size();
+    LOG(INFO) << Substitute("Successfully deleted $0 blocks on $1 attempts",
+                            num_deleted, num_deleted_attempts);
+
+    {
+      // Since this test is for failed writes, don't inject faults during reads
+      // or while reopening the block manager.
+      google::FlagSaver saver;
+      FLAGS_env_inject_eio = 0;
+      for (const auto& id : ids) {
+        ASSERT_OK(read_a_block(id));
+      }
+      ASSERT_OK(this->ReopenBlockManager(scoped_refptr<MetricEntity>(),
+                                         shared_ptr<MemTracker>(),
+                                         { GetTestDataDirectory() },
+                                         false /* create */));
+    }
+  }
+  FLAGS_env_inject_eio = 0;
+}
+
+TYPED_TEST(BlockManagerTest, TestGetAllBlockIds) {
+  vector<BlockId> ids;
+  for (int i = 0; i < 100; i++) {
+    unique_ptr<WritableBlock> block;
+    ASSERT_OK(this->bm_->CreateBlock(this->test_block_opts_, &block));
+    ASSERT_OK(block->Close());
+    ids.push_back(block->id());
+  }
+
+  // The file block manager should skip these; they shouldn't appear in
+  // 'retrieved_ids' below.
+  for (const auto& s : { string("abcde"), // not numeric
+                         string("12345"), // not a real block ID
+                         ids.begin()->ToString() }) { // not in a block directory
+    unique_ptr<WritableFile> writer;
+    ASSERT_OK(this->env_->NewWritableFile(
+        JoinPathSegments(this->test_dir_, s), &writer));
+    ASSERT_OK(writer->Close());
+  }
+
+  vector<BlockId> retrieved_ids;
+  ASSERT_OK(this->bm_->GetAllBlockIds(&retrieved_ids));
+
+  // Sort the two collections before the comparison as GetAllBlockIds() does
+  // not guarantee a deterministic order.
+  std::sort(ids.begin(), ids.end(), BlockIdCompare());
+  std::sort(retrieved_ids.begin(), retrieved_ids.end(), BlockIdCompare());
+
+  ASSERT_EQ(ids, retrieved_ids);
+}
+
+TYPED_TEST(BlockManagerTest, FinalizeTest) {
+  const string kTestData = "test data";
+  unique_ptr<WritableBlock> written_block;
+  ASSERT_OK(this->bm_->CreateBlock(this->test_block_opts_, &written_block));
+  ASSERT_OK(written_block->Append(kTestData));
+  ASSERT_OK(written_block->Finalize());
+  ASSERT_OK(written_block->Close());
+}
+
+// Tests that WritableBlock::Close() is thread-safe for multiple
+// FINALIZED blocks.
+TYPED_TEST(BlockManagerTest, ConcurrentCloseFinalizedWritableBlockTest) {
+  const string kTestData = "test data";
+
+  // Create several blocks. For each block, Finalize() it after fully
+  // written, and then Close() it.
+  auto write_data = [&]() {
+    for (int i = 0; i < 5; i++) {
+      unique_ptr<WritableBlock> writer;
+      CHECK_OK(this->bm_->CreateBlock(this->test_block_opts_, &writer));
+      CHECK_OK(writer->Append(kTestData));
+      CHECK_OK(writer->Finalize());
+      SleepFor(MonoDelta::FromMilliseconds(rand() % 100));
+      CHECK_OK(writer->Close());
+    }
+  };
+
+  vector<std::thread> threads;
+  for (int i = 0; i < 100; i++) {
+    threads.emplace_back(write_data);
+  }
+  for (auto& t : threads) {
+    t.join();
+  }
+
+  vector<BlockId> retrieved_ids;
+  ASSERT_OK(this->bm_->GetAllBlockIds(&retrieved_ids));
+  ASSERT_EQ(500, retrieved_ids.size());
+  for (const auto& id : retrieved_ids) {
+    unique_ptr<ReadableBlock> block;
+    ASSERT_OK(this->bm_->OpenBlock(id, &block));
+    uint64_t size;
+    ASSERT_OK(block->Size(&size));
+    uint8_t buf[size];
+    Slice slice(buf, size);
+    ASSERT_OK(block->Read(0, slice));
+    ASSERT_EQ(kTestData, slice);
+  }
+
+  ASSERT_OK(this->ReopenBlockManager(scoped_refptr<MetricEntity>(),
+                                     shared_ptr<MemTracker>(),
+                                     { GetTestDataDirectory() },
+                                     false /* create */));
+}
+
+TYPED_TEST(BlockManagerTest, TestBlockTransaction) {
+  // Create a BlockCreationTransaction. In this transaction,
+  // create some blocks and commit the writes all together.
+  const string kTestData = "test data";
+  unique_ptr<BlockCreationTransaction> creation_transaction =
+      this->bm_->NewCreationTransaction();
+  vector<BlockId> created_blocks;
+  for (int i = 0; i < 20; i++) {
+    unique_ptr<WritableBlock> writer;
+    ASSERT_OK(this->bm_->CreateBlock(this->test_block_opts_, &writer));
+
+    // Write some data to it.
+    ASSERT_OK(writer->Append(kTestData));
+    ASSERT_OK(writer->Finalize());
+    created_blocks.emplace_back(writer->id());
+    creation_transaction->AddCreatedBlock(std::move(writer));
+  }
+  ASSERT_OK(creation_transaction->CommitCreatedBlocks());
+
+  // Read the blocks and verify the content.
+  for (const auto& block : created_blocks) {
+    unique_ptr<ReadableBlock> reader;
+    ASSERT_OK(this->bm_->OpenBlock(block, &reader));
+    uint64_t sz;
+    ASSERT_OK(reader->Size(&sz));
+    ASSERT_EQ(kTestData.length(), sz);
+    uint8_t scratch[kTestData.length()];
+    Slice data(scratch, kTestData.length());
+    ASSERT_OK(reader->Read(0, data));
+    ASSERT_EQ(kTestData, data);
+  }
+
+  // Create a BlockDeletionTransaction. In this transaction,
+  // randomly delete almost half of the created blocks.
+  shared_ptr<BlockDeletionTransaction> deletion_transaction =
+      this->bm_->NewDeletionTransaction();
+  for (const auto& block : created_blocks) {
+    if (rand() % 2) deletion_transaction->AddDeletedBlock(block);
+  }
+  vector<BlockId> deleted_blocks;
+  ASSERT_OK(deletion_transaction->CommitDeletedBlocks(&deleted_blocks));
+  for (const auto& block : deleted_blocks) {
+    created_blocks.erase(std::remove(created_blocks.begin(), created_blocks.end(), block),
+                         created_blocks.end());
+    ASSERT_TRUE(this->bm_->OpenBlock(block, nullptr).IsNotFound());
+  }
+
+  // Delete the rest of created blocks. But force the operations to fail,
+  // in order to test that the first failure properly propagates.
+  FLAGS_crash_on_eio = false;
+  FLAGS_env_inject_eio = 1.0;
+  for (const auto& block : created_blocks) {
+    deletion_transaction->AddDeletedBlock(block);
+  }
+  deleted_blocks.clear();
+  Status s = deletion_transaction->CommitDeletedBlocks(&deleted_blocks);
+  ASSERT_TRUE(s.IsIOError());
+  ASSERT_STR_CONTAINS(s.ToString(), Substitute("only deleted $0 blocks, "
+                                               "first failure",
+                                               deleted_blocks.size()));
+  FLAGS_env_inject_eio = 0;
+}
 
 } // namespace fs
 } // namespace kudu

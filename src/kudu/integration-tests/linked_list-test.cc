@@ -30,31 +30,38 @@
 // To verify, the table is scanned, and we ensure that every key is linked to
 // either zero or one times, and no link_to refers to a missing key.
 
+#include <cstdint>
+#include <ostream>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+#include <boost/bind.hpp>
 #include <gflags/gflags.h>
+#include <gflags/gflags_declare.h>
 #include <glog/logging.h>
-#include <glog/stl_logging.h>
 #include <gtest/gtest.h>
 
-#include "kudu/client/client.h"
-#include "kudu/client/row_result.h"
-#include "kudu/gutil/map-util.h"
-#include "kudu/gutil/stl_util.h"
-#include "kudu/gutil/strings/substitute.h"
-#include "kudu/gutil/strings/split.h"
-#include "kudu/gutil/walltime.h"
+#include "kudu/client/shared_ptr.h"
+#include "kudu/common/wire_protocol.pb.h"
+#include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/port.h"
+#include "kudu/integration-tests/cluster_itest_util.h"
 #include "kudu/integration-tests/linked_list-test-util.h"
 #include "kudu/integration-tests/ts_itest-base.h"
-#include "kudu/util/random.h"
-#include "kudu/util/stopwatch.h"
+#include "kudu/master/master.pb.h"
+#include "kudu/mini-cluster/external_mini_cluster.h"
+#include "kudu/mini-cluster/mini_cluster.h"
+#include "kudu/tserver/tablet_server-test-base.h"
+#include "kudu/util/monotime.h"
+#include "kudu/util/status.h"
+#include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
-#include "kudu/util/hdr_histogram.h"
 
-using kudu::client::KuduClient;
-using kudu::client::KuduClientBuilder;
-using kudu::client::KuduSchema;
-using kudu::client::sp::shared_ptr;
-using kudu::itest::TServerDetails;
-
+DECLARE_int32(num_replicas);
+DECLARE_int32(num_tablet_servers);
+DECLARE_string(ts_flags);
 DEFINE_int32(seconds_to_run, 5, "Number of seconds for which to run the test");
 
 DEFINE_int32(num_chains, 50, "Number of parallel chains to generate");
@@ -67,7 +74,21 @@ DEFINE_bool(stress_flush_compact, false,
 DEFINE_bool(stress_wal_gc, false,
             "Set WAL segment size small so that logs will be GCed during the test");
 
+using kudu::client::sp::shared_ptr;
+using kudu::cluster::ClusterNodes;
+using kudu::itest::TServerDetails;
+using kudu::itest::WAIT_FOR_LEADER;
+using kudu::itest::WaitForReplicasReportedToMaster;
+using kudu::itest::WaitForServersToAgree;
+using kudu::master::VOTER_REPLICA;
+using std::string;
+using std::vector;
+
 namespace kudu {
+
+namespace client {
+class KuduClient;
+} // namespace client
 
 class LinkedListTest : public tserver::TabletServerIntegrationTestBase {
  public:
@@ -87,23 +108,27 @@ class LinkedListTest : public tserver::TabletServerIntegrationTestBase {
   void BuildAndStart() {
     vector<string> common_flags;
 
-    common_flags.push_back("--skip_remove_old_recovery_dir");
+    common_flags.emplace_back("--skip_remove_old_recovery_dir");
+
+    // Set history retention to one day, so that we don't GC history in this test.
+    // We rely on verifying "back in time" with snapshot scans.
+    common_flags.emplace_back("--tablet_history_max_age_sec=86400");
 
     vector<string> ts_flags(common_flags);
     if (FLAGS_stress_flush_compact) {
       // Set the flush threshold low so that we have a mix of flushed and unflushed
       // operations in the WAL, when we bootstrap.
-      ts_flags.push_back("--flush_threshold_mb=1");
+      ts_flags.emplace_back("--flush_threshold_mb=1");
       // Set the compaction budget to be low so that we get multiple passes of compaction
       // instead of selecting all of the rowsets in a single compaction of the whole
       // tablet.
-      ts_flags.push_back("--tablet_compaction_budget_mb=4");
+      ts_flags.emplace_back("--tablet_compaction_budget_mb=4");
       // Set the major delta compaction ratio low enough that we trigger a lot of them.
-      ts_flags.push_back("--tablet_delta_store_major_compact_min_ratio=0.001");
+      ts_flags.emplace_back("--tablet_delta_store_major_compact_min_ratio=0.001");
     }
     if (FLAGS_stress_wal_gc) {
       // Set the size of the WAL segments low so that some can be GC'd.
-      ts_flags.push_back("--log_segment_size_mb=1");
+      ts_flags.emplace_back("--log_segment_size_mb=1");
     }
 
     CreateCluster("linked-list-cluster", ts_flags, common_flags);
@@ -113,8 +138,7 @@ class LinkedListTest : public tserver::TabletServerIntegrationTestBase {
   }
 
   void ResetClientAndTester() {
-    KuduClientBuilder builder;
-    ASSERT_OK(cluster_->CreateClient(builder, &client_));
+    ASSERT_OK(cluster_->CreateClient(nullptr, &client_));
     tester_.reset(new LinkedListTester(client_, kTableId,
                                        FLAGS_num_chains,
                                        FLAGS_num_tablets,
@@ -124,23 +148,13 @@ class LinkedListTest : public tserver::TabletServerIntegrationTestBase {
 
   void RestartCluster() {
     CHECK(cluster_);
-    cluster_->Shutdown(ExternalMiniCluster::TS_ONLY);
+    cluster_->ShutdownNodes(ClusterNodes::TS_ONLY);
     cluster_->Restart();
     ResetClientAndTester();
   }
 
  protected:
-  void AddExtraFlags(const string& flags_str, vector<string>* flags) {
-    if (flags_str.empty()) {
-      return;
-    }
-    vector<string> split_flags = strings::Split(flags_str, " ");
-    for (const string& flag : split_flags) {
-      flags->push_back(flag);
-    }
-  }
-
-  shared_ptr<KuduClient> client_;
+  shared_ptr<client::KuduClient> client_;
   gscoped_ptr<LinkedListTester> tester_;
 };
 
@@ -278,34 +292,50 @@ TEST_F(LinkedListTest, TestLoadWhileOneServerDownAndVerify) {
 
   FLAGS_num_tablet_servers = 3;
   FLAGS_num_tablets = 1;
-  ASSERT_NO_FATAL_FAILURE(BuildAndStart());
+
+  const auto run_time = MonoDelta::FromSeconds(FLAGS_seconds_to_run);
+  const auto wait_time = run_time;
+
+  NO_FATALS(BuildAndStart());
 
   // Load the data with one of the three servers down.
   cluster_->tablet_server(0)->Shutdown();
 
-  int64_t written = 0;
-  ASSERT_OK(tester_->LoadLinkedList(MonoDelta::FromSeconds(FLAGS_seconds_to_run),
-                                           FLAGS_num_snapshots,
-                                           &written));
+  int64_t written;
+  ASSERT_OK(tester_->LoadLinkedList(run_time, FLAGS_num_snapshots, &written));
 
   // Start back up the server that missed all of the data being loaded. It should be
   // able to stream the data back from the other server which is still up.
   ASSERT_OK(cluster_->tablet_server(0)->Restart());
 
-  // We'll give the tablets 5 seconds to start up regardless of how long we
-  // inserted for. This prevents flakiness in TSAN builds in particular.
-  const int kBaseTimeToWaitSecs = 5;
-  const int kWaitTime = FLAGS_seconds_to_run + kBaseTimeToWaitSecs;
   string tablet_id = tablet_replicas_.begin()->first;
-  ASSERT_NO_FATAL_FAILURE(WaitForServersToAgree(
-                            MonoDelta::FromSeconds(kWaitTime),
-                            tablet_servers_,
-                            tablet_id,
-                            written / FLAGS_num_chains));
+
+  // When running for longer times (like --seconds_to_run=800), the replica
+  // at the shutdown tservers falls behind the WAL segment GC threshold. In case
+  // of the 3-4-3 replica management scheme, that leads to evicting the former
+  // replica and replacing it with a non-voter one. The WaitForServersToAgree()
+  // below doesn't take into account that a non-voter replica, even caught up
+  // with the leader, first needs to be promoted to voter before commencing the
+  // verification phase. So, before checking for the minimum required operaiton
+  // index, let's first make sure that the replica at the restarted tserver
+  // is a voter.
+  bool has_leader;
+  master::TabletLocationsPB tablet_locations;
+  ASSERT_OK(WaitForReplicasReportedToMaster(
+      cluster_->master_proxy(), FLAGS_num_tablet_servers, tablet_id, wait_time,
+      WAIT_FOR_LEADER, VOTER_REPLICA, &has_leader, &tablet_locations));
+
+  // All right, having the necessary number of voter replicas, make sure all
+  // replicas are up-to-date in terms of OpId index.
+  ASSERT_OK(WaitForServersToAgree(wait_time, tablet_servers_, tablet_id,
+                                  written / FLAGS_num_chains));
 
   cluster_->tablet_server(1)->Shutdown();
   cluster_->tablet_server(2)->Shutdown();
-  ASSERT_OK(tester_->WaitAndVerify(FLAGS_seconds_to_run, written));
+
+  ASSERT_OK(tester_->WaitAndVerify(FLAGS_seconds_to_run,
+                                   written,
+                                   LinkedListTester::FINISH_WITH_SCAN_LATEST));
 }
 
 } // namespace kudu

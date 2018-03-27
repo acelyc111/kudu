@@ -17,24 +17,38 @@
 #ifndef CFILE_UTIL_H_
 #define CFILE_UTIL_H_
 
-#include <algorithm>
+#include <cstddef>
+#include <functional>
 #include <iostream>
+#include <memory>
 
-#include "kudu/cfile/cfile.pb.h"
+#include <boost/optional/optional.hpp>
 
 #include "kudu/common/schema.h"
-#include "kudu/common/row.h"
-#include "kudu/common/scan_predicate.h"
-#include "kudu/common/encoded_key.h"
-#include "kudu/util/bloom_filter.h"
 #include "kudu/util/slice.h"
 #include "kudu/util/status.h"
 
 namespace kudu {
+
+class MemTracker;
+class faststring;
+
 namespace cfile {
 
 class CFileReader;
 class CFileIterator;
+
+// Used to set the CFileFooterPB bitset tracking incompatible features
+enum IncompatibleFeatures {
+  NONE = 0,
+
+  // Write a crc32 checksum at the end of each cfile block
+  CHECKSUM = 1 << 0,
+
+  SUPPORTED = NONE | CHECKSUM
+};
+
+typedef std::function<void(const void*, faststring*)> ValidxKeyEncoder;
 
 struct WriterOptions {
   // Approximate size of index blocks.
@@ -57,11 +71,19 @@ struct WriterOptions {
   // Whether the file needs a value index
   bool write_validx;
 
+  // Whether to optimize index keys by storing shortest separating prefixes
+  // instead of entire keys.
+  bool optimize_index_keys;
+
   // Column storage attributes.
   //
   // Default: all default values as specified in the constructor in
   // schema.h
   ColumnStorageAttributes storage_attributes;
+
+  // An optional value index key encoder. If not set, the default encoder
+  // encodes the entire value.
+  boost::optional<ValidxKeyEncoder> validx_key_encoder;
 
   WriterOptions();
 };
@@ -75,29 +97,19 @@ struct ReaderOptions {
   std::shared_ptr<MemTracker> parent_mem_tracker;
 };
 
-struct DumpIteratorOptions {
-  // If true, print values of rows, otherwise only print aggregate
-  // information.
-  bool print_rows;
-
-  // Number of rows to iterate over. If 0, will iterate over all rows.
-  size_t nrows;
-
-  DumpIteratorOptions()
-      : print_rows(false), nrows(0) {
-  }
-};
-
 // Dumps the contents of a cfile to 'out'; 'reader' and 'iterator'
-// must be initialized. See cfile/cfile-dump.cc and tools/fs_tool.cc
-// for sample usage.
-//
-// See also: DumpIteratorOptions
+// must be initialized. If 'num_rows' is 0, all rows will be printed.
 Status DumpIterator(const CFileReader& reader,
                     CFileIterator* it,
                     std::ostream* out,
-                    const DumpIteratorOptions& opts,
+                    int num_rows,
                     int indent);
+
+// Return the length of the common prefix shared by the two strings.
+size_t CommonPrefixLength(const Slice& a, const Slice& b);
+
+// Truncate right to give a shortest key satisfying left <= key <= right.
+void GetSeparatingKey(const Slice& left, Slice* right);
 
 }  // namespace cfile
 }  // namespace kudu

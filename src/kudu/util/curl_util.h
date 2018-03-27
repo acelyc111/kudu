@@ -20,6 +20,7 @@
 #include <string>
 
 #include "kudu/gutil/macros.h"
+#include "kudu/util/monotime.h"
 #include "kudu/util/status.h"
 
 typedef void CURL;
@@ -48,6 +49,20 @@ class EasyCurl {
                    const std::string& post_data,
                    faststring* dst);
 
+  // Set whether to verify the server's SSL certificate in the case of an HTTPS
+  // connection.
+  void set_verify_peer(bool verify) {
+    verify_peer_ = verify;
+  }
+
+  void set_return_headers(bool v) {
+    return_headers_ = v;
+  }
+
+  void set_timeout(MonoDelta t) {
+    timeout_ = t;
+  }
+
  private:
   // Do a request. If 'post_data' is non-NULL, does a POST.
   // Otherwise, does a GET.
@@ -55,6 +70,15 @@ class EasyCurl {
                    const std::string* post_data,
                    faststring* dst);
   CURL* curl_;
+
+  // Whether to verify the server certificate.
+  bool verify_peer_ = true;
+
+  // Whether to return the HTTP headers with the response.
+  bool return_headers_ = false;
+
+  MonoDelta timeout_;
+
   DISALLOW_COPY_AND_ASSIGN(EasyCurl);
 };
 

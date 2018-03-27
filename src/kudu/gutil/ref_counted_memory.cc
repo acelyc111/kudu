@@ -4,7 +4,9 @@
 
 #include "kudu/gutil/ref_counted_memory.h"
 
-#include <stdlib.h>
+#include <cstdlib>
+#include <cstring>
+#include <utility>
 
 #include <glog/logging.h>
 

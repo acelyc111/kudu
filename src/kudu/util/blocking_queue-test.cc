@@ -15,32 +15,39 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <boost/thread/thread.hpp>
-#include <glog/logging.h>
-#include <gtest/gtest.h>
-#include <memory>
+#include <cstddef>
+#include <cstdint>
+#include <map>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include <gtest/gtest.h>
+
+#include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/util/countdown_latch.h"
 #include "kudu/util/blocking_queue.h"
+#include "kudu/util/monotime.h"
+#include "kudu/util/mutex.h"
+#include "kudu/util/status.h"
+#include "kudu/util/test_macros.h"
 
-using std::shared_ptr;
 using std::string;
+using std::thread;
 using std::vector;
 
 namespace kudu {
 
 BlockingQueue<int32_t> test1_queue(5);
 
-void InsertSomeThings(void) {
+void InsertSomeThings() {
   ASSERT_EQ(test1_queue.Put(1), QUEUE_SUCCESS);
   ASSERT_EQ(test1_queue.Put(2), QUEUE_SUCCESS);
   ASSERT_EQ(test1_queue.Put(3), QUEUE_SUCCESS);
 }
 
 TEST(BlockingQueueTest, Test1) {
-  boost::thread inserter_thread(InsertSomeThings);
+  thread inserter_thread(InsertSomeThings);
   int32_t i;
   ASSERT_TRUE(test1_queue.BlockingGet(&i));
   ASSERT_EQ(1, i);
@@ -48,6 +55,7 @@ TEST(BlockingQueueTest, Test1) {
   ASSERT_EQ(2, i);
   ASSERT_TRUE(test1_queue.BlockingGet(&i));
   ASSERT_EQ(3, i);
+  inserter_thread.join();
 }
 
 TEST(BlockingQueueTest, TestBlockingDrainTo) {
@@ -56,10 +64,45 @@ TEST(BlockingQueueTest, TestBlockingDrainTo) {
   ASSERT_EQ(test_queue.Put(2), QUEUE_SUCCESS);
   ASSERT_EQ(test_queue.Put(3), QUEUE_SUCCESS);
   vector<int32_t> out;
-  ASSERT_TRUE(test_queue.BlockingDrainTo(&out));
+  ASSERT_OK(test_queue.BlockingDrainTo(&out, MonoTime::Now() + MonoDelta::FromSeconds(30)));
   ASSERT_EQ(1, out[0]);
   ASSERT_EQ(2, out[1]);
   ASSERT_EQ(3, out[2]);
+
+  // Set a deadline in the past and ensure we time out.
+  Status s = test_queue.BlockingDrainTo(&out, MonoTime::Now() - MonoDelta::FromSeconds(1));
+  ASSERT_TRUE(s.IsTimedOut());
+
+  // Ensure that if the queue is shut down, we get Aborted status.
+  test_queue.Shutdown();
+  s = test_queue.BlockingDrainTo(&out, MonoTime::Now() - MonoDelta::FromSeconds(1));
+  ASSERT_TRUE(s.IsAborted());
+}
+
+// Test that, when the queue is shut down with elements still pending,
+// Drain still returns OK until the elements are all gone.
+TEST(BlockingQueueTest, TestGetAndDrainAfterShutdown) {
+  // Put some elements into the queue and then shut it down.
+  BlockingQueue<int32_t> q(3);
+  ASSERT_EQ(q.Put(1), QUEUE_SUCCESS);
+  ASSERT_EQ(q.Put(2), QUEUE_SUCCESS);
+
+  q.Shutdown();
+
+  // Get() should still return an element.
+  int i;
+  ASSERT_TRUE(q.BlockingGet(&i));
+  ASSERT_EQ(1, i);
+
+  // Drain should still return OK, since it yielded elements.
+  vector<int32_t> out;
+  ASSERT_OK(q.BlockingDrainTo(&out));
+  ASSERT_EQ(2, out[0]);
+
+  // Now that it's empty, it should return Aborted.
+  Status s = q.BlockingDrainTo(&out);
+  ASSERT_TRUE(s.IsAborted()) << s.ToString();
+  ASSERT_FALSE(q.BlockingGet(&i));
 }
 
 TEST(BlockingQueueTest, TestTooManyInsertions) {
@@ -128,8 +171,6 @@ TEST(BlockingQueueTest, TestGscopedPtrMethods) {
 
 class MultiThreadTest {
  public:
-  typedef vector<shared_ptr<boost::thread> > thread_vec_t;
-
   MultiThreadTest()
    :  puts_(4),
       blocking_puts_(4),
@@ -168,20 +209,14 @@ class MultiThreadTest {
 
   void Run() {
     for (int i = 0; i < nthreads_; i++) {
-      threads_.push_back(shared_ptr<boost::thread>(
-              new boost::thread(boost::bind(
-                &MultiThreadTest::InserterThread, this, i))));
-      threads_.push_back(shared_ptr<boost::thread>(
-              new boost::thread(boost::bind(
-                &MultiThreadTest::RemoverThread, this))));
+      threads_.emplace_back(&MultiThreadTest::InserterThread, this, i);
+      threads_.emplace_back(&MultiThreadTest::RemoverThread, this);
     }
     // We add an extra thread to ensure that there aren't enough elements in
     // the queue to go around.  This way, we test removal after Shutdown.
-    threads_.push_back(shared_ptr<boost::thread>(
-            new boost::thread(boost::bind(
-              &MultiThreadTest::RemoverThread, this))));
-    for (const auto& thread : threads_) {
-      thread->join();
+    threads_.emplace_back(&MultiThreadTest::RemoverThread, this);
+    for (auto& thread : threads_) {
+      thread.join();
     }
     // Let's check to make sure we got what we should have.
     MutexLock guard(lock_);
@@ -201,7 +236,7 @@ class MultiThreadTest {
   BlockingQueue<int32_t> queue_;
   Mutex lock_;
   std::map<int32_t, int> gotten_;
-  thread_vec_t threads_;
+  vector<thread> threads_;
   int num_inserters_;
   CountDownLatch sync_latch_;
 };

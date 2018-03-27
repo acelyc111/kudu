@@ -26,6 +26,14 @@ cdef class KuduType(object):
         DataType type
 
 
+cdef class ColumnTypeAttributes:
+    """
+    Wraps a Kudu client ColumnTypeAttributes object
+    """
+    cdef:
+        KuduColumnTypeAttributes* type_attributes
+
+
 cdef class ColumnSchema:
     """
     Wraps a Kudu client ColumnSchema object
@@ -38,6 +46,7 @@ cdef class ColumnSchema:
 cdef class ColumnSpec:
     cdef:
         KuduColumnSpec* spec
+        KuduType _type
 
 
 cdef class SchemaBuilder:
@@ -57,3 +66,9 @@ cdef class Schema:
 
     cdef inline DataType loc_type(self, int i):
         return self.schema.Column(i).type()
+
+
+cdef class KuduValue:
+    cdef:
+        C_KuduValue* _value
+

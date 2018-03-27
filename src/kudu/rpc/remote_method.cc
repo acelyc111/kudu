@@ -15,6 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <ostream>
+#include <utility>
+
 #include <glog/logging.h>
 
 #include "kudu/gutil/strings/substitute.h"
@@ -41,7 +44,7 @@ void RemoteMethod::ToPB(RemoteMethodPB* pb) const {
   pb->set_method_name(method_name_);
 }
 
-string RemoteMethod::ToString() const {
+std::string RemoteMethod::ToString() const {
   return Substitute("$0.$1", service_name_, method_name_);
 }
 

@@ -24,7 +24,7 @@
 // Summary
 // ------------------------------------------------------------
 //
-// This API provides a basic set of metrics primitives along the lines of the Code Hale's
+// This API provides a basic set of metrics primitives along the lines of the Coda Hale's
 // metrics library along with JSON formatted output of running metrics.
 //
 // The metrics system has a few main concepts in its data model:
@@ -62,7 +62,7 @@
 //
 // MetricEntity instances may also carry a key-value map of string attributes. These
 // attributes are directly exposed to monitoring systems via the JSON output. Monitoring
-// systems may use this information to allow hierarchical aggregation beteween entities,
+// systems may use this information to allow hierarchical aggregation between entities,
 // display them to the user, etc.
 //
 // Metric instances
@@ -223,7 +223,11 @@
 //
 /////////////////////////////////////////////////////
 
-#include <algorithm>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -233,11 +237,14 @@
 #include "kudu/gutil/bind.h"
 #include "kudu/gutil/callback.h"
 #include "kudu/gutil/casts.h"
+#include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/macros.h"
 #include "kudu/gutil/map-util.h"
+#include "kudu/gutil/port.h"
 #include "kudu/gutil/ref_counted.h"
-#include "kudu/gutil/singleton.h"
 #include "kudu/util/atomic.h"
-#include "kudu/util/jsonwriter.h"
+#include "kudu/util/hdr_histogram.h"
+#include "kudu/util/jsonwriter.h" // IWYU pragma: keep
 #include "kudu/util/locks.h"
 #include "kudu/util/monotime.h"
 #include "kudu/util/status.h"
@@ -316,6 +323,8 @@
 #define METRIC_DECLARE_gauge_size METRIC_DECLARE_gauge_uint64
 #endif
 
+template <typename Type> class Singleton;
+
 namespace kudu {
 
 class Counter;
@@ -323,9 +332,10 @@ class CounterPrototype;
 
 template<typename T>
 class AtomicGauge;
+template <typename Sig>
+class Callback;
 template<typename T>
 class FunctionGauge;
-class Gauge;
 template<typename T>
 class GaugePrototype;
 
@@ -334,7 +344,6 @@ class MetricEntityPrototype;
 class MetricPrototype;
 class MetricRegistry;
 
-class HdrHistogram;
 class Histogram;
 class HistogramPrototype;
 class HistogramSnapshotPB;
@@ -374,10 +383,15 @@ struct MetricUnit {
     kScanners,
     kMaintenanceOperations,
     kBlocks,
+    kHoles,
     kLogBlockContainers,
     kTasks,
     kMessages,
     kContextSwitches,
+    kDataDirectories,
+    kState,
+    kSessions,
+    kTablets,
   };
   static const char* Name(Type unit);
 };
@@ -408,6 +422,22 @@ struct MetricJsonOptions {
   // unit, etc).
   // Default: false
   bool include_schema_info;
+
+  // Try to skip any metrics which have not been modified since before
+  // the given epoch. The current epoch can be fetched using
+  // Metric::current_epoch() and incremented using Metric::IncrementEpoch().
+  //
+  // Note that this is an inclusive bound.
+  int64_t only_modified_in_or_after_epoch = 0;
+
+  // Whether to include metrics which have had no data recorded and thus have
+  // a value of 0. Note that some metrics with the value 0 may still be included:
+  // notably, gauges may be non-zero and then reset to zero, so seeing that
+  // they are currently zero does not indicate they are "untouched".
+  bool include_untouched_metrics = true;
+
+  // Whether to include the attributes of each entity.
+  bool include_entity_attributes = true;
 };
 
 class MetricEntityPrototype {
@@ -486,8 +516,20 @@ class MetricEntity : public RefCountedThreadSafe<MetricEntity> {
   void SetAttribute(const std::string& key, const std::string& val);
 
   int num_metrics() const {
-    lock_guard<simple_spinlock> l(&lock_);
+    std::lock_guard<simple_spinlock> l(lock_);
     return metric_map_.size();
+  }
+
+  // Mark this entity as unpublished. This will cause the registry to retire its metrics
+  // and unregister it.
+  void Unpublish() {
+    std::lock_guard<simple_spinlock> l(lock_);
+    published_ = false;
+  }
+
+  bool published() {
+    std::lock_guard<simple_spinlock> l(lock_);
+    return published_;
   }
 
  private:
@@ -511,11 +553,14 @@ class MetricEntity : public RefCountedThreadSafe<MetricEntity> {
   // Map from metric name to Metric object. Protected by lock_.
   MetricMap metric_map_;
 
-  // The key/value attributes. Protected by lock_
+  // The key/value attributes. Protected by lock_.
   AttributeMap attributes_;
 
   // The set of metrics which should never be retired. Protected by lock_.
   std::vector<scoped_refptr<Metric> > never_retire_metrics_;
+
+  // Whether this entity is published. Protected by lock_.
+  bool published_;
 };
 
 // Base class to allow for putting all metrics into a single container.
@@ -528,13 +573,52 @@ class Metric : public RefCountedThreadSafe<Metric> {
 
   const MetricPrototype* prototype() const { return prototype_; }
 
+  // Return true if this metric has never been touched.
+  virtual bool IsUntouched() const = 0;
+
+  // Return true if this metric has changed in or after the given metrics epoch.
+  bool ModifiedInOrAfterEpoch(int64_t epoch) {
+    return m_epoch_ >= epoch;
+  }
+
+  // Return the current epoch for tracking modification of metrics.
+  // This can be passed as 'MetricJsonOptions::only_modified_since_epoch' to
+  // get a diff of metrics between two points in time.
+  static int64_t current_epoch() {
+    return g_epoch_;
+  }
+
+  // Advance to the next epoch for metrics.
+  // This is cheap for the calling thread but causes some extra work on the paths
+  // of hot metric updaters, so should only be done rarely (eg before dumping
+  // metrics).
+  static void IncrementEpoch();
+
  protected:
   explicit Metric(const MetricPrototype* prototype);
   virtual ~Metric();
 
   const MetricPrototype* const prototype_;
 
+  void UpdateModificationEpoch() {
+    // If we have some upper bound, we need to invalidate it. We use a 'test-and-set'
+    // here to avoid contending on writes to this cacheline.
+    if (m_epoch_ < current_epoch()) {
+      // Out-of-line the uncommon case which requires a bit more code.
+      UpdateModificationEpochSlowPath();
+    }
+  }
+
+  // The last metrics epoch in which this metric was modified.
+  // We use epochs instead of timestamps since we can ensure that epochs
+  // only change rarely. Thus this member is read-mostly and doesn't cause
+  // cacheline bouncing between metrics writers. We also don't need to read
+  // the system clock, which is more expensive compared to reading 'g_epoch_'.
+  std::atomic<int64_t> m_epoch_;
+
  private:
+  void UpdateModificationEpochSlowPath();
+
   friend class MetricEntity;
   friend class RefCountedThreadSafe<Metric>;
 
@@ -542,6 +626,9 @@ class Metric : public RefCountedThreadSafe<Metric> {
   // of the metrics subsystem. If this metric is not due for retirement, this member is
   // uninitialized.
   MonoTime retire_time_;
+
+  // See 'current_epoch()'.
+  static std::atomic<int64_t> g_epoch_;
 
   DISALLOW_COPY_AND_ASSIGN(Metric);
 };
@@ -580,7 +667,7 @@ class MetricRegistry {
 
   // Return the number of entities in this registry.
   int num_entities() const {
-    lock_guard<simple_spinlock> l(&lock_);
+    std::lock_guard<simple_spinlock> l(lock_);
     return entities_.size();
   }
 
@@ -731,6 +818,7 @@ class Gauge : public Metric {
   virtual ~Gauge() {}
   virtual Status WriteAsJson(JsonWriter* w,
                              const MetricJsonOptions& opts) const OVERRIDE;
+
  protected:
   virtual void WriteValue(JsonWriter* writer) const = 0;
  private:
@@ -744,6 +832,10 @@ class StringGauge : public Gauge {
               std::string initial_value);
   std::string value() const;
   void set_value(const std::string& value);
+  virtual bool IsUntouched() const override {
+    return false;
+  }
+
  protected:
   virtual void WriteValue(JsonWriter* writer) const OVERRIDE;
  private:
@@ -767,9 +859,11 @@ class AtomicGauge : public Gauge {
     value_.Store(static_cast<int64_t>(value), kMemOrderNoBarrier);
   }
   void Increment() {
+    UpdateModificationEpoch();
     value_.IncrementBy(1, kMemOrderNoBarrier);
   }
   virtual void IncrementBy(int64_t amount) {
+    UpdateModificationEpoch();
     value_.IncrementBy(amount, kMemOrderNoBarrier);
   }
   void Decrement() {
@@ -778,7 +872,9 @@ class AtomicGauge : public Gauge {
   void DecrementBy(int64_t amount) {
     IncrementBy(-amount);
   }
-
+  virtual bool IsUntouched() const override {
+    return false;
+  }
  protected:
   virtual void WriteValue(JsonWriter* writer) const OVERRIDE {
     writer->Value(value());
@@ -850,7 +946,7 @@ template <typename T>
 class FunctionGauge : public Gauge {
  public:
   T value() const {
-    lock_guard<simple_spinlock> l(&lock_);
+    std::lock_guard<simple_spinlock> l(lock_);
     return function_.Run();
   }
 
@@ -862,7 +958,7 @@ class FunctionGauge : public Gauge {
   // This should be used during destruction. If you want a settable
   // Gauge, use a normal Gauge instead of a FunctionGauge.
   void DetachToConstant(T v) {
-    lock_guard<simple_spinlock> l(&lock_);
+    std::lock_guard<simple_spinlock> l(lock_);
     function_ = Bind(&FunctionGauge::Return, v);
   }
 
@@ -894,11 +990,19 @@ class FunctionGauge : public Gauge {
                                 this));
   }
 
+  virtual bool IsUntouched() const override {
+    return false;
+  }
+
  private:
   friend class MetricEntity;
 
   FunctionGauge(const GaugePrototype<T>* proto, Callback<T()> function)
-      : Gauge(proto), function_(std::move(function)) {}
+      : Gauge(proto), function_(std::move(function)) {
+    // Override the modification epoch to the maximum, since we don't have any idea
+    // when the bound function changes value.
+    m_epoch_ = std::numeric_limits<decltype(m_epoch_.load())>::max();
+  }
 
   static T Return(T v) {
     return v;
@@ -936,6 +1040,10 @@ class Counter : public Metric {
   void IncrementBy(int64_t amount);
   virtual Status WriteAsJson(JsonWriter* w,
                              const MetricJsonOptions& opts) const OVERRIDE;
+
+  virtual bool IsUntouched() const override {
+    return value() == 0;
+  }
 
  private:
   FRIEND_TEST(MetricsTest, SimpleCounterTest);
@@ -982,13 +1090,21 @@ class Histogram : public Metric {
                              const MetricJsonOptions& opts) const OVERRIDE;
 
   // Returns a snapshot of this histogram including the bucketed values and counts.
-  Status GetHistogramSnapshotPB(HistogramSnapshotPB* snapshot,
+  Status GetHistogramSnapshotPB(HistogramSnapshotPB* snapshot_pb,
                                 const MetricJsonOptions& opts) const;
+
+  // Returns a pointer to the underlying histogram. The implementation of HdrHistogram
+  // is thread safe.
+  const HdrHistogram* histogram() const { return histogram_.get(); }
 
   uint64_t CountInBucketForValueForTests(uint64_t value) const;
   uint64_t MinValueForTests() const;
   uint64_t MaxValueForTests() const;
   double MeanValueForTests() const;
+
+  virtual bool IsUntouched() const override {
+    return TotalCount() == 0;
+  }
 
  private:
   FRIEND_TEST(MetricsTest, SimpleHistogramTest);
@@ -1012,6 +1128,10 @@ class ScopedLatencyMetric {
   MonoTime time_started_;
 };
 
+#define SCOPED_LATENCY_METRIC(_mtx, _h) \
+  ScopedLatencyMetric _h##_metric((_mtx) ? (_mtx)->_h.get() : NULL)
+
+
 ////////////////////////////////////////////////////////////
 // Inline implementations of template methods
 ////////////////////////////////////////////////////////////
@@ -1019,7 +1139,7 @@ class ScopedLatencyMetric {
 inline scoped_refptr<Counter> MetricEntity::FindOrCreateCounter(
     const CounterPrototype* proto) {
   CheckInstantiation(proto);
-  lock_guard<simple_spinlock> l(&lock_);
+  std::lock_guard<simple_spinlock> l(lock_);
   scoped_refptr<Counter> m = down_cast<Counter*>(FindPtrOrNull(metric_map_, proto).get());
   if (!m) {
     m = new Counter(proto);
@@ -1031,7 +1151,7 @@ inline scoped_refptr<Counter> MetricEntity::FindOrCreateCounter(
 inline scoped_refptr<Histogram> MetricEntity::FindOrCreateHistogram(
     const HistogramPrototype* proto) {
   CheckInstantiation(proto);
-  lock_guard<simple_spinlock> l(&lock_);
+  std::lock_guard<simple_spinlock> l(lock_);
   scoped_refptr<Histogram> m = down_cast<Histogram*>(FindPtrOrNull(metric_map_, proto).get());
   if (!m) {
     m = new Histogram(proto);
@@ -1045,7 +1165,7 @@ inline scoped_refptr<AtomicGauge<T> > MetricEntity::FindOrCreateGauge(
     const GaugePrototype<T>* proto,
     const T& initial_value) {
   CheckInstantiation(proto);
-  lock_guard<simple_spinlock> l(&lock_);
+  std::lock_guard<simple_spinlock> l(lock_);
   scoped_refptr<AtomicGauge<T> > m = down_cast<AtomicGauge<T>*>(
       FindPtrOrNull(metric_map_, proto).get());
   if (!m) {
@@ -1060,7 +1180,7 @@ inline scoped_refptr<FunctionGauge<T> > MetricEntity::FindOrCreateFunctionGauge(
     const GaugePrototype<T>* proto,
     const Callback<T()>& function) {
   CheckInstantiation(proto);
-  lock_guard<simple_spinlock> l(&lock_);
+  std::lock_guard<simple_spinlock> l(lock_);
   scoped_refptr<FunctionGauge<T> > m = down_cast<FunctionGauge<T>*>(
       FindPtrOrNull(metric_map_, proto).get());
   if (!m) {

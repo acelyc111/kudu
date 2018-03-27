@@ -15,11 +15,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <gtest/gtest.h>
-
 #include <algorithm>
+#include <cstdint>
+#include <ostream>
 #include <string>
 #include <vector>
+
+#include <glog/logging.h>
+#include <gtest/gtest.h>
 
 #include "kudu/gutil/strings/join.h"
 #include "kudu/gutil/strings/util.h"
@@ -27,7 +30,11 @@
 #include "kudu/util/net/socket.h"
 #include "kudu/util/net/sockaddr.h"
 #include "kudu/util/status.h"
+#include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
+
+using std::string;
+using std::vector;
 
 namespace kudu {
 
@@ -53,6 +60,7 @@ TEST(SockaddrTest, Test) {
   Sockaddr addr;
   ASSERT_OK(addr.ParseString("1.1.1.1:12345", 12345));
   ASSERT_EQ(12345, addr.port());
+  ASSERT_EQ("1.1.1.1", addr.host());
 }
 
 TEST_F(NetUtilTest, TestParseAddresses) {
@@ -90,6 +98,31 @@ TEST_F(NetUtilTest, TestResolveAddresses) {
   }
 
   ASSERT_OK(hp.ResolveAddresses(nullptr));
+}
+
+TEST_F(NetUtilTest, TestWithinNetwork) {
+  Sockaddr addr;
+  Network network;
+
+  ASSERT_OK(addr.ParseString("10.0.23.0:12345", 0));
+  ASSERT_OK(network.ParseCIDRString("10.0.0.0/8"));
+  EXPECT_TRUE(network.WithinNetwork(addr));
+
+  ASSERT_OK(addr.ParseString("172.28.3.4:0", 0));
+  ASSERT_OK(network.ParseCIDRString("172.16.0.0/12"));
+  EXPECT_TRUE(network.WithinNetwork(addr));
+
+  ASSERT_OK(addr.ParseString("192.168.0.23", 0));
+  ASSERT_OK(network.ParseCIDRString("192.168.1.14/16"));
+  EXPECT_TRUE(network.WithinNetwork(addr));
+
+  ASSERT_OK(addr.ParseString("8.8.8.8:0", 0));
+  ASSERT_OK(network.ParseCIDRString("0.0.0.0/0"));
+  EXPECT_TRUE(network.WithinNetwork(addr));
+
+  ASSERT_OK(addr.ParseString("192.169.0.23", 0));
+  ASSERT_OK(network.ParseCIDRString("192.168.0.0/16"));
+  EXPECT_FALSE(network.WithinNetwork(addr));
 }
 
 // Ensure that we are able to do a reverse DNS lookup on various IP addresses.

@@ -14,9 +14,10 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+syntax = "proto2";
 package kudu;
 
-option java_package = "org.kududb";
+option java_package = "org.apache.kudu";
 
 // Information about the build environment, configuration, etc.
 message VersionInfoPB {

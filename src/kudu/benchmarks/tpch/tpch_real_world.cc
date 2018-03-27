@@ -37,27 +37,49 @@
 //    stops at soon as it gets the signal that we ran out of time or that there are no more rows to
 //    insert, so the last timing shouldn't be used.
 //
-// TODO Make the inserts multi-threaded. See Kudu-629 for the technique.
-#include <boost/bind.hpp>
+// TODO(KUDU-629) Make the inserts multi-threaded.
 
-#include <glog/logging.h>
-#include <stdlib.h>
-#include <sys/types.h>
 #include <sys/stat.h>
+
+#include <cerrno>
+#include <cinttypes>
+#include <csignal>
+#include <cstdint>
+#include <cstdlib>
+#include <iostream>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <boost/bind.hpp>
+#include <boost/function.hpp>
+#include <gflags/gflags.h>
+#include <glog/logging.h>
 
 #include "kudu/benchmarks/tpch/line_item_tsv_importer.h"
 #include "kudu/benchmarks/tpch/rpc_line_item_dao.h"
 #include "kudu/benchmarks/tpch/tpch-schemas.h"
+#include "kudu/client/row_result.h"
+#include "kudu/client/schema.h"
+#include "kudu/common/partial_row.h"
+#include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/move.h"
+#include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/stl_util.h"
+#include "kudu/gutil/stringprintf.h"
 #include "kudu/gutil/strings/join.h"
 #include "kudu/gutil/strings/substitute.h"
-#include "kudu/integration-tests/external_mini_cluster.h"
+#include "kudu/mini-cluster/external_mini_cluster.h"
 #include "kudu/util/atomic.h"
+#include "kudu/util/countdown_latch.h"
 #include "kudu/util/env.h"
 #include "kudu/util/errno.h"
 #include "kudu/util/flags.h"
 #include "kudu/util/logging.h"
 #include "kudu/util/monotime.h"
+#include "kudu/util/net/net_util.h"
+#include "kudu/util/status.h"
 #include "kudu/util/stopwatch.h"
 #include "kudu/util/subprocess.h"
 #include "kudu/util/thread.h"
@@ -69,7 +91,9 @@ DEFINE_bool(tpch_load_data, true,
 DEFINE_bool(tpch_run_queries, true,
             "Query dbgen data as it is inserted");
 DEFINE_int32(tpch_max_batch_size, 1000,
-             "Maximum number of inserts to batch at once");
+             "Maximum number of inserts/updates to batch at once.  Set to 0 "
+             "to delegate the batching control to the logic of the "
+             "KuduSession running in AUTO_BACKGROUND_MODE flush mode.");
 DEFINE_int32(tpch_test_client_timeout_msec, 10000,
              "Timeout that will be used for all operations and RPCs");
 DEFINE_int32(tpch_test_runtime_sec, 0,
@@ -91,11 +115,23 @@ DEFINE_string(tpch_path_to_ts_flags_file, "",
               "a mini cluster. Doesn't use one by default.");
 DEFINE_string(tpch_table_name, "tpch_real_world",
               "Table name to use during the test");
+DEFINE_string(tpch_partition_strategy, "range",
+              "The partitioning strategy to use for the lineitem table. If 'range' is selected, "
+              "each writer thread inserts sequentially into its own tablet, creating an ideal "
+              "workload for maximum throughput. 'hash' partitioning creates the same number of "
+              "tablets, but hash-partitions them so that each writer thread writes to all "
+              "tablets. This is less ideal, but more faithfully represents a lot of write "
+              "workloads.");
+
+using std::string;
+using std::vector;
 
 namespace kudu {
 
 using client::KuduRowResult;
 using client::KuduSchema;
+using cluster::ExternalMiniCluster;
+using cluster::ExternalMiniClusterOptions;
 using strings::Substitute;
 
 class TpchRealWorld {
@@ -149,19 +185,21 @@ const char* TpchRealWorld::kLineItemBase = "lineitem.tbl";
 Status TpchRealWorld::Init() {
   Env* env = Env::Default();
   if (FLAGS_tpch_use_mini_cluster) {
-    if (env->FileExists(FLAGS_tpch_mini_cluster_base_dir)) {
-      RETURN_NOT_OK(env->DeleteRecursively(FLAGS_tpch_mini_cluster_base_dir));
+    if (FLAGS_tpch_load_data) {
+      if (env->FileExists(FLAGS_tpch_mini_cluster_base_dir)) {
+        RETURN_NOT_OK(env->DeleteRecursively(FLAGS_tpch_mini_cluster_base_dir));
+      }
+      RETURN_NOT_OK(env->CreateDir(FLAGS_tpch_mini_cluster_base_dir));
     }
-    RETURN_NOT_OK(env->CreateDir(FLAGS_tpch_mini_cluster_base_dir));
 
     ExternalMiniClusterOptions opts;
     opts.num_tablet_servers = 1;
-    opts.data_root = FLAGS_tpch_mini_cluster_base_dir;
+    opts.cluster_root = FLAGS_tpch_mini_cluster_base_dir;
     if (!FLAGS_tpch_path_to_ts_flags_file.empty()) {
       opts.extra_tserver_flags.push_back("--flagfile=" + FLAGS_tpch_path_to_ts_flags_file);
     }
 
-    cluster_.reset(new ExternalMiniCluster(opts));
+    cluster_.reset(new ExternalMiniCluster(std::move(opts)));
     RETURN_NOT_OK(cluster_->Start());
     master_addresses_ = cluster_->leader_master()->bound_rpc_hostport().ToString();
   } else {
@@ -209,21 +247,20 @@ Status TpchRealWorld::StartDbgens() {
   for (int i = 1; i <= FLAGS_tpch_num_inserters; i++) {
     // This environment variable is necessary if dbgen isn't in the current dir.
     setenv("DSS_CONFIG", FLAGS_tpch_path_to_dbgen_dir.c_str(), 1);
-    string path_to_dbgen = Substitute("$0/dbgen", FLAGS_tpch_path_to_dbgen_dir);
     vector<string> argv;
-    argv.push_back(path_to_dbgen);
-    argv.push_back("-q");
-    argv.push_back("-T");
-    argv.push_back("L");
-    argv.push_back("-s");
+    argv.push_back(Substitute("$0/dbgen", FLAGS_tpch_path_to_dbgen_dir));
+    argv.emplace_back("-q");
+    argv.emplace_back("-T");
+    argv.emplace_back("L");
+    argv.emplace_back("-s");
     argv.push_back(Substitute("$0", FLAGS_tpch_scaling_factor));
     if (FLAGS_tpch_num_inserters > 1) {
-      argv.push_back("-C");
+      argv.emplace_back("-C");
       argv.push_back(Substitute("$0", FLAGS_tpch_num_inserters));
-      argv.push_back("-S");
+      argv.emplace_back("-S");
       argv.push_back(Substitute("$0", i));
     }
-    gscoped_ptr<Subprocess> dbgen_proc(new Subprocess(path_to_dbgen, argv));
+    gscoped_ptr<Subprocess> dbgen_proc(new Subprocess(argv));
     LOG(INFO) << "Running " << JoinStrings(argv, " ");
     RETURN_NOT_OK(dbgen_proc->Start());
     dbgen_processes_.push_back(dbgen_proc.release());
@@ -243,20 +280,32 @@ gscoped_ptr<RpcLineItemDAO> TpchRealWorld::GetInittedDAO() {
 
   KuduSchema schema(tpch::CreateLineItemSchema());
   vector<const KuduPartialRow*> split_rows;
-  for (int64_t i = 1; i < FLAGS_tpch_num_inserters; i++) {
-    KuduPartialRow* row = schema.NewRow();
-    CHECK_OK(row->SetInt64(tpch::kOrderKeyColName, i * increment));
-    CHECK_OK(row->SetInt32(tpch::kLineNumberColName, 0));
-    split_rows.push_back(row);
+
+  RpcLineItemDAO::PartitionStrategy strategy;
+  if (FLAGS_tpch_partition_strategy == "hash") {
+    strategy = RpcLineItemDAO::HASH;
+  } else if (FLAGS_tpch_partition_strategy == "range") {
+    strategy = RpcLineItemDAO::RANGE;
+    for (int64_t i = 1; i < FLAGS_tpch_num_inserters; i++) {
+      KuduPartialRow* row = schema.NewRow();
+      CHECK_OK(row->SetInt64(tpch::kOrderKeyColName, i * increment));
+      CHECK_OK(row->SetInt32(tpch::kLineNumberColName, 0));
+      split_rows.push_back(row);
+    }
+  } else {
+    LOG(FATAL) << "Unknown partition strategy: " << FLAGS_tpch_partition_strategy;
   }
 
-  gscoped_ptr<RpcLineItemDAO> dao(new RpcLineItemDAO(master_addresses_,
-                                                     FLAGS_tpch_table_name,
-                                                     FLAGS_tpch_max_batch_size,
-                                                     FLAGS_tpch_test_client_timeout_msec,
-                                                     split_rows));
+  gscoped_ptr<RpcLineItemDAO> dao(
+        new RpcLineItemDAO(master_addresses_,
+                           FLAGS_tpch_table_name,
+                           FLAGS_tpch_max_batch_size,
+                           FLAGS_tpch_test_client_timeout_msec,
+                           strategy,
+                           FLAGS_tpch_num_inserters,
+                           split_rows));
   dao->Init();
-  return dao.Pass();
+  return std::move(dao);
 }
 
 void TpchRealWorld::LoadLineItemsThread(int i) {
@@ -266,33 +315,48 @@ void TpchRealWorld::LoadLineItemsThread(int i) {
 
   boost::function<void(KuduPartialRow*)> f =
       boost::bind(&LineItemTsvImporter::GetNextLine, &importer, _1);
-  while (importer.HasNextLine() && !stop_threads_.Load()) {
-    dao->WriteLine(f);
-    int64_t current_count = rows_inserted_.Increment();
-    if (current_count % 250000 == 0) {
-      LOG(INFO) << "Inserted " << current_count << " rows";
+  const string time_spent_msg = Substitute(
+        "by thread $0 to load generated data into the database", i);
+  LOG_TIMING(INFO, time_spent_msg) {
+    while (importer.HasNextLine() && !stop_threads_.Load()) {
+      dao->WriteLine(f);
+      int64_t current_count = rows_inserted_.Increment();
+      if (current_count % 250000 == 0) {
+        LOG(INFO) << "Inserted " << current_count << " rows";
+      }
     }
+    dao->FinishWriting();
   }
-  dao->FinishWriting();
+  LOG(INFO) << Substitute("Thread $0 inserted ", i)
+            << rows_inserted_.Load() << " rows in total";
 }
 
 void TpchRealWorld::MonitorDbgenThread(int i) {
   Subprocess* dbgen_proc = dbgen_processes_[i];
   while (!stop_threads_.Load()) {
-    int ret;
-    Status s = dbgen_proc->WaitNoBlock(&ret);
+    Status s = dbgen_proc->WaitNoBlock();
     if (s.ok()) {
-      CHECK(ret == 0) << "dbgen exited with a non-zero return code: " << ret;
+      int exit_status;
+      string exit_info;
+      CHECK_OK(dbgen_proc->GetExitStatus(&exit_status, &exit_info));
+      if (exit_status != 0) {
+        LOG(FATAL) << exit_info;
+      }
       LOG(INFO) << "dbgen finished inserting data";
       dbgen_processes_finished_.CountDown();
       return;
-    } else {
-      SleepFor(MonoDelta::FromMilliseconds(100));
     }
+    CHECK(s.IsTimedOut()) << "Unexpected wait status: " << s.ToString();
+    SleepFor(MonoDelta::FromMilliseconds(100));
   }
-  dbgen_proc->Kill(9);
-  int ret;
-  dbgen_proc->Wait(&ret);
+  Status s = dbgen_proc->Kill(SIGKILL);
+  if (!s.ok()) {
+    LOG(FATAL) << "Failed to send SIGKILL to dbgen: " << s.ToString();
+  }
+  s = dbgen_proc->Wait();
+  if (!s.ok()) {
+    LOG(FATAL) << "Failed to await for dbgen exit: " << s.ToString();
+  }
 }
 
 void TpchRealWorld::RunQueriesThread() {

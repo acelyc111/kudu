@@ -15,8 +15,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <gtest/gtest.h>
+#include <cstdint>
+#include <cstring>
 #include <vector>
+
+#include <gtest/gtest.h>
 
 #include "kudu/gutil/strings/join.h"
 #include "kudu/util/bitmap.h"
@@ -172,7 +175,7 @@ TEST(TestBitMap, TestFindBit) {
     BitmapChange(bm, i, i & 3);
   }
 
-  while (num_bits--) {
+  for (; num_bits > 0; num_bits--) {
     for (size_t offset = 0; offset < num_bits; ++offset) {
       size_t idx;
 

@@ -93,6 +93,7 @@ class TestSchema(unittest.TestCase):
         (builder.add_column('key')
          .type('int32')
          .primary_key()
+         .block_size(1048576)
          .nullable(False))
         schema = builder.build()
 
@@ -123,8 +124,12 @@ class TestSchema(unittest.TestCase):
         builder = kudu.schema_builder()
         builder.add_column('key', 'int64', nullable=False)
 
-        foo = builder.add_column('foo', 'string').encoding('rle')
-        assert foo is not None
+        available_encodings = ['auto', 'plain', 'prefix', 'bitshuffle',
+                               'rle', 'dict', kudu.ENCODING_DICT]
+        for enc in available_encodings:
+            foo = builder.add_column('foo_%s' % enc, 'string').encoding(enc)
+            assert foo is not None
+            del foo
 
         bar = builder.add_column('bar', 'string')
         bar.encoding(kudu.ENCODING_PLAIN)
@@ -136,6 +141,56 @@ class TestSchema(unittest.TestCase):
         builder.build()
         # TODO(wesm): The C++ client does not give us an API to see the storage
         # attributes of a column
+
+    def test_decimal(self):
+        builder = kudu.schema_builder()
+        (builder.add_column('key')
+         .type('decimal')
+         .primary_key()
+         .nullable(False)
+         .precision(9)
+         .scale(2))
+        schema = builder.build()
+
+        column = schema[0]
+        tp = column.type
+        assert tp.name == 'decimal'
+        assert tp.type == kudu.schema.DECIMAL
+        ta = column.type_attributes
+        assert ta.precision == 9
+        assert ta.scale == 2
+
+    def test_decimal_without_precision(self):
+        builder = kudu.schema_builder()
+        (builder.add_column('key')
+         .type('decimal')
+         .primary_key()
+         .nullable(False))
+
+        with self.assertRaises(kudu.KuduInvalidArgument):
+            builder.build()
+
+    def test_precision_on_non_decimal_column(self):
+        builder = kudu.schema_builder()
+        (builder.add_column('key')
+         .type('int32')
+         .primary_key()
+         .nullable(False)
+         .precision(9)
+         .scale(2))
+
+        with self.assertRaises(kudu.KuduInvalidArgument):
+            builder.build()
+
+    def test_unsupported_col_spec_methods_for_create_table(self):
+        builder = kudu.schema_builder()
+        builder.add_column('test', 'int64').rename('test')
+        with self.assertRaises(kudu.KuduNotSupported):
+            builder.build()
+
+        builder.add_column('test', 'int64').remove_default()
+        with self.assertRaises(kudu.KuduNotSupported):
+            builder.build()
 
     def test_set_column_spec_pk(self):
         builder = kudu.schema_builder()

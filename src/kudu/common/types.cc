@@ -19,10 +19,13 @@
 
 #include <memory>
 #include <unordered_map>
+#include <utility>
 
 #include "kudu/gutil/singleton.h"
+#include "kudu/util/logging.h"
 
 using std::shared_ptr;
+using std::string;
 using std::unordered_map;
 
 namespace kudu {
@@ -34,16 +37,26 @@ TypeInfo::TypeInfo(TypeTraitsClass t)
     name_(TypeTraitsClass::name()),
     size_(TypeTraitsClass::size),
     min_value_(TypeTraitsClass::min_value()),
+    max_value_(TypeTraitsClass::max_value()),
     append_func_(TypeTraitsClass::AppendDebugStringForValue),
-    compare_func_(TypeTraitsClass::Compare) {
+    compare_func_(TypeTraitsClass::Compare),
+    are_consecutive_func_(TypeTraitsClass::AreConsecutive) {
 }
 
 void TypeInfo::AppendDebugStringForValue(const void *ptr, string *str) const {
-  append_func_(ptr, str);
+  if (KUDU_SHOULD_REDACT()) {
+    str->append(kRedactionMessage);
+  } else {
+    append_func_(ptr, str);
+  }
 }
 
 int TypeInfo::Compare(const void *lhs, const void *rhs) const {
   return compare_func_(lhs, rhs);
+}
+
+bool TypeInfo::AreConsecutive(const void* a, const void* b) const {
+  return are_consecutive_func_(a, b);
 }
 
 class TypeInfoResolver {
@@ -65,17 +78,21 @@ class TypeInfoResolver {
     AddMapping<INT32>();
     AddMapping<UINT64>();
     AddMapping<INT64>();
-    AddMapping<TIMESTAMP>();
+    AddMapping<UNIXTIME_MICROS>();
     AddMapping<STRING>();
     AddMapping<BOOL>();
     AddMapping<FLOAT>();
     AddMapping<DOUBLE>();
     AddMapping<BINARY>();
+    AddMapping<INT128>();
+    AddMapping<DECIMAL32>();
+    AddMapping<DECIMAL64>();
+    AddMapping<DECIMAL128>();
   }
 
   template<DataType type> void AddMapping() {
     TypeTraits<type> traits;
-    mapping_.insert(make_pair(type, shared_ptr<TypeInfo>(new TypeInfo(traits))));
+    mapping_.insert(make_pair(type, std::make_shared<TypeInfo>(traits)));
   }
 
   unordered_map<DataType,

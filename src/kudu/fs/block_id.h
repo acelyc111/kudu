@@ -17,24 +17,19 @@
 #ifndef KUDU_FS_BLOCK_ID_H
 #define KUDU_FS_BLOCK_ID_H
 
+#include <cinttypes>
+#include <cstddef>
+#include <cstdint>
 #include <iosfwd>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
-#include <glog/logging.h>
-
-#include "kudu/gutil/macros.h"
 #include "kudu/gutil/stringprintf.h"
 
 namespace kudu {
 
 class BlockIdPB;
-
-namespace fs {
-namespace internal {
-class FileBlockLocation;
-} // namespace internal
-} // namespace fs
 
 class BlockId {
  public:
@@ -64,6 +59,10 @@ class BlockId {
     return id_ != other.id_;
   }
 
+  bool operator<(const BlockId& other) const {
+    return id_ < other.id_;
+  }
+
   // Returns the raw ID. Use with care; in most cases the BlockId should be
   // treated as a completely opaque value.
   uint64_t id() const { return id_; }
@@ -91,15 +90,17 @@ struct BlockIdHash {
 
 struct BlockIdCompare {
   bool operator()(const BlockId& first, const BlockId& second) const {
-    return first.id() < second.id();
+    return first < second;
   }
 };
 
 struct BlockIdEqual {
   bool operator()(const BlockId& first, const BlockId& second) const {
-    return first.id() == second.id();
+    return first == second;
   }
 };
+
+typedef std::unordered_set<BlockId, BlockIdHash, BlockIdEqual> BlockIdSet;
 
 } // namespace kudu
 #endif /* KUDU_FS_BLOCK_ID_H */

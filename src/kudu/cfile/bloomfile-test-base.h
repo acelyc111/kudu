@@ -14,8 +14,8 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-#ifndef KUDU_CFILE_BLOOMFILE_TEST_BASE_H
-#define KUDU_CFILE_BLOOMFILE_TEST_BASE_H
+
+#pragma once
 
 #include <glog/logging.h>
 #include <gtest/gtest.h>
@@ -27,6 +27,7 @@
 #include "kudu/util/random.h"
 #include "kudu/util/random_util.h"
 #include "kudu/util/stopwatch.h"
+#include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
 #include "kudu/util/thread.h"
 
@@ -40,9 +41,6 @@ DEFINE_bool(benchmark_should_hit, false, "Set to true for the benchmark to query
 namespace kudu {
 namespace cfile {
 
-using fs::ReadableBlock;
-using fs::WritableBlock;
-
 static const int kKeyShift = 2;
 
 class BloomFileTestBase : public KuduTest {
@@ -50,7 +48,7 @@ class BloomFileTestBase : public KuduTest {
   void SetUp() OVERRIDE {
     KuduTest::SetUp();
 
-    fs_manager_.reset(new FsManager(env_.get(), GetTestPath("fs_root")));
+    fs_manager_.reset(new FsManager(env_, GetTestPath("fs_root")));
     ASSERT_OK(fs_manager_->CreateInitialFileSystemLayout());
     ASSERT_OK(fs_manager_->Open());
   }
@@ -70,8 +68,8 @@ class BloomFileTestBase : public KuduTest {
   }
 
   void WriteTestBloomFile() {
-    gscoped_ptr<WritableBlock> sink;
-    ASSERT_OK(fs_manager_->CreateNewBlock(&sink));
+    std::unique_ptr<fs::WritableBlock> sink;
+    ASSERT_OK(fs_manager_->CreateNewBlock({}, &sink));
     block_id_ = sink->id();
 
     // Set sizing based on flags
@@ -82,7 +80,7 @@ class BloomFileTestBase : public KuduTest {
       << "Invalid parameters: --n_keys isn't set large enough to fill even "
       << "one bloom filter of the requested --bloom_size_bytes";
 
-    BloomFileWriter bfw(sink.Pass(), sizing);
+    BloomFileWriter bfw(std::move(sink), sizing);
 
     ASSERT_OK(bfw.Start());
     AppendBlooms(&bfw);
@@ -90,10 +88,10 @@ class BloomFileTestBase : public KuduTest {
   }
 
   Status OpenBloomFile() {
-    gscoped_ptr<ReadableBlock> source;
+    std::unique_ptr<fs::ReadableBlock> source;
     RETURN_NOT_OK(fs_manager_->OpenBlock(block_id_, &source));
 
-    return BloomFileReader::Open(source.Pass(), ReaderOptions(), &bfr_);
+    return BloomFileReader::Open(std::move(source), ReaderOptions(), &bfr_);
   }
 
   uint64_t ReadBenchmark() {
@@ -122,12 +120,11 @@ class BloomFileTestBase : public KuduTest {
   }
 
  protected:
-  gscoped_ptr<FsManager> fs_manager_;
-  gscoped_ptr<BloomFileReader> bfr_;
+  std::unique_ptr<FsManager> fs_manager_;
+  std::unique_ptr<BloomFileReader> bfr_;
   BlockId block_id_;
 };
 
 } // namespace cfile
 } // namespace kudu
 
-#endif

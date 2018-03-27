@@ -14,9 +14,10 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+syntax = "proto2";
 package kudu.tablet;
 
-option java_package = "org.kududb.tablet";
+option java_package = "org.apache.kudu.tablet";
 
 import "kudu/common/common.proto";
 import "kudu/consensus/opid.proto";
@@ -53,9 +54,9 @@ enum TabletDataState {
   TABLET_DATA_UNKNOWN = 999;
 
   // The tablet is set to TABLET_DATA_COPYING state when in the middle of
-  // remote bootstrap while copying data files from a remote peer. If a tablet
-  // server crashes with a tablet in this state, the tablet must be deleted and
-  // the remote bootstrap process must be restarted for that tablet.
+  // copying data files from a remote peer. If a tablet server crashes with
+  // a tablet in this state, the tablet must be deleted and
+  // the Tablet Copy process must be restarted for that tablet.
   TABLET_DATA_COPYING = 0;
 
   // Fresh empty tablets and successfully copied tablets are set to the
@@ -122,15 +123,37 @@ message TabletSuperBlockPB {
   // WAL before tombstoning.
   // Only relevant for TOMBSTONED tablets.
   optional consensus.OpId tombstone_last_logged_opid = 12;
+
+  // Tablet data is spread across a data directory group. If this is not set
+  // and the tablet state is TABLET_DATA_READY, it is assumed that the data is
+  // from a version of Kudu before 1.5.0. In this case, a new group will be
+  // created spanning all data directories.
+  optional DataDirGroupPB data_dir_group = 15;
 }
 
-// The enum of tablet states.
-// Tablet states are sent in TabletReports and kept in TabletPeer.
+// Tablet states represent stages of a TabletReplica's object lifecycle and are
+// reported to the master via tablet reports.
+//
+// Legal state transitions for a single TabletReplica object:
+//
+// NOT_INITIALIZED -> INITIALIZED -> BOOTSTRAPPING -> RUNNING -> STOPPING -> STOPPED -> SHUTDOWN
+//             |              |                |                  ^ ^ ^
+//             |              |                |                  | | |
+//             |              |                +------------------+ | |
+//             |              +-------------------------------------+ |
+//             +------------------------------------------------------+
+//
+// Since a TabletReplica instance is replaced when a Tablet Copy operation
+// occurs, from a remote perspective it is possible for a tablet replica to
+// appear to transition from SHUTDOWN back to NOT_INITIALIZED.
 enum TabletStatePB {
   UNKNOWN = 999;
 
-  // Tablet has not yet started.
-  NOT_STARTED = 5;
+  // Tablet has not yet been initialized.
+  NOT_INITIALIZED = 6;
+
+  // Tablet has been initialized but not yet started.
+  INITIALIZED = 5;
 
   // Indicates the Tablet is bootstrapping, i.e. that the Tablet is not
   // available for RPC.
@@ -140,13 +163,16 @@ enum TabletStatePB {
   // state Peers are available for client RPCs.
   RUNNING = 1;
 
-  // The tablet failed to for some reason. TabletPeer::error() will return
+  // The tablet failed to for some reason. TabletReplica::error() will return
   // the reason for the failure.
   FAILED = 2;
 
   // The Tablet is shutting down, and will not accept further requests.
-  QUIESCING = 3;
+  STOPPING = 3;
 
-  // The Tablet has been stopped.
+  // The tablet has been stopped, possibly because it has been tombstoned.
+  STOPPED = 7;
+
+  // The Tablet has been completely shut down.
   SHUTDOWN = 4;
 }

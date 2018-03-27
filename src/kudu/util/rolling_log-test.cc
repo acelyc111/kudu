@@ -17,16 +17,24 @@
 
 #include "kudu/util/rolling_log.h"
 
-#include <glog/logging.h>
-#include <glog/stl_logging.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <cstdint>
 #include <string>
 #include <vector>
 
+#include <glog/stl_logging.h>
+#include <gtest/gtest.h>
+
+#include "kudu/gutil/port.h"
+#include "kudu/gutil/strings/stringpiece.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/gutil/strings/util.h"
 #include "kudu/util/env.h"
-#include "kudu/util/memenv/memenv.h"
+#include "kudu/util/faststring.h"
 #include "kudu/util/path_util.h"
+#include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
 
 using std::string;
@@ -61,6 +69,7 @@ class RollingLogTest : public KuduTest {
       ASSERT_TRUE(HasSuffixString(child, pid_suffix) ||
                   HasSuffixString(child, pid_suffix + ".gz")) << "bad child: " << child;
     }
+    std::sort(children->begin(), children->end());
     ASSERT_EQ(children->size(), expected_count) << *children;
   }
 
@@ -69,34 +78,36 @@ class RollingLogTest : public KuduTest {
 
 // Test with compression off.
 TEST_F(RollingLogTest, TestLog) {
-  RollingLog log(env_.get(), log_dir_, "mylog");
+  RollingLog log(env_, log_dir_, "mylog");
   log.SetCompressionEnabled(false);
-  log.SetSizeLimitBytes(100);
+  log.SetRollThresholdBytes(100);
 
   // Before writing anything, we shouldn't open a log file.
   vector<string> children;
   NO_FATALS(AssertLogCount(0, &children));
 
   // Appending some data should write a new segment.
-  ASSERT_OK(log.Append("Hello world\n"));
+  const string kTestString = "Hello world\n";
+  ASSERT_OK(log.Append(kTestString));
   NO_FATALS(AssertLogCount(1, &children));
 
   for (int i = 0; i < 10; i++) {
-    ASSERT_OK(log.Append("Hello world\n"));
+    ASSERT_OK(log.Append(kTestString));
   }
   NO_FATALS(AssertLogCount(2, &children));
 
   faststring data;
   string path = JoinPathSegments(log_dir_, children[0]);
-  ASSERT_OK(ReadFileToString(env_.get(), path, &data));
-  ASSERT_TRUE(HasPrefixString(data.ToString(), "Hello world\n"))
+  ASSERT_OK(ReadFileToString(env_, path, &data));
+  ASSERT_TRUE(HasPrefixString(data.ToString(), kTestString))
     << "Data missing";
-  ASSERT_LE(data.size(), 100) << "Size limit not respected";
+  ASSERT_LE(data.size(), 100 + kTestString.length())
+      << "Roll threshold not respected";
 }
 
 // Test with compression on.
 TEST_F(RollingLogTest, TestCompression) {
-  RollingLog log(env_.get(), log_dir_, "mylog");
+  RollingLog log(env_, log_dir_, "mylog");
   ASSERT_OK(log.Open());
 
   StringPiece data = "Hello world\n";
@@ -116,6 +127,21 @@ TEST_F(RollingLogTest, TestCompression) {
   ASSERT_OK(env_->GetFileSize(JoinPathSegments(log_dir_, children[0]), &size));
   ASSERT_LT(size, raw_size / 10);
   ASSERT_GT(size, 0);
+}
+
+TEST_F(RollingLogTest, TestFileCountLimit) {
+  RollingLog log(env_, log_dir_, "mylog");
+  ASSERT_OK(log.Open());
+  log.SetRollThresholdBytes(100);
+  log.SetMaxNumSegments(3);
+
+  for (int i = 0; i < 100; i++) {
+    ASSERT_OK(log.Append("hello world\n"));
+  }
+  ASSERT_OK(log.Close());
+
+  vector<string> children;
+  NO_FATALS(AssertLogCount(3, &children));
 }
 
 } // namespace kudu

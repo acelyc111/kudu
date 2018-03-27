@@ -19,13 +19,36 @@
 
 #include <sys/types.h>
 
+#include <cstdint>
+#include <cstring>
+#include <functional>
 #include <string>
 #include <vector>
 
+#include <glog/logging.h>
+
+#include "kudu/gutil/macros.h"
 #include "kudu/gutil/strings/fastmem.h"
 #include "kudu/util/status.h"
 
 namespace kudu {
+
+template <typename T> class ArrayView;
+class MonoTime;
+class StackTrace;
+class StackTraceCollector;
+
+namespace stack_trace_internal {
+struct SignalData;
+}
+
+// Return true if coverage is enabled.
+bool IsCoverageBuild();
+
+// Try to flush coverage info. If another thread is already flushing
+// coverage, this returns without doing anything, since flushing coverage
+// is not thread-safe or re-entrant.
+void TryFlushCoverage();
 
 // Return a list of all of the thread IDs currently running in this process.
 // Not async-safe.
@@ -49,6 +72,8 @@ Status SetStackTraceSignal(int signum);
 // may be active at a time.
 std::string DumpThreadStack(int64_t tid);
 
+Status GetThreadStack(int64_t tid, StackTrace* stack);
+
 // Return the current stack trace, stringified.
 std::string GetStackTrace();
 
@@ -61,8 +86,6 @@ std::string GetStackTrace();
 // Note that this is much more useful in the context of a static binary,
 // since addr2line wouldn't know where shared libraries were mapped at
 // runtime.
-//
-// NOTE: This inherits the same async-safety issue as HexStackTraceToString()
 std::string GetStackTraceHex();
 
 // This is the same as GetStackTraceHex(), except multi-line in a format that
@@ -77,8 +100,7 @@ std::string GetLogFormatStackTraceHex();
 // The resulting trace just includes the hex addresses, space-separated. This is suitable
 // for later stringification by pasting into 'addr2line' for example.
 //
-// This function is not async-safe, since it uses the libc backtrace() function which
-// may invoke the dynamic loader.
+// This function is async-safe.
 void HexStackTraceToString(char* buf, size_t size);
 
 // Efficient class for collecting and later stringifying a stack trace.
@@ -86,47 +108,69 @@ void HexStackTraceToString(char* buf, size_t size);
 // Requires external synchronization.
 class StackTrace {
  public:
+
+  // Constructs a new (uncollected) stack trace.
   StackTrace()
     : num_frames_(0) {
   }
 
+  // Resets the stack trace to an uncollected state.
   void Reset() {
     num_frames_ = 0;
   }
 
+  // Returns true if Collect() (but not Reset()) has been called on this stack trace.
+  bool HasCollected() const {
+    return num_frames_ > 0;
+  }
+
+  // Copies the contents of 's' into this stack trace.
   void CopyFrom(const StackTrace& s) {
     memcpy(this, &s, sizeof(s));
   }
 
-  bool Equals(const StackTrace& s) {
+  // Returns true if the stack trace 's' matches this trace.
+  bool Equals(const StackTrace& s) const {
     return s.num_frames_ == num_frames_ &&
       strings::memeq(frames_, s.frames_,
                      num_frames_ * sizeof(frames_[0]));
   }
 
-  // Collect and store the current stack trace. Skips the top 'skip_frames' frames
-  // from the stack. For example, a value of '1' will skip the 'Collect()' function
-  // call itself.
-  //
-  // This function is technically not async-safe. However, according to
-  // http://lists.nongnu.org/archive/html/libunwind-devel/2011-08/msg00054.html it is "largely
-  // async safe" and it would only deadlock in the case that you call it while a dynamic library
-  // load is in progress. We assume that dynamic library loads would almost always be completed
-  // very early in the application lifecycle, so for now, this is considered "async safe" until
-  // it proves to be a problem.
-  void Collect(int skip_frames = 1);
+  // Comparison operator for use in sorting.
+  bool LessThan(const StackTrace& s) const;
 
+  // Collect and store the current stack trace. Skips the top 'skip_frames' frames
+  // from the stack. For example, a value of '1' will skip whichever function
+  // called the 'Collect()' function. The 'Collect' function itself is always skipped.
+  //
+  // This function is async-safe.
+  void Collect(int skip_frames = 0);
+
+  int num_frames() const {
+    return num_frames_;
+  }
+
+  void* frame(int i) const {
+    DCHECK_LE(i, num_frames_);
+    return frames_[i];
+  }
 
   enum Flags {
     // Do not fix up the addresses on the stack to try to point to the 'call'
     // instructions instead of the return address. This is necessary when dumping
     // addresses to be interpreted by 'pprof', which does this fix-up itself.
-    NO_FIX_CALLER_ADDRESSES = 1
+    NO_FIX_CALLER_ADDRESSES = 1,
+
+    // Prefix each hex address with '0x'. This is required by the go version
+    // of pprof when parsing stack traces.
+    HEX_0X_PREFIX = 1 << 1,
   };
 
   // Stringify the trace into the given buffer.
   // The resulting output is hex addresses suitable for passing into 'addr2line'
   // later.
+  //
+  // Async-safe.
   void StringifyToHex(char* buf, size_t size, int flags = 0) const;
 
   // Same as above, but returning a std::string.
@@ -156,6 +200,108 @@ class StackTrace {
 
   int num_frames_;
   void* frames_[kMaxFrames];
+};
+
+// Utility class for gathering a process-wide snapshot of the stack traces
+// of all threads.
+class StackTraceSnapshot {
+ public:
+  // The information about each thread will be gathered in a struct.
+  struct ThreadInfo {
+    // The TID of the thread.
+    int64_t tid;
+
+    // The status of collection. If a thread exits during collection or
+    // was blocking signals, it's possible to have an error here.
+    Status status;
+
+    // The name of the thread.
+    // May be missing if 'status' is not OK or if thread name collection was
+    // disabled.
+    std::string thread_name;
+
+    // The current stack trace of the thread.
+    // Always missing if 'status' is not OK.
+    StackTrace stack;
+  };
+  using VisitorFunc = std::function<void(ArrayView<ThreadInfo> group)>;
+
+  void set_capture_thread_names(bool c) {
+    capture_thread_names_ = c;
+  }
+
+  // Snapshot the stack traces of all threads in the process.
+  //
+  // NOTE: this may take some time and should not be called in a latency-sensitive
+  // context.
+  Status SnapshotAllStacks();
+
+  // After having collected stacks, visit them, grouped by shared
+  // stack trace. The visitor function will be called once per group.
+  // Each group is guaranteed to be non-empty.
+  //
+  // Any threads which failed to collect traces are returned as a single group
+  // having empty stack traces.
+  //
+  // REQUIRES: a previous successful call to SnapshotAllStacks().
+  void VisitGroups(const VisitorFunc& visitor);
+
+  // Return the number of threads which were interrogated for a stack trace.
+  //
+  // NOTE: this includes threads which failed to collect.
+  int num_threads() const { return infos_.size(); }
+
+  // Return the number of threads which failed to collect a stack trace.
+  int num_failed() const { return num_failed_; }
+
+ private:
+  std::vector<StackTraceSnapshot::ThreadInfo> infos_;
+  std::vector<StackTraceCollector> collectors_;
+  int num_failed_ = 0;
+
+  bool capture_thread_names_ = true;
+};
+
+
+// Class to collect the stack trace of another thread within this process.
+// This allows for more advanced use cases than 'DumpThreadStack(tid)' above.
+// Namely, this provides an asynchronous trigger/collect API so that many
+// stack traces can be collected from many different threads in parallel using
+// different instances of this object.
+class StackTraceCollector {
+ public:
+  StackTraceCollector() = default;
+  StackTraceCollector(StackTraceCollector&& other) noexcept;
+  ~StackTraceCollector();
+
+  // Send the asynchronous request to the the thread with TID 'tid'
+  // to collect its stack trace into '*stack'.
+  //
+  // NOTE: 'stack' must remain a valid pointer until AwaitCollection() has
+  // completed.
+  //
+  // Returns OK if the signal was sent successfully.
+  Status TriggerAsync(int64_t tid, StackTrace* stack);
+
+  // Wait for the stack trace to be collected from the target thread.
+  //
+  // REQUIRES: TriggerAsync() has returned successfully.
+  Status AwaitCollection(MonoTime deadline);
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(StackTraceCollector);
+
+  // Safely sets 'sig_data_' back to nullptr after having sent an asynchronous
+  // stack trace request. See implementation for details.
+  //
+  // Returns true if the stack trace was collected before revocation
+  // and false if it was not.
+  //
+  // POSTCONDITION: sig_data_ == nullptr
+  bool RevokeSigData();
+
+  int64_t tid_ = 0;
+  stack_trace_internal::SignalData* sig_data_ = nullptr;
 };
 
 } // namespace kudu

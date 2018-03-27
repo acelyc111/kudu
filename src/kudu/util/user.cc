@@ -17,11 +17,11 @@
 
 #include "kudu/util/user.h"
 
-#include <sys/types.h>
-#include <errno.h>
 #include <pwd.h>
 #include <unistd.h>
 
+#include <cerrno>
+#include <cstdlib>
 #include <string>
 
 #include <glog/logging.h>
@@ -47,7 +47,7 @@ Status GetLoggedInUser(string* user_name) {
 
   gscoped_ptr<char[], FreeDeleter> buf(static_cast<char *>(malloc(bufsize)));
   if (buf.get() == nullptr) {
-    return Status::RuntimeError("Malloc failed", ErrnoToString(errno), errno);
+    return Status::RuntimeError("malloc failed", ErrnoToString(errno), errno);
   }
 
   int ret = getpwuid_r(getuid(), &pwd, buf.get(), bufsize, &result);

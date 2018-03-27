@@ -17,29 +17,23 @@
 
 #include "kudu/tablet/svg_dump.h"
 
-#include <glog/logging.h>
-#include <time.h>
-
+#include <ctime>
 #include <fstream>
-#include <iostream>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
-#include "kudu/common/encoded_key.h"
+#include <gflags/gflags.h>
+#include <glog/logging.h>
+
 #include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/macros.h"
 #include "kudu/gutil/map-util.h"
+#include "kudu/gutil/move.h"
 #include "kudu/gutil/stringprintf.h"
 #include "kudu/gutil/strings/util.h"
 #include "kudu/tablet/rowset_info.h"
 #include "kudu/util/flag_tags.h"
-
-using std::ostream;
-using std::unordered_set;
-using std::vector;
-
-namespace kudu {
-namespace tablet {
 
 // Flag to dump SVGs of every compaction decision.
 //
@@ -55,6 +49,14 @@ DEFINE_string(compaction_policy_dump_svgs_pattern, "",
               "The special string 'TIME' will be substituted "
               "with the compaction selection timestamp.");
 TAG_FLAG(compaction_policy_dump_svgs_pattern, hidden);
+
+using std::ostream;
+using std::string;
+using std::unordered_set;
+using std::vector;
+
+namespace kudu {
+namespace tablet {
 
 namespace {
 

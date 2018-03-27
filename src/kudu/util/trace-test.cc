@@ -15,17 +15,39 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <gtest/gtest.h>
+#include <cctype>
+#include <cstdint>
+#include <cstring>
+#include <map>
+#include <ostream>
 #include <string>
+#include <thread>
+#include <vector>
+
+#include <glog/logging.h>
+#include <gtest/gtest.h>
 #include <rapidjson/document.h>
 #include <rapidjson/rapidjson.h>
 
-#include "kudu/util/trace.h"
+#include "kudu/gutil/macros.h"
+#include "kudu/gutil/port.h"
+#include "kudu/gutil/ref_counted.h"
+#include "kudu/gutil/walltime.h"
+#include "kudu/util/atomic.h"
+#include "kudu/util/countdown_latch.h"
 #include "kudu/util/debug/trace_event.h"
+#include "kudu/util/debug/trace_event_impl.h"
 #include "kudu/util/debug/trace_event_synthetic_delay.h"
 #include "kudu/util/debug/trace_logging.h"
+#include "kudu/util/monotime.h"
+#include "kudu/util/scoped_cleanup.h"
+#include "kudu/util/status.h"
 #include "kudu/util/stopwatch.h"
+#include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
+#include "kudu/util/thread.h"
+#include "kudu/util/trace_metrics.h"
+#include "kudu/util/trace.h"
 
 using kudu::debug::TraceLog;
 using kudu::debug::TraceResultBuffer;
@@ -33,6 +55,7 @@ using kudu::debug::CategoryFilter;
 using rapidjson::Document;
 using rapidjson::Value;
 using std::string;
+using std::thread;
 using std::vector;
 
 namespace kudu {
@@ -59,7 +82,7 @@ TEST_F(TraceTest, TestBasic) {
   TRACE_TO(t, "hello $0, $1", "world", 12345);
   TRACE_TO(t, "goodbye $0, $1", "cruel world", 54321);
 
-  string result = XOutDigits(t->DumpToString(false));
+  string result = XOutDigits(t->DumpToString(Trace::NO_FLAGS));
   ASSERT_EQ("XXXX XX:XX:XX.XXXXXX trace-test.cc:XX] hello world, XXXXX\n"
             "XXXX XX:XX:XX.XXXXXX trace-test.cc:XX] goodbye cruel world, XXXXX\n",
             result);
@@ -82,26 +105,26 @@ TEST_F(TraceTest, TestAttach) {
   EXPECT_TRUE(Trace::CurrentTrace() == nullptr);
   TRACE("this goes nowhere");
 
-  EXPECT_EQ(XOutDigits(traceA->DumpToString(false)),
-            "XXXX XX:XX:XX.XXXXXX trace-test.cc:XX] hello from traceA\n");
-  EXPECT_EQ(XOutDigits(traceB->DumpToString(false)),
-            "XXXX XX:XX:XX.XXXXXX trace-test.cc:XX] hello from traceB\n");
+  EXPECT_EQ("XXXX XX:XX:XX.XXXXXX trace-test.cc:XXX] hello from traceA\n",
+            XOutDigits(traceA->DumpToString(Trace::NO_FLAGS)));
+  EXPECT_EQ("XXXX XX:XX:XX.XXXXXX trace-test.cc:XXX] hello from traceB\n",
+            XOutDigits(traceB->DumpToString(Trace::NO_FLAGS)));
 }
 
 TEST_F(TraceTest, TestChildTrace) {
   scoped_refptr<Trace> traceA(new Trace);
   scoped_refptr<Trace> traceB(new Trace);
   ADOPT_TRACE(traceA.get());
-  traceA->AddChildTrace(traceB.get());
+  traceA->AddChildTrace("child", traceB.get());
   TRACE("hello from traceA");
   {
     ADOPT_TRACE(traceB.get());
     TRACE("hello from traceB");
   }
-  EXPECT_EQ(XOutDigits(traceA->DumpToString(false)),
-            "XXXX XX:XX:XX.XXXXXX trace-test.cc:XX] hello from traceA\n"
-            "Related trace:\n"
-            "XXXX XX:XX:XX.XXXXXX trace-test.cc:XX] hello from traceB\n");
+  EXPECT_EQ("XXXX XX:XX:XX.XXXXXX trace-test.cc:XXX] hello from traceA\n"
+            "Related trace 'child':\n"
+            "XXXX XX:XX:XX.XXXXXX trace-test.cc:XXX] hello from traceB\n",
+            XOutDigits(traceA->DumpToString(Trace::NO_FLAGS)));
 }
 
 static void GenerateTraceEvents(int thread_id,
@@ -438,9 +461,9 @@ class TraceEventCallbackTest : public KuduTest {
                        const uint64_t arg_values[],
                        unsigned char flags) {
     s_instance->collected_events_phases_.push_back(phase);
-    s_instance->collected_events_categories_.push_back(
+    s_instance->collected_events_categories_.emplace_back(
         TraceLog::GetCategoryGroupName(category_group_enabled));
-    s_instance->collected_events_names_.push_back(name);
+    s_instance->collected_events_names_.emplace_back(name);
     s_instance->collected_events_timestamps_.push_back(timestamp);
   }
 };
@@ -659,27 +682,27 @@ class TraceEventSyntheticDelayTest : public KuduTest,
     return delay;
   }
 
-  void AdvanceTime(MonoDelta delta) { now_.AddDelta(delta); }
+  void AdvanceTime(MonoDelta delta) { now_ += delta; }
 
   int TestFunction() {
     MonoTime start = Now();
     { TRACE_EVENT_SYNTHETIC_DELAY("test.Delay"); }
     MonoTime end = Now();
-    return end.GetDeltaSince(start).ToMilliseconds();
+    return (end - start).ToMilliseconds();
   }
 
   int AsyncTestFunctionBegin() {
     MonoTime start = Now();
     { TRACE_EVENT_SYNTHETIC_DELAY_BEGIN("test.AsyncDelay"); }
     MonoTime end = Now();
-    return end.GetDeltaSince(start).ToMilliseconds();
+    return (end - start).ToMilliseconds();
   }
 
   int AsyncTestFunctionEnd() {
     MonoTime start = Now();
     { TRACE_EVENT_SYNTHETIC_DELAY_END("test.AsyncDelay"); }
     MonoTime end = Now();
-    return end.GetDeltaSince(start).ToMilliseconds();
+    return (end - start).ToMilliseconds();
   }
 
  private:
@@ -768,11 +791,11 @@ TEST_F(TraceEventSyntheticDelayTest, BeginParallel) {
   EXPECT_FALSE(!end_times[1].Initialized());
 
   delay->EndParallel(end_times[0]);
-  EXPECT_GE(Now().GetDeltaSince(start_time).ToMilliseconds(), kTargetDurationMs);
+  EXPECT_GE((Now() - start_time).ToMilliseconds(), kTargetDurationMs);
 
   start_time = Now();
   delay->EndParallel(end_times[1]);
-  EXPECT_LT(Now().GetDeltaSince(start_time).ToMilliseconds(), kShortDurationMs);
+  EXPECT_LT((Now() - start_time).ToMilliseconds(), kShortDurationMs);
 }
 
 TEST_F(TraceTest, TestVLogTrace) {
@@ -821,5 +844,48 @@ TEST_F(TraceTest, TestVLogAndEchoToConsole) {
   tl->SetDisabled();
 }
 
+TEST_F(TraceTest, TestTraceMetrics) {
+  scoped_refptr<Trace> trace(new Trace);
+  trace->metrics()->Increment("foo", 10);
+  trace->metrics()->Increment("bar", 10);
+  for (int i = 0; i < 1000; i++) {
+    trace->metrics()->Increment("baz", i);
+  }
+  EXPECT_EQ("{\"bar\":10,\"baz\":499500,\"foo\":10}",
+            trace->MetricsAsJSON());
+
+  {
+    ADOPT_TRACE(trace.get());
+    TRACE_COUNTER_SCOPE_LATENCY_US("test_scope_us");
+    SleepFor(MonoDelta::FromMilliseconds(100));
+  }
+  auto m = trace->metrics()->Get();
+  EXPECT_GE(m["test_scope_us"], 80 * 1000);
+}
+
+// Regression test for KUDU-2075: using tracing from vanilla threads
+// should work fine, even if some pthread_self identifiers have been
+// reused.
+TEST_F(TraceTest, TestTraceFromVanillaThreads) {
+  TraceLog::GetInstance()->SetEnabled(
+      CategoryFilter(CategoryFilter::kDefaultCategoryFilterString),
+      TraceLog::RECORDING_MODE,
+      TraceLog::RECORD_CONTINUOUSLY);
+  SCOPED_CLEANUP({ TraceLog::GetInstance()->SetDisabled(); });
+
+  // Do several passes to make it more likely that the thread identifiers
+  // will get reused.
+  for (int pass = 0; pass < 10; pass++) {
+    vector<thread> threads;
+    for (int i = 0; i < 100; i++) {
+      threads.emplace_back([i] {
+          GenerateTraceEvents(i, 1);
+        });
+    }
+    for (auto& t : threads) {
+      t.join();
+    }
+  }
+}
 } // namespace debug
 } // namespace kudu

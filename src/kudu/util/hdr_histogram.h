@@ -18,7 +18,14 @@
 #define KUDU_UTIL_HDRHISTOGRAM_H_
 
 // C++ (TR1) port of HdrHistogram.
-// Original java implementation: http://giltene.github.io/HdrHistogram/
+//
+// Portions of these classes were ported from Java to C++ from the sources
+// available at https://github.com/HdrHistogram/HdrHistogram .
+//
+//   The code in this repository code was Written by Gil Tene, Michael Barker,
+//   and Matt Warren, and released to the public domain, as explained at
+//   http://creativecommons.org/publicdomain/zero/1.0/
+// ---------------------------------------------------------------------------
 //
 // A High Dynamic Range (HDR) Histogram
 //
@@ -45,12 +52,12 @@
 
 #include "kudu/gutil/atomicops.h"
 #include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/macros.h"
+#include "kudu/gutil/port.h"
 
 namespace kudu {
 
-class AbstractHistogramIterator;
 class Status;
-class RecordedValuesIterator;
 
 // This implementation allows you to specify a range and accuracy (significant
 // digits) to support in an instance of a histogram. The class takes care of

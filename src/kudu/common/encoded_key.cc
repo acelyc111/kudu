@@ -15,16 +15,27 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <cstring>
+#include <ostream>
 #include <vector>
+
+#include <glog/logging.h>
 
 #include "kudu/common/encoded_key.h"
 #include "kudu/common/key_encoder.h"
+#include "kudu/common/key_util.h"
 #include "kudu/common/row.h"
-#include "kudu/common/row_key-util.h"
+#include "kudu/common/schema.h"
+#include "kudu/common/types.h"
+#include "kudu/gutil/move.h"
+#include "kudu/gutil/port.h"
+#include "kudu/util/logging.h"
+#include "kudu/util/memory/arena.h"
 
 namespace kudu {
 
 using std::string;
+using std::vector;
 
 
 EncodedKey::EncodedKey(faststring* data,
@@ -95,7 +106,7 @@ Status EncodedKey::IncrementEncodedKey(const Schema& tablet_schema,
 
   // Increment the new key
   ContiguousRow new_row(&tablet_schema, new_row_key);
-  if (!row_key_util::IncrementKey(&new_row, arena)) {
+  if (!key_util::IncrementPrimaryKey(&new_row, arena)) {
     return Status::IllegalState("No lexicographically greater key exists");
   }
 
@@ -108,21 +119,23 @@ Status EncodedKey::IncrementEncodedKey(const Schema& tablet_schema,
 }
 
 string EncodedKey::Stringify(const Schema &schema) const {
-  if (num_key_cols_ == 1) {
-    return schema.column(0).Stringify(raw_keys_.front());
-  }
+  DCHECK_EQ(schema.num_key_columns(), num_key_cols_);
+  DCHECK_EQ(schema.num_key_columns(), raw_keys_.size());
 
   faststring s;
   s.append("(");
-  for (int i = 0; i < num_key_cols_; i++) {
+  for (int i = 0; i < raw_keys_.size(); i++) {
     if (i > 0) {
-      s.append(",");
+      if (schema.column(i).type_info()->IsMinValue(raw_keys_[i])) {
+        // If the value is the minimum, short-circuit to avoid printing keys such as
+        // '(2, -9223372036854775808, -9223372036854775808, -9223372036854775808)',
+        // and instead print '(2)'. The minimum values are usually filled in
+        // automatically upon decoding, so it makes sense to omit them.
+        break;
+      }
+      s.append(", ");
     }
-    if (i < raw_keys_.size()) {
-      s.append(schema.column(i).Stringify(raw_keys_[i]));
-    } else {
-      s.append("*");
-    }
+    s.append(schema.column(i).Stringify(raw_keys_[i]));
   }
   s.append(")");
   return s.ToString();
@@ -180,17 +193,19 @@ string EncodedKey::RangeToString(const EncodedKey* lower, const EncodedKey* uppe
   string ret;
   if (lower && upper) {
     ret.append("encoded key BETWEEN ");
-    ret.append(lower->encoded_key().ToDebugString());
+    ret.append(KUDU_REDACT(lower->encoded_key().ToDebugString()));
     ret.append(" AND ");
-    ret.append(upper->encoded_key().ToDebugString());
+    ret.append(KUDU_REDACT(upper->encoded_key().ToDebugString()));
     return ret;
-  } else if (lower) {
+  }
+  if (lower) {
     ret.append("encoded key >= ");
-    ret.append(lower->encoded_key().ToDebugString());
+    ret.append(KUDU_REDACT(lower->encoded_key().ToDebugString()));
     return ret;
-  } else if (upper) {
+  }
+  if (upper) {
     ret.append("encoded key <= ");
-    ret.append(upper->encoded_key().ToDebugString());
+    ret.append(KUDU_REDACT(upper->encoded_key().ToDebugString()));
   } else {
     LOG(DFATAL) << "Invalid key!";
     ret = "invalid key range";

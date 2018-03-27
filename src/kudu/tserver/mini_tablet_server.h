@@ -14,20 +14,20 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-#ifndef KUDU_TSERVER_MINI_TABLET_SERVER_H
-#define KUDU_TSERVER_MINI_TABLET_SERVER_H
 
-#include "kudu/common/schema.h"
-#include "kudu/gutil/macros.h"
+#pragma once
+
+#include <memory>
+#include <string>
+#include <vector>
+
 #include "kudu/tserver/tablet_server_options.h"
 #include "kudu/util/net/sockaddr.h"
-#include "kudu/util/status.h"
-
-#include <string>
 
 namespace kudu {
-
-class FsManager;
+class HostPort;
+class Schema;
+class Status;
 
 namespace consensus {
 class RaftConfigPB;
@@ -40,7 +40,10 @@ class TabletServer;
 // An in-process tablet server meant for use in test cases.
 class MiniTabletServer {
  public:
-  MiniTabletServer(const std::string& fs_root, uint16_t rpc_port);
+  // Note: The host portion of 'rpc_bind_addr' is also used for the http service.
+  MiniTabletServer(std::string fs_root,
+                   const HostPort& rpc_bind_addr,
+                   int num_data_dirs = 1);
   ~MiniTabletServer();
 
   // Return the options which will be used to start the tablet server.
@@ -77,6 +80,9 @@ class MiniTabletServer {
                        const Schema& schema,
                        const consensus::RaftConfigPB& config);
 
+  // Return the ids of all non-tombstoned tablets on this server.
+  std::vector<std::string> ListTablets() const;
+
   // Create a RaftConfigPB which should be used to create a local-only
   // tablet on the given tablet server.
   consensus::RaftConfigPB CreateLocalConfig() const;
@@ -87,19 +93,18 @@ class MiniTabletServer {
   const TabletServer* server() const { return server_.get(); }
   TabletServer* server() { return server_.get(); }
 
-  bool is_started() const { return started_; }
+  // Return TS uuid.
+  const std::string& uuid() const;
+
+  bool is_started() const { return server_ ? true : false; }
 
   void FailHeartbeats();
 
  private:
-  bool started_;
-
+  const std::string fs_root_;
   TabletServerOptions opts_;
-
-  gscoped_ptr<FsManager> fs_manager_;
-  gscoped_ptr<TabletServer> server_;
+  std::unique_ptr<TabletServer> server_;
 };
 
 } // namespace tserver
 } // namespace kudu
-#endif

@@ -17,10 +17,20 @@
 #ifndef KUDU_CFILE_BINARY_PREFIX_BLOCK_H
 #define KUDU_CFILE_BINARY_PREFIX_BLOCK_H
 
+#include <sys/types.h>
+
+#include <cstddef>
+#include <cstdint>
 #include <vector>
+
+#include <glog/logging.h>
 
 #include "kudu/cfile/block_encodings.h"
 #include "kudu/common/rowid.h"
+#include "kudu/gutil/port.h"
+#include "kudu/util/faststring.h"
+#include "kudu/util/slice.h"
+#include "kudu/util/status.h"
 
 namespace kudu {
 
@@ -33,11 +43,11 @@ struct WriterOptions;
 
 // Encoding for data blocks of binary data that have common prefixes.
 // This encodes in a manner similar to LevelDB (prefix coding)
-class BinaryPrefixBlockBuilder : public BlockBuilder {
+class BinaryPrefixBlockBuilder final : public BlockBuilder {
  public:
   explicit BinaryPrefixBlockBuilder(const WriterOptions *options);
 
-  bool IsBlockFull(size_t limit) const OVERRIDE;
+  bool IsBlockFull() const override;
 
   int Add(const uint8_t *vals, size_t count) OVERRIDE;
 
@@ -56,10 +66,11 @@ class BinaryPrefixBlockBuilder : public BlockBuilder {
   // key should be a Slice *
   Status GetFirstKey(void *key) const OVERRIDE;
 
- private:
-  // Return the length of the common prefix shared by the two strings.
-  static size_t CommonPrefixLength(const Slice& a, const Slice& b);
+  // Return the last added key.
+  // key should be a Slice *
+  Status GetLastKey(void *key) const OVERRIDE;
 
+ private:
   faststring buffer_;
   faststring last_val_;
 
@@ -81,7 +92,7 @@ class BinaryPrefixBlockBuilder : public BlockBuilder {
 };
 
 // Decoder for BINARY type, PREFIX encoding
-class BinaryPrefixBlockDecoder : public BlockDecoder {
+class BinaryPrefixBlockDecoder final : public BlockDecoder {
  public:
   explicit BinaryPrefixBlockDecoder(Slice slice);
 

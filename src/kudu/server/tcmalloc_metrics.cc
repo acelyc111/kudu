@@ -16,10 +16,17 @@
 // under the License.
 #include "kudu/server/tcmalloc_metrics.h"
 
-#include <boost/bind.hpp>
-#include <glog/logging.h>
-#include <gperftools/malloc_extension.h>
+#include <cstddef>
+#include <cstdint>
+#include <ostream>
 
+#include <glog/logging.h>
+#ifdef TCMALLOC_ENABLED
+#include <gperftools/malloc_extension.h>
+#endif
+
+#include "kudu/gutil/bind.h"
+#include "kudu/gutil/bind_helpers.h"
 #include "kudu/util/metrics.h"
 
 #ifndef TCMALLOC_ENABLED

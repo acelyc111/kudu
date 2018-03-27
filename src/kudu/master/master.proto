@@ -14,14 +14,19 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+syntax = "proto2";
 package kudu.master;
 
-option java_package = "org.kududb.master";
+option java_package = "org.apache.kudu.master";
 
 import "kudu/common/common.proto";
 import "kudu/common/wire_protocol.proto";
 import "kudu/consensus/metadata.proto";
+import "kudu/consensus/replica_management.proto";
+import "kudu/rpc/rpc_header.proto";
+import "kudu/security/token.proto";
 import "kudu/tablet/metadata.proto";
+import "kudu/util/pb_util.proto";
 
 ////////////////////////////////////////////////////////////
 // Common data structures
@@ -58,8 +63,21 @@ message MasterErrorPB {
     NOT_THE_LEADER = 7;
 
     // The number of replicas requested is greater than the number of live servers
-    // in the cluster.
+    // in the cluster or the configured maximum.
     REPLICATION_FACTOR_TOO_HIGH = 8;
+
+    // The request or response involved a tablet which is not yet running.
+    TABLET_NOT_RUNNING = 9;
+
+    // The number of replicas requested is even.
+    EVEN_REPLICATION_FACTOR = 10;
+
+    // The number of replicas requested is illegal (eg non-positive).
+    ILLEGAL_REPLICATION_FACTOR = 11;
+
+    // The callee detected that its replica management scheme is incompatible
+    // with the caller's scheme.
+    INCOMPATIBLE_REPLICA_MANAGEMENT = 12;
   }
 
   // The error code.
@@ -109,8 +127,8 @@ message SysTabletsEntryPB {
   // Tablet partition.
   optional PartitionPB partition = 7;
 
-  // The latest committed consensus configuration consensus configuration reported to the Master.
-  optional consensus.ConsensusStatePB committed_consensus_state = 3;
+  // The latest consensus state reported to the Master.
+  optional consensus.ConsensusStatePB consensus_state = 3;
 
   // Debug state for the tablet.
   optional State state = 4 [ default = UNKNOWN ];
@@ -162,6 +180,27 @@ message SysTablesEntryPB {
   optional bytes state_msg = 7;
 }
 
+// The on-disk entry in the sys.catalog table ("metadata" column) to represent
+// certificate authority (CA) information. Not more than one entry of this type
+// should exist in the sys.catalog table at any time.
+message SysCertAuthorityEntryPB {
+  // Private key body in DER format. This information is sensitive,
+  // that's why the REDACT attribute is present.
+  required bytes private_key = 1 [(kudu.REDACT) = true];
+  // Certificate body in DER format. This information is not sensitive,
+  // but we are redacting most of security-related info anyway
+  // (handshake/SASL tokens, etc.).
+  required bytes certificate = 2 [(kudu.REDACT) = true];
+}
+
+// The on-disk entry in the sys.catalog table ("metadata" column) to represent
+// a Token Signing Key (TSK) object. Multiple entries of this type
+// can simultaneously co-exist in the sys.catalog table.
+message SysTskEntryPB {
+  // TokenSigningPrivateKeyPB message representing a TSK.
+  required security.TokenSigningPrivateKeyPB tsk = 1;
+}
+
 ////////////////////////////////////////////////////////////
 // RPCs
 ////////////////////////////////////////////////////////////
@@ -172,25 +211,15 @@ message PingRequestPB {
 message PingResponsePB {
 }
 
-// Sent by the TS when it first heartbeats with a master. This sends the
-// master all of the necessary information about the current instance
-// of the TS.
-message TSRegistrationPB {
-  repeated HostPortPB rpc_addresses = 1;
-  repeated HostPortPB http_addresses = 2;
-
-  // TODO: add stuff like software version, etc.
-}
-
 message ReportedTabletPB {
   required bytes tablet_id = 1;
   optional tablet.TabletStatePB state = 2 [ default = UNKNOWN ];
   optional tablet.TabletDataState tablet_data_state = 6 [ default = TABLET_DATA_UNKNOWN ];
 
-  // The latest _committed_ consensus state.
+  // The latest consensus state.
   // This will be missing if the tablet is not in a RUNNING state
   // (i.e. if it is BOOTSTRAPPING).
-  optional consensus.ConsensusStatePB committed_consensus_state = 3;
+  optional consensus.ConsensusStatePB consensus_state = 3;
 
   optional AppStatusPB error = 4;
   optional uint32 schema_version = 5;
@@ -237,7 +266,7 @@ message TSHeartbeatRequestPB {
 
   // Sent upon start-up of the TS, or in response to 'needs_reregister' on a heartbeat
   // response.
-  optional TSRegistrationPB registration = 2;
+  optional ServerRegistrationPB registration = 2;
 
   // Sent when the tablet information has changed, or in response to
   // 'needs_full_tablet_report'.
@@ -247,6 +276,22 @@ message TSHeartbeatRequestPB {
 
   // TODO: perhaps add some very basic metrics reporting here, like
   // free space, reqs/sec, etc?
+
+  // The number of tablets that are BOOTSTRAPPING or RUNNING.
+  // Used by the master to determine load when creating new tablet replicas.
+  optional int32 num_live_tablets = 4;
+
+  // If the tablet server needs its certificate signed, the CSR
+  // in DER format.
+  optional bytes csr_der = 5;
+
+  // The most recently known TSK sequence number. Allows the master to
+  // selectively notify the tablet server of more recent TSKs.
+  optional int64 latest_tsk_seq_num = 6;
+
+  // Replica management parameters that the tablet server is running with.
+  // This field is set only if the registration field is present.
+  optional consensus.ReplicaManagementInfoPB replica_management_info = 7;
 }
 
 message TSHeartbeatResponsePB {
@@ -270,6 +315,24 @@ message TSHeartbeatResponsePB {
 
   // Specify whether or not the node is the leader master.
   optional bool leader_master = 6;
+
+  // If the heartbeat request had a CSR, then the successfully
+  // signed certificate will be returned in DER format.
+  optional bytes signed_cert_der = 7;
+
+  // Any CA certs used by the cluster, currently only included when
+  // 'signed_cert_der' is also sent (however the tablet server will always check
+  // for all heartbeat responses). Currently the master only uses one cert, but
+  // we may support rolling this cert in the future, so tablet servers should
+  // add all returned certs to their trusted CA list.
+  //
+  // NOTE: this is not necessarily a "certificate chain" but rather a set of
+  // independent certs to be trusted. They may or may not have any signing
+  // relationship between them.
+  repeated bytes ca_cert_der = 8;
+
+  // Token signing keys which the tablet server should begin trusting.
+  repeated security.TokenSigningPublicKeyPB tsks = 9;
 }
 
 //////////////////////////////
@@ -292,11 +355,8 @@ message TabletLocationsPB {
 
   repeated ReplicaPB replicas = 4;
 
-  // true if the tablet was running but no tablet server has reported it yet.
-  // The set of replicas will be the last one that was hosting the tablet.
-  // This should happen on Master restart when the request is issued before
-  // the TS has the time to notify the Master about the tablets that is hosting.
-  required bool stale = 5;
+  // DEPRECATED. Still set by servers, but should be ignored by clients.
+  optional bool DEPRECATED_stale = 5;
 }
 
 // Info about a single tablet server, returned to the client as part
@@ -310,9 +370,21 @@ message TSInfoPB {
   repeated HostPortPB rpc_addresses = 2;
 }
 
+// Selector to specify policy for listing tablet replicas in
+// GetTableLocationResponsePB and GetTabletLocationsResponsePB.
+enum ReplicaTypeFilter {
+  UNKNOWN = 999;
+  ANY_REPLICA = 0;
+  VOTER_REPLICA = 1;
+}
+
 message GetTabletLocationsRequestPB {
+
   // The tablet IDs about which to fetch info.
   repeated bytes tablet_ids = 1;
+
+  // What type of tablet replicas to include in the response.
+  optional ReplicaTypeFilter replica_type_filter = 2 [ default = VOTER_REPLICA ];
 }
 
 message GetTabletLocationsResponsePB {
@@ -335,7 +407,8 @@ message CreateTableRequestPB {
   required SchemaPB schema = 2;
   // repeated bytes pre_split_keys = 3;
   // repeated PartialRowPB split_rows = 5;
-  optional RowOperationsPB split_rows = 6;
+  // Holds either the split rows or the range bounds (or both) of the table.
+  optional RowOperationsPB split_rows_range_bounds = 6;
   optional PartitionSchemaPB partition_schema = 7;
   optional int32 num_replicas = 4;
 }
@@ -389,17 +462,38 @@ message GetTableLocationsRequestPB {
   required TableIdentifierPB table = 1;
 
   // Partition-key range.
-  optional bytes partition_key_start = 3;
-  optional bytes partition_key_end = 4;
+  optional bytes partition_key_start = 3 [(kudu.REDACT) = true];
+  optional bytes partition_key_end = 4 [(kudu.REDACT) = true];
 
   optional uint32 max_returned_locations = 5 [ default = 10 ];
+
+  // What type of tablet replicas to include in the
+  // 'GetTableLocationsResponsePB::tablet_locations' response field.
+  optional ReplicaTypeFilter replica_type_filter = 6 [ default = VOTER_REPLICA ];
 }
 
+// The response to a GetTableLocations RPC. The master guarantees that:
+//
+// * The response contains a location for all tablets in the requested range,
+//   limited by the request's 'max_returned_locations'.
+// * The tablet locations are returned in sorted order by the partition key range.
+// * If *any* tablet in the response is not running, then the entire response
+//   will fail with MasterErrorPB::TABLET_NOT_RUNNING, and the tablet_locations
+//   field will be empty.
+// * A gap between the partition key ranges of consecutive tablets indicates a
+//   non-covered partition range.
+// * If the request's start partition key falls in a non-covered partition
+//   range, the response will contain the tablet immediately before the
+//   non-covered range, if it exists.
 message GetTableLocationsResponsePB {
   // The error, if an error occurred with this request.
   optional MasterErrorPB error = 1;
 
   repeated TabletLocationsPB tablet_locations = 2;
+
+  // If the client caches table locations, the entries should not live longer
+  // than this timeout. Defaults to one hour.
+  optional uint32 ttl_millis = 3 [default = 36000000];
 }
 
 message AlterTableRequestPB {
@@ -408,10 +502,9 @@ message AlterTableRequestPB {
     ADD_COLUMN = 1;
     DROP_COLUMN = 2;
     RENAME_COLUMN = 3;
-
-    // TODO(KUDU-861): this will subsume RENAME_COLUMN, but not yet implemented
-    // on the master side.
     ALTER_COLUMN = 4;
+    ADD_RANGE_PARTITION = 5;
+    DROP_RANGE_PARTITION = 6;
   }
   message AddColumn {
     // The schema to add.
@@ -423,10 +516,24 @@ message AlterTableRequestPB {
     // Name of the column to drop.
     required string name = 1;
   }
+  // This should eventually be deprecated in favor of AlterColumn.
   message RenameColumn {
     // Name of the column to rename;
     required string old_name = 1;
     required string new_name = 2;
+  }
+  message AlterColumn {
+    optional ColumnSchemaDeltaPB delta = 1;
+  }
+  message AddRangePartition {
+    // A set of row operations containing the lower and upper range bound for
+    // the range partition to add or drop.
+    optional RowOperationsPB range_bounds = 1;
+  }
+  message DropRangePartition {
+    // A set of row operations containing the lower and upper range bound for
+    // the range partition to add or drop.
+    optional RowOperationsPB range_bounds = 1;
   }
 
   message Step {
@@ -436,18 +543,29 @@ message AlterTableRequestPB {
     optional AddColumn add_column = 2;
     optional DropColumn drop_column = 3;
     optional RenameColumn rename_column = 4;
+    optional AddRangePartition add_range_partition = 5;
+    optional DropRangePartition drop_range_partition = 6;
+    optional AlterColumn alter_column = 7;
   }
 
   required TableIdentifierPB table = 1;
   repeated Step alter_schema_steps = 2;
   optional string new_table_name = 3;
+
+  // The table schema to use when decoding the range bound row operations. Only
+  // necessary when partitions are being added or dropped.
+  optional SchemaPB schema = 4;
 }
 
 message AlterTableResponsePB {
   // The error, if an error occurred with this request.
   optional MasterErrorPB error = 1;
 
+  // The schema version of the altered table.
   optional uint32 schema_version = 2;
+
+  // The table ID of the altered table.
+  optional bytes table_id = 3;
 }
 
 message IsAlterTableDoneRequestPB {
@@ -470,6 +588,9 @@ message GetTableSchemaRequestPB {
 }
 
 message GetTableSchemaResponsePB {
+  // create_table_done (field number 6) was removed in Kudu 1.6.
+  reserved 6;
+
   // The error, if an error occurred with this request.
   optional MasterErrorPB error = 1;
 
@@ -487,8 +608,44 @@ message GetTableSchemaResponsePB {
   // The ID of the table.
   optional bytes table_id = 4;
 
-  // True if the create operation is completed, false otherwise.
-  optional bool create_table_done = 6;
+  // The table name.
+  optional string table_name = 7;
+}
+
+message ConnectToMasterRequestPB {
+}
+
+message ConnectToMasterResponsePB {
+  // Set if there an error.
+  optional MasterErrorPB error = 1;
+
+  // The current role of the master.
+  optional consensus.RaftPeerPB.Role role = 2;
+
+  // Any CA certs used by the cluster. Currently the master only uses
+  // one cert, but we may support rolling this cert in the future, so
+  // clients should add all returned certs to their trusted CA list.
+  //
+  // NOTE: this is not necessarily a "certificate chain" but rather a set of
+  // independent certs to be trusted. They may or may not have any signing
+  // relationship between them.
+  repeated bytes ca_cert_der = 3;
+
+  // If the client requested an authentication token, and security is
+  // enabled on the cluster, the master returns a signed authn token.
+  optional security.SignedTokenPB authn_token = 4;
+
+  // The hosts and ports of the masters in this cluster.
+  //
+  // NOTE: Added in Kudu 1.6.
+  //
+  // NOTE: it is likely, but not guaranteed that the hostnames advertised here
+  // will be usable by all clients. Client implementations should not use this
+  // field for "discovery" of other masters, since then it's likely that
+  // users will configure applications to only talk to one the masters in
+  // an HA setup. If that master then fails, the applications would go
+  // offline.
+  repeated HostPortPB master_addrs = 5;
 }
 
 // ============================================================================
@@ -503,7 +660,7 @@ message ListTabletServersResponsePB {
 
   message Entry {
     required NodeInstancePB instance_id = 1;
-    optional TSRegistrationPB registration = 2;
+    optional ServerRegistrationPB registration = 2;
     optional int32 millis_since_heartbeat = 3;
   }
   repeated Entry servers = 2;
@@ -514,7 +671,6 @@ message ListTabletServersResponsePB {
 message GetMasterRegistrationRequestPB {
 }
 
-// TODO: Just use ServerRegistration here.
 message GetMasterRegistrationResponsePB {
   // Node instance information is always set.
   required NodeInstancePB instance_id = 1;
@@ -539,35 +695,98 @@ message ListMastersResponsePB {
   // An entry for each individual master server.
   repeated ServerEntryPB masters = 1;
 
-  // Set only if there's an error in retrieving the list of servers or
-  // in getting this server's own local registration information.
-  optional AppStatusPB error = 2;
+  // DEPRECATED, use 'error' field.
+  optional AppStatusPB DEPRECATED_error = 2;
+
+  // Set if there an error retrieving the registration information.
+  optional MasterErrorPB error = 3;
+}
+
+enum MasterFeatures {
+  UNKNOWN_FEATURE = 0;
+  // The master supports creating tables with non-covering range partitions.
+  RANGE_PARTITION_BOUNDS = 1;
+  // The master supports adding and dropping range partitions.
+  ADD_DROP_RANGE_PARTITIONS = 2;
+  // The master supports the 'ConnectToMaster' RPC.
+  CONNECT_TO_MASTER = 3;
+  // The catalog manager supports different replica management schemes
+  // (see "kudu/consensus/replica_management.proto"). At least, both the
+  // EVICT_FIRST (a.k.a. 3-2-3) and the PREPARE_REPLACEMENT_BEFORE_EVICTION
+  // (a.k.a. 3-4-3) schemes.
+  REPLICA_MANAGEMENT = 4;
 }
 
 service MasterService {
-  rpc Ping(PingRequestPB) returns (PingResponsePB);
+  // Set the default authz method to something invalid, so that if
+  // we forget to set the option on a new RPC call, we'll get a build
+  // failure.
+  option (kudu.rpc.default_authz_method) = "MUST_SET_AUTHZ_PER_RPC";
 
   // TS->Master RPCs
-  rpc TSHeartbeat(TSHeartbeatRequestPB) returns (TSHeartbeatResponsePB);
+  // ------------------------------------------------------------
+  rpc TSHeartbeat(TSHeartbeatRequestPB) returns (TSHeartbeatResponsePB) {
+    option (kudu.rpc.authz_method) = "AuthorizeService";
+  }
 
   // Client->Master RPCs
-  rpc GetTabletLocations(GetTabletLocationsRequestPB) returns (GetTabletLocationsResponsePB);
+  // ------------------------------------------------------------
 
-  rpc CreateTable(CreateTableRequestPB) returns (CreateTableResponsePB);
-  rpc IsCreateTableDone(IsCreateTableDoneRequestPB) returns (IsCreateTableDoneResponsePB);
+  // Used only by Kudu 1.3 and later.
+  rpc ConnectToMaster(ConnectToMasterRequestPB) returns (ConnectToMasterResponsePB) {
+    option (kudu.rpc.authz_method) = "AuthorizeClient";
+  }
 
-  rpc DeleteTable(DeleteTableRequestPB) returns (DeleteTableResponsePB);
+  rpc GetTabletLocations(GetTabletLocationsRequestPB) returns (GetTabletLocationsResponsePB) {
+    option (kudu.rpc.authz_method) = "AuthorizeClient";
+  }
 
-  rpc AlterTable(AlterTableRequestPB) returns (AlterTableResponsePB);
-  rpc IsAlterTableDone(IsAlterTableDoneRequestPB) returns (IsAlterTableDoneResponsePB);
+  rpc CreateTable(CreateTableRequestPB) returns (CreateTableResponsePB) {
+    option (kudu.rpc.authz_method) = "AuthorizeClient";
+  }
+  rpc IsCreateTableDone(IsCreateTableDoneRequestPB) returns (IsCreateTableDoneResponsePB) {
+    option (kudu.rpc.authz_method) = "AuthorizeClient";
+  }
+  rpc DeleteTable(DeleteTableRequestPB) returns (DeleteTableResponsePB) {
+    option (kudu.rpc.authz_method) = "AuthorizeClient";
+  }
 
-  rpc ListTables(ListTablesRequestPB) returns (ListTablesResponsePB);
-  rpc GetTableLocations(GetTableLocationsRequestPB) returns (GetTableLocationsResponsePB);
-  rpc GetTableSchema(GetTableSchemaRequestPB) returns (GetTableSchemaResponsePB);
+  rpc AlterTable(AlterTableRequestPB) returns (AlterTableResponsePB) {
+    option (kudu.rpc.authz_method) = "AuthorizeClient";
+  }
+  rpc IsAlterTableDone(IsAlterTableDoneRequestPB) returns (IsAlterTableDoneResponsePB) {
+    option (kudu.rpc.authz_method) = "AuthorizeClient";
+  }
+
+  rpc ListTables(ListTablesRequestPB) returns (ListTablesResponsePB) {
+    option (kudu.rpc.authz_method) = "AuthorizeClient";
+  }
+  rpc GetTableLocations(GetTableLocationsRequestPB) returns (GetTableLocationsResponsePB) {
+    option (kudu.rpc.authz_method) = "AuthorizeClient";
+  }
+  rpc GetTableSchema(GetTableSchemaRequestPB) returns (GetTableSchemaResponsePB) {
+    option (kudu.rpc.authz_method) = "AuthorizeClient";
+  }
 
   // Administrative/monitoring RPCs
-  rpc ListTabletServers(ListTabletServersRequestPB) returns (ListTabletServersResponsePB);
-  rpc ListMasters(ListMastersRequestPB) returns (ListMastersResponsePB);
+  // ------------------------------------------------------------
+  rpc ListTabletServers(ListTabletServersRequestPB) returns (ListTabletServersResponsePB) {
+    option (kudu.rpc.authz_method) = "AuthorizeClient";
+  }
+  rpc ListMasters(ListMastersRequestPB) returns (ListMastersResponsePB) {
+    option (kudu.rpc.authz_method) = "AuthorizeClient";
+  }
+  rpc Ping(PingRequestPB) returns (PingResponsePB) {
+    option (kudu.rpc.authz_method) = "AuthorizeClientOrService";
+  }
+
+  // Master->Master RPCs
+  // ------------------------------------------------------------
+
+  // NOTE: this RPC is also used by Kudu client <= 1.2 when first connecting to the
+  // cluster.
   rpc GetMasterRegistration(GetMasterRegistrationRequestPB) returns
-    (GetMasterRegistrationResponsePB);
+      (GetMasterRegistrationResponsePB) {
+    option (kudu.rpc.authz_method) = "AuthorizeClientOrService";
+  }
 }

@@ -19,12 +19,21 @@
 
 #include <algorithm>
 #include <limits>
+#include <mutex>
+#include <ostream>
+#include <string>
 #include <vector>
 
+#include <gflags/gflags.h>
+#include <glog/logging.h>
+#include <google/protobuf/message.h>
 
 #include "kudu/gutil/map-util.h"
+#include "kudu/gutil/port.h"
 #include "kudu/gutil/strings/substitute.h"
-#include "kudu/tablet/tablet_peer.h"
+#include "kudu/tablet/tablet.h"
+#include "kudu/tablet/tablet_replica.h"
+#include "kudu/tablet/transactions/transaction.h"
 #include "kudu/tablet/transactions/transaction_driver.h"
 #include "kudu/util/flag_tags.h"
 #include "kudu/util/logging.h"
@@ -60,6 +69,7 @@ METRIC_DEFINE_counter(tablet, transaction_memory_pressure_rejections,
                       "transaction memory limit was reached.");
 
 using std::shared_ptr;
+using std::string;
 using std::vector;
 
 namespace kudu {
@@ -86,11 +96,8 @@ TransactionTracker::TransactionTracker() {
 }
 
 TransactionTracker::~TransactionTracker() {
-  lock_guard<simple_spinlock> l(&lock_);
+  std::lock_guard<simple_spinlock> l(lock_);
   CHECK_EQ(pending_txns_.size(), 0);
-  if (mem_tracker_) {
-    mem_tracker_->UnregisterFromParent();
-  }
 }
 
 Status TransactionTracker::Add(TransactionDriver* driver) {
@@ -101,12 +108,12 @@ Status TransactionTracker::Add(TransactionDriver* driver) {
     }
 
     // May be null in unit tests.
-    TabletPeer* peer = driver->state()->tablet_peer();
+    TabletReplica* replica = driver->state()->tablet_replica();
 
     string msg = Substitute(
         "Transaction failed, tablet $0 transaction memory consumption ($1) "
         "has exceeded its limit ($2) or the limit of an ancestral tracker",
-        peer ? peer->tablet()->tablet_id() : "(unknown)",
+        replica ? replica->tablet()->tablet_id() : "(unknown)",
         mem_tracker_->consumption(), mem_tracker_->limit());
 
     KLOG_EVERY_N_SECS(WARNING, 1) << msg << THROTTLE_MSG;
@@ -120,7 +127,7 @@ Status TransactionTracker::Add(TransactionDriver* driver) {
   // again, as it may disappear between now and then.
   State st;
   st.memory_footprint = driver_mem_footprint;
-  lock_guard<simple_spinlock> l(&lock_);
+  std::lock_guard<simple_spinlock> l(lock_);
   InsertOrDie(&pending_txns_, driver, st);
   return Status::OK();
 }
@@ -163,27 +170,22 @@ void TransactionTracker::DecrementCounters(const TransactionDriver& driver) cons
 void TransactionTracker::Release(TransactionDriver* driver) {
   DecrementCounters(*driver);
 
-  State st;
-  {
-    // Remove the transaction from the map, retaining the state for use
-    // below.
-    lock_guard<simple_spinlock> l(&lock_);
-    st = FindOrDie(pending_txns_, driver);
-    if (PREDICT_FALSE(pending_txns_.erase(driver) != 1)) {
-      LOG(FATAL) << "Could not remove pending transaction from map: "
-          << driver->ToStringUnlocked();
-    }
-  }
-
+  // Remove the transaction from the map updating memory consumption if needed.
+  std::lock_guard<simple_spinlock> l(lock_);
+  State st = FindOrDie(pending_txns_, driver);
   if (mem_tracker_) {
     mem_tracker_->Release(st.memory_footprint);
+  }
+  if (PREDICT_FALSE(pending_txns_.erase(driver) != 1)) {
+    LOG(FATAL) << "Could not remove pending transaction from map: "
+        << driver->ToStringUnlocked();
   }
 }
 
 void TransactionTracker::GetPendingTransactions(
     vector<scoped_refptr<TransactionDriver> >* pending_out) const {
   DCHECK(pending_out->empty());
-  lock_guard<simple_spinlock> l(&lock_);
+  std::lock_guard<simple_spinlock> l(lock_);
   for (const TxnMap::value_type& e : pending_txns_) {
     // Increments refcount of each transaction.
     pending_out->push_back(e.first);
@@ -191,7 +193,7 @@ void TransactionTracker::GetPendingTransactions(
 }
 
 int TransactionTracker::GetNumPendingForTests() const {
-  lock_guard<simple_spinlock> l(&lock_);
+  std::lock_guard<simple_spinlock> l(lock_);
   return pending_txns_.size();
 }
 
@@ -201,10 +203,11 @@ void TransactionTracker::WaitForAllToFinish() const {
 }
 
 Status TransactionTracker::WaitForAllToFinish(const MonoDelta& timeout) const {
-  const int complain_ms = 1000;
-  int wait_time = 250;
+  int wait_time_us = 250;
   int num_complaints = 0;
-  MonoTime start_time = MonoTime::Now(MonoTime::FINE);
+  MonoTime start_time = MonoTime::Now();
+  MonoTime next_log_time = start_time + MonoDelta::FromSeconds(1);
+
   while (1) {
     vector<scoped_refptr<TransactionDriver> > txns;
     GetPendingTransactions(&txns);
@@ -213,25 +216,27 @@ Status TransactionTracker::WaitForAllToFinish(const MonoDelta& timeout) const {
       break;
     }
 
-    MonoDelta diff = MonoTime::Now(MonoTime::FINE).GetDeltaSince(start_time);
-    if (diff.MoreThan(timeout)) {
+    MonoTime now = MonoTime::Now();
+    MonoDelta diff = now - start_time;
+    if (diff > timeout) {
       return Status::TimedOut(Substitute("Timed out waiting for all transactions to finish. "
                                          "$0 transactions pending. Waited for $1",
                                          txns.size(), diff.ToString()));
     }
-    int64_t waited_ms = diff.ToMilliseconds();
-    if (waited_ms / complain_ms > num_complaints) {
+    if (now > next_log_time) {
       LOG(WARNING) << Substitute("TransactionTracker waiting for $0 outstanding transactions to"
-                                 " complete now for $1 ms", txns.size(), waited_ms);
-      num_complaints++;
-    }
-    wait_time = std::min(wait_time * 5 / 4, 1000000);
+                                 " complete now for $1", txns.size(), diff.ToString());
+      LOG(INFO) << "Dumping currently running transactions: ";
+      for (scoped_refptr<TransactionDriver> driver : txns) {
+        LOG(INFO) << driver->ToString();
+      }
 
-    LOG(INFO) << "Dumping currently running transactions: ";
-    for (scoped_refptr<TransactionDriver> driver : txns) {
-      LOG(INFO) << driver->ToString();
+      num_complaints++;
+      // Exponential back-off on how often the transactions are dumped.
+      next_log_time = now + MonoDelta::FromSeconds(1 << std::min(8, num_complaints));
     }
-    SleepFor(MonoDelta::FromMicroseconds(wait_time));
+    wait_time_us = std::min(wait_time_us * 5 / 4, 1000000);
+    SleepFor(MonoDelta::FromMicroseconds(wait_time_us));
   }
   return Status::OK();
 }

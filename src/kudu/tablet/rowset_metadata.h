@@ -14,12 +14,19 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-#ifndef KUDU_TABLET_ROWSET_METADATA_H
-#define KUDU_TABLET_ROWSET_METADATA_H
 
+#pragma once
+
+#include <cstdint>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
+
+#include <boost/container/flat_map.hpp>
+#include <boost/container/vector.hpp>
+#include <glog/logging.h>
 
 #include "kudu/common/schema.h"
 #include "kudu/fs/block_id.h"
@@ -27,22 +34,17 @@
 #include "kudu/gutil/macros.h"
 #include "kudu/gutil/map-util.h"
 #include "kudu/tablet/tablet_metadata.h"
-#include "kudu/util/debug-util.h"
-#include "kudu/util/env.h"
 #include "kudu/util/locks.h"
+#include "kudu/util/status.h"
 
 namespace kudu {
 
-namespace tools {
-class FsTool;
-} // namespace tools
-
 namespace tablet {
 
+class RowSetDataPB;
 class RowSetMetadataUpdate;
-class TabletMetadata;
 
-// Keeps tracks of the RowSet data blocks.
+// Keeps track of the RowSet data blocks.
 //
 // On each tablet MemRowSet flush, a new RowSetMetadata is created,
 // and the DiskRowSetWriter will create and write the "immutable" blocks for
@@ -66,19 +68,30 @@ class TabletMetadata;
 //
 class RowSetMetadata {
  public:
-  typedef std::map<ColumnId, BlockId> ColumnIdToBlockIdMap;
+  // We use a flat_map to save memory, since there are lots of these metadata
+  // objects.
+  typedef boost::container::flat_map<ColumnId, BlockId> ColumnIdToBlockIdMap;
 
   // Create a new RowSetMetadata
   static Status CreateNew(TabletMetadata* tablet_metadata,
                           int64_t id,
-                          gscoped_ptr<RowSetMetadata>* metadata);
+                          std::unique_ptr<RowSetMetadata>* metadata);
 
   // Load metadata from a protobuf which was previously read from disk.
   static Status Load(TabletMetadata* tablet_metadata,
                      const RowSetDataPB& pb,
-                     gscoped_ptr<RowSetMetadata>* metadata);
+                     std::unique_ptr<RowSetMetadata>* metadata);
+
+  // Resets the in-memory state to mirror 'pb'.
+  //
+  // Should only be used to initialize a RowSetMetadata instance or to
+  // immediately roll-back an updated RowSetMetadata instance following an
+  // error after calling CommitUpdate().
+  void LoadFromPB(const RowSetDataPB& pb);
 
   Status Flush();
+
+  void AddOrphanedBlocks(const std::vector<BlockId>& blocks);
 
   const std::string ToString() const;
 
@@ -89,79 +102,79 @@ class RowSetMetadata {
   }
 
   void set_bloom_block(const BlockId& block_id) {
-    lock_guard<LockType> l(&lock_);
+    std::lock_guard<LockType> l(lock_);
     DCHECK(bloom_block_.IsNull());
     bloom_block_ = block_id;
   }
 
   void set_adhoc_index_block(const BlockId& block_id) {
-    lock_guard<LockType> l(&lock_);
+    std::lock_guard<LockType> l(lock_);
     DCHECK(adhoc_index_block_.IsNull());
     adhoc_index_block_ = block_id;
   }
 
-  void SetColumnDataBlocks(const ColumnIdToBlockIdMap& blocks_by_col_id);
+  void SetColumnDataBlocks(const std::map<ColumnId, BlockId>& blocks_by_col_id);
 
   Status CommitRedoDeltaDataBlock(int64_t dms_id, const BlockId& block_id);
 
   Status CommitUndoDeltaDataBlock(const BlockId& block_id);
 
   BlockId bloom_block() const {
-    lock_guard<LockType> l(&lock_);
+    std::lock_guard<LockType> l(lock_);
     return bloom_block_;
   }
 
   BlockId adhoc_index_block() const {
-    lock_guard<LockType> l(&lock_);
+    std::lock_guard<LockType> l(lock_);
     return adhoc_index_block_;
   }
 
   bool has_adhoc_index_block() const {
-    lock_guard<LockType> l(&lock_);
+    std::lock_guard<LockType> l(lock_);
     return !adhoc_index_block_.IsNull();
   }
 
-  BlockId column_data_block_for_col_id(ColumnId col_id) {
-    lock_guard<LockType> l(&lock_);
+  BlockId column_data_block_for_col_id(const ColumnId& col_id) const {
+    std::lock_guard<LockType> l(lock_);
     return FindOrDie(blocks_by_col_id_, col_id);
   }
 
   ColumnIdToBlockIdMap GetColumnBlocksById() const {
-    lock_guard<LockType> l(&lock_);
+    std::lock_guard<LockType> l(lock_);
     return blocks_by_col_id_;
   }
 
-  vector<BlockId> redo_delta_blocks() const {
-    lock_guard<LockType> l(&lock_);
+  std::vector<BlockId> redo_delta_blocks() const {
+    std::lock_guard<LockType> l(lock_);
     return redo_delta_blocks_;
   }
 
-  vector<BlockId> undo_delta_blocks() const {
-    lock_guard<LockType> l(&lock_);
+  std::vector<BlockId> undo_delta_blocks() const {
+    std::lock_guard<LockType> l(lock_);
     return undo_delta_blocks_;
   }
 
   TabletMetadata *tablet_metadata() const { return tablet_metadata_; }
 
   int64_t last_durable_redo_dms_id() const {
-    lock_guard<LockType> l(&lock_);
+    std::lock_guard<LockType> l(lock_);
     return last_durable_redo_dms_id_;
   }
 
   void SetLastDurableRedoDmsIdForTests(int64_t redo_dms_id) {
-    lock_guard<LockType> l(&lock_);
+    std::lock_guard<LockType> l(lock_);
     last_durable_redo_dms_id_ = redo_dms_id;
   }
 
   bool HasDataForColumnIdForTests(ColumnId col_id) const {
     BlockId b;
-    lock_guard<LockType> l(&lock_);
+    std::lock_guard<LockType> l(lock_);
     if (!FindCopy(blocks_by_col_id_, col_id, &b)) return false;
     return fs_manager()->BlockExists(b);
   }
 
   bool HasBloomDataBlockForTests() const {
-    lock_guard<LockType> l(&lock_);
+    std::lock_guard<LockType> l(lock_);
     return !bloom_block_.IsNull() && fs_manager()->BlockExists(bloom_block_);
   }
 
@@ -169,14 +182,17 @@ class RowSetMetadata {
 
   // Atomically commit a set of changes to this object.
   //
-  // On success, calls TabletMetadata::AddOrphanedBlocks() on the removed blocks.
-  Status CommitUpdate(const RowSetMetadataUpdate& update);
+  // Returns the blocks removed from the rowset metadata during the update.
+  // These blocks must be added to the TabletMetadata's orphaned blocks list.
+  void CommitUpdate(const RowSetMetadataUpdate& update,
+                    std::vector<BlockId>* removed);
+
+  void ToProtobuf(RowSetDataPB *pb);
 
   std::vector<BlockId> GetAllBlocks();
 
  private:
   friend class TabletMetadata;
-  friend class kudu::tools::FsTool;
 
   typedef simple_spinlock LockType;
 
@@ -195,8 +211,6 @@ class RowSetMetadata {
   }
 
   Status InitFromPB(const RowSetDataPB& pb);
-
-  void ToProtobuf(RowSetDataPB *pb);
 
   TabletMetadata* const tablet_metadata_;
   bool initted_;
@@ -234,6 +248,9 @@ class RowSetMetadataUpdate {
   RowSetMetadataUpdate& ReplaceRedoDeltaBlocks(const std::vector<BlockId>& to_remove,
                                                const std::vector<BlockId>& to_add);
 
+  // Remove the specified undo delta blocks.
+  RowSetMetadataUpdate& RemoveUndoDeltaBlocks(const std::vector<BlockId>& to_remove);
+
   // Replace the CFile for the given column ID.
   RowSetMetadataUpdate& ReplaceColumnId(ColumnId col_id, const BlockId& block_id);
 
@@ -255,6 +272,8 @@ class RowSetMetadataUpdate {
     std::vector<BlockId> to_add;
   };
   std::vector<ReplaceDeltaBlocks> replace_redo_blocks_;
+
+  std::vector<BlockId> remove_undo_blocks_;
   BlockId new_undo_block_;
 
   DISALLOW_COPY_AND_ASSIGN(RowSetMetadataUpdate);
@@ -262,4 +281,3 @@ class RowSetMetadataUpdate {
 
 } // namespace tablet
 } // namespace kudu
-#endif /* KUDU_TABLET_ROWSET_METADATA_H */

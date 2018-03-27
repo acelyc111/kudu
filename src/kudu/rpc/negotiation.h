@@ -17,18 +17,38 @@
 #ifndef KUDU_RPC_NEGOTIATION_H
 #define KUDU_RPC_NEGOTIATION_H
 
+#include <iosfwd>
+
 #include "kudu/gutil/ref_counted.h"
-#include "kudu/util/monotime.h"
+#include "kudu/gutil/macros.h"
+#include "kudu/security/security_flags.h"
 
 namespace kudu {
+
+class MonoTime;
+
 namespace rpc {
 
 class Connection;
 
+enum class AuthenticationType {
+  INVALID,
+  SASL,
+  TOKEN,
+  CERTIFICATE,
+};
+const char* AuthenticationTypeToString(AuthenticationType t);
+
+std::ostream& operator<<(std::ostream& o, AuthenticationType authentication_type);
+
 class Negotiation {
  public:
+
+  // Perform negotiation for a connection (either server or client)
   static void RunNegotiation(const scoped_refptr<Connection>& conn,
-                             const MonoTime &deadline);
+                             security::RpcAuthentication authentication,
+                             security::RpcEncryption encryption,
+                             MonoTime deadline);
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(Negotiation);
 };

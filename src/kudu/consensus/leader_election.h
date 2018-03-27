@@ -18,35 +18,28 @@
 #ifndef KUDU_CONSENSUS_LEADER_ELECTION_H
 #define KUDU_CONSENSUS_LEADER_ELECTION_H
 
+#include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-#include "kudu/consensus/consensus.h"
 #include "kudu/consensus/consensus.pb.h"
-#include "kudu/gutil/callback.h"
+#include "kudu/consensus/consensus_peers.h"
+#include "kudu/consensus/raft_consensus.h"
 #include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/macros.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/rpc/rpc_controller.h"
 #include "kudu/util/locks.h"
+#include "kudu/util/monotime.h"
+#include "kudu/util/status.h"
 
 namespace kudu {
-class Status;
-
-namespace metadata {
-class RaftPeerPB;
-}
-
-namespace rpc {
-class Messenger;
-class RpcController;
-}
-
 namespace consensus {
-class PeerProxy;
-class PeerProxyFactory;
+
+class RaftConfigPB;
 
 // The vote a peer has given.
 enum ElectionVote {
@@ -104,19 +97,17 @@ class VoteCounter {
 // The result of a leader election.
 struct ElectionResult {
  public:
-  ElectionResult(ConsensusTerm election_term, ElectionVote decision);
-  ElectionResult(ConsensusTerm election_term, ElectionVote decision,
-                 ConsensusTerm higher_term, const std::string& message);
+  ElectionResult(VoteRequestPB vote_request, ElectionVote decision,
+                 ConsensusTerm highest_term, const std::string& message);
 
-  // Term the election was run for.
-  const ConsensusTerm election_term;
+  // The vote request that was sent to the voters for this election.
+  const VoteRequestPB vote_request;
 
   // The overall election GRANTED/DENIED decision of the configuration.
   const ElectionVote decision;
 
-  // At least one voter had a higher term than the candidate.
-  const bool has_higher_term;
-  const ConsensusTerm higher_term;
+  // The highest term seen from any voter.
+  const ConsensusTerm highest_voter_term;
 
   // Human-readable explanation of the vote result, if any.
   const std::string message;
@@ -147,7 +138,7 @@ struct ElectionResult {
 // This class is thread-safe.
 class LeaderElection : public RefCountedThreadSafe<LeaderElection> {
  public:
-  typedef Callback<void(const ElectionResult&)> ElectionDecisionCallback;
+  typedef std::function<void(const ElectionResult&)> ElectionDecisionCallback;
   typedef std::unordered_map<std::string, PeerProxy*> ProxyMap;
 
   // Set up a new leader election driver.
@@ -230,12 +221,15 @@ class LeaderElection : public RefCountedThreadSafe<LeaderElection> {
   // Callback invoked to notify the caller of an election decision.
   const ElectionDecisionCallback decision_callback_;
 
-  // List of all potential followers to request votes from.
+  // List of all other voters to request votes from.
   // The candidate's own UUID must not be included.
-  std::vector<std::string> follower_uuids_;
+  std::vector<std::string> other_voter_uuids_;
 
   // Map of UUID -> VoterState.
   VoterStateMap voter_state_;
+
+  // The highest term seen from a voter so far (or 0 if no votes).
+  int64_t highest_voter_term_;
 };
 
 } // namespace consensus

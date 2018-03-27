@@ -17,15 +17,22 @@
 
 #include "kudu/util/spinlock_profiling.h"
 
+#include <sstream>
+#include <string>
+
 #include <glog/logging.h>
 #include <gflags/gflags.h>
 
 #include "kudu/gutil/atomicops.h"
-#include "kudu/gutil/basictypes.h"
+#include "kudu/gutil/bind.h"
+#include "kudu/gutil/casts.h"
 #include "kudu/gutil/macros.h"
+#include "kudu/gutil/once.h"
+#include "kudu/gutil/port.h"
 #include "kudu/gutil/spinlock.h"
 #include "kudu/gutil/strings/human_readable.h"
 #include "kudu/gutil/sysinfo.h"
+#include "kudu/util/atomic.h"
 #include "kudu/util/debug-util.h"
 #include "kudu/util/flag_tags.h"
 #include "kudu/util/metrics.h"
@@ -45,6 +52,7 @@ METRIC_DEFINE_gauge_uint64(server, spinlock_contention_time,
     "started. If this increases rapidly, it may indicate a performance issue in Kudu "
     "internals triggered by a particular workload and warrant investigation.",
     kudu::EXPOSE_AS_COUNTER);
+
 
 using base::SpinLock;
 using base::SpinLockHolder;
@@ -81,7 +89,7 @@ class ContentionStacks {
   //
   // On return, guarantees that any stack traces that were present at the beginning of
   // the call have been flushed. However, new stacks can be added concurrently with this call.
-  void Flush(std::stringstream* out, int64_t* dropped);
+  void Flush(std::ostringstream* out, int64_t* dropped);
 
  private:
 
@@ -168,14 +176,15 @@ void ContentionStacks::AddStack(const StackTrace& s, int64_t cycles) {
   dropped_samples_.Increment();
 }
 
-void ContentionStacks::Flush(std::stringstream* out, int64_t* dropped) {
+void ContentionStacks::Flush(std::ostringstream* out, int64_t* dropped) {
   uint64_t iterator = 0;
   StackTrace t;
   int64_t cycles;
   int64_t count;
   while (g_contention_stacks->CollectSample(&iterator, &t, &count, &cycles)) {
-    *out << cycles << "\t" << count
-         << " @ " << t.ToHexString(StackTrace::NO_FIX_CALLER_ADDRESSES)
+    *out << cycles << " " << count
+         << " @ " << t.ToHexString(StackTrace::NO_FIX_CALLER_ADDRESSES |
+                                   StackTrace::HEX_0X_PREFIX)
          << std::endl;
   }
 
@@ -203,7 +212,8 @@ bool ContentionStacks::CollectSample(uint64_t* iterator, StackTrace* s, int64_t*
 }
 
 
-void SubmitSpinLockProfileData(const void *contendedlock, int64 wait_cycles) {
+void SubmitSpinLockProfileData(const void *contendedlock, int64_t wait_cycles) {
+  TRACE_COUNTER_INCREMENT("spinlock_wait_cycles", wait_cycles);
   bool profiling_enabled = base::subtle::Acquire_Load(&g_profiling_enabled);
   bool long_wait_time = wait_cycles > FLAGS_lock_contention_trace_threshold_cycles;
   // Short circuit this function quickly in the common case.
@@ -263,7 +273,6 @@ void RegisterSpinLockContentionMetrics(const scoped_refptr<MetricEntity>& entity
   entity->NeverRetire(
       METRIC_spinlock_contention_time.InstantiateFunctionGauge(
           entity, Bind(&GetSpinLockContentionMicros)));
-
 }
 
 uint64_t GetSpinLockContentionMicros() {
@@ -278,7 +287,7 @@ void StartSynchronizationProfiling() {
   base::subtle::Barrier_AtomicIncrement(&g_profiling_enabled, 1);
 }
 
-void FlushSynchronizationProfile(std::stringstream* out,
+void FlushSynchronizationProfile(std::ostringstream* out,
                                  int64_t* drop_count) {
   CHECK_NOTNULL(g_contention_stacks)->Flush(out, drop_count);
 }
@@ -293,7 +302,7 @@ void StopSynchronizationProfiling() {
 // The hook expected by gutil is in the gutil namespace. Simply forward into the
 // kudu namespace so we don't need to qualify everything.
 namespace gutil {
-void SubmitSpinLockProfileData(const void *contendedlock, int64 wait_cycles) {
+void SubmitSpinLockProfileData(const void *contendedlock, int64_t wait_cycles) {
   kudu::SubmitSpinLockProfileData(contendedlock, wait_cycles);
 }
 } // namespace gutil

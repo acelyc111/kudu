@@ -16,6 +16,9 @@
 // under the License.
 #include "kudu/util/pb_util-internal.h"
 
+#include <ostream>
+#include <string>
+
 namespace kudu {
 namespace pb_util {
 namespace internal {
@@ -39,15 +42,11 @@ bool SequentialFileFileInputStream::Next(const void **data, int *size) {
     return true;
   }
 
-  Slice result;
-  status_ = rfile_->Read(buffer_size_, &result, buffer_.get());
+  Slice result(buffer_.get(), buffer_size_);
+  status_ = rfile_->Read(&result);
   if (!status_.ok()) {
     LOG(WARNING) << "Read at " << buffer_offset_ << " failed: " << status_.ToString();
     return false;
-  }
-
-  if (result.data() != buffer_.get()) {
-    memcpy(buffer_.get(), result.data(), result.size());
   }
 
   buffer_used_ = result.size();

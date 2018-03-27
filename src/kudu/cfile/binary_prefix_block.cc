@@ -18,22 +18,35 @@
 #include "kudu/cfile/binary_prefix_block.h"
 
 #include <algorithm>
+#include <cstring>
+#include <cstdint>
+#include <ostream>
 #include <string>
 
-#include "kudu/cfile/cfile_writer.h"
+#include <glog/logging.h>
+
+#include "kudu/cfile/cfile_util.h"
 #include "kudu/common/columnblock.h"
+#include "kudu/common/common.pb.h"
+#include "kudu/common/schema.h"
+#include "kudu/common/types.h"
 #include "kudu/gutil/port.h"
+#include "kudu/gutil/stringprintf.h"
+#include "kudu/gutil/strings/fastmem.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/util/coding.h"
 #include "kudu/util/coding-inl.h"
 #include "kudu/util/group_varint-inl.h"
 #include "kudu/util/hexdump.h"
+#include "kudu/util/logging.h"
+#include "kudu/util/memory/arena.h"
 #include "kudu/util/slice.h"
 
 namespace kudu {
 namespace cfile {
 
 using kudu::coding::AppendGroupVarInt32;
+using std::string;
 using strings::Substitute;
 
 ////////////////////////////////////////////////////////////
@@ -78,9 +91,9 @@ void BinaryPrefixBlockBuilder::Reset() {
   last_val_.clear();
 }
 
-bool BinaryPrefixBlockBuilder::IsBlockFull(size_t limit) const {
-  // TODO: take restarts size into account
-  return buffer_.size() > limit;
+bool BinaryPrefixBlockBuilder::IsBlockFull() const {
+  // TODO(todd): take restarts size into account
+  return buffer_.size() > options_->storage_attributes.cfile_block_size;
 }
 
 Slice BinaryPrefixBlockBuilder::Finish(rowid_t ordinal_pos) {
@@ -129,10 +142,7 @@ int BinaryPrefixBlockBuilder::Add(const uint8_t *vals, size_t count) {
   int added = 0;
   const Slice* slices = reinterpret_cast<const Slice*>(vals);
   Slice prev_val(last_val_);
-  // We generate a static call to IsBlockFull() to avoid the vtable lookup
-  // in this hot path.
-  while (!BinaryPrefixBlockBuilder::IsBlockFull(options_->storage_attributes.cfile_block_size) &&
-         added < count) {
+  while (!IsBlockFull() && added < count) {
     const Slice val = slices[added];
 
     int old_size = buffer_.size();
@@ -197,40 +207,12 @@ Status BinaryPrefixBlockBuilder::GetFirstKey(void *key) const {
   return Status::OK();
 }
 
-size_t BinaryPrefixBlockBuilder::CommonPrefixLength(const Slice& slice_a,
-                                                    const Slice& slice_b) {
-  // This implementation is modeled after strings::fastmemcmp_inlined().
-  int len = std::min(slice_a.size(), slice_b.size());
-  const uint8_t* a = slice_a.data();
-  const uint8_t* b = slice_b.data();
-  const uint8_t* a_limit = a + len;
-
-  const size_t sizeof_uint64 = sizeof(uint64_t);
-  // Move forward 8 bytes at a time until finding an unequal portion.
-  while (a + sizeof_uint64 <= a_limit &&
-         UNALIGNED_LOAD64(a) == UNALIGNED_LOAD64(b)) {
-    a += sizeof_uint64;
-    b += sizeof_uint64;
+Status BinaryPrefixBlockBuilder::GetLastKey(void *key) const {
+  if (val_count_ == 0) {
+    return Status::NotFound("no keys in data block");
   }
-
-  // Same, 4 bytes at a time.
-  const size_t sizeof_uint32 = sizeof(uint32_t);
-  while (a + sizeof_uint32 <= a_limit &&
-         UNALIGNED_LOAD32(a) == UNALIGNED_LOAD32(b)) {
-    a += sizeof_uint32;
-    b += sizeof_uint32;
-  }
-
-  // Now one byte at a time. We could do a 2-bytes-at-a-time loop,
-  // but we're following the example of fastmemcmp_inlined(). The benefit of
-  // 2-at-a-time likely doesn't outweigh the cost of added code size.
-  while (a < a_limit &&
-         *a == *b) {
-    a++;
-    b++;
-  }
-
-  return a - slice_a.data();
+  *reinterpret_cast<Slice *>(key) = Slice(last_val_);
+  return Status::OK();
 }
 
 ////////////////////////////////////////////////////////////
@@ -238,7 +220,7 @@ size_t BinaryPrefixBlockBuilder::CommonPrefixLength(const Slice& slice_a,
 ////////////////////////////////////////////////////////////
 
 BinaryPrefixBlockDecoder::BinaryPrefixBlockDecoder(Slice slice)
-    : data_(std::move(slice)),
+    : data_(slice),
       parsed_(false),
       num_elems_(0),
       ordinal_pos_base_(0),
@@ -318,6 +300,13 @@ void BinaryPrefixBlockDecoder::SeekToPositionInBlock(uint pos) {
 
   DCHECK_LE(pos, num_elems_);
 
+  // Seeking past the last element is valid -- it just sets us to the
+  // same state as if we have read all of the elements.
+  if (pos == num_elems_) {
+    cur_idx_ = pos;
+    return;
+  }
+
   int target_restart = pos/restart_interval_;
   SeekToRestartPoint(target_restart);
 
@@ -332,7 +321,7 @@ void BinaryPrefixBlockDecoder::SeekToPositionInBlock(uint pos) {
 // point. Note that the restart points in the file do not include
 // the '0' restart point, since that is simply the beginning of
 // the data and hence a waste of space. So, 'idx' may range from
-// 0 (first record) through num_restarts_ (last recorded restart point)
+// 0 (first record) through num_restarts_ (exclusive).
 const uint8_t * BinaryPrefixBlockDecoder::GetRestartPoint(uint32_t idx) const {
   DCHECK_LE(idx, num_restarts_);
 
@@ -395,8 +384,8 @@ Status BinaryPrefixBlockDecoder::SeekAtOrAfterValue(const void *value_void,
 #ifndef NDEBUG
     VLOG(3) << "loop iter:\n"
             << "cur_idx = " << cur_idx_ << "\n"
-            << "target  =" << target.ToString() << "\n"
-            << "cur_val_=" << Slice(cur_val_).ToString();
+            << "target  =" << KUDU_REDACT(target.ToDebugString()) << "\n"
+            << "cur_val_=" << KUDU_REDACT(Slice(cur_val_).ToDebugString());
 #endif
     int cmp = Slice(cur_val_).compare(target);
     if (cmp >= 0) {

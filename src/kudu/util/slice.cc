@@ -17,15 +17,19 @@
 
 #include "kudu/util/slice.h"
 
+#include <cctype>
+
+#include "kudu/gutil/port.h"
 #include "kudu/gutil/stringprintf.h"
 #include "kudu/util/status.h"
+#include "kudu/util/logging.h"
 
 namespace kudu {
 
 Status Slice::check_size(size_t expected_size) const {
   if (PREDICT_FALSE(size() != expected_size)) {
     return Status::Corruption(StringPrintf("Unexpected Slice size. "
-        "Expected %zu but got %zu.", expected_size, size()), ToDebugString(100));
+        "Expected %zu but got %zu.", expected_size, size()), KUDU_REDACT(ToDebugString(100)));
   }
   return Status::OK();
 }

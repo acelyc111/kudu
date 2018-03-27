@@ -14,13 +14,13 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-#ifndef KUDU_FS_BLOCK_MANAGER_UTIL_H
-#define KUDU_FS_BLOCK_MANAGER_UTIL_H
 
+#pragma once
+
+#include <memory>
 #include <string>
 #include <vector>
 
-#include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/util/path_util.h"
 #include "kudu/util/status.h"
 
@@ -52,7 +52,9 @@ class PathInstanceMetadataFile {
 
   // Opens, reads, verifies, and closes an existing instance metadata file.
   //
-  // On success, 'metadata_' is overwritten with the contents of the file.
+  // On success, either 'metadata_' is overwritten with the contents of the
+  // file, or, in the case of disk failure, returns OK and sets
+  // 'health_status_' to a non-OK value.
   Status LoadFromDisk();
 
   // Locks the instance metadata file, which must exist on-disk. Returns an
@@ -67,24 +69,43 @@ class PathInstanceMetadataFile {
   // Unlocks the instance metadata file. Must have been locked to begin with.
   Status Unlock();
 
-  void SetMetadataForTests(gscoped_ptr<PathInstanceMetadataPB> metadata) {
-    metadata_ = metadata.Pass();
+  // Sets the metadata file.
+  void SetMetadataForTests(std::unique_ptr<PathInstanceMetadataPB> metadata);
+
+  // Sets that the instance failed (e.g. due to a disk failure).
+  //
+  // If failed, there is no guarantee that the instance will have a 'metadata_'.
+  void SetInstanceFailed(const Status& s = Status::IOError("Path instance failed")) {
+    health_status_ = s;
   }
 
-  std::string path() const { return DirName(filename_); }
+  // Whether or not the instance is healthy. If the instance file lives on a
+  // disk that has failed, this should return false.
+  bool healthy() const {
+    return health_status_.ok();
+  }
+
+  const Status& health_status() const {
+    return health_status_;
+  }
+
+  std::string dir() const { return DirName(filename_); }
+  const std::string& path() const { return filename_; }
   PathInstanceMetadataPB* const metadata() const { return metadata_.get(); }
 
-  // Check the integrity of the provided instances' path sets.
-  static Status CheckIntegrity(const std::vector<PathInstanceMetadataFile*>& instances);
+  // Check the integrity of the provided instances' path sets, ignoring any
+  // unhealthy instances.
+  static Status CheckIntegrity(
+      const std::vector<std::unique_ptr<PathInstanceMetadataFile>>& instances);
 
  private:
   Env* env_;
   const std::string block_manager_type_;
   const std::string filename_;
-  gscoped_ptr<PathInstanceMetadataPB> metadata_;
-  gscoped_ptr<FileLock> lock_;
+  std::unique_ptr<PathInstanceMetadataPB> metadata_;
+  std::unique_ptr<FileLock> lock_;
+  Status health_status_;
 };
 
 } // namespace fs
 } // namespace kudu
-#endif

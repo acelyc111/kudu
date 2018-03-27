@@ -33,35 +33,27 @@
 #define KUDU_UTIL_MEMORY_MEMORY_H_
 
 #include <algorithm>
-#include <glog/logging.h>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <memory>
-#include <stddef.h>
+#include <ostream>
 #include <vector>
 
+#include <glog/logging.h>
+
 #include "kudu/util/boost_mutex_utils.h"
+#include "kudu/util/memory/overwrite.h"
 #include "kudu/util/mutex.h"
 #include "kudu/gutil/gscoped_ptr.h"
-#include "kudu/gutil/logging-inl.h"
 #include "kudu/gutil/macros.h"
-#include "kudu/gutil/strings/stringpiece.h"
+#include "kudu/gutil/port.h"
 #include "kudu/gutil/singleton.h"
-
-using std::copy;
-using std::max;
-using std::min;
-using std::numeric_limits;
-using std::reverse;
-using std::sort;
-using std::swap;
-using std::vector;
 
 namespace kudu {
 
 class BufferAllocator;
 class MemTracker;
-
-void OverwriteWithPattern(char* p, size_t len, StringPiece pattern);
 
 // Wrapper for a block of data allocated by a BufferAllocator. Owns the block.
 // (To release the block, destroy the buffer - it will then return it via the
@@ -186,7 +178,7 @@ class BufferAllocator {
   // For unbounded allocators (like raw HeapBufferAllocator) this is the highest
   // size_t value possible.
   // TODO(user): consider making pure virtual.
-  virtual size_t Available() const { return numeric_limits<size_t>::max(); }
+  virtual size_t Available() const { return std::numeric_limits<size_t>::max(); }
 
  protected:
   friend class Buffer;
@@ -261,7 +253,7 @@ class HeapBufferAllocator : public BufferAllocator {
   }
 
   virtual size_t Available() const OVERRIDE {
-    return numeric_limits<size_t>::max();
+    return std::numeric_limits<size_t>::max();
   }
 
  private:
@@ -337,7 +329,7 @@ class Mediator {
   virtual void Free(size_t amount) = 0;
 
   // TODO(user): consider making pure virtual.
-  virtual size_t Available() const { return numeric_limits<size_t>::max(); }
+  virtual size_t Available() const { return std::numeric_limits<size_t>::max(); }
 };
 
 // Optionally thread-safe skeletal implementation of a 'quota' abstraction,
@@ -451,7 +443,7 @@ class MediatingBufferAllocator : public BufferAllocator {
   virtual ~MediatingBufferAllocator() {}
 
   virtual size_t Available() const OVERRIDE {
-    return min(delegate_->Available(), mediator_->Available());
+    return std::min(delegate_->Available(), mediator_->Available());
   }
 
  private:
@@ -476,7 +468,7 @@ class MemoryLimit : public BufferAllocator {
  public:
   // Creates a limiter based on the default, heap allocator. Quota is infinite.
   // (Can be set using SetQuota).
-  explicit MemoryLimit()
+  MemoryLimit()
       : quota_(std::numeric_limits<size_t>::max()),
         allocator_(HeapBufferAllocator::Get(), &quota_) {}
 
@@ -542,7 +534,7 @@ class SoftQuotaBypassingBufferAllocator : public BufferAllocator {
     const size_t usage = allocator_.GetUsage();
     size_t available = allocator_.Available();
     if (bypassed_amount_ > usage) {
-      available = max(bypassed_amount_ - usage, available);
+      available = std::max(bypassed_amount_ - usage, available);
     }
     return available;
   }
@@ -554,7 +546,7 @@ class SoftQuotaBypassingBufferAllocator : public BufferAllocator {
   // with increased minimal size is more likely to fail because of exceeding
   // hard quota, so we also fall back to the original minimal size.
   size_t AdjustMinimal(size_t requested, size_t minimal) const {
-    return min(requested, max(minimal, Available()));
+    return std::min(requested, std::max(minimal, Available()));
   }
   virtual Buffer* AllocateInternal(size_t requested,
                                    size_t minimal,
@@ -856,7 +848,7 @@ class OwningBufferAllocator : public BufferAllocator {
 
   // Not using PointerVector here because we want to guarantee certain order of
   // deleting elements (starting from the ones added last).
-  vector<OwnedType*> owned_;
+  std::vector<OwnedType*> owned_;
   BufferAllocator* delegate_;
 };
 
@@ -890,11 +882,11 @@ class GuaranteeMemory : public BufferAllocator {
   }
 
   virtual bool ReallocateInternal(size_t requested,
-                                  size_t minimal,
+                                  size_t /* minimal */,
                                   Buffer* buffer,
                                   BufferAllocator* originator) OVERRIDE {
-    int64 additional_memory = requested - (buffer != NULL ? buffer->size() : 0);
-    return additional_memory <= static_cast<int64>(Available())
+    int64_t additional_memory = requested - (buffer != NULL ? buffer->size() : 0);
+    return additional_memory <= static_cast<int64_t>(Available())
         && DelegateReallocate(&limit_, requested, requested,
                               buffer, originator);
   }
@@ -920,7 +912,7 @@ size_t Quota<thread_safe>::Allocate(const size_t requested,
   size_t allocation;
   if (usage_ > quota || minimal > quota - usage_) {
     // OOQ (Out of quota).
-    if (!enforced() && minimal <= numeric_limits<size_t>::max() - usage_) {
+    if (!enforced() && minimal <= std::numeric_limits<size_t>::max() - usage_) {
       // The quota is unenforced and the value of "minimal" won't cause an
       // overflow. Perform a minimal allocation.
       allocation = minimal;
@@ -936,7 +928,7 @@ size_t Quota<thread_safe>::Allocate(const size_t requested,
                  << ((allocation == 0) ? "Did not allocate any memory."
                  : "Allocated the minimal value requested.");
   } else {
-    allocation = min(requested, quota - usage_);
+    allocation = std::min(requested, quota - usage_);
   }
   usage_ += allocation;
   return allocation;
@@ -948,7 +940,7 @@ void Quota<thread_safe>::Free(size_t amount) {
   usage_ -= amount;
   // threads allocate/free memory concurrently via the same Quota object that is
   // not protected with a mutex (thread_safe == false).
-  if (usage_ > (numeric_limits<size_t>::max() - (1 << 28))) {
+  if (usage_ > (std::numeric_limits<size_t>::max() - (1 << 28))) {
     LOG(ERROR) << "Suspiciously big usage_ value: " << usage_
                << " (could be a result size_t wrapping around below 0, "
                << "for example as a result of race condition).";

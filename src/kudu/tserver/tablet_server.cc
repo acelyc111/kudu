@@ -17,44 +17,47 @@
 
 #include "kudu/tserver/tablet_server.h"
 
+#include <cstddef>
+#include <ostream>
+#include <type_traits>
+#include <utility>
+
 #include <glog/logging.h>
-#include <list>
-#include <vector>
 
 #include "kudu/cfile/block_cache.h"
+#include "kudu/fs/error_manager.h"
 #include "kudu/fs/fs_manager.h"
+#include "kudu/gutil/bind.h"
+#include "kudu/gutil/bind_helpers.h"
+#include "kudu/gutil/move.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/rpc/service_if.h"
-#include "kudu/server/rpc_server.h"
-#include "kudu/server/webserver.h"
-#include "kudu/tablet/maintenance_manager.h"
 #include "kudu/tserver/heartbeater.h"
 #include "kudu/tserver/scanners.h"
+#include "kudu/tserver/tablet_copy_service.h"
 #include "kudu/tserver/tablet_service.h"
 #include "kudu/tserver/ts_tablet_manager.h"
-#include "kudu/tserver/tserver-path-handlers.h"
-#include "kudu/tserver/remote_bootstrap_service.h"
+#include "kudu/tserver/tserver_path_handlers.h"
+#include "kudu/util/maintenance_manager.h"
 #include "kudu/util/net/net_util.h"
-#include "kudu/util/net/sockaddr.h"
 #include "kudu/util/status.h"
 
+using std::string;
+using kudu::fs::ErrorHandlerType;
 using kudu::rpc::ServiceIf;
-using kudu::tablet::TabletPeer;
-using std::shared_ptr;
-using std::vector;
 
 namespace kudu {
 namespace tserver {
 
 TabletServer::TabletServer(const TabletServerOptions& opts)
-  : ServerBase("TabletServer", opts, "kudu.tabletserver"),
+  : KuduServer("TabletServer", opts, "kudu.tabletserver"),
     initted_(false),
     fail_heartbeats_for_tests_(false),
     opts_(opts),
-    tablet_manager_(new TSTabletManager(fs_manager_.get(), this, metric_registry())),
+    tablet_manager_(new TSTabletManager(this)),
     scanner_manager_(new ScannerManager(metric_entity())),
     path_handlers_(new TabletServerPathHandlers(this)),
-    maintenance_manager_(new MaintenanceManager(MaintenanceManager::DEFAULT_OPTIONS)) {
+    maintenance_manager_(new MaintenanceManager(MaintenanceManager::kDefaultOptions)) {
 }
 
 TabletServer::~TabletServer() {
@@ -87,8 +90,10 @@ Status TabletServer::Init() {
   // our heartbeat thread will loop until successfully connecting.
   RETURN_NOT_OK(ValidateMasterAddressResolution());
 
-  RETURN_NOT_OK(ServerBase::Init());
-  RETURN_NOT_OK(path_handlers_->Register(web_server_.get()));
+  RETURN_NOT_OK(KuduServer::Init());
+  if (web_server_) {
+    RETURN_NOT_OK(path_handlers_->Register(web_server_.get()));
+  }
 
   heartbeater_.reset(new Heartbeater(opts_, this));
 
@@ -109,21 +114,23 @@ Status TabletServer::WaitInited() {
 Status TabletServer::Start() {
   CHECK(initted_);
 
+  fs_manager_->SetErrorNotificationCb(ErrorHandlerType::DISK,
+      Bind(&TSTabletManager::FailTabletsInDataDir, Unretained(tablet_manager_.get())));
+
   gscoped_ptr<ServiceIf> ts_service(new TabletServiceImpl(this));
   gscoped_ptr<ServiceIf> admin_service(new TabletServiceAdminImpl(this));
-  gscoped_ptr<ServiceIf> consensus_service(new ConsensusServiceImpl(metric_entity(),
-                                                                    tablet_manager_.get()));
-  gscoped_ptr<ServiceIf> remote_bootstrap_service(
-      new RemoteBootstrapServiceImpl(fs_manager_.get(), tablet_manager_.get(), metric_entity()));
+  gscoped_ptr<ServiceIf> consensus_service(new ConsensusServiceImpl(this, tablet_manager_.get()));
+  gscoped_ptr<ServiceIf> tablet_copy_service(new TabletCopyServiceImpl(
+      this, tablet_manager_.get()));
 
-  RETURN_NOT_OK(ServerBase::RegisterService(ts_service.Pass()));
-  RETURN_NOT_OK(ServerBase::RegisterService(admin_service.Pass()));
-  RETURN_NOT_OK(ServerBase::RegisterService(consensus_service.Pass()));
-  RETURN_NOT_OK(ServerBase::RegisterService(remote_bootstrap_service.Pass()));
-  RETURN_NOT_OK(ServerBase::Start());
+  RETURN_NOT_OK(RegisterService(std::move(ts_service)));
+  RETURN_NOT_OK(RegisterService(std::move(admin_service)));
+  RETURN_NOT_OK(RegisterService(std::move(consensus_service)));
+  RETURN_NOT_OK(RegisterService(std::move(tablet_copy_service)));
+  RETURN_NOT_OK(KuduServer::Start());
 
   RETURN_NOT_OK(heartbeater_->Start());
-  RETURN_NOT_OK(maintenance_manager_->Init());
+  RETURN_NOT_OK(maintenance_manager_->Init(fs_manager_->uuid()));
 
   google::FlushLogFiles(google::INFO); // Flush the startup messages.
 
@@ -131,16 +138,23 @@ Status TabletServer::Start() {
 }
 
 void TabletServer::Shutdown() {
-  LOG(INFO) << "TabletServer shutting down...";
-
   if (initted_) {
+    string name = ToString();
+    LOG(INFO) << name << " shutting down...";
+
+    // 1. Stop accepting new RPCs.
+    UnregisterAllServices();
+
+    // 2. Shut down the tserver's subsystems.
     maintenance_manager_->Shutdown();
     WARN_NOT_OK(heartbeater_->Stop(), "Failed to stop TS Heartbeat thread");
-    ServerBase::Shutdown();
+    fs_manager_->UnsetErrorNotificationCb(ErrorHandlerType::DISK);
     tablet_manager_->Shutdown();
-  }
 
-  LOG(INFO) << "TabletServer shut down complete. Bye!";
+    // 3. Shut down generic subsystems.
+    KuduServer::Shutdown();
+    LOG(INFO) << name << " shutdown complete.";
+  }
 }
 
 } // namespace tserver

@@ -15,14 +15,27 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <glog/logging.h>
+#include <cstdint>
+#include <memory>
+#include <ostream>
+#include <string>
 
-#include "kudu/common/schema.h"
+#include <glog/logging.h>
+#include <gtest/gtest.h>
+
+#include "kudu/common/partial_row.h"
 #include "kudu/common/wire_protocol-test-util.h"
-#include "kudu/fs/fs_manager.h"
-#include "kudu/gutil/ref_counted.h"
+#include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/port.h"
 #include "kudu/tablet/local_tablet_writer.h"
+#include "kudu/tablet/metadata.pb.h"
+#include "kudu/tablet/tablet-harness.h"
 #include "kudu/tablet/tablet-test-util.h"
+#include "kudu/tablet/tablet.h"
+#include "kudu/tablet/tablet_metadata.h"
+#include "kudu/util/pb_util.h"
+#include "kudu/util/status.h"
+#include "kudu/util/test_macros.h"
 
 namespace kudu {
 namespace tablet {
@@ -86,11 +99,47 @@ TEST_F(TestTabletMetadata, TestLoadFromSuperBlock) {
   // Compare the 2 dumped superblock PBs.
   ASSERT_EQ(superblock_pb_1.SerializeAsString(),
             superblock_pb_2.SerializeAsString())
-    << superblock_pb_1.DebugString()
-    << superblock_pb_2.DebugString();
+    << pb_util::SecureDebugString(superblock_pb_1)
+    << pb_util::SecureDebugString(superblock_pb_2);
 
   LOG(INFO) << "Superblocks match:\n"
-            << superblock_pb_1.DebugString();
+            << pb_util::SecureDebugString(superblock_pb_1);
+}
+
+TEST_F(TestTabletMetadata, TestOnDiskSize) {
+  TabletMetadata* meta = harness_->tablet()->metadata();
+
+  // The tablet metadata was flushed on creation.
+  int64_t initial_size = meta->on_disk_size();
+  ASSERT_GT(initial_size, 0);
+
+  // Write some data to the tablet and flush.
+  gscoped_ptr<KuduPartialRow> row;
+  BuildPartialRow(0, 0, "foo", &row);
+  writer_->Insert(*row);
+  ASSERT_OK(harness_->tablet()->Flush());
+
+  // The tablet metadata grows after flushing a new rowset.
+  int64_t middle_size = meta->on_disk_size();
+  ASSERT_GT(middle_size, initial_size);
+
+  // Create another rowset.
+  // The on-disk size shouldn't change until after flush.
+  BuildPartialRow(1, 1, "bar", &row);
+  writer_->Insert(*row);
+  ASSERT_EQ(middle_size, meta->on_disk_size());
+  ASSERT_OK(harness_->tablet()->Flush());
+  int64_t final_size = meta->on_disk_size();
+  ASSERT_GT(final_size, middle_size);
+
+  // Shut down the tablet.
+  harness_->tablet()->Shutdown();
+
+  // The tablet metadata is a container file holding the superblock PB,
+  // so the on_disk_size should be at least as big.
+  TabletSuperBlockPB superblock_pb;
+  ASSERT_OK(meta->ToSuperBlock(&superblock_pb));
+  ASSERT_GE(final_size, superblock_pb.ByteSize());
 }
 
 

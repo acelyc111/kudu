@@ -54,11 +54,13 @@ if ! ( cd $ROOT && git diff --quiet .  && git diff --cached --quiet . ) ; then
   REVISION="${REVISION}-dirty"
 fi
 
+BUILD_ROOT=$(dirname $TEST_EXECUTABLE)/..
+
 # Parse out our "build config" - a space-separated list of tags
 # which include the cmake build type as well as the list of configured
 # sanitizers
 
-CMAKECACHE=$ROOT/CMakeCache.txt
+CMAKECACHE=$BUILD_ROOT/CMakeCache.txt
 BUILD_CONFIG=$(grep '^CMAKE_BUILD_TYPE:' $CMAKECACHE | cut -f 2 -d=)
 if grep -q "KUDU_USE_ASAN:UNINITIALIZED=1" $CMAKECACHE ; then
   BUILD_CONFIG="$BUILD_CONFIG asan"
@@ -69,8 +71,12 @@ fi
 if grep -q "KUDU_USE_UBSAN:UNINITIALIZED=1" $CMAKECACHE ; then
   BUILD_CONFIG="$BUILD_CONFIG ubsan"
 fi
-if [ -n "$HEAPCHECK" ]; then
-  BUILD_CONFIG="$BUILD_CONFIG heapcheck"
+
+# We sometimes have flaky infrastructure where NTP is broken. In that case
+# do not report it as a failed test.
+if zgrep -q 'Clock considered unsynchronized' $LOGFILE ; then
+  echo Not reporting test that failed due to NTP issues.
+  exit 1
 fi
 
 # Only upload a log if the test failed.

@@ -17,18 +17,23 @@
 #ifndef KUDU_CLIENT_TABLE_ALTERER_INTERNAL_H
 #define KUDU_CLIENT_TABLE_ALTERER_INTERNAL_H
 
-#include <boost/optional.hpp>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include <boost/optional/optional.hpp>
+
 #include "kudu/client/client.h"
+#include "kudu/common/partial_row.h"
+#include "kudu/gutil/macros.h"
 #include "kudu/master/master.pb.h"
+#include "kudu/util/monotime.h"
 #include "kudu/util/status.h"
 
 namespace kudu {
-namespace master {
-class AlterTableRequestPB_AlterColumn;
-} // namespace master
+
+class Schema;
+
 namespace client {
 
 class KuduColumnSpec;
@@ -48,8 +53,16 @@ class KuduTableAlterer::Data {
   struct Step {
     master::AlterTableRequestPB::StepType step_type;
 
-    // Owned by KuduTableAlterer::Data.
+    // Owned by KuduTableAlterer::Data. Only set when the StepType is
+    // [ADD|DROP|RENAME|ALTER]_COLUMN.
     KuduColumnSpec *spec;
+
+    // Lower and upper bound partition keys. Only set when the StepType is
+    // [ADD|DROP]_RANGE_PARTITION.
+    std::unique_ptr<KuduPartialRow> lower_bound;
+    std::unique_ptr<KuduPartialRow> upper_bound;
+    KuduTableCreator::RangePartitionBound lower_bound_type;
+    KuduTableCreator::RangePartitionBound upper_bound_type;
   };
   std::vector<Step> steps_;
 
@@ -58,6 +71,12 @@ class KuduTableAlterer::Data {
   bool wait_;
 
   boost::optional<std::string> rename_to_;
+
+  // Set to true if there are alter partition steps.
+  bool has_alter_partitioning_steps = false;
+
+  // Schema of add/drop range partition bound rows.
+  const Schema* schema_;
 
  private:
   DISALLOW_COPY_AND_ASSIGN(Data);

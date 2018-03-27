@@ -17,15 +17,19 @@
 
 #include "kudu/rpc/rpc.h"
 
-#include <boost/bind.hpp>
+#include <cstdlib>
 #include <string>
 
-#include "kudu/gutil/basictypes.h"
+#include <boost/bind.hpp> // IWYU pragma: keep
+#include <boost/function.hpp>
+#include <glog/logging.h>
+
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/rpc/messenger.h"
 #include "kudu/rpc/rpc_header.pb.h"
 
 using std::shared_ptr;
+using std::string;
 using strings::Substitute;
 using strings::SubstituteAndAppend;
 
@@ -34,16 +38,19 @@ namespace kudu {
 namespace rpc {
 
 bool RpcRetrier::HandleResponse(Rpc* rpc, Status* out_status) {
-  ignore_result(DCHECK_NOTNULL(rpc));
-  ignore_result(DCHECK_NOTNULL(out_status));
+  DCHECK(rpc);
+  DCHECK(out_status);
 
-  // Always retry a TOO_BUSY error.
-  Status controller_status = controller_.status();
+  // Always retry TOO_BUSY and UNAVAILABLE errors.
+  const Status controller_status = controller_.status();
   if (controller_status.IsRemoteError()) {
     const ErrorStatusPB* err = controller_.error_response();
     if (err &&
         err->has_code() &&
-        err->code() == ErrorStatusPB::ERROR_SERVER_TOO_BUSY) {
+        (err->code() == ErrorStatusPB::ERROR_SERVER_TOO_BUSY ||
+         err->code() == ErrorStatusPB::ERROR_UNAVAILABLE)) {
+      // The UNAVAILABLE code is a broader counterpart of the
+      // SERVER_TOO_BUSY. In both cases it's necessary to retry a bit later.
       DelayedRetry(rpc, controller_status);
       return true;
     }
@@ -73,8 +80,7 @@ void RpcRetrier::DelayedRetryCb(Rpc* rpc, const Status& status) {
   if (new_status.ok()) {
     // Has this RPC timed out?
     if (deadline_.Initialized()) {
-      MonoTime now = MonoTime::Now(MonoTime::FINE);
-      if (deadline_.ComesBefore(now)) {
+      if (MonoTime::Now() > deadline_) {
         string err_str = Substitute("$0 passed its deadline", rpc->ToString());
         if (!last_error_.ok()) {
           SubstituteAndAppend(&err_str, ": $0", last_error_.ToString());

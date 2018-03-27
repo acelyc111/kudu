@@ -17,24 +17,32 @@
 
 #include "kudu/rpc/acceptor_pool.h"
 
-#include <gflags/gflags.h>
-#include <glog/logging.h>
-#include <inttypes.h>
-#include <iostream>
-#include <pthread.h>
-#include <stdint.h>
 #include <string>
+#include <ostream>
 #include <vector>
 
+#include <gflags/gflags.h>
+#include <glog/logging.h>
+
+#include "kudu/gutil/basictypes.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/rpc/messenger.h"
 #include "kudu/util/flag_tags.h"
+#include "kudu/util/logging.h"
 #include "kudu/util/metrics.h"
 #include "kudu/util/net/sockaddr.h"
 #include "kudu/util/net/socket.h"
 #include "kudu/util/status.h"
 #include "kudu/util/thread.h"
+
+namespace google {
+namespace protobuf {
+
+class Message;
+
+}
+}
 
 using google::protobuf::Message;
 using std::string;
@@ -60,7 +68,7 @@ AcceptorPool::AcceptorPool(Messenger* messenger, Socket* socket,
                            Sockaddr bind_address)
     : messenger_(messenger),
       socket_(socket->Release()),
-      bind_address_(std::move(bind_address)),
+      bind_address_(bind_address),
       rpc_connections_accepted_(METRIC_rpc_connections_accepted.Instantiate(
           messenger->metric_entity())),
       closing_(false) {}
@@ -111,6 +119,16 @@ void AcceptorPool::Shutdown() {
     CHECK_OK(ThreadJoiner(thread.get()).Join());
   }
   threads_.clear();
+
+  // Close the socket: keeping the descriptor open and, possibly, receiving late
+  // not-to-be-read messages from the peer does not make much sense. The
+  // Socket::Close() method is called upon destruction of the aggregated socket_
+  // object as well. However, the typical ownership pattern of an AcceptorPool
+  // object includes two references wrapped via a shared_ptr smart pointer: one
+  // is held by Messenger, another by RpcServer. If not calling Socket::Close()
+  // here, it would  necessary to wait until Messenger::Shutdown() is called for
+  // the corresponding messenger object to close this socket.
+  ignore_result(socket_.Close());
 }
 
 Sockaddr AcceptorPool::bind_address() const {
@@ -119,6 +137,10 @@ Sockaddr AcceptorPool::bind_address() const {
 
 Status AcceptorPool::GetBoundAddress(Sockaddr* addr) const {
   return socket_.GetSocketAddress(addr);
+}
+
+int64_t AcceptorPool::num_rpc_connections_accepted() const {
+  return rpc_connections_accepted_->value();
 }
 
 void AcceptorPool::RunThread() {
@@ -132,14 +154,15 @@ void AcceptorPool::RunThread() {
       if (Release_Load(&closing_)) {
         break;
       }
-      LOG(WARNING) << "AcceptorPool: accept failed: " << s.ToString();
+      KLOG_EVERY_N_SECS(WARNING, 1) << "AcceptorPool: accept failed: " << s.ToString()
+                                    << THROTTLE_MSG;
       continue;
     }
     s = new_sock.SetNoDelay(true);
     if (!s.ok()) {
-      LOG(WARNING) << "Acceptor with remote = " << remote.ToString()
+      KLOG_EVERY_N_SECS(WARNING, 1) << "Acceptor with remote = " << remote.ToString()
           << " failed to set TCP_NODELAY on a newly accepted socket: "
-          << s.ToString();
+          << s.ToString() << THROTTLE_MSG;
       continue;
     }
     rpc_connections_accepted_->Increment();

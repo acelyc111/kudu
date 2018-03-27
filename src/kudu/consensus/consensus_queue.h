@@ -18,39 +18,90 @@
 #ifndef KUDU_CONSENSUS_CONSENSUS_QUEUE_H_
 #define KUDU_CONSENSUS_CONSENSUS_QUEUE_H_
 
+#include <cstdint>
+#include <functional>
 #include <iosfwd>
-#include <map>
+#include <memory>
 #include <string>
 #include <unordered_map>
-#include <utility>
 #include <vector>
 
-#include "kudu/consensus/consensus.pb.h"
+#include <boost/optional/optional.hpp>
+#include <glog/logging.h>
+#include <gtest/gtest_prod.h>
+
 #include "kudu/consensus/log_cache.h"
-#include "kudu/consensus/log_util.h"
-#include "kudu/consensus/opid_util.h"
+#include "kudu/consensus/metadata.pb.h"
+#include "kudu/consensus/opid.pb.h"
 #include "kudu/consensus/ref_counted_replicate.h"
+#include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/ref_counted.h"
+#include "kudu/gutil/threading/thread_collision_warner.h"
 #include "kudu/util/locks.h"
+#include "kudu/util/metrics.h"
+#include "kudu/util/monotime.h"
 #include "kudu/util/status.h"
+#include "kudu/util/status_callback.h"
 
 namespace kudu {
-template<class T>
-class AtomicGauge;
-class MemTracker;
-class MetricEntity;
-class ThreadPool;
+class ThreadPoolToken;
 
 namespace log {
 class Log;
-class AsyncLogReader;
+}
+
+namespace logging {
+class LogThrottler;
 }
 
 namespace consensus {
+class ConsensusRequestPB;
+class ConsensusResponsePB;
+class ConsensusStatusPB;
 class PeerMessageQueueObserver;
+class TimeManager;
+class StartTabletCopyRequestPB;
 
 // The id for the server-wide consensus queue MemTracker.
 extern const char kConsensusQueueParentTrackerId[];
+
+// State enum for the last known status of a peer tracked by the
+// ConsensusQueue.
+enum class PeerStatus {
+  // The peer has not yet had a round of communication.
+  NEW,
+
+  // The last exchange with the peer was successful. We transmitted
+  // an update to the peer and it accepted it.
+  OK,
+
+  // Some tserver-level or consensus-level error occurred that didn't
+  // fall into any of the below buckets.
+  REMOTE_ERROR,
+
+  // Some RPC-layer level error occurred. For example, a network error or timeout
+  // occurred while attempting to send the RPC.
+  RPC_LAYER_ERROR,
+
+  // The remote tablet server indicated that the tablet was in a FAILED state.
+  TABLET_FAILED,
+
+  // The remote tablet server indicated that the tablet was in a NOT_FOUND state.
+  TABLET_NOT_FOUND,
+
+  // The remote tablet server indicated that the term of this leader was older
+  // than its latest seen term.
+  INVALID_TERM,
+
+  // The remote tablet server was unable to prepare any operations in the most recent
+  // batch.
+  CANNOT_PREPARE,
+
+  // The remote tablet server's log was divergent from the leader's log.
+  LMP_MISMATCH,
+};
+
+const char* PeerStatusToString(PeerStatus p);
 
 // Tracks the state of the peers and which transactions they have replicated.
 // Owns the LogCache which actually holds the replicate messages which are
@@ -59,24 +110,18 @@ extern const char kConsensusQueueParentTrackerId[];
 // This also takes care of pushing requests to peers as new operations are
 // added, and notifying RaftConsensus when the commit index advances.
 //
-// This class is used only on the LEADER side.
-//
-// TODO Right now this class is able to track one outstanding operation
+// TODO(todd): Right now this class is able to track one outstanding operation
 // per peer. If we want to have more than one outstanding RPC we need to
 // modify it.
 class PeerMessageQueue {
  public:
   struct TrackedPeer {
-    explicit TrackedPeer(std::string uuid)
-        : uuid(std::move(uuid)),
-          is_new(true),
-          next_index(kInvalidOpIdIndex),
-          last_received(MinimumOpId()),
-          last_known_committed_idx(MinimumOpId().index()),
-          is_last_exchange_successful(false),
-          last_successful_communication_time(MonoTime::Now(MonoTime::FINE)),
-          needs_remote_bootstrap(false),
-          last_seen_term_(0) {}
+    explicit TrackedPeer(RaftPeerPB peer_pb);
+
+    TrackedPeer() = default;
+
+    // Copy a given TrackedPeer.
+    TrackedPeer& operator=(const TrackedPeer& tracked_peer) = default;
 
     // Check that the terms seen from a given peer only increase
     // monotonically.
@@ -85,13 +130,13 @@ class PeerMessageQueue {
       last_seen_term_ = term;
     }
 
+    const std::string& uuid() const {
+      return peer_pb.permanent_uuid();
+    }
+
     std::string ToString() const;
 
-    // UUID of the peer.
-    const std::string uuid;
-
-    // Whether this is a newly tracked peer.
-    bool is_new;
+    RaftPeerPB peer_pb;
 
     // Next index to send to the peer.
     // This corresponds to "nextIndex" as specified in Raft.
@@ -102,18 +147,33 @@ class PeerMessageQueue {
     OpId last_received;
 
     // The last committed index this peer knows about.
-    int64_t last_known_committed_idx;
+    int64_t last_known_committed_index;
 
-    // Whether the last exchange with this peer was successful.
-    bool is_last_exchange_successful;
+    // The status after our last attempt to communicate with the peer.
+    // See the comments within the PeerStatus enum above for details.
+    PeerStatus last_exchange_status;
 
     // The time of the last communication with the peer.
+    //
+    // NOTE: this does not indicate that the peer successfully made progress at the
+    // given time -- this only indicates that we got some indication that the tablet
+    // server process was alive. It could be that the tablet was not found, etc.
+    // Consult last_exchange_status for details.
+    //
     // Defaults to the time of construction, so does not necessarily mean that
     // successful communication ever took place.
-    MonoTime last_successful_communication_time;
+    MonoTime last_communication_time;
 
-    // Whether the follower was detected to need remote bootstrap.
-    bool needs_remote_bootstrap;
+    // Set to false if it is determined that the remote peer has fallen behind
+    // the local peer's WAL.
+    bool wal_catchup_possible;
+
+    // The peer's latest overall health status.
+    HealthReportPB::HealthStatus last_overall_health_status;
+
+    // Throttler for how often we will log status messages pertaining to this
+    // peer (eg when it is lagging, etc).
+    std::shared_ptr<logging::LogThrottler> status_log_throttler;
 
    private:
     // The last term we saw from a given peer.
@@ -122,38 +182,44 @@ class PeerMessageQueue {
     int64_t last_seen_term_;
   };
 
-  PeerMessageQueue(const scoped_refptr<MetricEntity>& metric_entity,
-                   const scoped_refptr<log::Log>& log,
-                   const RaftPeerPB& local_peer_pb,
-                   const std::string& tablet_id);
-
-  // Initialize the queue.
-  virtual void Init(const OpId& last_locally_replicated);
+  PeerMessageQueue(scoped_refptr<MetricEntity> metric_entity,
+                   scoped_refptr<log::Log> log,
+                   scoped_refptr<TimeManager> time_manager,
+                   RaftPeerPB local_peer_pb,
+                   std::string tablet_id,
+                   std::unique_ptr<ThreadPoolToken> raft_pool_observers_token,
+                   OpId last_locally_replicated,
+                   const OpId& last_locally_committed);
 
   // Changes the queue to leader mode, meaning it tracks majority replicated
   // operations and notifies observers when those change.
   // 'committed_index' corresponds to the id of the last committed operation,
   // i.e. operations with ids <= 'committed_index' should be considered committed.
+  //
   // 'current_term' corresponds to the leader's current term, this is different
   // from 'committed_index.term()' if the leader has not yet committed an
   // operation in the current term.
   // 'active_config' is the currently-active Raft config. This must always be
   // a superset of the tracked peers, and that is enforced with runtime CHECKs.
-  virtual void SetLeaderMode(const OpId& committed_index,
-                             int64_t current_term,
-                             const RaftConfigPB& active_config);
+  void SetLeaderMode(int64_t committed_index,
+                     int64_t current_term,
+                     const RaftConfigPB& active_config);
 
   // Changes the queue to non-leader mode. Currently tracked peers will still
   // be tracked so that the cache is only evicted when the peers no longer need
   // the operations but the queue will no longer advance the majority replicated
   // index or notify observers of its advancement.
-  virtual void SetNonLeaderMode();
+  void SetNonLeaderMode(const RaftConfigPB& active_config);
 
   // Makes the queue track this peer.
-  virtual void TrackPeer(const std::string& peer_uuid);
+  void TrackPeer(const RaftPeerPB& peer_pb);
 
   // Makes the queue untrack this peer.
-  virtual void UntrackPeer(const std::string& peer_uuid);
+  void UntrackPeer(const std::string& uuid);
+
+  // Returns a health report for all active peers.
+  // Returns IllegalState if the local peer is not the leader of the config.
+  std::unordered_map<std::string, HealthReportPB> ReportHealthOfPeers() const;
 
   // Appends a single message to be replicated to the peers.
   // Returns OK unless the message could not be added to the queue for some
@@ -162,7 +228,7 @@ class PeerMessageQueue {
   //
   // This is thread-safe against all of the read methods, but not thread-safe
   // with concurrent Append calls.
-  virtual Status AppendOperation(const ReplicateRefPtr& msg);
+  Status AppendOperation(const ReplicateRefPtr& msg);
 
   // Appends a vector of messages to be replicated to the peers.
   // Returns OK unless the message could not be added to the queue for some
@@ -172,8 +238,20 @@ class PeerMessageQueue {
   //
   // This is thread-safe against all of the read methods, but not thread-safe
   // with concurrent Append calls.
-  virtual Status AppendOperations(const std::vector<ReplicateRefPtr>& msgs,
-                                  const StatusCallback& log_append_callback);
+  Status AppendOperations(const std::vector<ReplicateRefPtr>& msgs,
+                          const StatusCallback& log_append_callback);
+
+  // Truncate all operations coming after 'index'. Following this, the 'last_appended'
+  // operation is reset to the OpId with this index, and the log cache will be truncated
+  // accordingly.
+  void TruncateOpsAfter(int64_t index);
+
+  // Return the last OpId in the log.
+  // Note that this can move backwards after a truncation (TruncateOpsAfter).
+  OpId GetLastOpIdInLog() const;
+
+  // Return the next OpId to be appended to the queue in the current term.
+  OpId GetNextOpId() const;
 
   // Assembles a request for a peer, adding entries past 'op_id' up to
   // 'consensus_max_batch_size_bytes'.
@@ -190,59 +268,78 @@ class PeerMessageQueue {
   // instance of ConsensusRequestPB to RequestForPeer(): the buffer will
   // replace the old entries with new ones without de-allocating the old
   // ones if they are still required.
-  virtual Status RequestForPeer(const std::string& uuid,
-                                ConsensusRequestPB* request,
-                                std::vector<ReplicateRefPtr>* msg_refs,
-                                bool* needs_remote_bootstrap);
+  Status RequestForPeer(const std::string& uuid,
+                        ConsensusRequestPB* request,
+                        std::vector<ReplicateRefPtr>* msg_refs,
+                        bool* needs_tablet_copy);
 
-  // Fill in a StartRemoteBootstrapRequest for the specified peer.
-  // If that peer should not remotely bootstrap, returns a non-OK status.
-  // On success, also internally resets peer->needs_remote_bootstrap to false.
-  virtual Status GetRemoteBootstrapRequestForPeer(const std::string& uuid,
-                                                  StartRemoteBootstrapRequestPB* req);
+  // Fill in a StartTabletCopyRequest for the specified peer.
+  // If that peer should not initiate Tablet Copy, returns a non-OK status.
+  // On success, also internally resets peer->needs_tablet_copy to false.
+  Status GetTabletCopyRequestForPeer(const std::string& uuid,
+                                     StartTabletCopyRequestPB* req);
 
-  // Update the last successful communication timestamp for the given peer
-  // to the current time. This should be called when a non-network related
-  // error is received from the peer, indicating that it is alive, even if it
-  // may not be fully up and running or able to accept updates.
-  void NotifyPeerIsResponsiveDespiteError(const std::string& peer_uuid);
+  // Inform the queue of a new status known for one of its peers.
+  // 'ps' indicates an interpretation of the status, while 'status'
+  // may contain a more specific error message in the case of one of
+  // the error statuses.
+  void UpdatePeerStatus(const std::string& peer_uuid,
+                        PeerStatus ps,
+                        const Status& status);
 
   // Updates the request queue with the latest response of a peer, returns
   // whether this peer has more requests pending.
-  virtual void ResponseFromPeer(const std::string& peer_uuid,
-                                const ConsensusResponsePB& response,
-                                bool* more_pending);
+  void ResponseFromPeer(const std::string& peer_uuid,
+                        const ConsensusResponsePB& response,
+                        bool* more_pending);
+
+  // Called by the consensus implementation to update the queue's watermarks
+  // based on information provided by the leader. This is used for metrics and
+  // log retention.
+  void UpdateFollowerWatermarks(int64_t committed_index,
+                                int64_t all_replicated_index);
+
+  // Updates the last op appended to the leader and the corresponding lag metric.
+  // This should not be called by a leader.
+  void UpdateLastIndexAppendedToLeader(int64_t last_idx_appended_to_leader);
 
   // Closes the queue, peers are still allowed to call UntrackPeer() and
   // ResponseFromPeer() but no additional peers can be tracked or messages
   // queued.
-  virtual void Close();
+  void Close();
 
-  virtual int64_t GetQueuedOperationsSizeBytesForTests() const;
+  int64_t GetQueuedOperationsSizeBytesForTests() const;
 
-  // Returns the last message replicated by all peers, for tests.
-  virtual OpId GetAllReplicatedIndexForTests() const;
+  // Returns the last message replicated by all peers.
+  int64_t GetAllReplicatedIndex() const;
 
+  // Returns the committed index. All operations with index less than or equal to
+  // this index have been committed.
+  int64_t GetCommittedIndex() const;
 
-  virtual OpId GetCommittedIndexForTests() const;
+  // Return true if the committed index falls within the current term.
+  bool IsCommittedIndexInCurrentTerm() const;
 
-  // Returns the current majority replicated OpId, for tests.
-  virtual OpId GetMajorityReplicatedOpIdForTests() const;
+  // Whether the queue run in the leader mode.
+  bool IsInLeaderMode() const;
+
+  // Returns the current majority replicated index, for tests.
+  int64_t GetMajorityReplicatedIndexForTests() const;
 
   // Returns a copy of the TrackedPeer with 'uuid' or crashes if the peer is
   // not being tracked.
-  virtual TrackedPeer GetTrackedPeerForTests(std::string uuid);
+  TrackedPeer GetTrackedPeerForTests(const std::string& uuid);
 
-  virtual std::string ToString() const;
+  std::string ToString() const;
 
   // Dumps the contents of the queue to the provided string vector.
-  virtual void DumpToStrings(std::vector<std::string>* lines) const;
+  void DumpToStrings(std::vector<std::string>* lines) const;
 
-  virtual void DumpToHtml(std::ostream& out) const;
+  void DumpToHtml(std::ostream& out) const;
 
-  virtual void RegisterObserver(PeerMessageQueueObserver* observer);
+  void RegisterObserver(PeerMessageQueueObserver* observer);
 
-  virtual Status UnRegisterObserver(PeerMessageQueueObserver* observer);
+  Status UnRegisterObserver(PeerMessageQueueObserver* observer);
 
   struct Metrics {
     // Keeps track of the number of ops. that are completed by a majority but still need
@@ -250,14 +347,21 @@ class PeerMessageQueue {
     scoped_refptr<AtomicGauge<int64_t> > num_majority_done_ops;
     // Keeps track of the number of ops. that are still in progress (IsDone() returns false).
     scoped_refptr<AtomicGauge<int64_t> > num_in_progress_ops;
+    // Keeps track of the number of ops. behind the leader the peer is, measured as the difference
+    // between the latest appended op index on this peer versus on the leader (0 if leader).
+    scoped_refptr<AtomicGauge<int64_t> > num_ops_behind_leader;
 
     explicit Metrics(const scoped_refptr<MetricEntity>& metric_entity);
   };
 
-  virtual ~PeerMessageQueue();
+  ~PeerMessageQueue();
 
  private:
   FRIEND_TEST(ConsensusQueueTest, TestQueueAdvancesCommittedIndex);
+  FRIEND_TEST(ConsensusQueueTest, TestQueueMovesWatermarksBackward);
+  FRIEND_TEST(ConsensusQueueTest, TestFollowerCommittedIndexAndMetrics);
+  FRIEND_TEST(ConsensusQueueUnitTest, PeerHealthStatus);
+  FRIEND_TEST(RaftConsensusQuorumTest, TestReplicasEnforceTheLogMatchingProperty);
 
   // Mode specifies how the queue currently behaves:
   // LEADER - Means the queue tracks remote peers and replicates whatever messages
@@ -270,24 +374,33 @@ class PeerMessageQueue {
   };
 
   enum State {
-    kQueueConstructed,
     kQueueOpen,
     kQueueClosed
+  };
+
+  // Types of replicas to count when advancing a queue watermark.
+  enum ReplicaTypes {
+    ALL_REPLICAS,
+    VOTER_REPLICAS,
   };
 
   struct QueueState {
 
     // The first operation that has been replicated to all currently
     // tracked peers.
-    OpId all_replicated_opid;
+    int64_t all_replicated_index;
 
     // The index of the last operation replicated to a majority.
     // This is usually the same as 'committed_index' but might not
     // be if the terms changed.
-    OpId majority_replicated_opid;
+    int64_t majority_replicated_index;
 
     // The index of the last operation to be considered committed.
-    OpId committed_index;
+    int64_t committed_index;
+
+    // The index of the last operation appended to the leader. A follower will use this to
+    // determine how many ops behind the leader it is, as a soft metric for follower lag.
+    int64_t last_idx_appended_to_leader;
 
     // The opid of the last operation appended to the queue.
     OpId last_appended;
@@ -296,9 +409,12 @@ class PeerMessageQueue {
     // Set by the last appended operation.
     // If the queue owner's term is less than the term observed
     // from another peer the queue owner must step down.
-    // TODO: it is likely to be cleaner to get this from the ConsensusMetadata
-    // rather than by snooping on what operations are appended to the queue.
     int64_t current_term;
+
+    // The first index that we saw that was part of this current term.
+    // When the term advances, this is set to boost::none, and then set
+    // when the first operation is appended in the new term.
+    boost::optional<int64_t> first_index_in_current_term;
 
     // The size of the majority for the queue.
     int majority_size_;
@@ -320,18 +436,39 @@ class PeerMessageQueue {
   // fatal error.
   bool IsOpInLog(const OpId& desired_op) const;
 
-  void NotifyObserversOfMajorityReplOpChange(const OpId new_majority_replicated_op);
-  void NotifyObserversOfMajorityReplOpChangeTask(const OpId new_majority_replicated_op);
+  // Return true if it would be safe to evict the peer 'evict_uuid' at this
+  // point in time.
+  bool SafeToEvictUnlocked(const std::string& evict_uuid) const;
 
+  // Update a peer's last_health_status field and trigger the appropriate
+  // notifications.
+  void UpdatePeerHealthUnlocked(TrackedPeer* peer);
+
+  // Update the peer's last exchange status, and other fields, based on the
+  // response.
+  void UpdateExchangeStatus(TrackedPeer* peer, const TrackedPeer& prev_peer_state,
+                            const ConsensusResponsePB& response, bool* lmp_mismatch);
+
+  // Check if the peer is a NON_VOTER candidate ready for promotion. If so,
+  // trigger promotion.
+  void PromoteIfNeeded(TrackedPeer* peer, const TrackedPeer& prev_peer_state,
+                       const ConsensusStatusPB& status);
+
+  // Calculate a peer's up-to-date health status based on internal fields.
+  static HealthReportPB::HealthStatus PeerHealthStatus(const TrackedPeer& peer);
+
+  // Asynchronously trigger various types of observer notifications on a
+  // separate thread.
+  void NotifyObserversOfCommitIndexChange(int64_t new_commit_index);
   void NotifyObserversOfTermChange(int64_t term);
-  void NotifyObserversOfTermChangeTask(int64_t term);
-
   void NotifyObserversOfFailedFollower(const std::string& uuid,
                                        int64_t term,
                                        const std::string& reason);
-  void NotifyObserversOfFailedFollowerTask(const std::string& uuid,
-                                           int64_t term,
-                                           const std::string& reason);
+  void NotifyObserversOfPeerToPromote(const std::string& peer_uuid);
+  void NotifyObserversOfPeerHealthChange();
+
+  // Notify all PeerMessageQueueObservers using the given callback function.
+  void NotifyObserversTask(const std::function<void(PeerMessageQueueObserver*)>& func);
 
   typedef std::unordered_map<std::string, TrackedPeer*> PeersMap;
 
@@ -342,7 +479,11 @@ class PeerMessageQueue {
   void DumpToStringsUnlocked(std::vector<std::string>* lines) const;
 
   // Updates the metrics based on index math.
-  void UpdateMetrics();
+  void UpdateMetricsUnlocked();
+
+  // Update the metric that measures how many ops behind the leader the local
+  // replica believes it is (0 if leader).
+  void UpdateLagMetricsUnlocked();
 
   void ClearUnlocked();
 
@@ -350,7 +491,13 @@ class PeerMessageQueue {
   // 'preceding_first_op_in_queue_' if the queue is empty.
   const OpId& GetLastOp() const;
 
-  void TrackPeerUnlocked(const std::string& uuid);
+  void TrackPeerUnlocked(const RaftPeerPB& peer_pb);
+
+  void UntrackPeerUnlocked(const std::string& uuid);
+
+  // We need the local peer in the config because it contains the current
+  // 'member_type' of the local node while 'local_peer_pb_' does not.
+  void TrackLocalPeerUnlocked();
 
   // Checks that if the queue is in LEADER mode then all registered peers are
   // in the active config. Crashes with a FATAL log message if this invariant
@@ -363,18 +510,22 @@ class PeerMessageQueue {
                                const Status& status);
 
   // Advances 'watermark' to the smallest op that 'num_peers_required' have.
+  // If 'replica_types' is set to VOTER_REPLICAS, the 'num_peers_required' is
+  // interpreted as "number of voters required". If 'replica_types' is set to
+  // ALL_REPLICAS, 'num_peers_required' counts any peer, regardless of its
+  // voting status.
   void AdvanceQueueWatermark(const char* type,
-                             OpId* watermark,
+                             int64_t* watermark,
                              const OpId& replicated_before,
                              const OpId& replicated_after,
                              int num_peers_required,
+                             ReplicaTypes replica_types,
                              const TrackedPeer* who_caused);
 
   std::vector<PeerMessageQueueObserver*> observers_;
 
-  // The pool which executes observer notifications.
-  // TODO consider reusing a another pool.
-  gscoped_ptr<ThreadPool> observers_pool_;
+  // The pool token which executes observer notifications.
+  std::unique_ptr<ThreadPoolToken> raft_pool_observers_token_;
 
   // PB containing identifying information about the local peer.
   const RaftPeerPB local_peer_pb_;
@@ -396,31 +547,32 @@ class PeerMessageQueue {
   LogCache log_cache_;
 
   Metrics metrics_;
+
+  scoped_refptr<TimeManager> time_manager_;
 };
 
 // The interface between RaftConsensus and the PeerMessageQueue.
 class PeerMessageQueueObserver {
  public:
-  // Called by the queue each time the response for a peer is handled with
-  // the resulting majority replicated index.
-  // The consensus implementation decides the commit index based on that
-  // and triggers the apply for pending transactions.
-  // 'committed_index' is set to the id of the last operation considered
-  // committed by consensus.
-  // The implementation is idempotent, i.e. independently of the ordering of
-  // calls to this method only non-triggered applys will be started.
-  virtual void UpdateMajorityReplicated(const OpId& majority_replicated,
-                                        OpId* committed_index) = 0;
+  // Notify the observer that the commit index has advanced to 'committed_index'.
+  virtual void NotifyCommitIndex(int64_t committed_index) = 0;
 
-  // Notify the Consensus implementation that a follower replied with a term
+  // Notify the observer that a follower replied with a term
   // higher than that established in the queue.
   virtual void NotifyTermChange(int64_t term) = 0;
 
-  // Notify Consensus that a peer is unable to catch up due to falling behind
+  // Notify the observer that a peer is unable to catch up due to falling behind
   // the leader's log GC threshold.
   virtual void NotifyFailedFollower(const std::string& peer_uuid,
                                     int64_t term,
                                     const std::string& reason) = 0;
+
+  // Notify the observer that the specified peer is ready to be promoted from
+  // NON_VOTER to VOTER.
+  virtual void NotifyPeerToPromote(const std::string& peer_uuid) = 0;
+
+  // Notify the observer that the health of one of the peers has changed.
+  virtual void NotifyPeerHealthChange() = 0;
 
   virtual ~PeerMessageQueueObserver() {}
 };

@@ -16,12 +16,24 @@
 // under the License.
 
 #include "kudu/client/client-test-util.h"
-#include "kudu/client/row_result.h"
 
+#include <string>
+#include <ostream>
 #include <vector>
 
+#include <glog/logging.h>
+#include <gtest/gtest.h>
+
+#include "kudu/client/row_result.h"
+#include "kudu/client/scan_batch.h"
+#include "kudu/client/schema.h"
+#include "kudu/client/write_op.h"
 #include "kudu/gutil/stl_util.h"
-#include "kudu/util/test_util.h"
+#include "kudu/util/status.h"
+#include "kudu/util/test_macros.h"
+
+using std::string;
+using std::vector;
 
 namespace kudu {
 namespace client {
@@ -29,7 +41,7 @@ namespace client {
 void LogSessionErrorsAndDie(const sp::shared_ptr<KuduSession>& session,
                             const Status& s) {
   CHECK(!s.ok());
-  std::vector<KuduError*> errors;
+  vector<KuduError*> errors;
   ElementDeleter d(&errors);
   bool overflow;
   session->GetPendingErrors(&errors, &overflow);
@@ -52,20 +64,72 @@ void LogSessionErrorsAndDie(const sp::shared_ptr<KuduSession>& session,
 void ScanTableToStrings(KuduTable* table, vector<string>* row_strings) {
   row_strings->clear();
   KuduScanner scanner(table);
+  // TODO(dralves) Change this to READ_AT_SNAPSHOT, fault tolerant scan and get rid
+  // of the retry code below.
   ASSERT_OK(scanner.SetSelection(KuduClient::LEADER_ONLY));
-  scanner.SetTimeoutMillis(60000);
-  ScanToStrings(&scanner, row_strings);
+  ASSERT_OK(scanner.SetTimeoutMillis(15000));
+  ASSERT_OK(ScanToStrings(&scanner, row_strings));
 }
 
-void ScanToStrings(KuduScanner* scanner, vector<string>* row_strings) {
-  ASSERT_OK(scanner->Open());
+int64_t CountTableRows(KuduTable* table) {
+  vector<string> rows;
+  client::ScanTableToStrings(table, &rows);
+  return rows.size();
+}
+
+Status CountRowsWithRetries(KuduScanner* scanner, size_t* row_count) {
+  if (!scanner) {
+    return Status::InvalidArgument("null scanner");
+  }
+  // KUDU-1656: there might be timeouts, so re-try the operations
+  // to avoid flakiness.
+  Status row_count_status;
+  size_t actual_row_count = 0;
+  row_count_status = scanner->Open();
+  for (size_t i = 0; i < 3; ++i) {
+    if (!row_count_status.ok()) {
+      if (row_count_status.IsTimedOut()) {
+        // Start the row count over again.
+        continue;
+      }
+      RETURN_NOT_OK(row_count_status);
+    }
+    size_t count = 0;
+    while (scanner->HasMoreRows()) {
+      KuduScanBatch batch;
+      row_count_status = scanner->NextBatch(&batch);
+      if (!row_count_status.ok()) {
+        if (row_count_status.IsTimedOut()) {
+          // Break the NextBatch() cycle and start row count over again.
+          break;
+        }
+        RETURN_NOT_OK(row_count_status);
+      }
+      count += batch.NumRows();
+    }
+    if (row_count_status.ok()) {
+      // Success: stop the retry cycle.
+      actual_row_count = count;
+      break;
+    }
+  }
+  RETURN_NOT_OK(row_count_status);
+  if (row_count) {
+    *row_count = actual_row_count;
+  }
+  return Status::OK();
+}
+
+Status ScanToStrings(KuduScanner* scanner, vector<string>* row_strings) {
+  RETURN_NOT_OK(scanner->Open());
   vector<KuduRowResult> rows;
   while (scanner->HasMoreRows()) {
-    ASSERT_OK(scanner->NextBatch(&rows));
+    RETURN_NOT_OK(scanner->NextBatch(&rows));
     for (const KuduRowResult& row : rows) {
       row_strings->push_back(row.ToString());
     }
   }
+  return Status::OK();
 }
 
 KuduSchema KuduSchemaFromSchema(const Schema& schema) {

@@ -14,35 +14,35 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-#ifndef KUDU_INTEGRATION_TESTS_CLUSTER_VERIFIER_H
-#define KUDU_INTEGRATION_TESTS_CLUSTER_VERIFIER_H
+#pragma once
 
 #include <string>
 
 #include "kudu/gutil/macros.h"
 #include "kudu/tools/ksck.h"
-#include "kudu/util/monotime.h"
 #include "kudu/util/status.h"
+#include "kudu/util/monotime.h"
 
 namespace kudu {
 
-using tools::ChecksumOptions;
-
-class ExternalMiniCluster;
-class MonoDelta;
+namespace cluster {
+class MiniCluster;
+} // namespace cluster
 
 // Utility class for integration tests to verify that the cluster is in a good state.
 class ClusterVerifier {
  public:
-  explicit ClusterVerifier(ExternalMiniCluster* cluster);
-  ~ClusterVerifier();
+  explicit ClusterVerifier(cluster::MiniCluster* cluster);
+
+  // Set the timeout for read/write/admin operations.
+  void SetOperationsTimeout(const MonoDelta& timeout);
 
   // Set the amount of time which we'll retry trying to verify the cluster
   // state. We retry because it's possible that one of the replicas is behind
   // but in the process of catching up.
   void SetVerificationTimeout(const MonoDelta& timeout);
 
-  /// Set the number of concurrent scans to execute per tablet server.
+  // Set the number of concurrent scans to execute per tablet server.
   void SetScanConcurrency(int concurrency);
 
   // Verify that the cluster is in good state. Triggers a gtest assertion failure
@@ -76,9 +76,10 @@ class ClusterVerifier {
                                 int expected_row_count,
                                 const MonoDelta& timeout);
 
- private:
-  Status DoKsck();
+  // Run the ksck utility against the cluster.
+  Status RunKsck();
 
+ private:
   // Implementation for CheckRowCount -- returns a Status instead of firing
   // gtest assertions.
   Status DoCheckRowCount(const std::string& table_name,
@@ -86,12 +87,13 @@ class ClusterVerifier {
                          int expected_row_count);
 
 
-  ExternalMiniCluster* cluster_;
+  cluster::MiniCluster* cluster_;
 
-  ChecksumOptions checksum_options_;
+  tools::ChecksumOptions checksum_options_;
+
+  MonoDelta operations_timeout_;
 
   DISALLOW_COPY_AND_ASSIGN(ClusterVerifier);
 };
 
 } // namespace kudu
-#endif /* KUDU_INTEGRATION_TESTS_CLUSTER_VERIFIER_H */

@@ -14,14 +14,17 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-#ifndef KUDU_CLIENT_CLIENT_TEST_UTIL_H
-#define KUDU_CLIENT_CLIENT_TEST_UTIL_H
 
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
+#include "kudu/gutil/port.h"
 #include "kudu/client/client.h"
-#include "kudu/gutil/macros.h"
+#include "kudu/client/shared_ptr.h"
 #include "kudu/util/status.h"
 
 namespace kudu {
@@ -44,14 +47,21 @@ inline void FlushSessionOrDie(const sp::shared_ptr<KuduSession>& session) {
   }
 }
 
+// Scans in LEADER_ONLY mode, returning stringified rows in the given vector.
 void ScanTableToStrings(KuduTable* table, std::vector<std::string>* row_strings);
 
-void ScanToStrings(KuduScanner* scanner, std::vector<std::string>* row_strings);
+// Count the number of rows in the table in LEADER_ONLY mode.
+int64_t CountTableRows(KuduTable* table);
+
+// Open the specified scanner and iterate through the rows, returning the row
+// count. The scan operations are retried a few times in case of a timeout.
+Status CountRowsWithRetries(KuduScanner* scanner, size_t* row_count);
+
+Status ScanToStrings(KuduScanner* scanner,
+                     std::vector<std::string>* row_strings) WARN_UNUSED_RESULT;
 
 // Convert a kudu::Schema to a kudu::client::KuduSchema.
 KuduSchema KuduSchemaFromSchema(const Schema& schema);
 
 } // namespace client
 } // namespace kudu
-
-#endif /* KUDU_CLIENT_CLIENT_TEST_UTIL_H */

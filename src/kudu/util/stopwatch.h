@@ -25,6 +25,7 @@
 #if defined(__APPLE__)
 #include <mach/clock.h>
 #include <mach/mach.h>
+#include <mach/thread_info.h>
 #endif  // defined(__APPLE__)
 
 #include "kudu/gutil/macros.h"
@@ -63,6 +64,11 @@ namespace kudu {
   kudu::sw_internal::LogTiming VARNAME_LINENUM(_log_timing)(__FILE__, __LINE__, \
       google::severity, "", description, -1, true);
 
+// Scoped version of LOG_SLOW_EXECUTION().
+#define SCOPED_LOG_SLOW_EXECUTION(severity, max_expected_millis, description) \
+  kudu::sw_internal::LogTiming VARNAME_LINENUM(_log_timing)(__FILE__, __LINE__, \
+      google::severity, "", description, max_expected_millis, true)
+
 // Scoped version of LOG_SLOW_EXECUTION() but with a prefix.
 #define SCOPED_LOG_SLOW_EXECUTION_PREFIX(severity, max_expected_millis, prefix, description) \
   kudu::sw_internal::LogTiming VARNAME_LINENUM(_log_timing)(__FILE__, __LINE__, \
@@ -95,20 +101,38 @@ namespace kudu {
   kudu::sw_internal::LogTiming VARNAME_LINENUM(_log_timing)(__FILE__, __LINE__, \
       google::INFO, "", description, -1, VLOG_IS_ON(vlog_level));
 
+
+// Workaround for the clang analyzer being confused by the above loop-based macros.
+// The analyzer thinks the macros might loop more than once, and thus generates
+// false positives. So, for its purposes, just make them empty.
+#if defined(CLANG_TIDY) || defined(__clang_analyzer__)
+
+#undef LOG_TIMING_PREFIX_IF
+#define LOG_TIMING_PREFIX_IF(severity, condition, prefix, description)
+
+#undef VLOG_TIMING
+#define VLOG_TIMING(vlog_level, description)
+
+#undef LOG_SLOW_EXECUTION
+#define LOG_SLOW_EXECUTION(severity, max_expected_millis, description)
+#endif
+
+
 #define NANOS_PER_SECOND 1000000000.0
 #define NANOS_PER_MILLISECOND 1000000.0
 
 class Stopwatch;
 
-typedef uint64_t nanosecond_type;
+typedef int64_t nanosecond_type;
 
 // Structure which contains an elapsed amount of wall/user/sys time.
 struct CpuTimes {
   nanosecond_type wall;
   nanosecond_type user;
   nanosecond_type system;
+  int64_t context_switches;
 
-  void clear() { wall = user = system = 0LL; }
+  void clear() { wall = user = system = context_switches = 0LL; }
 
   // Return a string formatted similar to the output of the "time" shell command.
   std::string ToString() const {
@@ -138,11 +162,16 @@ struct CpuTimes {
 //
 // Wall clock time is based on a monotonic timer, so can be reliably used for
 // determining durations.
-// CPU time is based on the current thread's usage (not the whole process).
+// CPU time is based on either current thread's usage or the usage of the whole
+// process, depending on the value of 'Mode' passed to the constructor.
 //
 // The implementation relies on several syscalls, so should not be used for
 // hot paths, but is useful for timing anything on the granularity of seconds
 // or more.
+//
+// NOTE: the user time reported by this class is based on Linux scheduler ticks
+// and thus has low precision. Use GetThreadCpuTimeMicros() from walltime.h if
+// more accurate per-thread CPU usage timing is required.
 class Stopwatch {
  public:
 
@@ -156,8 +185,8 @@ class Stopwatch {
 
   // Construct a new stopwatch. The stopwatch is initially stopped.
   explicit Stopwatch(Mode mode = THIS_THREAD)
-    : stopped_(true),
-      mode_(mode) {
+      : mode_(mode),
+        stopped_(true) {
     times_.clear();
   }
 
@@ -178,6 +207,7 @@ class Stopwatch {
     times_.wall = current.wall - times_.wall;
     times_.user = current.user - times_.user;
     times_.system = current.system - times_.system;
+    times_.context_switches = current.context_switches - times_.context_switches;
   }
 
   // Return the elapsed amount of time. If the stopwatch is running, then returns
@@ -192,6 +222,7 @@ class Stopwatch {
     current.wall -= times_.wall;
     current.user -= times_.user;
     current.system -= times_.system;
+    current.context_switches -= times_.context_switches;
     return current;
   }
 
@@ -213,6 +244,7 @@ class Stopwatch {
     times_.wall   -= current.wall;
     times_.user   -= current.user;
     times_.system -= current.system;
+    times_.context_switches -= current.context_switches;
   }
 
   bool is_stopped() const {
@@ -226,15 +258,17 @@ class Stopwatch {
 
 #if defined(__APPLE__)
     if (mode_ == THIS_THREAD) {
-      //Adapted from http://blog.kuriositaet.de/?p=257.
-      struct task_basic_info t_info;
-      mach_msg_type_number_t t_info_count = TASK_BASIC_INFO_COUNT;
-      CHECK_EQ(KERN_SUCCESS, task_info(mach_task_self(), TASK_THREAD_TIMES_INFO,
-                                       (task_info_t)&t_info, &t_info_count));
+      // Adapted from https://codereview.chromium.org/16818003
+      thread_basic_info_data_t t_info;
+      mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+      CHECK_EQ(KERN_SUCCESS, thread_info(mach_thread_self(), THREAD_BASIC_INFO,
+                                         (thread_info_t)&t_info, &count));
       usage.ru_utime.tv_sec = t_info.user_time.seconds;
       usage.ru_utime.tv_usec = t_info.user_time.microseconds;
       usage.ru_stime.tv_sec = t_info.system_time.seconds;
       usage.ru_stime.tv_usec = t_info.system_time.microseconds;
+      usage.ru_nivcsw = t_info.suspend_count;
+      usage.ru_nvcsw = 0;
     } else {
       CHECK_EQ(0, getrusage(RUSAGE_SELF, &usage));
     }
@@ -248,14 +282,14 @@ class Stopwatch {
     CHECK_EQ(0, clock_gettime(CLOCK_MONOTONIC, &wall));
 #endif  // defined(__APPLE__)
     times->wall   = wall.tv_sec * 1000000000L + wall.tv_nsec;
-    times->user   = usage.ru_utime.tv_sec * 1000000000L + usage.ru_utime.tv_usec * 1000;
-    times->system = usage.ru_stime.tv_sec * 1000000000L + usage.ru_stime.tv_usec * 1000;
+    times->user   = usage.ru_utime.tv_sec * 1000000000L + usage.ru_utime.tv_usec * 1000L;
+    times->system = usage.ru_stime.tv_sec * 1000000000L + usage.ru_stime.tv_usec * 1000L;
+    times->context_switches = usage.ru_nvcsw + usage.ru_nivcsw;
   }
 
+  const Mode mode_;
   bool stopped_;
-
   CpuTimes times_;
-  Mode mode_;
 };
 
 
@@ -301,7 +335,7 @@ class LogTiming {
   const char *file_;
   const int line_;
   const google::LogSeverity severity_;
-  const string prefix_;
+  const std::string prefix_;
   const std::string description_;
   const int64_t max_expected_millis_;
   const bool should_print_;
@@ -312,7 +346,10 @@ class LogTiming {
   void Print(int64_t max_expected_millis) {
     stopwatch_.stop();
     CpuTimes times = stopwatch_.elapsed();
-    if (times.wall_millis() > max_expected_millis) {
+    // TODO(todd): for some reason, times.wall_millis() sometimes ends up negative
+    // on rare occasion, for unclear reasons, so we have to check max_expected_millis
+    // < 0 to be sure we always print when requested.
+    if (max_expected_millis < 0 || times.wall_millis() > max_expected_millis) {
       google::LogMessage(file_, line_, severity_).stream()
         << prefix_ << "Time spent " << description_ << ": "
         << times.ToString();

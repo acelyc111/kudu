@@ -17,71 +17,83 @@
 
 #include "kudu/rpc/connection.h"
 
-#include <boost/intrusive/list.hpp>
-#include <gflags/gflags.h>
-#include <glog/logging.h>
-#include <stdint.h>
-
+#include <algorithm>
+#include <cerrno>
 #include <iostream>
+#include <memory>
+#include <set>
 #include <string>
-#include <vector>
+#include <type_traits>
+
+#include <boost/intrusive/detail/list_iterator.hpp>
+#include <boost/intrusive/list.hpp>
+#include <ev.h>
+#include <glog/logging.h>
 
 #include "kudu/gutil/map-util.h"
+#include "kudu/gutil/move.h"
+#include "kudu/util/slice.h"
 #include "kudu/gutil/strings/human_readable.h"
 #include "kudu/gutil/strings/substitute.h"
-#include "kudu/rpc/auth_store.h"
-#include "kudu/rpc/rpc_introspection.pb.h"
-#include "kudu/rpc/constants.h"
+#include "kudu/rpc/inbound_call.h"
 #include "kudu/rpc/messenger.h"
+#include "kudu/rpc/outbound_call.h"
 #include "kudu/rpc/reactor.h"
 #include "kudu/rpc/rpc_controller.h"
 #include "kudu/rpc/rpc_header.pb.h"
-#include "kudu/rpc/sasl_client.h"
-#include "kudu/rpc/sasl_server.h"
+#include "kudu/rpc/rpc_introspection.pb.h"
 #include "kudu/rpc/transfer.h"
-#include "kudu/util/debug-util.h"
 #include "kudu/util/net/sockaddr.h"
+#include "kudu/util/net/socket.h"
 #include "kudu/util/status.h"
-#include "kudu/util/trace.h"
 
+using std::includes;
+using std::set;
 using std::shared_ptr;
-using std::vector;
+using std::unique_ptr;
 using strings::Substitute;
 
 namespace kudu {
 namespace rpc {
 
+typedef OutboundCall::Phase Phase;
+
 ///
 /// Connection
 ///
-Connection::Connection(ReactorThread *reactor_thread, Sockaddr remote,
-                       int socket, Direction direction)
+Connection::Connection(ReactorThread *reactor_thread,
+                       Sockaddr remote,
+                       unique_ptr<Socket> socket,
+                       Direction direction,
+                       CredentialsPolicy policy)
     : reactor_thread_(reactor_thread),
-      socket_(socket),
-      remote_(std::move(remote)),
+      remote_(remote),
+      socket_(std::move(socket)),
       direction_(direction),
-      last_activity_time_(MonoTime::Now(MonoTime::FINE)),
+      last_activity_time_(MonoTime::Now()),
       is_epoll_registered_(false),
       next_call_id_(1),
-      sasl_client_(kSaslAppName, socket),
-      sasl_server_(kSaslAppName, socket),
-      negotiation_complete_(false) {}
+      credentials_policy_(policy),
+      negotiation_complete_(false),
+      is_confidential_(false),
+      scheduled_for_shutdown_(false) {
+}
 
 Status Connection::SetNonBlocking(bool enabled) {
-  return socket_.SetNonBlocking(enabled);
+  return socket_->SetNonBlocking(enabled);
 }
 
 void Connection::EpollRegister(ev::loop_ref& loop) {
   DCHECK(reactor_thread_->IsCurrentThread());
   DVLOG(4) << "Registering connection for epoll: " << ToString();
   write_io_.set(loop);
-  write_io_.set(socket_.GetFd(), ev::WRITE);
+  write_io_.set(socket_->GetFd(), ev::WRITE);
   write_io_.set<Connection, &Connection::WriteHandler>(this);
   if (direction_ == CLIENT && negotiation_complete_) {
     write_io_.start();
   }
   read_io_.set(loop);
-  read_io_.set(socket_.GetFd(), ev::READ);
+  read_io_.set(socket_->GetFd(), ev::READ);
   read_io_.set<Connection, &Connection::ReadHandler>(this);
   read_io_.start();
   is_epoll_registered_ = true;
@@ -126,14 +138,16 @@ bool Connection::Idle() const {
   return true;
 }
 
-void Connection::Shutdown(const Status &status) {
+void Connection::Shutdown(const Status &status,
+                          unique_ptr<ErrorStatusPB> rpc_error) {
   DCHECK(reactor_thread_->IsCurrentThread());
-  shutdown_status_ = status;
+  shutdown_status_ = status.CloneAndPrepend("RPC connection failed");
 
   if (inbound_ && inbound_->TransferStarted()) {
-    double secs_since_active = reactor_thread_->cur_time()
-        .GetDeltaSince(last_activity_time_).ToSeconds();
-    LOG(WARNING) << "Shutting down connection " << ToString() << " with pending inbound data ("
+    double secs_since_active =
+        (reactor_thread_->cur_time() - last_activity_time_).ToSeconds();
+    LOG(WARNING) << "Shutting down " << ToString()
+                 << " with pending inbound data ("
                  << inbound_->StatusAsString() << ", last active "
                  << HumanReadableElapsedTime::ToShortString(secs_since_active)
                  << " ago, status=" << status.ToString() << ")";
@@ -143,7 +157,15 @@ void Connection::Shutdown(const Status &status) {
   for (const car_map_t::value_type &v : awaiting_response_) {
     CallAwaitingResponse *c = v.second;
     if (c->call) {
-      c->call->SetFailed(status);
+      // Make sure every awaiting call receives the error info, if any.
+      unique_ptr<ErrorStatusPB> error;
+      if (rpc_error) {
+        error.reset(new ErrorStatusPB(*rpc_error));
+      }
+      c->call->SetFailed(status,
+                         negotiation_complete_ ? Phase::REMOTE_CALL
+                                               : Phase::CONNECTION_NEGOTIATION,
+                         std::move(error));
     }
     // And we must return the CallAwaitingResponse to the pool
     car_pool_.Destroy(c);
@@ -160,7 +182,9 @@ void Connection::Shutdown(const Status &status) {
   read_io_.stop();
   write_io_.stop();
   is_epoll_registered_ = false;
-  WARN_NOT_OK(socket_.Close(), "Error closing socket");
+  if (socket_) {
+    WARN_NOT_OK(socket_->Close(), "Error closing socket");
+  }
 }
 
 void Connection::QueueOutbound(gscoped_ptr<OutboundTransfer> transfer) {
@@ -190,6 +214,21 @@ Connection::CallAwaitingResponse::~CallAwaitingResponse() {
 }
 
 void Connection::CallAwaitingResponse::HandleTimeout(ev::timer &watcher, int revents) {
+  if (remaining_timeout > 0) {
+    if (watcher.remaining() < -1.0) {
+      LOG(WARNING) << "RPC call timeout handler was delayed by "
+                   << -watcher.remaining() << "s! This may be due to a process-wide "
+                   << "pause such as swapping, logging-related delays, or allocator lock "
+                   << "contention. Will allow an additional "
+                   << remaining_timeout << "s for a response.";
+    }
+
+    watcher.set(remaining_timeout, 0);
+    watcher.start();
+    remaining_timeout = 0;
+    return;
+  }
+
   conn->HandleOutboundCallTimeout(this);
 }
 
@@ -200,7 +239,11 @@ void Connection::HandleOutboundCallTimeout(CallAwaitingResponse *car) {
   DCHECK(!car->call->IsFinished());
 
   // Mark the call object as failed.
-  car->call->SetTimedOut();
+  car->call->SetTimedOut(negotiation_complete_ ? Phase::REMOTE_CALL
+                                               : Phase::CONNECTION_NEGOTIATION);
+
+  // Test cancellation when 'car->call' is in 'TIMED_OUT' state
+  MaybeInjectCancellation(car->call);
 
   // Drop the reference to the call. If the original caller has moved on after
   // seeing the timeout, we no longer need to hold onto the allocated memory
@@ -214,45 +257,66 @@ void Connection::HandleOutboundCallTimeout(CallAwaitingResponse *car) {
   // already timed out.
 }
 
+void Connection::CancelOutboundCall(const shared_ptr<OutboundCall> &call) {
+  CallAwaitingResponse* car = FindPtrOrNull(awaiting_response_, call->call_id());
+  if (car != nullptr) {
+    // car->call may be NULL if the call has timed out already.
+    DCHECK(!car->call || car->call.get() == call.get());
+    car->call.reset();
+  }
+}
+
+// Inject a cancellation when 'call' is in state 'FLAGS_rpc_inject_cancellation_state'.
+void inline Connection::MaybeInjectCancellation(const shared_ptr<OutboundCall> &call) {
+  if (PREDICT_FALSE(call->ShouldInjectCancellation())) {
+    reactor_thread_->reactor()->messenger()->QueueCancellation(call);
+  }
+}
 
 // Callbacks after sending a call on the wire.
 // This notifies the OutboundCall object to change its state to SENT once it
 // has been fully transmitted.
 struct CallTransferCallbacks : public TransferCallbacks {
  public:
-  explicit CallTransferCallbacks(shared_ptr<OutboundCall> call)
-      : call_(std::move(call)) {}
+  explicit CallTransferCallbacks(shared_ptr<OutboundCall> call,
+                                 Connection *conn)
+      : call_(std::move(call)), conn_(conn) {}
 
   virtual void NotifyTransferFinished() OVERRIDE {
     // TODO: would be better to cancel the transfer while it is still on the queue if we
     // timed out before the transfer started, but there is still a race in the case of
     // a partial send that we have to handle here
     if (call_->IsFinished()) {
-      DCHECK(call_->IsTimedOut());
+      DCHECK(call_->IsTimedOut() || call_->IsCancelled());
     } else {
       call_->SetSent();
+      // Test cancellation when 'call_' is in 'SENT' state.
+      conn_->MaybeInjectCancellation(call_);
     }
     delete this;
   }
 
   virtual void NotifyTransferAborted(const Status &status) OVERRIDE {
-    VLOG(1) << "Connection torn down before " <<
-      call_->ToString() << " could send its call: " << status.ToString();
+    VLOG(1) << "Transfer of RPC call " << call_->ToString() << " aborted: "
+            << status.ToString();
     delete this;
   }
 
  private:
   shared_ptr<OutboundCall> call_;
+  Connection* conn_;
 };
 
-void Connection::QueueOutboundCall(const shared_ptr<OutboundCall> &call) {
+void Connection::QueueOutboundCall(shared_ptr<OutboundCall> call) {
   DCHECK(call);
   DCHECK_EQ(direction_, CLIENT);
   DCHECK(reactor_thread_->IsCurrentThread());
 
   if (PREDICT_FALSE(!shutdown_status_.ok())) {
     // Already shutdown
-    call->SetFailed(shutdown_status_);
+    call->SetFailed(shutdown_status_,
+                    negotiation_complete_ ? Phase::REMOTE_CALL
+                                          : Phase::CONNECTION_NEGOTIATION);
     return;
   }
 
@@ -260,19 +324,21 @@ void Connection::QueueOutboundCall(const shared_ptr<OutboundCall> &call) {
   // yet assigned a call ID.
   DCHECK(!call->call_id_assigned());
 
+  // We shouldn't reach this point if 'call' was requested to be cancelled.
+  DCHECK(!call->cancellation_requested());
+
   // Assign the call ID.
   int32_t call_id = GetNextCallId();
   call->set_call_id(call_id);
 
   // Serialize the actual bytes to be put on the wire.
-  slices_tmp_.clear();
-  Status s = call->SerializeTo(&slices_tmp_);
-  if (PREDICT_FALSE(!s.ok())) {
-    call->SetFailed(s);
-    return;
-  }
+  TransferPayload tmp_slices;
+  size_t n_slices = call->SerializeTo(&tmp_slices);
 
   call->SetQueued();
+
+  // Test cancellation when 'call_' is in 'ON_OUTBOUND_QUEUE' state.
+  MaybeInjectCancellation(call);
 
   scoped_car car(car_pool_.make_scoped_ptr(car_pool_.Construct()));
   car->conn = this;
@@ -284,14 +350,48 @@ void Connection::QueueOutboundCall(const shared_ptr<OutboundCall> &call) {
     reactor_thread_->RegisterTimeout(&car->timeout_timer);
     car->timeout_timer.set<CallAwaitingResponse, // NOLINT(*)
                            &CallAwaitingResponse::HandleTimeout>(car.get());
-    car->timeout_timer.set(timeout.ToSeconds(), 0);
+
+    // For calls with a timeout of at least 500ms, we actually run the timeout
+    // handler in two stages. The first timeout fires with a timeout 10% less
+    // than the user-specified one. It then schedules a second timeout for the
+    // remaining amount of time.
+    //
+    // The purpose of this two-stage timeout is to be more robust when the client
+    // has some process-wide pause, such as lock contention in tcmalloc, or a
+    // reactor callback that blocks in glog. Consider the following case:
+    //
+    // T = 0s        user issues an RPC with 5 second timeout
+    // T = 0.5s - 6s   process is blocked
+    // T = 6s        process unblocks, and the timeout fires (1s late)
+    //
+    // Without the two-stage timeout, we would determine that the call had timed out,
+    // even though it's likely that the response is waiting on our TCP socket.
+    // With the two-stage timeout, we'll end up with:
+    //
+    // T = 0s           user issues an RPC with 5 second timeout
+    // T = 0.5s - 6s    process is blocked
+    // T = 6s           process unblocks, and the first-stage timeout fires (1.5s late)
+    // T = 6s - 6.200s  time for the client to read the response which is waiting
+    // T = 6.200s       if the response was not actually available, we'll time out here
+    //
+    // We don't bother with this logic for calls with very short timeouts - assumedly
+    // a user setting such a short RPC timeout is well equipped to handle one.
+    double time = timeout.ToSeconds();
+    if (time >= 0.5) {
+      car->remaining_timeout = time * 0.1;
+      time -= car->remaining_timeout;
+    } else {
+      car->remaining_timeout = 0;
+    }
+
+    car->timeout_timer.set(time, 0);
     car->timeout_timer.start();
   }
 
-  TransferCallbacks *cb = new CallTransferCallbacks(call);
+  TransferCallbacks *cb = new CallTransferCallbacks(std::move(call), this);
   awaiting_response_[call_id] = car.release();
   QueueOutbound(gscoped_ptr<OutboundTransfer>(
-                  new OutboundTransfer(slices_tmp_, cb)));
+      OutboundTransfer::CreateForCallRequest(call_id, tmp_slices, n_slices, cb)));
 }
 
 // Callbacks for sending an RPC call response from the server.
@@ -301,7 +401,7 @@ struct ResponseTransferCallbacks : public TransferCallbacks {
  public:
   ResponseTransferCallbacks(gscoped_ptr<InboundCall> call,
                             Connection *conn) :
-    call_(call.Pass()),
+    call_(std::move(call)),
     conn_(conn)
   {}
 
@@ -332,12 +432,12 @@ class QueueTransferTask : public ReactorTask {
  public:
   QueueTransferTask(gscoped_ptr<OutboundTransfer> transfer,
                     Connection *conn)
-    : transfer_(transfer.Pass()),
+    : transfer_(std::move(transfer)),
       conn_(conn)
   {}
 
   virtual void Run(ReactorThread *thr) OVERRIDE {
-    conn_->QueueOutbound(transfer_.Pass());
+    conn_->QueueOutbound(std::move(transfer_));
     delete this;
   }
 
@@ -362,19 +462,32 @@ void Connection::QueueResponseForCall(gscoped_ptr<InboundCall> call) {
   // eventually runs in the reactor thread will take care of calling
   // ResponseTransferCallbacks::NotifyTransferAborted.
 
-  std::vector<Slice> slices;
-  call->SerializeResponseTo(&slices);
+  TransferPayload tmp_slices;
+  size_t n_slices = call->SerializeResponseTo(&tmp_slices);
 
-  TransferCallbacks *cb = new ResponseTransferCallbacks(call.Pass(), this);
+  TransferCallbacks *cb = new ResponseTransferCallbacks(std::move(call), this);
   // After the response is sent, can delete the InboundCall object.
-  gscoped_ptr<OutboundTransfer> t(new OutboundTransfer(slices, cb));
+  // We set a dummy call ID and required feature set, since these are not needed
+  // when sending responses.
+  gscoped_ptr<OutboundTransfer> t(
+      OutboundTransfer::CreateForCallResponse(tmp_slices, n_slices, cb));
 
-  QueueTransferTask *task = new QueueTransferTask(t.Pass(), this);
+  QueueTransferTask *task = new QueueTransferTask(std::move(t), this);
   reactor_thread_->reactor()->ScheduleReactorTask(task);
 }
 
-void Connection::set_user_credentials(const UserCredentials &user_credentials) {
-  user_credentials_.CopyFrom(user_credentials);
+void Connection::set_confidential(bool is_confidential) {
+  is_confidential_ = is_confidential;
+}
+
+bool Connection::SatisfiesCredentialsPolicy(CredentialsPolicy policy) const {
+  DCHECK_EQ(direction_, CLIENT);
+  return (policy == CredentialsPolicy::ANY_CREDENTIALS) ||
+      (policy == credentials_policy_);
+}
+
+RpczStore* Connection::rpcz_store() {
+  return reactor_thread_->reactor()->messenger()->rpcz_store();
 }
 
 void Connection::ReadHandler(ev::io &watcher, int revents) {
@@ -392,7 +505,7 @@ void Connection::ReadHandler(ev::io &watcher, int revents) {
     if (!inbound_) {
       inbound_.reset(new InboundTransfer());
     }
-    Status status = inbound_->ReceiveBuffer(socket_);
+    Status status = inbound_->ReceiveBuffer(*socket_);
     if (PREDICT_FALSE(!status.ok())) {
       if (status.posix_code() == ESHUTDOWN) {
         VLOG(1) << ToString() << " shut down by remote end.";
@@ -409,9 +522,9 @@ void Connection::ReadHandler(ev::io &watcher, int revents) {
     DVLOG(3) << ToString() << ": finished reading " << inbound_->data().size() << " bytes";
 
     if (direction_ == CLIENT) {
-      HandleCallResponse(inbound_.Pass());
+      HandleCallResponse(std::move(inbound_));
     } else if (direction_ == SERVER) {
-      HandleIncomingCall(inbound_.Pass());
+      HandleIncomingCall(std::move(inbound_));
     } else {
       LOG(FATAL) << "Invalid direction: " << direction_;
     }
@@ -431,7 +544,7 @@ void Connection::HandleIncomingCall(gscoped_ptr<InboundTransfer> transfer) {
   DCHECK(reactor_thread_->IsCurrentThread());
 
   gscoped_ptr<InboundCall> call(new InboundCall(this));
-  Status s = call->ParseFrom(transfer.Pass());
+  Status s = call->ParseFrom(std::move(transfer));
   if (!s.ok()) {
     LOG(WARNING) << ToString() << ": received bad data: " << s.ToString();
     // TODO: shutdown? probably, since any future stuff on this socket will be
@@ -448,13 +561,13 @@ void Connection::HandleIncomingCall(gscoped_ptr<InboundTransfer> transfer) {
     return;
   }
 
-  reactor_thread_->reactor()->messenger()->QueueInboundCall(call.Pass());
+  reactor_thread_->reactor()->messenger()->QueueInboundCall(std::move(call));
 }
 
 void Connection::HandleCallResponse(gscoped_ptr<InboundTransfer> transfer) {
   DCHECK(reactor_thread_->IsCurrentThread());
   gscoped_ptr<CallResponse> resp(new CallResponse);
-  CHECK_OK(resp->ParseFrom(transfer.Pass()));
+  CHECK_OK(resp->ParseFrom(std::move(transfer)));
 
   CallAwaitingResponse *car_ptr =
     EraseKeyReturnValuePtr(&awaiting_response_, resp->call_id());
@@ -467,13 +580,17 @@ void Connection::HandleCallResponse(gscoped_ptr<InboundTransfer> transfer) {
   // The car->timeout_timer ev::timer will be stopped automatically by its destructor.
   scoped_car car(car_pool_.make_scoped_ptr(car_ptr));
 
-  if (PREDICT_FALSE(car->call.get() == nullptr)) {
+  if (PREDICT_FALSE(!car->call)) {
     // The call already failed due to a timeout.
-    VLOG(1) << "Got response to call id " << resp->call_id() << " after client already timed out";
+    VLOG(1) << "Got response to call id " << resp->call_id() << " after client "
+            << "already timed out or cancelled";
     return;
   }
 
-  car->call->SetResponse(resp.Pass());
+  car->call->SetResponse(std::move(resp));
+
+  // Test cancellation when 'car->call' is in 'FINISHED_SUCCESS' or 'FINISHED_ERROR' state.
+  MaybeInjectCancellation(car->call);
 }
 
 void Connection::WriteHandler(ev::io &watcher, int revents) {
@@ -497,8 +614,47 @@ void Connection::WriteHandler(ev::io &watcher, int revents) {
   while (!outbound_transfers_.empty()) {
     transfer = &(outbound_transfers_.front());
 
+    if (!transfer->TransferStarted()) {
+
+      if (transfer->is_for_outbound_call()) {
+        CallAwaitingResponse* car = FindOrDie(awaiting_response_, transfer->call_id());
+        if (!car->call) {
+          // If the call has already timed out or has already been cancelled, the 'call'
+          // field would be set to NULL. In that case, don't bother sending it.
+          outbound_transfers_.pop_front();
+          transfer->Abort(Status::Aborted("already timed out or cancelled"));
+          delete transfer;
+          continue;
+        }
+
+        // If this is the start of the transfer, then check if the server has the
+        // required RPC flags. We have to wait until just before the transfer in
+        // order to ensure that the negotiation has taken place, so that the flags
+        // are available.
+        const set<RpcFeatureFlag>& required_features = car->call->required_rpc_features();
+        if (!includes(remote_features_.begin(), remote_features_.end(),
+                      required_features.begin(), required_features.end())) {
+          outbound_transfers_.pop_front();
+          Status s = Status::NotSupported("server does not support the required RPC features");
+          transfer->Abort(s);
+          Phase phase = negotiation_complete_ ? Phase::REMOTE_CALL : Phase::CONNECTION_NEGOTIATION;
+          car->call->SetFailed(std::move(s), phase);
+          // Test cancellation when 'call_' is in 'FINISHED_ERROR' state.
+          MaybeInjectCancellation(car->call);
+          car->call.reset();
+          delete transfer;
+          continue;
+        }
+
+        car->call->SetSending();
+
+        // Test cancellation when 'call_' is in 'SENDING' state.
+        MaybeInjectCancellation(car->call);
+      }
+    }
+
     last_activity_time_ = reactor_thread_->cur_time();
-    Status status = transfer->SendBuffer(socket_);
+    Status status = transfer->SendBuffer(*socket_);
     if (PREDICT_FALSE(!status.ok())) {
       LOG(WARNING) << ToString() << " send error: " << status.ToString();
       reactor_thread_->DestroyConnection(this, status);
@@ -513,7 +669,6 @@ void Connection::WriteHandler(ev::io &watcher, int revents) {
     outbound_transfers_.pop_front();
     delete transfer;
   }
-
 
   // If we were able to write all of our outbound transfers,
   // we don't have any more to write.
@@ -530,52 +685,42 @@ std::string Connection::ToString() const {
     remote_.ToString());
 }
 
-Status Connection::InitSaslClient() {
-  RETURN_NOT_OK(sasl_client().Init(kSaslProtoName));
-  RETURN_NOT_OK(sasl_client().EnableAnonymous());
-  RETURN_NOT_OK(sasl_client().EnablePlain(user_credentials().real_user(),
-                                          user_credentials().password()));
-  return Status::OK();
-}
-
-Status Connection::InitSaslServer() {
-  // TODO: Do necessary configuration plumbing to enable user authentication.
-  // Right now we just enable PLAIN with a "dummy" auth store, which allows everyone in.
-  RETURN_NOT_OK(sasl_server().Init(kSaslProtoName));
-  gscoped_ptr<AuthStore> auth_store(new DummyAuthStore());
-  RETURN_NOT_OK(sasl_server().EnablePlain(auth_store.Pass()));
-  return Status::OK();
-}
-
 // Reactor task that transitions this Connection from connection negotiation to
 // regular RPC handling. Destroys Connection on negotiation error.
 class NegotiationCompletedTask : public ReactorTask {
  public:
   NegotiationCompletedTask(Connection* conn,
-      const Status& negotiation_status)
+                           Status negotiation_status,
+                           std::unique_ptr<ErrorStatusPB> rpc_error)
     : conn_(conn),
-      negotiation_status_(negotiation_status) {
+      negotiation_status_(std::move(negotiation_status)),
+      rpc_error_(std::move(rpc_error)) {
   }
 
   virtual void Run(ReactorThread *rthread) OVERRIDE {
-    rthread->CompleteConnectionNegotiation(conn_, negotiation_status_);
+    rthread->CompleteConnectionNegotiation(conn_,
+                                           negotiation_status_,
+                                           std::move(rpc_error_));
     delete this;
   }
 
   virtual void Abort(const Status &status) OVERRIDE {
     DCHECK(conn_->reactor_thread()->reactor()->closing());
-    VLOG(1) << "Failed connection negotiation due to shut down reactor thread: " <<
-        status.ToString();
+    VLOG(1) << "Failed connection negotiation due to shut down reactor thread: "
+            << status.ToString();
     delete this;
   }
 
  private:
   scoped_refptr<Connection> conn_;
-  Status negotiation_status_;
+  const Status negotiation_status_;
+  std::unique_ptr<ErrorStatusPB> rpc_error_;
 };
 
-void Connection::CompleteNegotiation(const Status& negotiation_status) {
-  auto task = new NegotiationCompletedTask(this, negotiation_status);
+void Connection::CompleteNegotiation(Status negotiation_status,
+                                     unique_ptr<ErrorStatusPB> rpc_error) {
+  auto task = new NegotiationCompletedTask(
+      this, std::move(negotiation_status), std::move(rpc_error));
   reactor_thread_->reactor()->ScheduleReactorTask(task);
 }
 
@@ -590,10 +735,7 @@ Status Connection::DumpPB(const DumpRunningRpcsRequestPB& req,
   resp->set_remote_ip(remote_.ToString());
   if (negotiation_complete_) {
     resp->set_state(RpcConnectionPB::OPEN);
-    resp->set_remote_user_credentials(user_credentials_.ToString());
   } else {
-    // It's racy to dump credentials while negotiating, since the Connection
-    // object is owned by the negotiation thread at that point.
     resp->set_state(RpcConnectionPB::NEGOTIATING);
   }
 
@@ -604,7 +746,14 @@ Status Connection::DumpPB(const DumpRunningRpcsRequestPB& req,
         c->call->DumpPB(req, resp->add_calls_in_flight());
       }
     }
+
+    resp->set_outbound_queue_size(num_queued_outbound_transfers());
   } else if (direction_ == SERVER) {
+    if (negotiation_complete_) {
+      // It's racy to dump credentials while negotiating, since the Connection
+      // object is owned by the negotiation thread at that point.
+      resp->set_remote_user_credentials(remote_user_.ToString());
+    }
     for (const inbound_call_map_t::value_type& entry : calls_being_handled_) {
       InboundCall* c = entry.second;
       c->DumpPB(req, resp->add_calls_in_flight());

@@ -17,9 +17,14 @@
 
 #include "kudu/util/locks.h"
 
+#include "kudu/gutil/atomicops.h"
 #include "kudu/util/malloc.h"
 
 namespace kudu {
+
+using base::subtle::Acquire_CompareAndSwap;
+using base::subtle::NoBarrier_Load;
+using base::subtle::Release_Store;
 
 size_t percpu_rwlock::memory_footprint_excluding_this() const {
   // Because locks_ is a dynamic array of non-trivially-destructable types,

@@ -17,24 +17,38 @@
 
 #include "kudu/tablet/multi_column_writer.h"
 
+#include <memory>
+#include <ostream>
+#include <string>
+#include <utility>
+
+#include "kudu/cfile/cfile_util.h"
 #include "kudu/cfile/cfile_writer.h"
+#include "kudu/common/columnblock.h"
 #include "kudu/common/rowblock.h"
 #include "kudu/common/schema.h"
 #include "kudu/fs/block_id.h"
+#include "kudu/fs/block_manager.h"
+#include "kudu/fs/fs_manager.h"
+#include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/stl_util.h"
 
 namespace kudu {
 namespace tablet {
 
 using cfile::CFileWriter;
-using fs::ScopedWritableBlockCloser;
+using fs::BlockCreationTransaction;
+using fs::CreateBlockOptions;
 using fs::WritableBlock;
+using std::unique_ptr;
 
 MultiColumnWriter::MultiColumnWriter(FsManager* fs,
-                                     const Schema* schema)
+                                     const Schema* schema,
+                                     std::string tablet_id)
   : fs_(fs),
     schema_(schema),
-    finished_(false) {
+    finished_(false),
+    tablet_id_(std::move(tablet_id)) {
 }
 
 MultiColumnWriter::~MultiColumnWriter() {
@@ -45,14 +59,10 @@ Status MultiColumnWriter::Open() {
   CHECK(cfile_writers_.empty());
 
   // Open columns.
+  const CreateBlockOptions block_opts({ tablet_id_ });
   for (int i = 0; i < schema_->num_columns(); i++) {
     const ColumnSchema &col = schema_->column(i);
 
-    // TODO: allow options to be configured, perhaps on a per-column
-    // basis as part of the schema. For now use defaults.
-    //
-    // Also would be able to set encoding here, or do something smart
-    // to figure out the encoding on the fly.
     cfile::WriterOptions opts;
 
     // Index all columns by ordinal position, so we can match up
@@ -68,24 +78,24 @@ Status MultiColumnWriter::Open() {
     }
 
     // Open file for write.
-    gscoped_ptr<WritableBlock> block;
-    RETURN_NOT_OK_PREPEND(fs_->CreateNewBlock(&block),
+    unique_ptr<WritableBlock> block;
+    RETURN_NOT_OK_PREPEND(fs_->CreateNewBlock(block_opts, &block),
                           "Unable to open output file for column " + col.ToString());
     BlockId block_id(block->id());
 
     // Create the CFile writer itself.
     gscoped_ptr<CFileWriter> writer(new CFileWriter(
-        opts,
+        std::move(opts),
         col.type_info(),
         col.is_nullable(),
-        block.Pass()));
+        std::move(block)));
     RETURN_NOT_OK_PREPEND(writer->Start(),
                           "Unable to Start() writer for column " + col.ToString());
 
-    LOG(INFO) << "Opened CFile writer for column " << col.ToString();
     cfile_writers_.push_back(writer.release());
     block_ids_.push_back(block_id);
   }
+  LOG(INFO) << "Opened CFile writers for " << cfile_writers_.size() << " column(s)";
 
   return Status::OK();
 }
@@ -103,17 +113,12 @@ Status MultiColumnWriter::AppendBlock(const RowBlock& block) {
   return Status::OK();
 }
 
-Status MultiColumnWriter::Finish() {
-  ScopedWritableBlockCloser closer;
-  RETURN_NOT_OK(FinishAndReleaseBlocks(&closer));
-  return closer.CloseBlocks();
-}
-
-Status MultiColumnWriter::FinishAndReleaseBlocks(ScopedWritableBlockCloser* closer) {
+Status MultiColumnWriter::FinishAndReleaseBlocks(
+    BlockCreationTransaction* transaction) {
   CHECK(!finished_);
   for (int i = 0; i < schema_->num_columns(); i++) {
     CFileWriter *writer = cfile_writers_[i];
-    Status s = writer->FinishAndReleaseBlock(closer);
+    Status s = writer->FinishAndReleaseBlock(transaction);
     if (!s.ok()) {
       LOG(WARNING) << "Unable to Finish writer for column " <<
         schema_->column(i).ToString() << ": " << s.ToString();

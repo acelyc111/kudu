@@ -20,9 +20,18 @@
 #ifndef KUDU_UTIL_PB_UTIL_INTERNAL_H
 #define KUDU_UTIL_PB_UTIL_INTERNAL_H
 
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+
 #include <glog/logging.h>
 #include <google/protobuf/io/zero_copy_stream.h>
+
+#include "kudu/gutil/integral_types.h"
+#include "kudu/gutil/port.h"
 #include "kudu/util/env.h"
+#include "kudu/util/slice.h"
+#include "kudu/util/status.h"
 
 namespace kudu {
 namespace pb_util {
@@ -31,7 +40,8 @@ namespace internal {
 // Input Stream used by ParseFromSequentialFile()
 class SequentialFileFileInputStream : public google::protobuf::io::ZeroCopyInputStream {
  public:
-  SequentialFileFileInputStream(SequentialFile *rfile, size_t buffer_size = kDefaultBufferSize)
+  explicit SequentialFileFileInputStream(SequentialFile *rfile,
+                                         size_t buffer_size = kDefaultBufferSize)
     : buffer_used_(0), buffer_offset_(0),
       buffer_size_(buffer_size), buffer_(new uint8[buffer_size_]),
       total_read_(0), rfile_(rfile) {
@@ -51,8 +61,12 @@ class SequentialFileFileInputStream : public google::protobuf::io::ZeroCopyInput
     total_read_ -= count;
   }
 
-  int64 ByteCount() const OVERRIDE {
+  int64_t ByteCount() const OVERRIDE {
     return total_read_;
+  }
+
+  Status status() const {
+    return status_;
   }
 
  private:
@@ -63,7 +77,7 @@ class SequentialFileFileInputStream : public google::protobuf::io::ZeroCopyInput
   size_t buffer_used_;
   size_t buffer_offset_;
   const size_t buffer_size_;
-  gscoped_ptr<uint8_t[]> buffer_;
+  std::unique_ptr<uint8_t[]> buffer_;
 
   size_t total_read_;
   SequentialFile *rfile_;
@@ -72,7 +86,7 @@ class SequentialFileFileInputStream : public google::protobuf::io::ZeroCopyInput
 // Output Stream used by SerializeToWritableFile()
 class WritableFileOutputStream : public google::protobuf::io::ZeroCopyOutputStream {
  public:
-  WritableFileOutputStream(WritableFile *wfile, size_t buffer_size = kDefaultBufferSize)
+  explicit WritableFileOutputStream(WritableFile *wfile, size_t buffer_size = kDefaultBufferSize)
     : buffer_offset_(0), buffer_size_(buffer_size), buffer_(new uint8[buffer_size_]),
       flushed_(0), wfile_(wfile) {
     CHECK_GT(buffer_size, 0);
@@ -99,7 +113,7 @@ class WritableFileOutputStream : public google::protobuf::io::ZeroCopyOutputStre
     buffer_offset_ -= count;
   }
 
-  int64 ByteCount() const OVERRIDE {
+  int64_t ByteCount() const OVERRIDE {
     return flushed_ + buffer_offset_;
   }
 
@@ -110,7 +124,7 @@ class WritableFileOutputStream : public google::protobuf::io::ZeroCopyOutputStre
 
   size_t buffer_offset_;
   const size_t buffer_size_;
-  gscoped_ptr<uint8_t[]> buffer_;
+  std::unique_ptr<uint8_t[]> buffer_;
 
   size_t flushed_;
   WritableFile *wfile_;

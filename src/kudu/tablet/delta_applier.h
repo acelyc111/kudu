@@ -17,6 +17,7 @@
 #ifndef KUDU_TABLET_DELTA_APPLIER_H
 #define KUDU_TABLET_DELTA_APPLIER_H
 
+#include <cstddef>
 #include <string>
 #include <memory>
 #include <vector>
@@ -24,12 +25,19 @@
 #include <gtest/gtest_prod.h>
 
 #include "kudu/common/iterator.h"
-#include "kudu/common/schema.h"
 #include "kudu/gutil/macros.h"
-#include "kudu/util/status.h"
+#include "kudu/gutil/port.h"
 #include "kudu/tablet/cfile_set.h"
+#include "kudu/util/status.h"
 
 namespace kudu {
+
+class ColumnMaterializationContext;
+class ScanSpec;
+class Schema;
+class SelectionVector;
+struct IteratorStats;
+
 namespace tablet {
 
 class DeltaIterator;
@@ -61,7 +69,7 @@ class DeltaApplier : public ColumnwiseIterator {
   // All other rows are set to 1.
   virtual Status InitializeSelectionVector(SelectionVector *sel_vec) OVERRIDE;
 
-  Status MaterializeColumn(size_t col_idx, ColumnBlock *dst) OVERRIDE;
+  Status MaterializeColumn(ColumnMaterializationContext *ctx) override;
  private:
   friend class DeltaTracker;
 
@@ -71,11 +79,11 @@ class DeltaApplier : public ColumnwiseIterator {
 
   // Construct. The base_iter and delta_iter should not be Initted.
   DeltaApplier(std::shared_ptr<CFileSet::Iterator> base_iter,
-               std::shared_ptr<DeltaIterator> delta_iter);
+               std::unique_ptr<DeltaIterator> delta_iter);
   virtual ~DeltaApplier();
 
   std::shared_ptr<CFileSet::Iterator> base_iter_;
-  std::shared_ptr<DeltaIterator> delta_iter_;
+  std::unique_ptr<DeltaIterator> delta_iter_;
 
   bool first_prepare_;
 };

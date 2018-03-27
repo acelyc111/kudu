@@ -17,16 +17,27 @@
 //
 // Tests for the client which are true unit tests and don't require a cluster, etc.
 
-#include <boost/bind.hpp>
-#include <gtest/gtest.h>
+#include <cstddef>
 #include <string>
 #include <vector>
 
+#include <boost/bind.hpp>
+#include <boost/function.hpp>
+#include <gtest/gtest.h>
+
 #include "kudu/client/client.h"
 #include "kudu/client/client-internal.h"
+#include "kudu/client/error_collector.h"
+#include "kudu/client/schema.h"
+#include "kudu/client/value.h"
+#include "kudu/gutil/ref_counted.h"
+#include "kudu/util/monotime.h"
+#include "kudu/util/status.h"
+#include "kudu/util/test_macros.h"
 
 using std::string;
 using std::vector;
+using kudu::client::internal::ErrorCollector;
 
 namespace kudu {
 namespace client {
@@ -151,6 +162,13 @@ TEST(ClientUnitTest, TestSchemaBuilder_CompoundKey_BadColumnName) {
             b.Build(&s).ToString());
 }
 
+TEST(ClientUnitTest, TestDisableSslFailsIfNotInitialized) {
+  // If we try to disable SSL initialization without setting up SSL properly,
+  // it should return an error.
+  Status s = DisableOpenSSLInitialization();
+  ASSERT_STR_MATCHES(s.ToString(), "Locking callback not initialized");
+}
+
 namespace {
 Status TestFunc(const MonoTime& deadline, bool* retry, int* counter) {
   (*counter)++;
@@ -160,8 +178,7 @@ Status TestFunc(const MonoTime& deadline, bool* retry, int* counter) {
 } // anonymous namespace
 
 TEST(ClientUnitTest, TestRetryFunc) {
-  MonoTime deadline = MonoTime::Now(MonoTime::FINE);
-  deadline.AddDelta(MonoDelta::FromMilliseconds(100));
+  MonoTime deadline = MonoTime::Now() + MonoDelta::FromMilliseconds(100);
   int counter = 0;
   Status s = RetryFunc(deadline, "retrying test func", "timed out",
                        boost::bind(TestFunc, _1, _2, &counter));
@@ -170,6 +187,90 @@ TEST(ClientUnitTest, TestRetryFunc) {
   ASSERT_LT(counter, 20);
 }
 
+TEST(ClientUnitTest, TestErrorCollector) {
+  {
+    scoped_refptr<ErrorCollector> ec(new ErrorCollector);
+    // Setting the max memory size limit to 'unlimited'.
+    EXPECT_OK(ec->SetMaxMemSize(0));
+    // Setting the max memory size to 1 byte.
+    EXPECT_OK(ec->SetMaxMemSize(1));
+  }
+
+  // Check that the error collector does not allow to set the memory size limit
+  // if at least one error has been dropped since last flush.
+  {
+    scoped_refptr<ErrorCollector> ec(new ErrorCollector);
+    ec->dropped_errors_cnt_ = 1;
+    Status s = ec->SetMaxMemSize(0);
+    EXPECT_TRUE(s.IsIllegalState());
+    ASSERT_STR_CONTAINS(s.ToString(),
+                        "cannot set new limit: already dropped some errors");
+  }
+
+  // Check that the error collector does not overflow post-factum on call of the
+  // SetMaxMemSize() method.
+  {
+    const size_t size_bytes = 8;
+    scoped_refptr<ErrorCollector> ec(new ErrorCollector);
+    ec->mem_size_bytes_ = size_bytes;
+    EXPECT_OK(ec->SetMaxMemSize(0));
+    EXPECT_OK(ec->SetMaxMemSize(size_bytes));
+    Status s = ec->SetMaxMemSize(size_bytes - 1);
+    EXPECT_TRUE(s.IsIllegalState());
+    ASSERT_STR_CONTAINS(s.ToString(), "already accumulated errors for");
+  }
+}
+
+TEST(ClientUnitTest, TestKuduSchemaToString) {
+  // Test on unique PK.
+  KuduSchema s1;
+  KuduSchemaBuilder b1;
+  b1.AddColumn("key")->Type(KuduColumnSchema::INT32)->NotNull()->PrimaryKey();
+  b1.AddColumn("int_val")->Type(KuduColumnSchema::INT32)->NotNull();
+  b1.AddColumn("string_val")->Type(KuduColumnSchema::STRING)->Nullable();
+  b1.AddColumn("non_null_with_default")->Type(KuduColumnSchema::INT32)->NotNull()
+    ->Default(KuduValue::FromInt(12345));
+  ASSERT_OK(b1.Build(&s1));
+
+  string schema_str_1 = "Schema [\n"
+                        "\tprimary key (key),\n"
+                        "\tkey[int32 NOT NULL],\n"
+                        "\tint_val[int32 NOT NULL],\n"
+                        "\tstring_val[string NULLABLE],\n"
+                        "\tnon_null_with_default[int32 NOT NULL]\n"
+                        "]";
+  EXPECT_EQ(schema_str_1, s1.ToString());
+
+  // Test empty schema.
+  KuduSchema s2;
+  EXPECT_EQ("Schema []", s2.ToString());
+
+  // Test on composite PK.
+  // Create a different schema with a multi-column PK.
+  KuduSchemaBuilder b2;
+  b2.AddColumn("k1")->Type(KuduColumnSchema::INT32)->NotNull();
+  b2.AddColumn("k2")->Type(KuduColumnSchema::UNIXTIME_MICROS)->NotNull();
+  b2.AddColumn("k3")->Type(KuduColumnSchema::INT8)->NotNull();
+  b2.AddColumn("dec_val")->Type(KuduColumnSchema::DECIMAL)->Nullable()->Precision(9)->Scale(2);
+  b2.AddColumn("int_val")->Type(KuduColumnSchema::INT32)->NotNull();
+  b2.AddColumn("string_val")->Type(KuduColumnSchema::STRING)->Nullable();
+  b2.AddColumn("non_null_with_default")->Type(KuduColumnSchema::INT32)->NotNull()
+    ->Default(KuduValue::FromInt(12345));
+  b2.SetPrimaryKey({"k1", "k2", "k3"});
+  ASSERT_OK(b2.Build(&s2));
+
+  string schema_str_2 = "Schema [\n"
+                        "\tprimary key (k1, k2, k3),\n"
+                        "\tk1[int32 NOT NULL],\n"
+                        "\tk2[unixtime_micros NOT NULL],\n"
+                        "\tk3[int8 NOT NULL],\n"
+                        "\tdec_val[decimal(9, 2) NULLABLE],\n"
+                        "\tint_val[int32 NOT NULL],\n"
+                        "\tstring_val[string NULLABLE],\n"
+                        "\tnon_null_with_default[int32 NOT NULL]\n"
+                        "]";
+  EXPECT_EQ(schema_str_2, s2.ToString());
+}
+
 } // namespace client
 } // namespace kudu
-

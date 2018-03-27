@@ -21,17 +21,18 @@
 
 #include <sys/time.h>
 
-#include <glog/logging.h>
+#include <ctime>
 #include <string>
-using std::string;
 
 #if defined(__APPLE__)
 #include <mach/clock.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 
+#include <glog/logging.h>
+
 #include "kudu/gutil/once.h"
-#endif  // defined(__APPLE__)
+#endif  // #if defined(__APPLE__)
 
 #include "kudu/gutil/integral_types.h"
 
@@ -73,7 +74,7 @@ extern void InitializeTimebaseInfo();
 inline void GetCurrentTime(mach_timespec_t* ts) {
   clock_serv_t cclock;
   host_get_clock_service(mach_host_self(), CALENDAR_CLOCK, &cclock);
-  clock_get_time(cclock, ts);
+  CHECK_EQ(KERN_SUCCESS, clock_get_time(cclock, ts));
   mach_port_deallocate(mach_task_self(), cclock);
 }
 
@@ -175,5 +176,6 @@ class CycleClock {
   CycleClock();
 };
 
-#include "kudu/gutil/cycleclock-inl.h"  // inline method bodies
+// inline method bodies
+#include "kudu/gutil/cycleclock-inl.h"  // IWYU pragma: export
 #endif  // GUTIL_WALLTIME_H_

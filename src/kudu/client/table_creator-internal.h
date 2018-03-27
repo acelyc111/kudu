@@ -17,15 +17,23 @@
 #ifndef KUDU_CLIENT_TABLE_CREATOR_INTERNAL_H
 #define KUDU_CLIENT_TABLE_CREATOR_INTERNAL_H
 
+#include <memory>
 #include <string>
 #include <vector>
 
+#include <boost/optional/optional.hpp>
+
 #include "kudu/client/client.h"
 #include "kudu/common/common.pb.h"
+#include "kudu/common/partial_row.h"
+#include "kudu/gutil/macros.h"
+#include "kudu/util/monotime.h"
 
 namespace kudu {
 
 namespace client {
+
+class KuduSchema;
 
 class KuduTableCreator::Data {
  public:
@@ -38,16 +46,26 @@ class KuduTableCreator::Data {
 
   const KuduSchema* schema_;
 
-  std::vector<const KuduPartialRow*> split_rows_;
+  std::vector<std::unique_ptr<KuduPartialRow>> range_partition_splits_;
+
+  struct RangePartition {
+    std::unique_ptr<KuduPartialRow> lower_bound;
+    std::unique_ptr<KuduPartialRow> upper_bound;
+    RangePartitionBound lower_bound_type;
+    RangePartitionBound upper_bound_type;
+  };
+
+  std::vector<RangePartition> range_partition_bounds_;
 
   PartitionSchemaPB partition_schema_;
 
-  int num_replicas_;
+  boost::optional<int> num_replicas_;
 
   MonoDelta timeout_;
 
   bool wait_;
 
+ private:
   DISALLOW_COPY_AND_ASSIGN(Data);
 };
 

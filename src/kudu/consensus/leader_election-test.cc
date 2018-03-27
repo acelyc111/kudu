@@ -17,21 +17,48 @@
 
 #include "kudu/consensus/leader_election.h"
 
+#include <functional>
+#include <memory>
+#include <ostream>
 #include <string>
+#include <type_traits>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
-#include "kudu/consensus/consensus_peers.h"
+#include <glog/logging.h>
+#include <gtest/gtest.h>
+
+#include "kudu/common/wire_protocol.h"
 #include "kudu/consensus/consensus-test-util.h"
+#include "kudu/consensus/consensus.pb.h"
+#include "kudu/consensus/consensus_peers.h"
 #include "kudu/consensus/metadata.pb.h"
+#include "kudu/consensus/raft_consensus.h"
+#include "kudu/gutil/casts.h"
+#include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/map-util.h"
+#include "kudu/gutil/move.h"
+#include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/stl_util.h"
 #include "kudu/gutil/strings/substitute.h"
+#include "kudu/tserver/tserver.pb.h"
+#include "kudu/util/countdown_latch.h"
+#include "kudu/util/monotime.h"
+#include "kudu/util/status.h"
 #include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
+#include "kudu/util/threadpool.h"
 
 namespace kudu {
+
+namespace rpc {
+class Messenger;
+} // namespace rpc
+
 namespace consensus {
 
+using std::shared_ptr;
 using std::string;
 using std::unordered_map;
 using std::vector;
@@ -42,7 +69,7 @@ namespace {
 const int kLeaderElectionTimeoutSecs = 10;
 
 // Generate list of voter uuids.
-static vector<string> GenVoterUUIDs(int num_voters) {
+vector<string> GenVoterUUIDs(int num_voters) {
   vector<string> voter_uuids;
   for (int i = 0; i < num_voters; i++) {
     voter_uuids.push_back(Substitute("peer-$0", i));
@@ -65,18 +92,24 @@ class FromMapPeerProxyFactory : public PeerProxyFactory {
       : proxy_map_(proxy_map) {
   }
 
-  virtual Status NewProxy(const RaftPeerPB& peer_pb,
-                          gscoped_ptr<PeerProxy>* proxy) override {
+  Status NewProxy(const RaftPeerPB& peer_pb,
+                  gscoped_ptr<PeerProxy>* proxy) override {
     PeerProxy* proxy_ptr = FindPtrOrNull(*proxy_map_, peer_pb.permanent_uuid());
     if (!proxy_ptr) return Status::NotFound("No proxy for peer.");
     proxy->reset(proxy_ptr);
     return Status::OK();
   }
 
+  const shared_ptr<rpc::Messenger>& messenger() const override {
+    return null_messenger_;
+  }
+
  private:
   // FYI, the tests may add and remove nodes from this map while we hold a
   // reference to it.
   const ProxyMap* const proxy_map_;
+
+  shared_ptr<rpc::Messenger> null_messenger_;
 };
 
 class LeaderElectionTest : public KuduTest {
@@ -128,7 +161,8 @@ void LeaderElectionTest::ElectionCallback(const ElectionResult& result) {
 
 void LeaderElectionTest::InitUUIDs(int num_voters) {
   voter_uuids_ = GenVoterUUIDs(num_voters);
-  candidate_uuid_ = voter_uuids_[num_voters - 1];
+  CHECK(!voter_uuids_.empty());
+  candidate_uuid_ = voter_uuids_.back();
   voter_uuids_.pop_back();
 }
 
@@ -137,6 +171,7 @@ void LeaderElectionTest::InitNoOpPeerProxies() {
   for (const string& uuid : voter_uuids_) {
     RaftPeerPB* peer_pb = config_.add_peers();
     peer_pb->set_permanent_uuid(uuid);
+    peer_pb->set_member_type(RaftPeerPB::VOTER);
     PeerProxy* proxy = new NoOpTestPeerProxy(pool_.get(), *peer_pb);
     InsertOrDie(&proxies_, uuid, proxy);
   }
@@ -147,6 +182,7 @@ void LeaderElectionTest::InitDelayableMockedProxies(bool enable_delay) {
   for (const string& uuid : voter_uuids_) {
     RaftPeerPB* peer_pb = config_.add_peers();
     peer_pb->set_permanent_uuid(uuid);
+    peer_pb->set_member_type(RaftPeerPB::VOTER);
     auto proxy = new DelayablePeerProxy<MockedPeerProxy>(pool_.get(),
                                                          new MockedPeerProxy(pool_.get()));
     if (enable_delay) {
@@ -161,7 +197,7 @@ gscoped_ptr<VoteCounter> LeaderElectionTest::InitVoteCounter(int num_voters, int
   bool duplicate;
   CHECK_OK(counter->RegisterVote(candidate_uuid_, VOTE_GRANTED, &duplicate));
   CHECK(!duplicate);
-  return counter.Pass();
+  return std::move(counter);
 }
 
 scoped_refptr<LeaderElection> LeaderElectionTest::SetUpElectionWithHighTermVoter(
@@ -196,10 +232,11 @@ scoped_refptr<LeaderElection> LeaderElectionTest::SetUpElectionWithHighTermVoter
   request.set_tablet_id(tablet_id_);
 
   scoped_refptr<LeaderElection> election(
-      new LeaderElection(config_, proxy_factory_.get(), request, counter.Pass(),
+      new LeaderElection(config_, proxy_factory_.get(), request, std::move(counter),
                          MonoDelta::FromSeconds(kLeaderElectionTimeoutSecs),
-                         Bind(&LeaderElectionTest::ElectionCallback,
-                              Unretained(this))));
+                         std::bind(&LeaderElectionTest::ElectionCallback,
+                                   this,
+                                   std::placeholders::_1)));
   return election;
 }
 
@@ -252,10 +289,11 @@ scoped_refptr<LeaderElection> LeaderElectionTest::SetUpElectionWithGrantDenyErro
   request.set_tablet_id(tablet_id_);
 
   scoped_refptr<LeaderElection> election(
-      new LeaderElection(config_, proxy_factory_.get(), request, counter.Pass(),
+      new LeaderElection(config_, proxy_factory_.get(), request, std::move(counter),
                          MonoDelta::FromSeconds(kLeaderElectionTimeoutSecs),
-                         Bind(&LeaderElectionTest::ElectionCallback,
-                              Unretained(this))));
+                         std::bind(&LeaderElectionTest::ElectionCallback,
+                                   this,
+                                   std::placeholders::_1)));
   return election;
 }
 
@@ -266,7 +304,7 @@ TEST_F(LeaderElectionTest, TestPerfectElection) {
   for (int num_voters : config_sizes) {
     LOG(INFO) << "Testing election with config size of " << num_voters;
     int majority_size = (num_voters / 2) + 1;
-    ConsensusTerm election_term = 10 + num_voters; // Just to be able to differentiate.
+    ConsensusTerm election_term = 10L + num_voters; // Just to be able to differentiate.
 
     InitUUIDs(num_voters);
     InitNoOpPeerProxies();
@@ -278,14 +316,15 @@ TEST_F(LeaderElectionTest, TestPerfectElection) {
     request.set_tablet_id(tablet_id_);
 
     scoped_refptr<LeaderElection> election(
-        new LeaderElection(config_, proxy_factory_.get(), request, counter.Pass(),
+        new LeaderElection(config_, proxy_factory_.get(), request, std::move(counter),
                            MonoDelta::FromSeconds(kLeaderElectionTimeoutSecs),
-                           Bind(&LeaderElectionTest::ElectionCallback,
-                                Unretained(this))));
+                           std::bind(&LeaderElectionTest::ElectionCallback,
+                                     this,
+                                     std::placeholders::_1)));
     election->Run();
     latch_.Wait();
 
-    ASSERT_EQ(election_term, result_->election_term);
+    ASSERT_EQ(election_term, result_->vote_request.candidate_term());
     ASSERT_EQ(VOTE_GRANTED, result_->decision);
 
     pool_->Wait();
@@ -307,10 +346,9 @@ TEST_F(LeaderElectionTest, TestHigherTermBeforeDecision) {
       ->Respond(TestPeerProxy::kRequestVote);
   latch_.Wait();
 
-  ASSERT_EQ(kElectionTerm, result_->election_term);
+  ASSERT_EQ(kElectionTerm, result_->vote_request.candidate_term());
   ASSERT_EQ(VOTE_DENIED, result_->decision);
-  ASSERT_TRUE(result_->has_higher_term);
-  ASSERT_EQ(kElectionTerm + 1, result_->higher_term);
+  ASSERT_EQ(kElectionTerm + 1, result_->highest_voter_term);
   LOG(INFO) << "Election lost. Reason: " << result_->message;
 
   // This guy will vote "yes".
@@ -332,10 +370,10 @@ TEST_F(LeaderElectionTest, TestHigherTermAfterDecision) {
       ->Respond(TestPeerProxy::kRequestVote);
   latch_.Wait();
 
-  ASSERT_EQ(kElectionTerm, result_->election_term);
+  ASSERT_EQ(kElectionTerm, result_->vote_request.candidate_term());
   ASSERT_EQ(VOTE_GRANTED, result_->decision);
-  ASSERT_FALSE(result_->has_higher_term);
-  ASSERT_TRUE(result_->message.empty());
+  ASSERT_EQ(kElectionTerm, result_->highest_voter_term);
+  ASSERT_EQ("achieved majority votes", result_->message);
   LOG(INFO) << "Election won.";
 
   // This guy has a higher term.
@@ -357,10 +395,10 @@ TEST_F(LeaderElectionTest, TestWithDenyVotes) {
   election->Run();
 
   latch_.Wait();
-  ASSERT_EQ(kElectionTerm, result_->election_term);
+  ASSERT_EQ(kElectionTerm, result_->vote_request.candidate_term());
   ASSERT_EQ(VOTE_DENIED, result_->decision);
-  ASSERT_FALSE(result_->has_higher_term);
-  ASSERT_TRUE(result_->message.empty());
+  ASSERT_EQ(kElectionTerm, result_->highest_voter_term);
+  ASSERT_EQ("could not achieve majority", result_->message);
   LOG(INFO) << "Election denied.";
 
   pool_->Wait(); // Wait for the election callbacks to finish before we destroy proxies.
@@ -377,10 +415,10 @@ TEST_F(LeaderElectionTest, TestWithErrorVotes) {
   election->Run();
 
   latch_.Wait();
-  ASSERT_EQ(kElectionTerm, result_->election_term);
+  ASSERT_EQ(kElectionTerm, result_->vote_request.candidate_term());
   ASSERT_EQ(VOTE_DENIED, result_->decision);
-  ASSERT_FALSE(result_->has_higher_term);
-  ASSERT_TRUE(result_->message.empty());
+  ASSERT_EQ(0, result_->highest_voter_term); // no valid votes
+  ASSERT_EQ("could not achieve majority", result_->message);
   LOG(INFO) << "Election denied.";
 
   pool_->Wait(); // Wait for the election callbacks to finish before we destroy proxies.
@@ -407,16 +445,17 @@ TEST_F(LeaderElectionTest, TestFailToCreateProxy) {
 
   gscoped_ptr<VoteCounter> counter = InitVoteCounter(kNumVoters, kMajoritySize);
   scoped_refptr<LeaderElection> election(
-      new LeaderElection(config_, proxy_factory_.get(), request, counter.Pass(),
+      new LeaderElection(config_, proxy_factory_.get(), request, std::move(counter),
                          MonoDelta::FromSeconds(kLeaderElectionTimeoutSecs),
-                         Bind(&LeaderElectionTest::ElectionCallback,
-                              Unretained(this))));
+                         std::bind(&LeaderElectionTest::ElectionCallback,
+                                   this,
+                                   std::placeholders::_1)));
   election->Run();
   latch_.Wait();
-  ASSERT_EQ(kElectionTerm, result_->election_term);
+  ASSERT_EQ(kElectionTerm, result_->vote_request.candidate_term());
   ASSERT_EQ(VOTE_DENIED, result_->decision);
-  ASSERT_FALSE(result_->has_higher_term);
-  ASSERT_TRUE(result_->message.empty());
+  ASSERT_EQ(0, result_->highest_voter_term); // no votes
+  ASSERT_EQ("could not achieve majority", result_->message);
 }
 
 ////////////////////////////////////////

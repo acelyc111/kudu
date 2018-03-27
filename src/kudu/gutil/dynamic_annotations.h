@@ -121,8 +121,10 @@
     AnnotateCondVarSignalAll(__FILE__, __LINE__, cv)
 
   /* Annotations for user-defined synchronization mechanisms. */
-  #define ANNOTATE_HAPPENS_BEFORE(obj) ANNOTATE_CONDVAR_SIGNAL(obj)
-  #define ANNOTATE_HAPPENS_AFTER(obj)  ANNOTATE_CONDVAR_WAIT(obj)
+  #define ANNOTATE_HAPPENS_BEFORE(obj) \
+    AnnotateHappensBefore(__FILE__, __LINE__, obj)
+  #define ANNOTATE_HAPPENS_AFTER(obj) \
+    AnnotateHappensAfter(__FILE__, __LINE__, obj)
 
   /* Report that the bytes in the range [pointer, pointer+size) are about
      to be published safely. The race checker will create a happens-before
@@ -490,9 +492,13 @@ void AnnotateCondVarSignal(const char *file, int line,
                            const volatile void *cv);
 void AnnotateCondVarSignalAll(const char *file, int line,
                               const volatile void *cv);
+void AnnotateHappensBefore(const char *file, int line,
+                           const volatile void *obj);
+void AnnotateHappensAfter(const char *file, int line,
+                          const volatile void *obj);
 void AnnotatePublishMemoryRange(const char *file, int line,
                                 const volatile void *address,
-                                long size);
+                                long size); // NOLINT
 void AnnotateUnpublishMemoryRange(const char *file, int line,
                                   const volatile void *address,
                                   long size);
@@ -575,6 +581,8 @@ double ValgrindSlowdown(void);
 
 /* AddressSanitizer annotations from LLVM asan_interface.h */
 
+
+#if defined(__SANITIZE_ADDRESS__) || defined(ADDRESS_SANITIZER)
 // Marks memory region [addr, addr+size) as unaddressable.
 // This memory must be previously allocated by the user program. Accessing
 // addresses in this region from instrumented code is forbidden until
@@ -594,7 +602,6 @@ void __asan_poison_memory_region(void const volatile *addr, size_t size);
 void __asan_unpoison_memory_region(void const volatile *addr, size_t size);
 
 // User code should use macros instead of functions.
-#if defined(__SANITIZE_ADDRESS__) || defined(ADDRESS_SANITIZER)
 #define ASAN_POISON_MEMORY_REGION(addr, size)   \
   __asan_poison_memory_region((addr), (size))
 #define ASAN_UNPOISON_MEMORY_REGION(addr, size) \
@@ -761,7 +768,6 @@ void __asan_set_death_callback(void (*callback)(void));
   #endif
 
 #endif  /* CLANG_ANNOTALYSIS_ONLY */
-
 
 /* Undefine the macros intended only in this file. */
 #undef ANNOTALYSIS_STATIC_INLINE

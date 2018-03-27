@@ -17,38 +17,59 @@
 
 #include "kudu/server/generic_service.h"
 
-#include <gflags/gflags.h>
 #include <string>
+#include <ostream>
 #include <unordered_set>
 
+#include <gflags/gflags.h>
+#include <gflags/gflags_declare.h>
+#include <glog/logging.h>
+
+#include "kudu/clock/clock.h"
+#include "kudu/clock/hybrid_clock.h"
+#include "kudu/clock/mock_ntp.h"
+#include "kudu/clock/time_service.h"
+#include "kudu/common/timestamp.h"
+#include "kudu/common/wire_protocol.h"
+#include "kudu/gutil/casts.h"
 #include "kudu/gutil/map-util.h"
 #include "kudu/rpc/rpc_context.h"
-#include "kudu/server/clock.h"
-#include "kudu/server/hybrid_clock.h"
 #include "kudu/server/server_base.h"
+#include "kudu/server/server_base.pb.h"
+#include "kudu/util/debug-util.h"
+#include "kudu/util/debug/leak_annotations.h" // IWYU pragma: keep
 #include "kudu/util/flag_tags.h"
+#include "kudu/util/status.h"
 
-DECLARE_bool(use_mock_wall_clock);
+DECLARE_string(time_source);
 DECLARE_bool(use_hybrid_clock);
 
 using std::string;
 using std::unordered_set;
 
-#ifdef COVERAGE_BUILD
-extern "C" void __gcov_flush(void);
-#endif
-
-
 namespace kudu {
 namespace server {
 
 GenericServiceImpl::GenericServiceImpl(ServerBase* server)
-  : GenericServiceIf(server->metric_entity()),
+  : GenericServiceIf(server->metric_entity(), server->result_tracker()),
     server_(server) {
 }
 
 GenericServiceImpl::~GenericServiceImpl() {
 }
+
+bool GenericServiceImpl::AuthorizeSuperUser(const google::protobuf::Message* /*req*/,
+                                            google::protobuf::Message* /*resp*/,
+                                            rpc::RpcContext* rpc) {
+  return server_->Authorize(rpc, ServerBase::SUPER_USER);
+}
+
+bool GenericServiceImpl::AuthorizeClient(const google::protobuf::Message* /*req*/,
+                                         google::protobuf::Message* /*resp*/,
+                                         rpc::RpcContext* rpc) {
+  return server_->Authorize(rpc, ServerBase::SUPER_USER | ServerBase::USER);
+}
+
 
 void GenericServiceImpl::SetFlag(const SetFlagRequestPB* req,
                                  SetFlagResponsePB* resp,
@@ -98,18 +119,53 @@ void GenericServiceImpl::SetFlag(const SetFlagRequestPB* req,
   rpc->RespondSuccess();
 }
 
-void GenericServiceImpl::FlushCoverage(const FlushCoverageRequestPB* req,
+void GenericServiceImpl::CheckLeaks(const CheckLeaksRequestPB* /*req*/,
+                                    CheckLeaksResponsePB* resp,
+                                    rpc::RpcContext* rpc) {
+  // We have to use these nested #if statements rather than an && to avoid
+  // a preprocessor error with GCC which doesn't know about __has_feature.
+#if defined(__has_feature)
+#  if __has_feature(address_sanitizer)
+#    define LSAN_ENABLED
+#  endif
+#endif
+#ifndef LSAN_ENABLED
+  resp->set_success(false);
+#else
+  LOG(INFO) << "Checking for leaks (request via RPC)";
+  resp->set_success(true);
+
+  // Workaround for LSAN issue 757 (leak check can give false positives when
+  // run concurrently with other work). If LSAN reports a leak, we'll retry
+  // a few times and see if it goes away on its own. Any real leak would,
+  // by definition, not resolve itself over time.
+  //
+  // See https://github.com/google/sanitizers/issues/757
+  bool has_leaks = true;
+  for (int i = 0; i < 5; i++) {
+    has_leaks = __lsan_do_recoverable_leak_check();
+    if (!has_leaks) break;
+    SleepFor(MonoDelta::FromMilliseconds(5));
+  }
+
+  resp->set_found_leaks(has_leaks);
+#endif
+#undef LSAN_ENABLED
+  rpc->RespondSuccess();
+}
+
+void GenericServiceImpl::FlushCoverage(const FlushCoverageRequestPB* /*req*/,
                                        FlushCoverageResponsePB* resp,
                                        rpc::RpcContext* rpc) {
-#ifdef COVERAGE_BUILD
-  __gcov_flush();
-  LOG(INFO) << "Flushed coverage info. (request from " << rpc->requestor_string() << ")";
-  resp->set_success(true);
-#else
-  LOG(WARNING) << "Non-coverage build cannot flush coverage (request from "
-               << rpc->requestor_string() << ")";
-  resp->set_success(false);
-#endif
+  if (IsCoverageBuild()) {
+    TryFlushCoverage();
+    LOG(INFO) << "Flushed coverage info. (request from " << rpc->requestor_string() << ")";
+    resp->set_success(true);
+  } else {
+    LOG(WARNING) << "Non-coverage build cannot flush coverage (request from "
+                 << rpc->requestor_string() << ")";
+    resp->set_success(false);
+  }
   rpc->RespondSuccess();
 }
 
@@ -123,27 +179,33 @@ void GenericServiceImpl::ServerClock(const ServerClockRequestPB* req,
 void GenericServiceImpl::SetServerWallClockForTests(const SetServerWallClockForTestsRequestPB *req,
                                                    SetServerWallClockForTestsResponsePB *resp,
                                                    rpc::RpcContext *context) {
-  if (!FLAGS_use_hybrid_clock || !FLAGS_use_mock_wall_clock) {
+  if (!FLAGS_use_hybrid_clock || FLAGS_time_source != "mock") {
     LOG(WARNING) << "Error setting wall clock for tests. Server is not using HybridClock"
-        "or was not started with '--use_mock_wall_clock= true'";
+        "or was not started with '--ntp-source=mock'";
     resp->set_success(false);
   }
 
-  server::HybridClock* clock = down_cast<server::HybridClock*>(server_->clock());
+  auto* clock = down_cast<clock::HybridClock*>(server_->clock());
+  auto* mock = down_cast<clock::MockNtp*>(clock->time_service());
   if (req->has_now_usec()) {
-    clock->SetMockClockWallTimeForTests(req->now_usec());
+    mock->SetMockClockWallTimeForTests(req->now_usec());
   }
   if (req->has_max_error_usec()) {
-    clock->SetMockMaxClockErrorForTests(req->max_error_usec());
+    mock->SetMockMaxClockErrorForTests(req->max_error_usec());
   }
   resp->set_success(true);
   context->RespondSuccess();
 }
 
-void GenericServiceImpl::GetStatus(const GetStatusRequestPB* req,
+void GenericServiceImpl::GetStatus(const GetStatusRequestPB* /*req*/,
                                    GetStatusResponsePB* resp,
                                    rpc::RpcContext* rpc) {
-  server_->GetStatusPB(resp->mutable_status());
+  // Note: we must ensure that resp->has_status() is true in all cases to
+  // preserve backwards compatibility because it is defined as a required field.
+  Status s = server_->GetStatusPB(resp->mutable_status());
+  if (!s.ok()) {
+    StatusToPB(s, resp->mutable_error());
+  }
   rpc->RespondSuccess();
 }
 

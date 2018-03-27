@@ -14,23 +14,33 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+
 #include "kudu/util/jsonwriter.h"
 
+#include <new>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include <glog/logging.h>
 #include <google/protobuf/descriptor.h>
+#include <google/protobuf/descriptor.pb.h>
 #include <google/protobuf/message.h>
+#include <rapidjson/writer.h>
 #include <rapidjson/prettywriter.h>
 #include <rapidjson/rapidjson.h>
+
+#include "kudu/gutil/port.h"
+#include "kudu/util/faststring.h"
+#include "kudu/util/logging.h"
+#include "kudu/util/pb_util.pb.h"
 
 using google::protobuf::FieldDescriptor;
 using google::protobuf::Message;
 using google::protobuf::Reflection;
 
+using std::ostringstream;
 using std::string;
-using std::stringstream;
 using std::vector;
 
 namespace kudu {
@@ -39,10 +49,15 @@ namespace kudu {
 // Since Squeasel exposes a stringstream as its interface, this is needed to avoid overcopying.
 class UTF8StringStreamBuffer {
  public:
-  explicit UTF8StringStreamBuffer(std::stringstream* out);
+  explicit UTF8StringStreamBuffer(std::ostringstream* out);
+  ~UTF8StringStreamBuffer();
   void Put(rapidjson::UTF8<>::Ch c);
+
+  void Flush();
+
  private:
-  std::stringstream* out_;
+  faststring buf_;
+  std::ostringstream* out_;
 };
 
 // rapidjson doesn't provide any common interface between the PrettyWriter and
@@ -75,7 +90,7 @@ class JsonWriterIf {
 template<class T>
 class JsonWriterImpl : public JsonWriterIf {
  public:
-  explicit JsonWriterImpl(stringstream* out);
+  explicit JsonWriterImpl(ostringstream* out);
 
   virtual void Null() OVERRIDE;
   virtual void Bool(bool b) OVERRIDE;
@@ -106,7 +121,7 @@ class JsonWriterImpl : public JsonWriterIf {
 typedef rapidjson::PrettyWriter<UTF8StringStreamBuffer> PrettyWriterClass;
 typedef rapidjson::Writer<UTF8StringStreamBuffer> CompactWriterClass;
 
-JsonWriter::JsonWriter(stringstream* out, Mode m) {
+JsonWriter::JsonWriter(ostringstream* out, Mode m) {
   switch (m) {
     case PRETTY:
       impl_.reset(new JsonWriterImpl<PrettyWriterClass>(DCHECK_NOTNULL(out)));
@@ -118,6 +133,7 @@ JsonWriter::JsonWriter(stringstream* out, Mode m) {
 }
 JsonWriter::~JsonWriter() {
 }
+
 void JsonWriter::Null() { impl_->Null(); }
 void JsonWriter::Bool(bool b) { impl_->Bool(b); }
 void JsonWriter::Int(int i) { impl_->Int(i); }
@@ -172,19 +188,20 @@ void JsonWriter::Protobuf(const Message& pb) {
     String(field->name());
     if (field->is_repeated()) {
       StartArray();
-      for (int i = 0; i < reflection->FieldSize(pb, field); i++) {
-        ProtobufRepeatedField(pb, field, i);
+      int size = reflection->FieldSize(pb, field);
+      for (int i = 0; i < size; i++) {
+        ProtobufRepeatedField(pb, reflection, field, i);
       }
       EndArray();
     } else {
-      ProtobufField(pb, field);
+      ProtobufField(pb, reflection, field);
     }
   }
   EndObject();
 }
 
-void JsonWriter::ProtobufField(const Message& pb, const FieldDescriptor* field) {
-  const Reflection* reflection = pb.GetReflection();
+void JsonWriter::ProtobufField(const Message& pb, const Reflection* reflection,
+                               const FieldDescriptor* field) {
   switch (field->cpp_type()) {
     case FieldDescriptor::CPPTYPE_INT32:
       Int(reflection->GetInt32(pb, field));
@@ -211,7 +228,8 @@ void JsonWriter::ProtobufField(const Message& pb, const FieldDescriptor* field) 
       String(reflection->GetEnum(pb, field)->name());
       break;
     case FieldDescriptor::CPPTYPE_STRING:
-      String(reflection->GetString(pb, field));
+      String(KUDU_MAYBE_REDACT_IF(field->options().GetExtension(REDACT),
+                                  reflection->GetString(pb, field)));
       break;
     case FieldDescriptor::CPPTYPE_MESSAGE:
       Protobuf(reflection->GetMessage(pb, field));
@@ -221,8 +239,8 @@ void JsonWriter::ProtobufField(const Message& pb, const FieldDescriptor* field) 
   }
 }
 
-void JsonWriter::ProtobufRepeatedField(const Message& pb, const FieldDescriptor* field, int index) {
-  const Reflection* reflection = pb.GetReflection();
+void JsonWriter::ProtobufRepeatedField(const Message& pb, const Reflection* reflection,
+                                       const FieldDescriptor* field, int index) {
   switch (field->cpp_type()) {
     case FieldDescriptor::CPPTYPE_INT32:
       Int(reflection->GetRepeatedInt32(pb, field, index));
@@ -249,7 +267,8 @@ void JsonWriter::ProtobufRepeatedField(const Message& pb, const FieldDescriptor*
       String(reflection->GetRepeatedEnum(pb, field, index)->name());
       break;
     case FieldDescriptor::CPPTYPE_STRING:
-      String(reflection->GetRepeatedString(pb, field, index));
+      String(KUDU_MAYBE_REDACT_IF(field->options().GetExtension(REDACT),
+                                  reflection->GetRepeatedString(pb, field, index)));
       break;
     case FieldDescriptor::CPPTYPE_MESSAGE:
       Protobuf(reflection->GetRepeatedMessage(pb, field, index));
@@ -260,7 +279,7 @@ void JsonWriter::ProtobufRepeatedField(const Message& pb, const FieldDescriptor*
 }
 
 string JsonWriter::ToJson(const Message& pb, Mode mode) {
-  stringstream stream;
+  ostringstream stream;
   JsonWriter writer(&stream, mode);
   writer.Protobuf(pb);
   return stream.str();
@@ -270,12 +289,20 @@ string JsonWriter::ToJson(const Message& pb, Mode mode) {
 // UTF8StringStreamBuffer
 //
 
-UTF8StringStreamBuffer::UTF8StringStreamBuffer(std::stringstream* out)
+UTF8StringStreamBuffer::UTF8StringStreamBuffer(std::ostringstream* out)
   : out_(DCHECK_NOTNULL(out)) {
+}
+UTF8StringStreamBuffer::~UTF8StringStreamBuffer() {
+  DCHECK_EQ(buf_.size(), 0) << "Forgot to flush!";
 }
 
 void UTF8StringStreamBuffer::Put(rapidjson::UTF8<>::Ch c) {
-  out_->put(c);
+  buf_.push_back(c);
+}
+
+void UTF8StringStreamBuffer::Flush() {
+  out_->write(reinterpret_cast<char*>(buf_.data()), buf_.size());
+  buf_.clear();
 }
 
 //
@@ -283,7 +310,7 @@ void UTF8StringStreamBuffer::Put(rapidjson::UTF8<>::Ch c) {
 //
 
 template<class T>
-JsonWriterImpl<T>::JsonWriterImpl(stringstream* out)
+JsonWriterImpl<T>::JsonWriterImpl(ostringstream* out)
   : stream_(DCHECK_NOTNULL(out)),
     writer_(stream_) {
 }
@@ -310,10 +337,16 @@ void JsonWriterImpl<T>::String(const string& str) { writer_.String(str.c_str(), 
 template<class T>
 void JsonWriterImpl<T>::StartObject() { writer_.StartObject(); }
 template<class T>
-void JsonWriterImpl<T>::EndObject() { writer_.EndObject(); }
+void JsonWriterImpl<T>::EndObject() {
+  writer_.EndObject();
+  stream_.Flush();
+}
 template<class T>
 void JsonWriterImpl<T>::StartArray() { writer_.StartArray(); }
 template<class T>
-void JsonWriterImpl<T>::EndArray() { writer_.EndArray(); }
+void JsonWriterImpl<T>::EndArray() {
+  writer_.EndArray();
+  stream_.Flush();
+}
 
 } // namespace kudu

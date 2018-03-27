@@ -15,9 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "kudu/tablet/delta_key.h"
+#include <ostream>
 
 #include <glog/logging.h>
+
+#include "kudu/tablet/delta_key.h"
+#include "kudu/util/logging.h"
 
 namespace kudu {
 namespace tablet {
@@ -32,6 +35,11 @@ const char* DeltaType_Name(DeltaType t) {
       LOG(DFATAL) << "Unknown delta type: " << t;
   }
   return "UNKNOWN";
+}
+
+Status DeltaKey::DeltaKeyError(const Slice& orig, const char* err) {
+  return Status::Corruption(strings::Substitute("Bad delta key: $0", err),
+                            KUDU_REDACT(orig.ToDebugString(20)));
 }
 
 } // namespace tablet

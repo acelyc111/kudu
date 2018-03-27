@@ -17,9 +17,9 @@
 #
 # Sets COMPILER_FAMILY to 'clang' or 'gcc'
 # Sets COMPILER_VERSION to the version
-execute_process(COMMAND "${CMAKE_CXX_COMPILER}" -v
+execute_process(COMMAND env LANG=C "${CMAKE_CXX_COMPILER}" -v
                 ERROR_VARIABLE COMPILER_VERSION_FULL)
-message(INFO " ${COMPILER_VERSION_FULL}")
+message(${COMPILER_VERSION_FULL})
 
 # clang on Linux and Mac OS X before 10.9
 if("${COMPILER_VERSION_FULL}" MATCHES ".*clang version.*")
@@ -33,9 +33,27 @@ elseif("${COMPILER_VERSION_FULL}" MATCHES ".*based on LLVM.*")
     COMPILER_VERSION "${COMPILER_VERSION_FULL}")
 
 # clang on Mac OS X, XCode 7.
-elseif("${COMPILER_VERSION_FULL}" MATCHES ".*clang-700\\..*")
+elseif("${COMPILER_VERSION_FULL}" MATCHES ".*clang-7")
   set(COMPILER_FAMILY "clang")
   set(COMPILER_VERSION "3.7.0svn")
+
+# clang on Mac OS X, XCode 8.
+elseif("${COMPILER_VERSION_FULL}" MATCHES ".*clang-8")
+  set(COMPILER_FAMILY "clang")
+  set(COMPILER_VERSION "3.8.0svn")
+
+# clang on Mac OS X, XCode 9.
+#
+# TODO(dan): 4.0.0svn is just a guess, because Apple has not (as of the time of
+# writing) released the sources [1]. [2] and [3] are good resources for
+# determining the upstream Clang version as well.
+#
+# [1]: https://opensource.apple.com/
+# [2]: https://gist.github.com/yamaya/2924292
+# [3]: https://gist.github.com/epipping/ef8b02b0cfaec4a5ebf3a57092145a3f
+elseif("${COMPILER_VERSION_FULL}" MATCHES ".*clang-9")
+  set(COMPILER_FAMILY "clang")
+  set(COMPILER_VERSION "4.0.0svn")
 
 # gcc
 elseif("${COMPILER_VERSION_FULL}" MATCHES ".*gcc version.*")
@@ -47,3 +65,9 @@ else()
 endif()
 message("Selected compiler ${COMPILER_FAMILY} ${COMPILER_VERSION}")
 
+# gcc (and some varieties of clang) mention the path prefix where system headers
+# and libraries are located.
+if("${COMPILER_VERSION_FULL}" MATCHES "Configured with: .* --prefix=([^ ]*)")
+  set(COMPILER_SYSTEM_PREFIX_PATH ${CMAKE_MATCH_1})
+  message("Selected compiler built with --prefix=${COMPILER_SYSTEM_PREFIX_PATH}")
+endif()

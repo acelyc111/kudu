@@ -1,9 +1,14 @@
 // Copyright 2008 Google Inc. All Rights Reserved.
 
+#include <ostream>
+
 #include <glog/logging.h>
+
+#include "kudu/gutil/atomicops.h"
+#include "kudu/gutil/macros.h"
+#include "kudu/gutil/integral_types.h"
 #include "kudu/gutil/logging-inl.h"
 #include "kudu/gutil/once.h"
-#include "kudu/gutil/dynamic_annotations.h"
 #include "kudu/gutil/spinlock_internal.h"
 
 // All modifications to a GoogleOnceType occur inside GoogleOnceInternalInit.
@@ -39,7 +44,6 @@ void GoogleOnceInternalInit(Atomic32 *control, void (*func)(),
     } else {
       (*func_with_arg)(arg);
     }
-    ANNOTATE_HAPPENS_BEFORE(control);
     int32 old_control = base::subtle::NoBarrier_Load(control);
     base::subtle::Release_Store(control, GOOGLE_ONCE_INTERNAL_DONE);
     if (old_control == GOOGLE_ONCE_INTERNAL_WAITER) {

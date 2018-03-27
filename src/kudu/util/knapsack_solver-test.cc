@@ -15,14 +15,18 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <boost/lexical_cast.hpp>
-#include <glog/logging.h>
-#include <gtest/gtest.h>
+#include <cstdlib>
+#include <memory>
+#include <string>
 #include <vector>
+
+#include <gtest/gtest.h>
+
 #include "kudu/util/knapsack_solver.h"
-#include "kudu/util/stopwatch.h"
+#include "kudu/util/stopwatch.h"  // IWYU pragma: keep
 #include "kudu/util/test_util.h"
 
+using std::string;
 using std::vector;
 
 namespace kudu {
@@ -71,7 +75,7 @@ static string JoinInts(const vector<int> &ints) {
     if (i > 0) {
       ret.push_back(',');
     }
-    ret.append(boost::lexical_cast<string>(ints[i]));
+    ret.append(std::to_string(ints[i]));
   }
   return ret;
 }
@@ -80,10 +84,10 @@ TEST_F(TestKnapsack, Basics) {
   KnapsackSolver<TestItemTraits> solver;
 
   vector<TestItem> in;
-  in.push_back(TestItem(500, 3));
-  in.push_back(TestItem(110, 1));
-  in.push_back(TestItem(125, 1));
-  in.push_back(TestItem(100, 1));
+  in.emplace_back(500, 3);
+  in.emplace_back(110, 1);
+  in.emplace_back(125, 1);
+  in.emplace_back(100, 1);
 
   vector<int> out;
   double max_val;

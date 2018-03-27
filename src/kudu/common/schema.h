@@ -17,20 +17,33 @@
 #ifndef KUDU_COMMON_SCHEMA_H
 #define KUDU_COMMON_SCHEMA_H
 
+#include <cstddef>
+#include <cstdint>
 #include <functional>
-#include <glog/logging.h>
 #include <memory>
+#include <ostream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include <boost/optional/optional.hpp>
+#include <glog/logging.h>
+
+#include "kudu/common/common.pb.h"
 #include "kudu/common/id_mapping.h"
 #include "kudu/common/key_encoder.h"
+#include "kudu/common/types.h"
+#include "kudu/gutil/macros.h"
+#include "kudu/gutil/port.h"
 #include "kudu/gutil/stl_util.h"
 #include "kudu/gutil/strings/strcat.h"
+#include "kudu/gutil/strings/stringpiece.h"
 #include "kudu/gutil/strings/substitute.h"
+#include "kudu/util/compression/compression.pb.h"
+#include "kudu/util/faststring.h"
+#include "kudu/util/slice.h"
 #include "kudu/util/status.h"
 
 // Check that two schemas are equal, yielding a useful error message in the case that
@@ -39,20 +52,18 @@
   do { \
     DCHECK((s1).Equals((s2))) << "Schema " << (s1).ToString() \
                               << " does not match " << (s2).ToString(); \
-  } while (0);
+  } while (0)
 
 #define DCHECK_KEY_PROJECTION_SCHEMA_EQ(s1, s2) \
   do { \
     DCHECK((s1).KeyEquals((s2))) << "Key-Projection Schema " \
                                  << (s1).ToString() << " does not match " \
                                  << (s2).ToString(); \
-  } while (0);
+  } while (0)
 
 namespace kudu {
 
-using std::vector;
-using std::unordered_map;
-using std::unordered_set;
+class Arena;
 
 // The ID of a column. Each column in a table has a unique ID.
 struct ColumnId {
@@ -73,6 +84,35 @@ struct ColumnId {
   int32_t t;
 };
 
+// Class for storing column attributes such as precision and scale
+// for decimal types. Column attributes describe logical features of
+// the column; these features are usually relative to the column's type.
+struct ColumnTypeAttributes {
+ public:
+  ColumnTypeAttributes()
+      : precision(0),
+        scale(0) {
+  }
+
+  ColumnTypeAttributes(int8_t precision, int8_t scale)
+      : precision(precision),
+        scale(scale) {
+  }
+
+  // Does `other` represent equivalent attributes for `type`?
+  // For example, if type == DECIMAL64 then attributes are equivalent iff
+  // they have the same precision and scale.
+  bool EqualsForType(ColumnTypeAttributes other, DataType type) const;
+
+  // Return a string representation appropriate for `type`
+  // This is meant to be postfixed to the name of a primitive type to describe
+  // the full type, e.g. decimal(10, 4)
+  std::string ToStringForType(DataType type) const;
+
+  int8_t precision;
+  int8_t scale;
+};
+
 // Class for storing column attributes such as compression and
 // encoding.  Column attributes describe the physical storage and
 // representation of bytes, as opposed to a purely logical description
@@ -88,7 +128,13 @@ struct ColumnStorageAttributes {
       cfile_block_size(0) {
   }
 
-  string ToString() const;
+  ColumnStorageAttributes(EncodingType enc, CompressionType cmp)
+    : encoding(enc),
+      compression(cmp),
+      cfile_block_size(0) {
+  }
+
+  std::string ToString() const;
 
   EncodingType encoding;
   CompressionType compression;
@@ -96,6 +142,37 @@ struct ColumnStorageAttributes {
   // The preferred block size for cfile blocks. If 0, uses the
   // server-wide default.
   int32_t cfile_block_size;
+};
+
+// A struct representing changes to a ColumnSchema.
+//
+// In the future, as more complex alter operations need to be supported,
+// this may evolve into a class, but for now it's just POD.
+struct ColumnSchemaDelta {
+public:
+  explicit ColumnSchemaDelta(std::string name)
+      : name(std::move(name)),
+        remove_default(false) {
+  }
+
+  const std::string name;
+
+  boost::optional<std::string> new_name;
+
+  // NB: these properties of a column cannot be changed yet,
+  // ergo type and nullable should always be empty.
+  // TODO(wdberkeley) allow changing of type and nullability
+  boost::optional<DataType> type;
+
+  boost::optional<bool> nullable;
+
+  boost::optional<Slice> default_value;
+
+  bool remove_default;
+
+  boost::optional<EncodingType> encoding;
+  boost::optional<CompressionType> compression;
+  boost::optional<int32_t> cfile_block_size;
 };
 
 // The schema for a given column.
@@ -120,19 +197,20 @@ class ColumnSchema {
   //   ColumnSchema col_c("c", INT32, false, &default_i32);
   //   Slice default_str("Hello");
   //   ColumnSchema col_d("d", STRING, false, &default_str);
-  ColumnSchema(string name, DataType type, bool is_nullable = false,
+  ColumnSchema(std::string name, DataType type, bool is_nullable = false,
                const void* read_default = NULL,
                const void* write_default = NULL,
-               ColumnStorageAttributes attributes = ColumnStorageAttributes())
+               ColumnStorageAttributes attributes = ColumnStorageAttributes(),
+               ColumnTypeAttributes type_attributes = ColumnTypeAttributes())
       : name_(std::move(name)),
         type_info_(GetTypeInfo(type)),
         is_nullable_(is_nullable),
         read_default_(read_default ? new Variant(type, read_default) : NULL),
-        attributes_(std::move(attributes)) {
+        attributes_(attributes),
+        type_attributes_(type_attributes) {
     if (write_default == read_default) {
       write_default_ = read_default_;
     } else if (write_default != NULL) {
-      DCHECK(read_default != NULL) << "Must have a read default";
       write_default_.reset(new Variant(type, write_default));
     }
   }
@@ -145,17 +223,17 @@ class ColumnSchema {
     return is_nullable_;
   }
 
-  const string &name() const {
+  const std::string &name() const {
     return name_;
   }
 
   // Return a string identifying this column, including its
   // name.
-  string ToString() const;
+  std::string ToString() const;
 
   // Same as above, but only including the type information.
   // For example, "STRING NOT NULL".
-  string TypeToString() const;
+  std::string TypeToString() const;
 
   // Returns true if the column has a read default value
   bool has_read_default() const {
@@ -195,19 +273,42 @@ class ColumnSchema {
     return NULL;
   }
 
-  bool EqualsType(const ColumnSchema &other) const {
+  bool EqualsPhysicalType(const ColumnSchema& other) const {
+    if (this == &other) return true;
     return is_nullable_ == other.is_nullable_ &&
-           type_info()->type() == other.type_info()->type();
+           type_info()->physical_type() == other.type_info()->physical_type();
   }
 
-  bool Equals(const ColumnSchema &other, bool check_defaults) const {
-    if (!EqualsType(other) || this->name_ != other.name_)
+  bool EqualsType(const ColumnSchema &other) const {
+    if (this == &other) return true;
+    return is_nullable_ == other.is_nullable_ &&
+           type_info()->type() == other.type_info()->type() &&
+           type_attributes().EqualsForType(other.type_attributes(), type_info()->type());
+  }
+
+  // compare types in Equals function
+  enum {
+    COMPARE_NAME = 1 << 0,
+    COMPARE_TYPE = 1 << 1,
+    COMPARE_DEFAULTS = 1 << 2,
+
+    COMPARE_ALL = COMPARE_NAME | COMPARE_TYPE | COMPARE_DEFAULTS
+  };
+
+  bool Equals(const ColumnSchema &other,
+              int flags = COMPARE_ALL) const {
+    if (this == &other) return true;
+
+    if ((flags & COMPARE_NAME) && this->name_ != other.name_)
       return false;
 
-    // For Key comparison checking the defauls doesn't make sense,
+    if ((flags & COMPARE_TYPE) && !EqualsType(other))
+      return false;
+
+    // For Key comparison checking the defaults doesn't make sense,
     // since we don't support them, for server vs user schema this comparison
     // will always fail, since the user does not specify the defaults.
-    if (check_defaults) {
+    if (flags & COMPARE_DEFAULTS) {
       if (read_default_ == NULL && other.read_default_ != NULL)
         return false;
 
@@ -223,6 +324,11 @@ class ColumnSchema {
     return true;
   }
 
+  // Apply a ColumnSchemaDelta to this column schema, altering it according to
+  // the changes in the delta.
+  // The original column schema is changed only if the method returns OK.
+  Status ApplyDelta(const ColumnSchemaDelta& col_delta);
+
   // Returns extended attributes (such as encoding, compression, etc...)
   // associated with the column schema. The reason they are kept in a separate
   // struct is so that in the future, they may be moved out to a more
@@ -231,14 +337,18 @@ class ColumnSchema {
     return attributes_;
   }
 
+  const ColumnTypeAttributes& type_attributes() const {
+    return type_attributes_;
+  }
+
   int Compare(const void *lhs, const void *rhs) const {
     return type_info_->Compare(lhs, rhs);
   }
 
   // Stringify the given cell. This just stringifies the cell contents,
   // and doesn't include the column name or type.
-  string Stringify(const void *cell) const {
-    string ret;
+  std::string Stringify(const void *cell) const {
+    std::string ret;
     type_info_->AppendDebugStringForValue(cell, &ret);
     return ret;
   }
@@ -269,20 +379,19 @@ class ColumnSchema {
  private:
   friend class SchemaBuilder;
 
-  void set_name(const string& name) {
+  void set_name(const std::string& name) {
     name_ = name;
   }
 
-  string name_;
+  std::string name_;
   const TypeInfo *type_info_;
   bool is_nullable_;
   // use shared_ptr since the ColumnSchema is always copied around.
   std::shared_ptr<Variant> read_default_;
   std::shared_ptr<Variant> write_default_;
   ColumnStorageAttributes attributes_;
+  ColumnTypeAttributes type_attributes_;
 };
-
-class ContiguousRow;
 
 // The schema for a set of rows.
 //
@@ -323,7 +432,7 @@ class Schema {
   // empty schema and then use Reset(...)  so that errors can be
   // caught. If an invalid schema is passed to this constructor, an
   // assertion will be fired!
-  Schema(const vector<ColumnSchema>& cols,
+  Schema(const std::vector<ColumnSchema>& cols,
          int key_columns)
     : name_to_index_bytes_(0),
       // TODO: C++11 provides a single-arg constructor
@@ -340,8 +449,8 @@ class Schema {
   // empty schema and then use Reset(...)  so that errors can be
   // caught. If an invalid schema is passed to this constructor, an
   // assertion will be fired!
-  Schema(const vector<ColumnSchema>& cols,
-         const vector<ColumnId>& ids,
+  Schema(const std::vector<ColumnSchema>& cols,
+         const std::vector<ColumnId>& ids,
          int key_columns)
     : name_to_index_bytes_(0),
       // TODO: C++11 provides a single-arg constructor
@@ -355,7 +464,7 @@ class Schema {
   // Reset this Schema object to the given schema.
   // If this fails, the Schema object is left in an inconsistent
   // state and may not be used.
-  Status Reset(const vector<ColumnSchema>& cols, int key_columns) {
+  Status Reset(const std::vector<ColumnSchema>& cols, int key_columns) {
     std::vector<ColumnId> ids;
     return Reset(cols, ids, key_columns);
   }
@@ -363,13 +472,14 @@ class Schema {
   // Reset this Schema object to the given schema.
   // If this fails, the Schema object is left in an inconsistent
   // state and may not be used.
-  Status Reset(const vector<ColumnSchema>& cols,
-               const vector<ColumnId>& ids,
+  Status Reset(const std::vector<ColumnSchema>& cols,
+               const std::vector<ColumnId>& ids,
                int key_columns);
 
-  // Return the number of bytes needed to represent a single row of this schema.
+  // Return the number of bytes needed to represent a single row of this schema, without
+  // accounting for the null bitmap if the Schema contains nullable values.
   //
-  // This size does not include any indirected (variable length) data (eg strings)
+  // This size does not include any indirected (variable length) data (eg strings).
   size_t byte_size() const {
     DCHECK(initialized());
     return col_offsets_.back();
@@ -383,7 +493,13 @@ class Schema {
 
   // Return the number of columns in this schema
   size_t num_columns() const {
-    return cols_.size();
+    // Use name_to_index_.size() instead of cols_.size() since the former
+    // just reads a member variable of the unordered_map whereas the
+    // latter involves division by sizeof(ColumnSchema). Even though
+    // division-by-a-constant gets optimized into multiplication,
+    // the multiplication instruction has a significantly higher latency
+    // than the simple load.
+    return name_to_index_.size();
   }
 
   // Return the length of the key prefix in this schema.
@@ -492,7 +608,7 @@ class Schema {
   // in a way suitable for debugging. This isn't currently optimized
   // so should be avoided in hot paths.
   template<class RowType>
-  string DebugRow(const RowType& row) const {
+  std::string DebugRow(const RowType& row) const {
     DCHECK_SCHEMA_EQ(*this, *row.schema());
     return DebugRowColumns(row, num_columns());
   }
@@ -501,7 +617,7 @@ class Schema {
   // key-compatible with this one. Per above, this is not for use in
   // hot paths.
   template<class RowType>
-  string DebugRowKey(const RowType& row) const {
+  std::string DebugRowKey(const RowType& row) const {
     DCHECK_KEY_PROJECTION_SCHEMA_EQ(*this, *row.schema());
     return DebugRowColumns(row, num_key_columns());
   }
@@ -526,7 +642,7 @@ class Schema {
     START_KEY,
     END_KEY
   };
-  string DebugEncodedRowKey(Slice encoded_key, StartOrEnd start_or_end) const;
+  std::string DebugEncodedRowKey(Slice encoded_key, StartOrEnd start_or_end) const;
 
   // Compare two rows of this schema.
   template<class RowTypeA, class RowTypeB>
@@ -549,9 +665,9 @@ class Schema {
   // TODO this should probably be cached since the key projection
   // is not supposed to change, for a single schema.
   Schema CreateKeyProjection() const {
-    vector<ColumnSchema> key_cols(cols_.begin(),
+    std::vector<ColumnSchema> key_cols(cols_.begin(),
                                   cols_.begin() + num_key_columns_);
-    vector<ColumnId> col_ids;
+    std::vector<ColumnId> col_ids;
     if (!col_ids_.empty()) {
       col_ids.assign(col_ids_.begin(), col_ids_.begin() + num_key_columns_);
     }
@@ -607,18 +723,17 @@ class Schema {
 
   // Stringify this Schema. This is not particularly efficient,
   // so should only be used when necessary for output.
-  string ToString() const;
+  std::string ToString() const;
 
   // Return true if the schemas have exactly the same set of columns
   // and respective types.
   bool Equals(const Schema &other) const {
     if (this == &other) return true;
     if (this->num_key_columns_ != other.num_key_columns_) return false;
-    if (this->cols_.size() != other.cols_.size()) return false;
+    if (this->num_columns() != other.num_columns()) return false;
 
-    const bool have_column_ids = other.has_column_ids() && has_column_ids();
-    for (size_t i = 0; i < other.cols_.size(); i++) {
-      if (!this->cols_[i].Equals(other.cols_[i], have_column_ids)) return false;
+    for (size_t i = 0; i < other.num_columns(); i++) {
+      if (!this->cols_[i].Equals(other.cols_[i])) return false;
     }
 
     return true;
@@ -626,12 +741,21 @@ class Schema {
 
   // Return true if the key projection schemas have exactly the same set of
   // columns and respective types.
-  bool KeyEquals(const Schema& other) const {
+  bool KeyEquals(const Schema& other,
+                 int flags
+                    = ColumnSchema::COMPARE_NAME | ColumnSchema::COMPARE_TYPE) const {
+    if (this == &other) return true;
     if (this->num_key_columns_ != other.num_key_columns_) return false;
     for (size_t i = 0; i < this->num_key_columns_; i++) {
-      if (!this->cols_[i].Equals(other.cols_[i], false)) return false;
+      if (!this->cols_[i].Equals(other.cols_[i], flags)) return false;
     }
     return true;
+  }
+
+  // Return true if the key projection schemas have exactly the same set of
+  // columns and respective types except name field.
+  bool KeyTypeEquals(const Schema& other) const {
+    return KeyEquals(other, ColumnSchema::COMPARE_TYPE);
   }
 
   // Return a non-OK status if the project is not compatible with the current schema
@@ -671,7 +795,7 @@ class Schema {
     const bool use_column_ids = base_schema.has_column_ids() && has_column_ids();
 
     int proj_idx = 0;
-    for (int i = 0; i < cols_.size(); ++i) {
+    for (int i = 0; i < num_columns(); ++i) {
       const ColumnSchema& col_schema = cols_[i];
 
       // try to lookup the column by ID if present or just by name.
@@ -735,7 +859,7 @@ class Schema {
   // row.
   template<class RowType>
   std::string DebugRowColumns(const RowType& row, int num_columns) const {
-    string ret;
+    std::string ret;
     ret.append("(");
 
     for (size_t col_idx = 0; col_idx < num_columns; col_idx++) {
@@ -751,11 +875,11 @@ class Schema {
 
   friend class SchemaBuilder;
 
-  vector<ColumnSchema> cols_;
+  std::vector<ColumnSchema> cols_;
   size_t num_key_columns_;
   ColumnId max_col_id_;
-  vector<ColumnId> col_ids_;
-  vector<size_t> col_offsets_;
+  std::vector<ColumnId> col_ids_;
+  std::vector<size_t> col_offsets_;
 
   // The keys of this map are StringPiece references to the actual name members of the
   // ColumnSchema objects inside cols_. This avoids an extra copy of those strings,
@@ -766,7 +890,7 @@ class Schema {
   // measure its memory footprint.
   int64_t name_to_index_bytes_;
   typedef STLCountingAllocator<std::pair<const StringPiece, size_t> > NameToIndexMapAllocator;
-  typedef unordered_map<
+  typedef std::unordered_map<
       StringPiece,
       size_t,
       std::hash<StringPiece>,
@@ -795,7 +919,7 @@ class Schema {
 //   Schema new_schema = builder.Build();
 class SchemaBuilder {
  public:
-  explicit SchemaBuilder() { Reset(); }
+  SchemaBuilder() { Reset(); }
   explicit SchemaBuilder(const Schema& schema) { Reset(schema); }
 
   void Reset();
@@ -815,37 +939,50 @@ class SchemaBuilder {
     return next_id_;
   }
 
+  // Return true if the column named 'col_name' is a key column.
+  // Return false if the column is not a key column, or if
+  // the column is not in the builder.
+  bool is_key_column(const StringPiece col_name) const {
+    for (int i = 0; i < num_key_columns_; i++) {
+      if (cols_[i].name() == col_name) return true;
+    }
+    return false;
+  }
+
   Schema Build() const { return Schema(cols_, col_ids_, num_key_columns_); }
   Schema BuildWithoutIds() const { return Schema(cols_, num_key_columns_); }
 
-  Status AddKeyColumn(const string& name, DataType type);
+  Status AddKeyColumn(const std::string& name, DataType type);
 
   Status AddColumn(const ColumnSchema& column, bool is_key);
 
-  Status AddColumn(const string& name, DataType type) {
+  Status AddColumn(const std::string& name, DataType type) {
     return AddColumn(name, type, false, NULL, NULL);
   }
 
-  Status AddNullableColumn(const string& name, DataType type) {
+  Status AddNullableColumn(const std::string& name, DataType type) {
     return AddColumn(name, type, true, NULL, NULL);
   }
 
-  Status AddColumn(const string& name,
+  Status AddColumn(const std::string& name,
                    DataType type,
                    bool is_nullable,
                    const void *read_default,
                    const void *write_default);
 
-  Status RemoveColumn(const string& name);
-  Status RenameColumn(const string& old_name, const string& new_name);
+  Status RemoveColumn(const std::string& name);
+
+  Status RenameColumn(const std::string& old_name, const std::string& new_name);
+
+  Status ApplyColumnSchemaDelta(const ColumnSchemaDelta& col_delta);
 
  private:
   DISALLOW_COPY_AND_ASSIGN(SchemaBuilder);
 
   ColumnId next_id_;
-  vector<ColumnId> col_ids_;
-  vector<ColumnSchema> cols_;
-  unordered_set<string> col_names_;
+  std::vector<ColumnId> col_ids_;
+  std::vector<ColumnSchema> cols_;
+  std::unordered_set<std::string> col_names_;
   size_t num_key_columns_;
 };
 

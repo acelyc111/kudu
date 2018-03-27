@@ -15,27 +15,36 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <glog/logging.h>
-
 #include "kudu/tablet/transactions/alter_schema_transaction.h"
 
+#include <memory>
+#include <utility>
+
+#include <glog/logging.h>
+
+#include "kudu/clock/hybrid_clock.h"
+#include "kudu/common/schema.h"
+#include "kudu/common/timestamp.h"
 #include "kudu/common/wire_protocol.h"
-#include "kudu/rpc/rpc_context.h"
-#include "kudu/server/hybrid_clock.h"
+#include "kudu/consensus/log.h"
+#include "kudu/consensus/raft_consensus.h"
+#include "kudu/gutil/strings/substitute.h"
 #include "kudu/tablet/tablet.h"
-#include "kudu/tablet/tablet_peer.h"
-#include "kudu/tablet/tablet_metrics.h"
+#include "kudu/tablet/tablet_replica.h"
 #include "kudu/tserver/tserver.pb.h"
+#include "kudu/util/pb_util.h"
 #include "kudu/util/trace.h"
 
 namespace kudu {
 namespace tablet {
 
-using boost::bind;
 using consensus::ReplicateMsg;
 using consensus::CommitMsg;
 using consensus::ALTER_SCHEMA_OP;
 using consensus::DriverType;
+using pb_util::SecureShortDebugString;
+using std::string;
+using std::unique_ptr;
 using strings::Substitute;
 using tserver::TabletServerErrorPB;
 using tserver::AlterSchemaRequestPB;
@@ -44,9 +53,9 @@ using tserver::AlterSchemaResponsePB;
 string AlterSchemaTransactionState::ToString() const {
   return Substitute("AlterSchemaTransactionState "
                     "[timestamp=$0, schema=$1, request=$2]",
-                    timestamp().ToString(),
+                    has_timestamp() ? timestamp().ToString() : "<unassigned>",
                     schema_ == nullptr ? "(none)" : schema_->ToString(),
-                    request_ == nullptr ? "(none)" : request_->ShortDebugString());
+                    request_ == nullptr ? "(none)" : SecureShortDebugString(*request_));
 }
 
 void AlterSchemaTransactionState::AcquireSchemaLock(rw_semaphore* l) {
@@ -61,11 +70,10 @@ void AlterSchemaTransactionState::ReleaseSchemaLock() {
   TRACE("Released schema lock");
 }
 
-
-AlterSchemaTransaction::AlterSchemaTransaction(AlterSchemaTransactionState* state,
+AlterSchemaTransaction::AlterSchemaTransaction(unique_ptr<AlterSchemaTransactionState> state,
                                                DriverType type)
-    : Transaction(state, type, Transaction::ALTER_SCHEMA_TXN),
-      state_(state) {
+    : Transaction(state.get(), type, Transaction::ALTER_SCHEMA_TXN),
+      state_(std::move(state)) {
 }
 
 void AlterSchemaTransaction::NewReplicateMsg(gscoped_ptr<ReplicateMsg>* replicate_msg) {
@@ -85,7 +93,7 @@ Status AlterSchemaTransaction::Prepare() {
     return s;
   }
 
-  Tablet* tablet = state_->tablet_peer()->tablet();
+  Tablet* tablet = state_->tablet_replica()->tablet();
   RETURN_NOT_OK(tablet->CreatePreparedAlterSchema(state(), schema.get()));
 
   state_->AddToAutoReleasePool(schema.release());
@@ -95,21 +103,25 @@ Status AlterSchemaTransaction::Prepare() {
 }
 
 Status AlterSchemaTransaction::Start() {
-  if (!state_->has_timestamp()) {
-    state_->set_timestamp(state_->tablet_peer()->clock()->Now());
-  }
-  TRACE("START. Timestamp: $0", server::HybridClock::GetPhysicalValueMicros(state_->timestamp()));
+  DCHECK(!state_->has_timestamp());
+  DCHECK(state_->consensus_round()->replicate_msg()->has_timestamp());
+  state_->set_timestamp(Timestamp(state_->consensus_round()->replicate_msg()->timestamp()));
+  TRACE("START. Timestamp: $0", clock::HybridClock::GetPhysicalValueMicros(state_->timestamp()));
   return Status::OK();
 }
 
 Status AlterSchemaTransaction::Apply(gscoped_ptr<CommitMsg>* commit_msg) {
   TRACE("APPLY ALTER-SCHEMA: Starting");
 
-  Tablet* tablet = state_->tablet_peer()->tablet();
+  Tablet* tablet = state_->tablet_replica()->tablet();
   RETURN_NOT_OK(tablet->AlterSchema(state()));
-  state_->tablet_peer()->log()
+  state_->tablet_replica()->log()
     ->SetSchemaForNextLogSegment(*DCHECK_NOTNULL(state_->schema()),
                                                  state_->schema_version());
+
+  // Altered tablets should be included in the next tserver heartbeat so that
+  // clients waiting on IsAlterTableDone() are unblocked promptly.
+  state_->tablet_replica()->MarkTabletDirty("Alter schema finished");
 
   commit_msg->reset(new CommitMsg());
   (*commit_msg)->set_op_type(ALTER_SCHEMA_OP);

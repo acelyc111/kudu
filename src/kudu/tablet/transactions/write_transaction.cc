@@ -18,22 +18,44 @@
 #include "kudu/tablet/transactions/write_transaction.h"
 
 #include <algorithm>
+#include <cstdint>
+#include <ctime>
+#include <new>
+#include <ostream>
+#include <type_traits>
 #include <vector>
 
-#include "kudu/common/wire_protocol.h"
+#include <gflags/gflags.h>
+#include <glog/logging.h>
+
+#include "kudu/clock/clock.h"
+#include "kudu/common/common.pb.h"
 #include "kudu/common/row_operations.h"
-#include "kudu/gutil/stl_util.h"
-#include "kudu/gutil/strings/numbers.h"
+#include "kudu/common/schema.h"
+#include "kudu/common/timestamp.h"
+#include "kudu/common/wire_protocol.h"
+#include "kudu/common/wire_protocol.pb.h"
+#include "kudu/consensus/opid.pb.h"
+#include "kudu/consensus/raft_consensus.h"
+#include "kudu/util/memory/arena.h"
+#include "kudu/gutil/dynamic_annotations.h"
+#include "kudu/gutil/move.h"
+#include "kudu/gutil/strings/substitute.h"
 #include "kudu/gutil/walltime.h"
-#include "kudu/rpc/rpc_context.h"
-#include "kudu/server/hybrid_clock.h"
+#include "kudu/rpc/rpc_header.pb.h"
+#include "kudu/tablet/lock_manager.h"
+#include "kudu/tablet/mvcc.h"
 #include "kudu/tablet/row_op.h"
 #include "kudu/tablet/tablet.h"
-#include "kudu/tablet/tablet_peer.h"
+#include "kudu/tablet/tablet.pb.h"
 #include "kudu/tablet/tablet_metrics.h"
+#include "kudu/tablet/tablet_replica.h"
 #include "kudu/tserver/tserver.pb.h"
 #include "kudu/util/debug/trace_event.h"
 #include "kudu/util/flag_tags.h"
+#include "kudu/util/metrics.h"
+#include "kudu/util/pb_util.h"
+#include "kudu/util/rw_semaphore.h"
 #include "kudu/util/trace.h"
 
 DEFINE_int32(tablet_inject_latency_on_apply_write_txn_ms, 0,
@@ -42,29 +64,36 @@ DEFINE_int32(tablet_inject_latency_on_apply_write_txn_ms, 0,
 TAG_FLAG(tablet_inject_latency_on_apply_write_txn_ms, unsafe);
 TAG_FLAG(tablet_inject_latency_on_apply_write_txn_ms, runtime);
 
+using std::string;
+using std::unique_ptr;
+using std::vector;
+using strings::Substitute;
+
 namespace kudu {
 namespace tablet {
 
-using boost::bind;
-using consensus::ReplicateMsg;
+using pb_util::SecureShortDebugString;
 using consensus::CommitMsg;
 using consensus::DriverType;
+using consensus::ReplicateMsg;
 using consensus::WRITE_OP;
 using tserver::TabletServerErrorPB;
 using tserver::WriteRequestPB;
 using tserver::WriteResponsePB;
-using strings::Substitute;
 
-WriteTransaction::WriteTransaction(WriteTransactionState* state, DriverType type)
-  : Transaction(state, type, Transaction::WRITE_TXN),
-  state_(state) {
-  start_time_ = MonoTime::Now(MonoTime::FINE);
+WriteTransaction::WriteTransaction(unique_ptr<WriteTransactionState> state, DriverType type)
+  : Transaction(state.get(), type, Transaction::WRITE_TXN),
+  state_(std::move(state)) {
+  start_time_ = MonoTime::Now();
 }
 
 void WriteTransaction::NewReplicateMsg(gscoped_ptr<ReplicateMsg>* replicate_msg) {
   replicate_msg->reset(new ReplicateMsg);
   (*replicate_msg)->set_op_type(WRITE_OP);
   (*replicate_msg)->mutable_write_request()->CopyFrom(*state()->request());
+  if (state()->are_results_tracked()) {
+    (*replicate_msg)->mutable_request_id()->CopyFrom(state()->request_id());
+  }
 }
 
 Status WriteTransaction::Prepare() {
@@ -82,7 +111,7 @@ Status WriteTransaction::Prepare() {
     return s;
   }
 
-  Tablet* tablet = state()->tablet_peer()->tablet();
+  Tablet* tablet = state()->tablet_replica()->tablet();
 
   Status s = tablet->DecodeWriteOperations(&client_schema, state());
   if (!s.ok()) {
@@ -98,11 +127,18 @@ Status WriteTransaction::Prepare() {
   return Status::OK();
 }
 
+void WriteTransaction::AbortPrepare() {
+  state()->ReleaseMvccTxn(TransactionResult::ABORTED);
+}
+
 Status WriteTransaction::Start() {
   TRACE_EVENT0("txn", "WriteTransaction::Start");
   TRACE("Start()");
-  state_->tablet_peer()->tablet()->StartTransaction(state_.get());
-  TRACE("Timestamp: $0", state_->tablet_peer()->clock()->Stringify(state_->timestamp()));
+  DCHECK(!state_->has_timestamp());
+  DCHECK(state_->consensus_round()->replicate_msg()->has_timestamp());
+  state_->set_timestamp(Timestamp(state_->consensus_round()->replicate_msg()->timestamp()));
+  state_->tablet_replica()->tablet()->StartTransaction(state_.get());
+  TRACE("Timestamp: $0", state_->tablet_replica()->clock()->Stringify(state_->timestamp()));
   return Status::OK();
 }
 
@@ -119,14 +155,13 @@ Status WriteTransaction::Apply(gscoped_ptr<CommitMsg>* commit_msg) {
     SleepFor(MonoDelta::FromMilliseconds(FLAGS_tablet_inject_latency_on_apply_write_txn_ms));
   }
 
-  Tablet* tablet = state()->tablet_peer()->tablet();
-
-  tablet->ApplyRowOperations(state());
+  Tablet* tablet = state()->tablet_replica()->tablet();
+  RETURN_NOT_OK(tablet->ApplyRowOperations(state()));
 
   // Add per-row errors to the result, update metrics.
   int i = 0;
   for (const RowOp* op : state()->row_ops()) {
-    if (state()->response() != nullptr && op->result->has_failed_status()) {
+    if (op->result->has_failed_status()) {
       // Replicas disregard the per row errors, for now
       // TODO check the per-row errors against the leader's, at least in debug mode
       WriteResponsePB::PerRowErrorPB* error = state()->response()->add_per_row_errors();
@@ -146,33 +181,26 @@ Status WriteTransaction::Apply(gscoped_ptr<CommitMsg>* commit_msg) {
   return Status::OK();
 }
 
-void WriteTransaction::PreCommit() {
-  TRACE_EVENT0("txn", "WriteTransaction::PreCommit");
-  TRACE("PRECOMMIT: Releasing row and schema locks");
-  // Perform early lock release after we've applied all changes
-  state()->release_row_locks();
-  state()->ReleaseSchemaLock();
-}
-
 void WriteTransaction::Finish(TransactionResult result) {
   TRACE_EVENT0("txn", "WriteTransaction::Finish");
+
+  state()->CommitOrAbort(result);
+
   if (PREDICT_FALSE(result == Transaction::ABORTED)) {
-    TRACE("FINISH: aborting transaction");
-    state()->Abort();
+    TRACE("FINISH: transaction aborted");
     return;
   }
 
   DCHECK_EQ(result, Transaction::COMMITTED);
-  // Now that all of the changes have been applied and the commit is durable
-  // make the changes visible to readers.
-  TRACE("FINISH: making edits visible");
-  state()->Commit();
 
-  TabletMetrics* metrics = state_->tablet_peer()->tablet()->metrics();
+  TRACE("FINISH: updating metrics");
+
+  TabletMetrics* metrics = state_->tablet_replica()->tablet()->metrics();
   if (metrics) {
     // TODO: should we change this so it's actually incremented by the
     // Tablet code itself instead of this wrapper code?
     metrics->rows_inserted->IncrementBy(state_->metrics().successful_inserts);
+    metrics->rows_upserted->IncrementBy(state_->metrics().successful_upserts);
     metrics->rows_updated->IncrementBy(state_->metrics().successful_updates);
     metrics->rows_deleted->IncrementBy(state_->metrics().successful_deletes);
 
@@ -181,7 +209,7 @@ void WriteTransaction::Finish(TransactionResult result) {
         metrics->commit_wait_duration->Increment(state_->metrics().commit_wait_duration_usec);
       }
       uint64_t op_duration_usec =
-          MonoTime::Now(MonoTime::FINE).GetDeltaSince(start_time_).ToMicroseconds();
+          (MonoTime::Now() - start_time_).ToMicroseconds();
       switch (state()->external_consistency_mode()) {
         case CLIENT_PROPAGATED:
           metrics->write_op_duration_client_propagated_consistency->Increment(op_duration_usec);
@@ -197,8 +225,8 @@ void WriteTransaction::Finish(TransactionResult result) {
 }
 
 string WriteTransaction::ToString() const {
-  MonoTime now(MonoTime::Now(MonoTime::FINE));
-  MonoDelta d = now.GetDeltaSince(start_time_);
+  MonoTime now(MonoTime::Now());
+  MonoDelta d = now - start_time_;
   WallTime abs_time = WallTime_Now() - d.ToSeconds();
   string abs_time_formatted;
   StringAppendStrftime(&abs_time_formatted, "%Y-%m-%d %H:%M:%S", (time_t)abs_time, true);
@@ -206,30 +234,27 @@ string WriteTransaction::ToString() const {
                     DriverType_Name(type()), abs_time_formatted, state_->ToString());
 }
 
-WriteTransactionState::WriteTransactionState(TabletPeer* tablet_peer,
+WriteTransactionState::WriteTransactionState(TabletReplica* tablet_replica,
                                              const tserver::WriteRequestPB *request,
+                                             const rpc::RequestIdPB* request_id,
                                              tserver::WriteResponsePB *response)
-  : TransactionState(tablet_peer),
-    request_(request),
+  : TransactionState(tablet_replica),
+    request_(DCHECK_NOTNULL(request)),
     response_(response),
     mvcc_tx_(nullptr),
     schema_at_decode_time_(nullptr) {
-  if (request) {
-    external_consistency_mode_ = request->external_consistency_mode();
-  } else {
-    external_consistency_mode_ = CLIENT_PROPAGATED;
+  external_consistency_mode_ = request_->external_consistency_mode();
+  if (!response_) {
+    response_ = &owned_response_;
+  }
+  if (request_id) {
+    request_id_ = *request_id;
   }
 }
 
-
-void WriteTransactionState::SetMvccTxAndTimestamp(gscoped_ptr<ScopedTransaction> mvcc_tx) {
+void WriteTransactionState::SetMvccTx(gscoped_ptr<ScopedTransaction> mvcc_tx) {
   DCHECK(!mvcc_tx_) << "Mvcc transaction already started/set.";
-  if (has_timestamp()) {
-    DCHECK_EQ(timestamp(), mvcc_tx->timestamp());
-  } else {
-    set_timestamp(mvcc_tx->timestamp());
-  }
-  mvcc_tx_ = mvcc_tx.Pass();
+  mvcc_tx_ = std::move(mvcc_tx);
 }
 
 void WriteTransactionState::set_tablet_components(
@@ -241,7 +266,7 @@ void WriteTransactionState::set_tablet_components(
 
 void WriteTransactionState::AcquireSchemaLock(rw_semaphore* schema_lock) {
   TRACE("Acquiring schema lock in shared mode");
-  shared_lock<rw_semaphore> temp(schema_lock);
+  shared_lock<rw_semaphore> temp(*schema_lock);
   schema_lock_.swap(temp);
   TRACE("Acquired schema lock");
 }
@@ -252,34 +277,58 @@ void WriteTransactionState::ReleaseSchemaLock() {
   TRACE("Released schema lock");
 }
 
+void WriteTransactionState::SetRowOps(vector<DecodedRowOperation> decoded_ops) {
+  std::lock_guard<simple_spinlock> l(txn_state_lock_);
+  row_ops_.clear();
+  row_ops_.reserve(decoded_ops.size());
+
+  Arena* arena = this->arena();
+  for (DecodedRowOperation& op : decoded_ops) {
+    row_ops_.push_back(arena->NewObject<RowOp>(std::move(op)));
+  }
+
+  // Allocate the ProbeStats objects from the transaction's arena, so
+  // they're all contiguous and we don't need to do any central allocation.
+  stats_array_ = static_cast<ProbeStats*>(
+      arena->AllocateBytesAligned(sizeof(ProbeStats) * row_ops_.size(),
+                                  alignof(ProbeStats)));
+
+  // Manually run the constructor to clear the stats to 0 before collecting them.
+  for (int i = 0; i < row_ops_.size(); i++) {
+    new (&stats_array_[i]) ProbeStats();
+  }
+}
+
 void WriteTransactionState::StartApplying() {
   CHECK_NOTNULL(mvcc_tx_.get())->StartApplying();
 }
 
-void WriteTransactionState::Abort() {
-  if (mvcc_tx_.get() != nullptr) {
-    // Abort the transaction.
-    mvcc_tx_->Abort();
-  }
-  mvcc_tx_.reset();
+void WriteTransactionState::CommitOrAbort(Transaction::TransactionResult result) {
+  ReleaseMvccTxn(result);
 
-  release_row_locks();
+  TRACE("Releasing row and schema locks");
+  ReleaseRowLocks();
   ReleaseSchemaLock();
 
-  // After commiting, we may respond to the RPC and delete the
-  // original request, so null them out here.
+  // After committing, if there is an RPC going on, the driver will respond to it.
+  // That will delete the RPC request and response objects. So, NULL them here
+  // so we don't read them again after they're deleted.
   ResetRpcFields();
 }
-void WriteTransactionState::Commit() {
+
+void WriteTransactionState::ReleaseMvccTxn(Transaction::TransactionResult result) {
   if (mvcc_tx_.get() != nullptr) {
     // Commit the transaction.
-    mvcc_tx_->Commit();
+    switch (result) {
+      case Transaction::COMMITTED:
+        mvcc_tx_->Commit();
+        break;
+      case Transaction::ABORTED:
+        mvcc_tx_->Abort();
+        break;
+    }
   }
   mvcc_tx_.reset();
-
-  // After commiting, we may respond to the RPC and delete the
-  // original request, so null them out here.
-  ResetRpcFields();
 }
 
 void WriteTransactionState::ReleaseTxResultPB(TxResultPB* result) const {
@@ -298,6 +347,9 @@ void WriteTransactionState::UpdateMetricsForOp(const RowOp& op) {
     case RowOperationsPB::INSERT:
       tx_metrics_.successful_inserts++;
       break;
+    case RowOperationsPB::UPSERT:
+      tx_metrics_.successful_upserts++;
+      break;
     case RowOperationsPB::UPDATE:
       tx_metrics_.successful_updates++;
       break;
@@ -306,11 +358,15 @@ void WriteTransactionState::UpdateMetricsForOp(const RowOp& op) {
       break;
     case RowOperationsPB::UNKNOWN:
     case RowOperationsPB::SPLIT_ROW:
+    case RowOperationsPB::RANGE_LOWER_BOUND:
+    case RowOperationsPB::RANGE_UPPER_BOUND:
+    case RowOperationsPB::INCLUSIVE_RANGE_UPPER_BOUND:
+    case RowOperationsPB::EXCLUSIVE_RANGE_LOWER_BOUND:
       break;
   }
 }
 
-void WriteTransactionState::release_row_locks() {
+void WriteTransactionState::ReleaseRowLocks() {
   // free the row locks
   for (RowOp* op : row_ops_) {
     op->row_lock.Release();
@@ -322,8 +378,7 @@ WriteTransactionState::~WriteTransactionState() {
 }
 
 void WriteTransactionState::Reset() {
-  // We likely shouldn't Commit() here. See KUDU-625.
-  Commit();
+  CommitOrAbort(Transaction::ABORTED);
   tx_metrics_.Reset();
   timestamp_ = Timestamp::kInvalidTimestamp;
   tablet_components_ = nullptr;
@@ -331,10 +386,14 @@ void WriteTransactionState::Reset() {
 }
 
 void WriteTransactionState::ResetRpcFields() {
-  lock_guard<simple_spinlock> l(&txn_state_lock_);
+  std::lock_guard<simple_spinlock> l(txn_state_lock_);
   request_ = nullptr;
   response_ = nullptr;
-  STLDeleteElements(&row_ops_);
+  // these are allocated from the arena, so just run the dtors.
+  for (RowOp* op : row_ops_) {
+    op->~RowOp();
+  }
+  row_ops_.clear();
 }
 
 string WriteTransactionState::ToString() const {
@@ -346,11 +405,9 @@ string WriteTransactionState::ToString() const {
   }
 
   // Stringify the actual row operations (eg INSERT/UPDATE/etc)
-  // NOTE: we'll eventually need to gate this by some flag if we want to avoid
-  // user data escaping into the log. See KUDU-387.
   string row_ops_str = "[";
   {
-    lock_guard<simple_spinlock> l(&txn_state_lock_);
+    std::lock_guard<simple_spinlock> l(txn_state_lock_);
     const size_t kMaxToStringify = 3;
     for (int i = 0; i < std::min(row_ops_.size(), kMaxToStringify); i++) {
       if (i > 0) {
@@ -366,7 +423,7 @@ string WriteTransactionState::ToString() const {
 
   return Substitute("WriteTransactionState $0 [op_id=($1), ts=$2, rows=$3]",
                     this,
-                    op_id().ShortDebugString(),
+                    SecureShortDebugString(op_id()),
                     ts_str,
                     row_ops_str);
 }

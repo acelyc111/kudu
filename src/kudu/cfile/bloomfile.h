@@ -14,12 +14,12 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-#ifndef KUDU_CFILE_BLOOMFILE_H
-#define KUDU_CFILE_BLOOMFILE_H
 
-#include <boost/ptr_container/ptr_vector.hpp>
-#include <string>
-#include <vector>
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
 
 #include "kudu/cfile/cfile_reader.h"
 #include "kudu/cfile/cfile_writer.h"
@@ -28,14 +28,25 @@
 #include "kudu/util/faststring.h"
 #include "kudu/util/mem_tracker.h"
 #include "kudu/util/once.h"
+#include "kudu/util/slice.h"
 #include "kudu/util/status.h"
 
 namespace kudu {
+
+namespace fs {
+class BlockCreationTransaction;
+class ReadableBlock;
+class WritableBlock;
+}
+
 namespace cfile {
+
+class BloomBlockHeaderPB;
+struct ReaderOptions;
 
 class BloomFileWriter {
  public:
-  BloomFileWriter(gscoped_ptr<fs::WritableBlock> block,
+  BloomFileWriter(std::unique_ptr<fs::WritableBlock> block,
                   const BloomFilterSizing &sizing);
 
   Status Start();
@@ -44,8 +55,9 @@ class BloomFileWriter {
   // Close the bloom's CFile, closing the underlying writable block.
   Status Finish();
 
-  // Close the bloom's CFile, releasing the underlying block to 'closer'.
-  Status FinishAndReleaseBlock(fs::ScopedWritableBlockCloser* closer);
+  // Close the bloom's CFile, finalizing the underlying block and
+  // releasing it to 'transaction'.
+  Status FinishAndReleaseBlock(fs::BlockCreationTransaction* transaction);
 
   // Estimate the amount of data already written to this file.
   size_t written_size() const;
@@ -55,12 +67,15 @@ class BloomFileWriter {
 
   Status FinishCurrentBloomBlock();
 
-  gscoped_ptr<cfile::CFileWriter> writer_;
+  std::unique_ptr<cfile::CFileWriter> writer_;
 
   BloomFilterBuilder bloom_builder_;
 
   // first key inserted in the current block.
   faststring first_key_;
+
+  // last key inserted in the previous block
+  faststring last_key_;
 };
 
 // Reader for a bloom file.
@@ -74,18 +89,18 @@ class BloomFileReader {
   // Fully open a bloom file using a previously opened block.
   //
   // After this call, the bloom reader is safe for use.
-  static Status Open(gscoped_ptr<fs::ReadableBlock> block,
-                     const ReaderOptions& options,
-                     gscoped_ptr<BloomFileReader> *reader);
+  static Status Open(std::unique_ptr<fs::ReadableBlock> block,
+                     ReaderOptions options,
+                     std::unique_ptr<BloomFileReader>* reader);
 
   // Lazily opens a bloom file using a previously opened block. A lazy open
   // does not incur additional I/O, nor does it validate the contents of
   // the bloom file.
   //
   // Init() must be called before using CheckKeyPresent().
-  static Status OpenNoInit(gscoped_ptr<fs::ReadableBlock> block,
-                           const ReaderOptions& options,
-                           gscoped_ptr<BloomFileReader> *reader);
+  static Status OpenNoInit(std::unique_ptr<fs::ReadableBlock> block,
+                           ReaderOptions options,
+                           std::unique_ptr<BloomFileReader>* reader);
 
   // Fully opens a previously lazily opened bloom file, parsing and
   // validating its contents.
@@ -98,12 +113,17 @@ class BloomFileReader {
   // Sets *maybe_present to false if the key is definitely not
   // present, otherwise sets it to true to indicate maybe present.
   Status CheckKeyPresent(const BloomKeyProbe &probe,
-                         bool *maybe_present);
+                         bool* maybe_present);
+
+  // Can be called before Init().
+  uint64_t FileSize() const {
+    return reader_->file_size();
+  }
 
  private:
   DISALLOW_COPY_AND_ASSIGN(BloomFileReader);
 
-  BloomFileReader(gscoped_ptr<CFileReader> reader, const ReaderOptions& options);
+  BloomFileReader(std::unique_ptr<CFileReader> reader, ReaderOptions options);
 
   // Parse the header present in the given block.
   //
@@ -111,8 +131,8 @@ class BloomFileReader {
   // a Slice to the true bloom filter data inside
   // *bloom_data.
   Status ParseBlockHeader(const Slice &block,
-                          BloomBlockHeaderPB *hdr,
-                          Slice *bloom_data) const;
+                          BloomBlockHeaderPB* hdr,
+                          Slice* bloom_data) const;
 
   // Callback used in 'init_once_' to initialize this bloom file.
   Status InitOnce();
@@ -121,15 +141,13 @@ class BloomFileReader {
   // excluding the CFileReader, which is tracked independently.
   size_t memory_footprint_excluding_reader() const;
 
-  gscoped_ptr<CFileReader> reader_;
+  // Sequence number for the instance, generated from a global counter.
+  // Used for a ThreadLocalCache key.
+  // TODO(todd): if we want to conserve a bit of memory we could try to
+  // collapse this into the init_once_ object or some-such.
+  const uint64_t instance_nonce_;
 
-  // TODO: temporary workaround for the fact that
-  // the index tree iterator is a member of the Reader object.
-  // We need a big per-thread object which gets passed around so as
-  // to avoid this... Instead we'll use a per-CPU iterator as a
-  // lame hack.
-  boost::ptr_vector<cfile::IndexTreeIterator> index_iters_;
-  gscoped_ptr<padded_spinlock[]> iter_locks_;
+  std::unique_ptr<CFileReader> reader_;
 
   KuduOnceDynamic init_once_;
 
@@ -139,4 +157,3 @@ class BloomFileReader {
 } // namespace cfile
 } // namespace kudu
 
-#endif

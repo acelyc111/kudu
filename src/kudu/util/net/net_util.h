@@ -17,6 +17,8 @@
 #ifndef KUDU_UTIL_NET_NET_UTIL_H
 #define KUDU_UTIL_NET_NET_UTIL_H
 
+#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -32,6 +34,10 @@ class HostPort {
   HostPort();
   HostPort(std::string host, uint16_t port);
   explicit HostPort(const Sockaddr& addr);
+
+  bool Initialized() const {
+    return !host_.empty();
+  }
 
   // Parse a "host:port" pair into this object.
   // If there is no port specified in the string, then 'default_port' is used.
@@ -52,6 +58,8 @@ class HostPort {
   uint16_t port() const { return port_; }
   void set_port(uint16_t port) { port_ = port; }
 
+  size_t HashCode() const;
+
   // Parse a comma separated list of "host:port" pairs into a vector
   // HostPort objects. If no port is specified for an entry in the
   // comma separated list, 'default_port' is used for that entry's
@@ -67,6 +75,49 @@ class HostPort {
  private:
   std::string host_;
   uint16_t port_;
+};
+
+bool operator==(const HostPort& hp1, const HostPort& hp2);
+
+// Hasher of HostPort objects for UnorderedAssociativeContainers.
+struct HostPortHasher {
+  size_t operator()(const HostPort& hp) const {
+    return hp.HashCode();
+  }
+};
+
+// Equality BinaryPredicate of HostPort objects for UnorderedAssociativeContainers.
+struct HostPortEqualityPredicate {
+  bool operator()(const HostPort& hp1, const HostPort& hp2) const {
+    return hp1 == hp2;
+  }
+};
+
+// A container for addr:mask pair.
+// Both addr and netmask are in big-endian byte order
+// (same as network byte order).
+class Network {
+ public:
+  Network();
+  Network(uint32_t addr, uint32_t netmask);
+
+  uint32_t addr() const { return addr_; }
+
+  uint32_t netmask() const { return netmask_; }
+
+  // Returns true if the address is within network.
+  bool WithinNetwork(const Sockaddr& addr) const;
+
+  // Parses a "addr/netmask" (CIDR notation) pair into this object.
+  Status ParseCIDRString(const std::string& addr);
+
+  // Parses a comma separated list of "addr/netmask" (CIDR notation)
+  // pairs into a vector of Network objects.
+  static Status ParseCIDRStrings(
+      const std::string& comma_sep_addrs, std::vector<Network>* res);
+ private:
+  uint32_t addr_;
+  uint32_t netmask_;
 };
 
 // Parse and resolve the given comma-separated list of addresses.
@@ -85,8 +136,11 @@ bool IsPrivilegedPort(uint16_t port);
 // Return the local machine's hostname.
 Status GetHostname(std::string* hostname);
 
+// Returns local subnets of all local network interfaces.
+Status GetLocalNetworks(std::vector<Network>* net);
+
 // Return the local machine's FQDN.
-Status GetFQDN(std::string* fqdn);
+Status GetFQDN(std::string* hostname);
 
 // Returns a single socket address from a HostPort.
 // If the hostname resolves to multiple addresses, returns the first in the

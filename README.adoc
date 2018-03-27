@@ -27,7 +27,9 @@ A single Kudu source tree may be used for multiple builds, each with its
 own build directory. Build directories may be placed anywhere in the
 filesystem with the exception of the root directory of the source tree. The
 Kudu build is invoked with a working directory of the build directory
-itself, so you must ensure it exists (i.e. create it with _mkdir -p_).
+itself, so you must ensure it exists (i.e. create it with _mkdir -p_). It's
+recommended to place all build directories within the _build_ subdirectory;
+_build/latest_ will be symlinked to most recently created one.
 
 The rest of this document assumes the build directory
 _<root directory of kudu source tree>/build/debug_.
@@ -55,9 +57,9 @@ between two commits which may have different dependencies.
 
 [source,bash]
 ----
-# Add <root of kudu tree>/thirdparty/installed/bin to your $PATH
+# Add <root of kudu tree>/thirdparty/installed/common/bin to your $PATH
 # before other parts of $PATH that may contain cmake, such as /usr/bin
-# For example: "export PATH=$HOME/git/kudu/thirdparty/installed/bin:$PATH"
+# For example: "export PATH=$HOME/git/kudu/thirdparty/installed/common/bin:$PATH"
 # if using bash.
 $ mkdir -p build/debug
 $ cd build/debug
@@ -66,7 +68,7 @@ $ make -j8  # or whatever level of parallelism your machine can handle
 ----
 
 The build artifacts, including the test binaries, will be stored in
-_build/debug/latest/_.
+_build/debug/bin/_.
 
 To omit the Kudu unit tests during the build, add -DNO_TESTS=1 to the
 invocation of cmake. For example:
@@ -92,14 +94,14 @@ This command will report any tests that failed, and the test logs will be
 written to _build/debug/test-logs_.
 
 Individual tests can be run by directly invoking the test binaries in
-_build/debug/latest_. Since Kudu uses the Google C++ Test Framework (gtest),
+_build/debug/bin_. Since Kudu uses the Google C++ Test Framework (gtest),
 specific test cases can be run with gtest flags:
 
 [source,bash]
 ----
 # List all the tests within a test binary, then run a single test
-$ build/debug/latest/tablet-test --gtest_list_tests
-$ build/debug/latest/tablet-test --gtest_filter=TestTablet/9.TestFlush
+$ build/debug/bin/tablet-test --gtest_list_tests
+$ build/debug/bin/tablet-test --gtest_filter=TestTablet/9.TestFlush
 ----
 
 gtest also allows more complex filtering patterns. See the upstream
@@ -158,30 +160,6 @@ set a breakpoint as follows:
 
 Then, when the breakpoint fires, gather a backtrace as usual using the `bt` command.
 
-=== Running tests with the tcmalloc memory leak checker enabled
-
-
-You can also run the tests with a tcmalloc feature that prints an error message
-and aborts if it detects memory leaks in your program.
-
-[source,bash]
-----
-$ mkdir -p build/leakcheck
-$ cd build/leakcheck
-$ cmake ../..
-$ make -j8
-$ # Note: LP_BIND_NOW=1 required below, see: https://code.google.com/p/gperftools/issues/detail?id=497
-$ PPROF_PATH=../../thirdparty/installed/bin/pprof HEAPCHECK=normal LD_BIND_NOW=1 ctest -j8
-----
-
-NOTE: For more information on the heap checker, please see:
-  http://google-perftools.googlecode.com/svn/trunk/doc/heap_checker.html
-
-NOTE: The AddressSanitizer doesn't play nice with tcmalloc, so sadly the
-HEAPCHECK environment has no effect if you have enabled ASAN. However, recent
-versions of ASAN will also detect leaks, so the tcmalloc leak checker is of
-limited utility.
-
 === Running tests with ThreadSanitizer enabled
 
 ThreadSanitizer (TSAN) is a feature of recent Clang and GCC compilers which can
@@ -195,7 +173,7 @@ $ mkdir -p build/tsan
 $ cd build/tsan
 $ CC=../../thirdparty/clang-toolchain/bin/clang \
     CXX=../../thirdparty/clang-toolchain/bin/clang++ \
-    cmake -DKUDU_USE_TSAN=1 .
+    cmake -DKUDU_USE_TSAN=1 ../..
 $ make -j8
 $ ctest -j8
 ----
@@ -204,7 +182,7 @@ $ ctest -j8
 [NOTE]
 ====
 Note that we rely on a list of runtime suppressions in _build-support/tsan-suppressions.txt_.
-If you simply run a unit test like _build/tsan/latest/foo-test_, you won't get these suppressions.
+If you simply run a unit test like _build/tsan/bin/foo-test_, you won't get these suppressions.
 Instead, use a command like:
 
 [source,bash]
@@ -212,12 +190,15 @@ Instead, use a command like:
 $ ctest -R foo-test
 ----
 
+or
+
+[source,bash]
+----
+$ build-support/run-test.sh build/tsan/bin/foo-test [--test-arguments-here]
+----
+
 ...and then view the logs in _build/tsan/test-logs/_
 
-In order for all of the suppressions to work, you need libraries with debug
-symbols installed, particularly for libstdc\+\+. On Ubuntu 13.10, the package
-libstdc++6-4.8-dbg is needed for TSAN builds to pass. It's not a bad idea to
-install debug symbol packages for libboost, libc, and cyrus-sasl as well.
 ====
 
 TSAN may truncate a few lines of the stack trace when reporting where the error
@@ -236,37 +217,35 @@ $ gdb -ex 'set disable-randomization off' -ex 'b __tsan::PrintReport' ./some-tes
 === Generating code coverage reports
 
 
-In order to generate a code coverage report, you must build with gcc (not clang)
-and use the following flags:
+In order to generate a code coverage report, you must use the following flags:
 
 [source,bash]
 ----
 $ mkdir -p build/coverage
 $ cd build/coverage
-$ cmake -DKUDU_GENERATE_COVERAGE=1 ../..
+$ CC=../../thirdparty/clang-toolchain/bin/clang \
+  CXX=../../thirdparty/clang-toolchain/bin/clang++ \
+  cmake -DKUDU_GENERATE_COVERAGE=1 ../..
 $ make -j4
 $ ctest -j4
 ----
 
 This will generate the code coverage files with extensions .gcno and .gcda. You can then
-use a tool like `lcov` or `gcovr` to visualize the results. For example, using gcovr:
+use a tool like `gcovr` or `llvm-cov gcov` to visualize the results. For example, using
+gcovr:
 
 [source,bash]
 ----
+$ cd build/coverage
 $ mkdir cov_html
-$ ./thirdparty/gcovr-3.0/scripts/gcovr -r src/
+$ ../../thirdparty/installed/common/bin/gcovr \
+      --gcov-executable=$(pwd)/../../build-support/llvm-gcov-wrapper \
+      --html --html-details -o cov_html/coverage.html
 ----
 
-Or using `lcov` (which seems to produce better HTML output):
-
-[source,bash]
-----
-$ lcov  --capture --directory src --output-file coverage.info
-$ genhtml coverage.info --output-directory out
-----
+Then open `cov_html/coverage.html` in your web browser.
 
 === Running lint checks
-
 
 Kudu uses cpplint.py from Google to enforce coding style guidelines. You can run the
 lint checks via cmake using the `ilint` target:
@@ -279,6 +258,36 @@ $ make ilint
 This will scan any file which is dirty in your working tree, or changed since the last
 gerrit-integrated upstream change in your git log. If you really want to do a full
 scan of the source tree, you may use the `lint` target instead.
+
+=== Running clang-tidy checks
+
+Kudu also uses the clang-tidy tool from LLVM to enforce coding style
+guidelines. You can run the tidy checks via cmake using the `tidy` target:
+
+[source,bash]
+----
+$ make tidy
+----
+
+This will scan any changes in the latest commit in the local tree. At the time
+of writing, it will not scan any changes that are not locally committed.
+
+=== Running include-what-you-use (IWYU) checks
+
+Kudu uses the https://github.com/include-what-you-use/include-what-you-use[IWYU]
+tool to keep the set of headers in the C++ source files consistent. For more
+information on what _consistent_ means, see
+https://github.com/include-what-you-use/include-what-you-use/blob/master/docs/WhyIWYU.md[_Why IWYU_].
+
+You can run the IWYU checks via cmake using the `iwyu` target:
+
+[source,bash]
+----
+$ make iwyu
+----
+
+This will scan any file which is dirty in your working tree, or changed since the last
+gerrit-integrated upstream change in your git log.
 
 === Building Kudu documentation
 
@@ -298,14 +307,14 @@ emitted to _build/docs_. This script requires `ruby` and `gem` to be installed
 on the system path, and will attempt to install `asciidoctor` and other related
 dependencies into `$HOME/.gems` using http://bundler.io/[bundler].
 
-=== Updating the documentation on the Kudu web site
+=== Updating the Kudu web site documentation
 
 To update the documentation that is integrated into the Kudu web site,
 including Javadoc documentation, you may run the following command:
 
 [source,bash]
 ----
-$ ./docs/support/script/make_site.sh
+$ ./docs/support/scripts/make_site.sh
 ----
 
 This script will use your local Git repository to check out a shallow clone of
@@ -318,6 +327,31 @@ Everything can be found in the _build/site_ subdirectory.
 You can proceed to commit the changes in the pages repository and send a code
 review for your changes. In the future, this step may be automated whenever
 changes are checked into the main Kudu repository.
+
+After making changes to the `gh-branch` branch, follow the instructions below
+when you want to deploy those changes to the live web site.
+
+=== Deploying changes to the Apache Kudu web site
+
+When the documentation is updated on the `gh-pages` branch, or when other web
+site files on that branch are updated, the following procedure can be used to
+deploy the changes to the official Apache Kudu web site. Committers have
+permissions to publish changes to the live site.
+
+[source,bash]
+----
+git checkout gh-pages
+git fetch origin
+git merge --ff-only origin/gh-pages
+./site_tool proof        # Check for broken links (takes a long time to run)
+./site_tool publish      # Generate the static HTML for the site.
+cd _publish && git push  # Update the live web site.
+----
+
+NOTE: sometimes, due to glitches with the ASF gitpubsub system, a large commit,
+such as a change to the docs, will not get mirrored to the live site. Adding an
+empty commit and doing another git push tends to fix the problem. See the git
+log for examples of people doing this in the past.
 
 == Improving build times
 
@@ -369,17 +403,22 @@ Eclipse can be used as an IDE for Kudu. To generate Eclipse project files, run:
 
 [source,bash]
 ----
+$ mkdir -p <sibling directory to source tree>
+$ cd <sibling directory to source tree>
 $ rm -rf CMakeCache.txt CMakeFiles/
-$ cmake -G "Eclipse CDT4 - Unix Makefiles" -DCMAKE_CXX_COMPILER_ARG1=-std=c++11 ../..
+$ cmake -G "Eclipse CDT4 - Unix Makefiles" -DCMAKE_CXX_COMPILER_ARG1=-std=c++11 <source tree>
 ----
+
+When the Eclipse generator is run in a subdirectory of the source tree, the
+resulting project is incomplete. That's why it's recommended to use a directory
+that's a sibling to the source tree. See [1] for more details.
 
 It's critical that _CMakeCache.txt_ be removed prior to running the generator,
 otherwise the extra Eclipse generator logic (the CMakeFindEclipseCDT4.make module)
 won't run and standard system includes will be missing from the generated project.
 
-Thanks to http://public.kitware.com/Bug/view.php?id=15102, the Eclipse generator
-ignores the -std=c++11 definition and we must add it manually on the command line
-via CMAKE_CXX_COMPILER_ARG1.
+Thanks to [2], the Eclipse generator ignores the `-std=c++11` definition and we must
+add it manually on the command line via `CMAKE_CXX_COMPILER_ARG1`.
 
 By default, the Eclipse CDT indexer will index everything under the _kudu/_
 source tree. It tends to choke on certain complicated source files within
@@ -391,9 +430,9 @@ Either way, these complicated source files must be excluded from indexing. To do
 this, right click on the project in the Project Explorer and select Properties. In
 the dialog box, select "C/C++ Project Paths", select the Source tab, highlight
 "Exclusion filter: (None)", and click "Edit...". In the new dialog box, click
-"Add Multiple...". Select every subdirectory inside _thirdparty_ except _installed_
-and _installed-deps_. Click OK all the way out and rebuild the project index by
-right clicking the project in the Project Explorer and selecting Index --> Rebuild.
+"Add Multiple...". Select every subdirectory inside _thirdparty_ except _installed_.
+Click OK all the way out and rebuild the project index by right clicking the project
+in the Project Explorer and selecting Index -> Rebuild.
 
 With this exclusion, the only false positives (shown as "red squigglies") that
 CDT presents appear to be in atomicops functions (`NoBarrier_CompareAndSwap` for
@@ -405,3 +444,11 @@ but one side effect is that nearly every source file appears in the indexer twic
 once via a target and once via the raw source file. To fix this, simply delete the
 [Targets] linked resource via the Project Explorer. Doing this should have no effect
 on writing code, though it may affect your ability to build from within Eclipse.
+
+1. https://cmake.org/pipermail/cmake-developers/2011-November/014153.html
+2. http://public.kitware.com/Bug/view.php?id=15102
+
+== Export Control Notice
+
+This distribution uses cryptographic software and may be subject to export controls.
+Please refer to docs/export_control.adoc for more information.

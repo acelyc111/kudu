@@ -15,19 +15,29 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <boost/assign/list_of.hpp>
-#include <gtest/gtest.h>
-#include <rapidjson/document.h>
+#include <cstdint>
+#include <ostream>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
+#include <gflags/gflags_declare.h>
+#include <glog/logging.h>
+#include <gtest/gtest.h>
+#include <rapidjson/document.h>
+
 #include "kudu/gutil/bind.h"
+#include "kudu/gutil/bind_helpers.h"
+#include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/map-util.h"
+#include "kudu/gutil/ref_counted.h"
 #include "kudu/util/hdr_histogram.h"
 #include "kudu/util/jsonreader.h"
 #include "kudu/util/jsonwriter.h"
 #include "kudu/util/metrics.h"
+#include "kudu/util/monotime.h"
+#include "kudu/util/status.h"
+#include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
 
 using std::string;
@@ -42,7 +52,7 @@ METRIC_DEFINE_entity(test_entity);
 
 class MetricsTest : public KuduTest {
  public:
-  virtual void SetUp() override {
+  void SetUp() override {
     KuduTest::SetUp();
 
     entity_ = METRIC_ENTITY_test_entity.Instantiate(&registry_, "my-test");
@@ -53,13 +63,13 @@ class MetricsTest : public KuduTest {
   scoped_refptr<MetricEntity> entity_;
 };
 
-METRIC_DEFINE_counter(test_entity, reqs_pending, "Requests Pending", MetricUnit::kRequests,
-                      "Number of requests pending");
+METRIC_DEFINE_counter(test_entity, test_counter, "My Test Counter", MetricUnit::kRequests,
+                      "Description of test counter");
 
 TEST_F(MetricsTest, SimpleCounterTest) {
   scoped_refptr<Counter> requests =
-    new Counter(&METRIC_reqs_pending);
-  ASSERT_EQ("Number of requests pending", requests->prototype()->description());
+    new Counter(&METRIC_test_counter);
+  ASSERT_EQ("Description of test counter", requests->prototype()->description());
   ASSERT_EQ(0, requests->value());
   requests->Increment();
   ASSERT_EQ(1, requests->value());
@@ -67,13 +77,13 @@ TEST_F(MetricsTest, SimpleCounterTest) {
   ASSERT_EQ(3, requests->value());
 }
 
-METRIC_DEFINE_gauge_uint64(test_entity, fake_memory_usage, "Memory Usage",
-                           MetricUnit::kBytes, "Test Gauge 1");
+METRIC_DEFINE_gauge_uint64(test_entity, test_gauge, "Test uint64 Gauge",
+                           MetricUnit::kBytes, "Description of Test Gauge");
 
 TEST_F(MetricsTest, SimpleAtomicGaugeTest) {
   scoped_refptr<AtomicGauge<uint64_t> > mem_usage =
-    METRIC_fake_memory_usage.Instantiate(entity_, 0);
-  ASSERT_EQ(METRIC_fake_memory_usage.description(), mem_usage->prototype()->description());
+    METRIC_test_gauge.Instantiate(entity_, 0);
+  ASSERT_EQ(METRIC_test_gauge.description(), mem_usage->prototype()->description());
   ASSERT_EQ(0, mem_usage->value());
   mem_usage->IncrementBy(7);
   ASSERT_EQ(7, mem_usage->value());
@@ -81,8 +91,8 @@ TEST_F(MetricsTest, SimpleAtomicGaugeTest) {
   ASSERT_EQ(5, mem_usage->value());
 }
 
-METRIC_DEFINE_gauge_int64(test_entity, test_func_gauge, "Test Gauge", MetricUnit::kBytes,
-                          "Test Gauge 2");
+METRIC_DEFINE_gauge_int64(test_entity, test_func_gauge, "Test Function Gauge",
+                          MetricUnit::kBytes, "Test Gauge 2");
 
 static int64_t MyFunction(int* metric_val) {
   return (*metric_val)++;
@@ -167,12 +177,12 @@ TEST_F(MetricsTest, SimpleHistogramTest) {
 }
 
 TEST_F(MetricsTest, JsonPrintTest) {
-  scoped_refptr<Counter> bytes_seen = METRIC_reqs_pending.Instantiate(entity_);
-  bytes_seen->Increment();
+  scoped_refptr<Counter> test_counter = METRIC_test_counter.Instantiate(entity_);
+  test_counter->Increment();
   entity_->SetAttribute("test_attr", "attr_val");
 
   // Generate the JSON.
-  std::stringstream out;
+  std::ostringstream out;
   JsonWriter writer(&out, JsonWriter::PRETTY);
   ASSERT_OK(entity_->WriteAsJson(&writer, { "*" }, MetricJsonOptions()));
 
@@ -185,7 +195,7 @@ TEST_F(MetricsTest, JsonPrintTest) {
   ASSERT_EQ(1, metrics.size());
   string metric_name;
   ASSERT_OK(reader.ExtractString(metrics[0], "name", &metric_name));
-  ASSERT_EQ("reqs_pending", metric_name);
+  ASSERT_EQ("test_counter", metric_name);
   int64_t metric_value;
   ASSERT_OK(reader.ExtractInt64(metrics[0], "value", &metric_value));
   ASSERT_EQ(1L, metric_value);
@@ -196,10 +206,20 @@ TEST_F(MetricsTest, JsonPrintTest) {
   ASSERT_OK(reader.ExtractString(attributes, "test_attr", &attr_value));
   ASSERT_EQ("attr_val", attr_value);
 
+  // Verify that metric filtering matches on substrings.
+  out.str("");
+  ASSERT_OK(entity_->WriteAsJson(&writer, { "test count" }, MetricJsonOptions()));
+  ASSERT_STR_CONTAINS(METRIC_test_counter.name(), out.str());
+
   // Verify that, if we filter for a metric that isn't in this entity, we get no result.
   out.str("");
   ASSERT_OK(entity_->WriteAsJson(&writer, { "not_a_matching_metric" }, MetricJsonOptions()));
   ASSERT_EQ("", out.str());
+
+  // Verify that filtering is case-insensitive.
+  out.str("");
+  ASSERT_OK(entity_->WriteAsJson(&writer, { "mY teST coUNteR" }, MetricJsonOptions()));
+  ASSERT_STR_CONTAINS(METRIC_test_counter.name(), out.str());
 }
 
 // Test that metrics are retired when they are no longer referenced.
@@ -207,7 +227,7 @@ TEST_F(MetricsTest, RetirementTest) {
   FLAGS_metrics_retirement_age_ms = 100;
 
   const string kMetricName = "foo";
-  scoped_refptr<Counter> counter = METRIC_reqs_pending.Instantiate(entity_);
+  scoped_refptr<Counter> counter = METRIC_test_counter.Instantiate(entity_);
   ASSERT_EQ(1, entity_->UnsafeMetricsMapForTests().size());
 
   // Since we hold a reference to the counter, it should not get retired.
@@ -269,7 +289,7 @@ TEST_F(MetricsTest, TestInstantiatingDifferentEntities) {
 
 TEST_F(MetricsTest, TestDumpJsonPrototypes) {
   // Dump the prototype info.
-  std::stringstream out;
+  std::ostringstream out;
   JsonWriter w(&out, JsonWriter::PRETTY);
   MetricPrototypeRegistry::get()->WriteAsJson(&w);
   string json = out.str();
@@ -278,7 +298,7 @@ TEST_F(MetricsTest, TestDumpJsonPrototypes) {
   const char* expected =
     "        {\n"
     "            \"name\": \"test_func_gauge\",\n"
-    "            \"label\": \"Test Gauge\",\n"
+    "            \"label\": \"Test Function Gauge\",\n"
     "            \"type\": \"gauge\",\n"
     "            \"unit\": \"bytes\",\n"
     "            \"description\": \"Test Gauge 2\",\n"
@@ -305,6 +325,64 @@ TEST_F(MetricsTest, TestDumpJsonPrototypes) {
   }
   ASSERT_TRUE(ContainsKey(seen_metrics, "threads_started"));
   ASSERT_TRUE(ContainsKey(seen_metrics, "test_hist"));
+}
+
+TEST_F(MetricsTest, TestDumpOnlyChanged) {
+  auto GetJson = [&](int64_t since_epoch) {
+    MetricJsonOptions opts;
+    opts.only_modified_in_or_after_epoch = since_epoch;
+    std::ostringstream out;
+    JsonWriter writer(&out, JsonWriter::COMPACT);
+    CHECK_OK(entity_->WriteAsJson(&writer, { "*" }, opts));
+    return out.str();
+  };
+
+  scoped_refptr<Counter> test_counter = METRIC_test_counter.Instantiate(entity_);
+
+  int64_t epoch_when_modified = Metric::current_epoch();
+  test_counter->Increment();
+
+  // If we pass a "since dirty" epoch from before we incremented it, we should
+  // see the metric.
+  for (int i = 0; i < 2; i++) {
+    ASSERT_STR_CONTAINS(GetJson(epoch_when_modified), "{\"name\":\"test_counter\",\"value\":1}");
+    Metric::IncrementEpoch();
+  }
+
+  // If we pass a current epoch, we should see that the metric was not modified.
+  int64_t new_epoch = Metric::current_epoch();
+  ASSERT_STR_NOT_CONTAINS(GetJson(new_epoch), "test_counter");
+  // ... until we modify it again.
+  test_counter->Increment();
+  ASSERT_STR_CONTAINS(GetJson(new_epoch), "{\"name\":\"test_counter\",\"value\":2}");
+}
+
+
+// Test that 'include_untouched_metrics=false' prevents dumping counters and histograms
+// which have never been incremented.
+TEST_F(MetricsTest, TestDontDumpUntouched) {
+  // Instantiate a bunch of metrics.
+  int metric_val = 1000;
+  scoped_refptr<Counter> test_counter = METRIC_test_counter.Instantiate(entity_);
+  scoped_refptr<Histogram> hist = METRIC_test_hist.Instantiate(entity_);
+  scoped_refptr<FunctionGauge<int64_t> > function_gauge =
+    METRIC_test_func_gauge.InstantiateFunctionGauge(
+        entity_, Bind(&MyFunction, Unretained(&metric_val)));
+  scoped_refptr<AtomicGauge<uint64_t> > atomic_gauge =
+    METRIC_test_gauge.Instantiate(entity_, 0);
+
+  MetricJsonOptions opts;
+  opts.include_untouched_metrics = false;
+  std::ostringstream out;
+  JsonWriter writer(&out, JsonWriter::COMPACT);
+  CHECK_OK(entity_->WriteAsJson(&writer, { "*" }, opts));
+  // Untouched counters and histograms should not be included.
+  ASSERT_STR_NOT_CONTAINS(out.str(), "test_counter");
+  ASSERT_STR_NOT_CONTAINS(out.str(), "test_hist");
+  // Untouched gauges need to be included, because we don't actually
+  // track whether they have been touched.
+  ASSERT_STR_CONTAINS(out.str(), "test_func_gauge");
+  ASSERT_STR_CONTAINS(out.str(), "test_gauge");
 }
 
 } // namespace kudu

@@ -19,23 +19,43 @@
 #ifndef KUDU_COMMON_WIRE_PROTOCOL_H
 #define KUDU_COMMON_WIRE_PROTOCOL_H
 
+#include <cstdint>
 #include <vector>
 
-#include "kudu/common/wire_protocol.pb.h"
 #include "kudu/util/status.h"
+
+namespace boost {
+template <class T>
+class optional;
+}
+
+namespace google {
+namespace protobuf {
+template <typename Element> class RepeatedPtrField;
+}
+}
 
 namespace kudu {
 
-class ConstContiguousRow;
+class Arena;
+class ColumnPredicate;
 class ColumnSchema;
 class faststring;
 class HostPort;
 class RowBlock;
-class RowBlockRow;
-class RowChangeList;
 class Schema;
 class Slice;
 class Sockaddr;
+struct ColumnSchemaDelta;
+
+class AppStatusPB;
+class ColumnPredicatePB;
+class ColumnSchemaDeltaPB;
+class ColumnSchemaPB;
+class HostPortPB;
+class RowwiseRowBlockPB;
+class SchemaPB;
+class ServerEntryPB;
 
 // Convert the given C++ Status object into the equivalent Protobuf.
 void StatusToPB(const Status& status, AppStatusPB* pb);
@@ -49,7 +69,14 @@ Status HostPortToPB(const HostPort& host_port, HostPortPB* host_port_pb);
 // Returns the HostPort created from the specified protobuf.
 Status HostPortFromPB(const HostPortPB& host_port_pb, HostPort* host_port);
 
-// Adds addresses in 'addrs' to 'pbs'. If an address is a wildcard
+// Convert the column schema delta `col_delta` to protobuf.
+void ColumnSchemaDeltaToPB(const ColumnSchemaDelta& col_delta, ColumnSchemaDeltaPB *pb);
+
+// Return the ColumnSchemaDelta created from the protobuf `pb`.
+// The protobuf must outlive the returned ColumnSchemaDelta.
+ColumnSchemaDelta ColumnSchemaDeltaFromPB(const ColumnSchemaDeltaPB& pb);
+
+  // Adds addresses in 'addrs' to 'pbs'. If an address is a wildcard
 // (e.g., "0.0.0.0"), then the local machine's hostname is used in
 // its place.
 Status AddHostPortPBs(const std::vector<Sockaddr>& addrs,
@@ -58,14 +85,16 @@ Status AddHostPortPBs(const std::vector<Sockaddr>& addrs,
 enum SchemaPBConversionFlags {
   SCHEMA_PB_WITHOUT_IDS = 1 << 0,
   SCHEMA_PB_WITHOUT_STORAGE_ATTRIBUTES = 1 << 1,
+
+  // When serializing, only write the 'read_default' value into the
+  // protobuf. Used when sending schemas from the client to the master
+  // for create/alter table.
+  SCHEMA_PB_WITHOUT_WRITE_DEFAULT = 1 << 2,
 };
 
 // Convert the specified schema to protobuf.
 // 'flags' is a bitfield of SchemaPBConversionFlags values.
 Status SchemaToPB(const Schema& schema, SchemaPB* pb, int flags = 0);
-
-// Convert the specified schema to protobuf without column IDs.
-Status SchemaToPBWithoutIds(const Schema& schema, SchemaPB *pb);
 
 // Returns the Schema created from the specified protobuf.
 // If the schema is invalid, return a non-OK status.
@@ -95,6 +124,17 @@ Status SchemaToColumnPBs(
   google::protobuf::RepeatedPtrField<ColumnSchemaPB>* cols,
   int flags = 0);
 
+// Convert the column predicate to protobuf.
+void ColumnPredicateToPB(const ColumnPredicate& predicate, ColumnPredicatePB* pb);
+
+// Convert a column predicate protobuf to a column predicate. The resulting
+// predicate is stored in the 'predicate' out parameter, if the result is
+// successful.
+Status ColumnPredicateFromPB(const Schema& schema,
+                             Arena* arena,
+                             const ColumnPredicatePB& pb,
+                             boost::optional<ColumnPredicate>* predicate);
+
 // Encode the given row block into the provided protobuf and data buffers.
 //
 // All data (both direct and indirect) for each selected row in the RowBlock is
@@ -105,18 +145,27 @@ Status SchemaToColumnPBs(
 // If 'client_projection_schema' is not NULL, then only columns specified in
 // 'client_projection_schema' will be projected to 'data_buf'.
 //
+// If 'pad_unixtime_micros_to_16_bytes' is true, UNIXTIME_MICROS slots in the projection
+// schema will be padded to the right by 8 (zero'd) bytes for a total of 16 bytes.
+//
 // Requires that block.nrows() > 0
 void SerializeRowBlock(const RowBlock& block, RowwiseRowBlockPB* rowblock_pb,
-                       const Schema* client_projection_schema,
-                       faststring* data_buf, faststring* indirect_data);
+                       const Schema* projection_schema,
+                       faststring* data_buf, faststring* indirect_data,
+                       bool pad_unixtime_micros_to_16_bytes = false);
 
 // Rewrites the data pointed-to by row data slice 'row_data_slice' by replacing
 // relative indirect data pointers with absolute ones in 'indirect_data_slice'.
 // At the time of this writing, this rewriting is only done for STRING types.
 //
+// It 'pad_unixtime_micros_to_16_bytes' is true, this function will take padding into
+// account when rewriting the block pointers.
+// See: SerializeRowBlock() for the actual format.
+//
 // Returns a bad Status if the provided data is invalid or corrupt.
 Status RewriteRowBlockPointers(const Schema& schema, const RowwiseRowBlockPB& rowblock_pb,
-                               const Slice& indirect_data_slice, Slice* row_data_slice);
+                               const Slice& indirect_data_slice, Slice* row_data_slice,
+                               bool pad_unixtime_micros_to_16_bytes = false);
 
 // Extract the rows stored in this protobuf, which must have exactly the
 // given Schema. This Schema may be obtained using ColumnPBsToSchema.

@@ -18,13 +18,18 @@
 #define KUDU_TABLET_DELTA_KEY_H
 
 #include <string>
+
 #include "kudu/common/rowid.h"
-#include "kudu/gutil/endian.h"
+#include "kudu/common/timestamp.h"
+#include "kudu/gutil/port.h"
 #include "kudu/gutil/strings/substitute.h"
-#include "kudu/tablet/mvcc.h"
+#include "kudu/util/slice.h"
 #include "kudu/util/status.h"
 
 namespace kudu {
+
+class faststring;
+
 namespace tablet {
 
 // The type of the delta.
@@ -51,7 +56,7 @@ class DeltaKey {
   {}
 
   DeltaKey(rowid_t id, Timestamp timestamp)
-      : row_idx_(id), timestamp_(std::move(timestamp)) {}
+      : row_idx_(id), timestamp_(timestamp) {}
 
   // Encode this key into the given buffer.
   //
@@ -70,19 +75,24 @@ class DeltaKey {
   // contain further data after that.
   // The 'key' slice is mutated so that, upon return, the decoded key has been removed from
   // its beginning.
-  Status DecodeFrom(Slice *key) {
+  //
+  // This function is called frequently, so is marked HOT to encourage inlining.
+  Status DecodeFrom(Slice *key) ATTRIBUTE_HOT {
     Slice orig(*key);
     if (!PREDICT_TRUE(DecodeRowId(key, &row_idx_))) {
-      return Status::Corruption("Bad delta key: bad rowid", orig.ToDebugString(20));
+      // Out-of-line the error case to keep this function small and inlinable.
+      return DeltaKeyError(orig, "bad rowid");
     }
 
     if (!PREDICT_TRUE(timestamp_.DecodeFrom(key))) {
-      return Status::Corruption("Bad delta key: bad timestamp", orig.ToDebugString(20));
+      // Out-of-line the error case to keep this function small and inlinable.
+      return DeltaKeyError(orig, "bad timestamp");
     }
+
     return Status::OK();
   }
 
-  string ToString() const {
+  std::string ToString() const {
     return strings::Substitute("(row $0@tx$1)", row_idx_, timestamp_.ToString());
   }
 
@@ -98,6 +108,9 @@ class DeltaKey {
   const Timestamp &timestamp() const { return timestamp_; }
 
  private:
+  // Out-of-line error construction used by DecodeFrom.
+  static Status DeltaKeyError(const Slice& orig, const char* err);
+
   // The row which has been updated.
   rowid_t row_idx_;
 

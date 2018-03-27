@@ -20,11 +20,11 @@
 # This script generates a header file which contains definitions
 # for the current Kudu build (eg timestamp, git hash, etc)
 
+import hashlib
 import logging
 import optparse
 import os
 import re
-import sha
 import subprocess
 import sys
 import time
@@ -39,7 +39,7 @@ def output_up_to_date(path, id_hash):
   """
   if not os.path.exists(path):
     return False
-  f = file(path).read()
+  f = open(path).read()
   m = re.search("id_hash=(\w+)", f)
   if not m:
     return False
@@ -67,7 +67,7 @@ def main():
 
   output_path = args[0]
 
-  hostname = check_output(["hostname", "-f"]).strip()
+  hostname = check_output(["hostname", "-f"]).strip().decode('utf-8')
   build_time = "%s %s" % (strftime("%d %b %Y %H:%M:%S", localtime()), time.tzname[0])
   username = os.getenv("USER")
 
@@ -78,10 +78,10 @@ def main():
   else:
     try:
       # No command line git hash, find it in the local git repository.
-      git_hash = check_output(["git", "rev-parse", "HEAD"]).strip()
+      git_hash = check_output(["git", "rev-parse", "HEAD"]).strip().decode('utf-8')
       clean_repo = subprocess.call("git diff --quiet && git diff --cached --quiet", shell=True) == 0
       clean_repo = str(clean_repo).lower()
-    except Exception, e:
+    except Exception:
       # If the git commands failed, we're probably building outside of a git
       # repository.
       logging.info("Build appears to be outside of a git repository... " +
@@ -99,16 +99,16 @@ def main():
   # timestamp. We put this hash in a comment, and use it to check whether to
   # re-generate the file. If it hasn't changed since a previous run, we don't
   # re-write the file. This avoids having to rebuild all binaries on every build.
-  identifying_hash = sha.sha(repr((git_hash, hostname, username,
-                                   clean_repo, build_id))).hexdigest()
+  identifying_hash = hashlib.sha1(repr((git_hash, hostname, username,
+                                        clean_repo, build_id)).encode('utf-8')).hexdigest()
 
   if output_up_to_date(output_path, identifying_hash):
     return 0
   d = os.path.dirname(output_path)
   if not os.path.exists(d):
     os.makedirs(d)
-  with file(output_path, "w") as f:
-    print >>f, """
+  with open(output_path, "w") as f:
+    f.write("""
 // THIS FILE IS AUTO-GENERATED! DO NOT EDIT!
 //
 // id_hash=%(identifying_hash)s
@@ -124,7 +124,7 @@ def main():
 #define KUDU_BUILD_TYPE "%(build_type)s"
 #define KUDU_VERSION_STRING "%(version_string)s"
 #endif
-""" % locals()
+""" % locals())
   return 0
 
 if __name__ == "__main__":

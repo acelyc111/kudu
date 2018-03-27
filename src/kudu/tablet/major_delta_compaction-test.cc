@@ -15,27 +15,37 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <gflags/gflags.h>
+#include <algorithm>
+#include <cstdint>
+#include <memory>
+#include <ostream>
+#include <string>
+#include <unordered_set>
+#include <vector>
+
 #include <glog/logging.h>
 #include <gtest/gtest.h>
-#include <memory>
-#include <unordered_set>
 
-#include "kudu/common/generic_iterators.h"
+#include "kudu/common/common.pb.h"
+#include "kudu/common/iterator.h"
 #include "kudu/common/partial_row.h"
+#include "kudu/common/schema.h"
+#include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/port.h"
+#include "kudu/gutil/stringprintf.h"
 #include "kudu/gutil/strings/substitute.h"
-#include "kudu/gutil/strings/util.h"
-#include "kudu/server/logical_clock.h"
-#include "kudu/tablet/cfile_set.h"
-#include "kudu/tablet/delta_compaction.h"
 #include "kudu/tablet/local_tablet_writer.h"
+#include "kudu/tablet/mvcc.h"
+#include "kudu/tablet/rowset.h"
 #include "kudu/tablet/tablet-test-util.h"
-#include "kudu/tablet/diskrowset-test-base.h"
-#include "kudu/util/test_util.h"
-#include "kudu/gutil/algorithm.h"
+#include "kudu/tablet/tablet.h"
+#include "kudu/util/status.h"
+#include "kudu/util/test_macros.h"
 
 using std::shared_ptr;
+using std::string;
 using std::unordered_set;
+using std::vector;
 
 namespace kudu {
 namespace tablet {
@@ -49,9 +59,7 @@ class TestMajorDeltaCompaction : public KuduRowSetTest {
                               ColumnSchema("val1", INT32),
                               ColumnSchema("val2", STRING),
                               ColumnSchema("val3", INT32),
-                              ColumnSchema("val4", STRING) }, 1)),
-      mvcc_(scoped_refptr<server::Clock>(
-          server::LogicalClock::CreateStartingAt(Timestamp::kInitialTimestamp))) {
+                              ColumnSchema("val4", STRING) }, 1)) {
   }
 
   struct ExpectedRow {
@@ -63,7 +71,7 @@ class TestMajorDeltaCompaction : public KuduRowSetTest {
 
     string Formatted() const {
       return strings::Substitute(
-        "(string key=$0, int32 val1=$1, string val2=$2, int32 val3=$3, string val4=$4)",
+        R"((string key="$0", int32 val1=$1, string val2="$2", int32 val3=$3, string val4="$4"))",
         key, val1, val2, val3, val4);
     }
   };
@@ -87,11 +95,11 @@ class TestMajorDeltaCompaction : public KuduRowSetTest {
       row.val4 = StringPrintf("b %08d", i * 10);
 
       int col = 0;
-      CHECK_OK(ins_row.SetString(col++, row.key));
+      CHECK_OK(ins_row.SetStringNoCopy(col++, row.key));
       CHECK_OK(ins_row.SetInt32(col++, row.val1));
-      CHECK_OK(ins_row.SetString(col++, row.val2));
+      CHECK_OK(ins_row.SetStringNoCopy(col++, row.val2));
       CHECK_OK(ins_row.SetInt32(col++, row.val3));
-      CHECK_OK(ins_row.SetString(col++, row.val4));
+      CHECK_OK(ins_row.SetStringNoCopy(col++, row.val4));
       ASSERT_OK_FAST(writer.Insert(ins_row));
       expected_state_.push_back(row);
     }
@@ -103,7 +111,7 @@ class TestMajorDeltaCompaction : public KuduRowSetTest {
     KuduPartialRow del_row(&client_schema_);
 
     for (int i = nrows - 1; i >= 0; i--) {
-      CHECK_OK(del_row.SetString(0, expected_state_[i].key));
+      CHECK_OK(del_row.SetStringNoCopy(0, expected_state_[i].key));
       ASSERT_OK(writer.Delete(del_row));
       expected_state_.pop_back();
     }
@@ -120,7 +128,7 @@ class TestMajorDeltaCompaction : public KuduRowSetTest {
       ExpectedRow* row = &expected_state_[idx];
       if ((idx % 2 == 0) == even) {
         // Set key
-        CHECK_OK(prow.SetString(0, row->key));
+        CHECK_OK(prow.SetStringNoCopy(0, row->key));
 
         // Update the data
         row->val1 *= 2;
@@ -130,7 +138,7 @@ class TestMajorDeltaCompaction : public KuduRowSetTest {
         // Apply the updates.
         CHECK_OK(prow.SetInt32(1, row->val1));
         CHECK_OK(prow.SetInt32(3, row->val3));
-        CHECK_OK(prow.SetString(4, row->val4));
+        CHECK_OK(prow.SetStringNoCopy(4, row->val4));
         ASSERT_OK(writer.Update(prow));
       }
     }
@@ -143,11 +151,10 @@ class TestMajorDeltaCompaction : public KuduRowSetTest {
     VerifyDataWithMvccAndExpectedState(snap, expected_state_);
   }
 
-  void VerifyDataWithMvccAndExpectedState(MvccSnapshot& snap,
+  void VerifyDataWithMvccAndExpectedState(const MvccSnapshot& snap,
                                           const vector<ExpectedRow>& passed_expected_state) {
       gscoped_ptr<RowwiseIterator> row_iter;
-      ASSERT_OK(tablet()->NewRowIterator(client_schema_, snap,
-                                                Tablet::UNORDERED, &row_iter));
+      ASSERT_OK(tablet()->NewRowIterator(client_schema_, snap, UNORDERED, &row_iter));
       ASSERT_OK(row_iter->Init(nullptr));
 
       vector<string> results;

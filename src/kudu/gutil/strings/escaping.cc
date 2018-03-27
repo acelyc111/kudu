@@ -3,22 +3,25 @@
 
 #include "kudu/gutil/strings/escaping.h"
 
-#include <assert.h>
-#include <stdio.h>
-#include <string.h>
+#include <cassert>
+#include <cstdio>
+#include <cstring>
 
 #include <limits>
-using std::numeric_limits;
+#include <ostream>
 #include <vector>
-using std::vector;
 
+#include "kudu/gutil/charmap.h"
+#include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/integral_types.h"
 #include "kudu/gutil/port.h"
-#include "kudu/gutil/gscoped_ptr.h"
-#include "kudu/gutil/strings/join.h"
-#include "kudu/gutil/utf/utf.h"  // for runetochar
-#include "kudu/gutil/charmap.h"
 #include "kudu/gutil/stl_util.h"
+#include "kudu/gutil/strings/strcat.h"
+#include "kudu/gutil/utf/utf.h"  // for runetochar
+
+using std::numeric_limits;
+using std::string;
+using std::vector;
 
 namespace strings {
 
@@ -1639,7 +1642,7 @@ void TenHexDigitsToEightBase32Digits(const char *in, char *out) {
 // ----------------------------------------------------------------------
 // EscapeFileName / UnescapeFileName
 // ----------------------------------------------------------------------
-static const Charmap escape_file_name_exceptions(
+static const Charmap kEscapeFileNameExceptions(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"  // letters
     "0123456789"  // digits
     "-_.");
@@ -1651,7 +1654,7 @@ void EscapeFileName(const StringPiece& src, string* dst) {
   for (char c : src) {
     // We do not use "isalpha" because we want the behavior to be
     // independent of the current locale settings.
-    if (escape_file_name_exceptions.contains(c)) {
+    if (kEscapeFileNameExceptions.contains(c)) {
       dst->push_back(c);
 
     } else if (c == '/') {

@@ -17,15 +17,27 @@
 
 #include "kudu/common/encoded_key.h"
 
+#include <cstdint>
+#include <string>
+
 #include <gtest/gtest.h>
 
-#include "kudu/gutil/strings/substitute.h"
-#include "kudu/util/slice.h"
-#include "kudu/util/stopwatch.h"
+#include "kudu/common/schema.h"
+#include "kudu/common/common.pb.h"
+#include "kudu/common/key_encoder.h"
+#include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/strings/substitute.h" // IWYU pragma: keep
+#include "kudu/util/faststring.h"
+#include "kudu/util/int128.h"
+#include "kudu/util/memory/arena.h"
 #include "kudu/util/random.h"
 #include "kudu/util/random_util.h"
+#include "kudu/util/slice.h"
+#include "kudu/util/stopwatch.h" // IWYU pragma: keep
 #include "kudu/util/test_util.h"
 #include "kudu/util/test_macros.h"
+
+using std::string;
 
 namespace kudu {
 
@@ -41,7 +53,7 @@ namespace kudu {
     EXPECT_NO_FATAL_FAILURE(ExpectDecodedKeyEq<(type)>((expected), (encoded_form), (val))); \
   } while (0)
 
-class EncodedKeyTest : public ::testing::Test {
+class EncodedKeyTest : public KuduTest {
  public:
   EncodedKeyTest()
   : schema_(CreateSchema()),
@@ -162,8 +174,20 @@ TEST_F(EncodedKeyTest, TestDecodeSimpleKeys) {
   }
 
   {
+    int128_t val = INT128_MAX;
+    EXPECT_DECODED_KEY_EQ(INT128, "(int128 key=170141183460469231731687303715884105727)",
+                          "\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff", &val);
+  }
+
+  {
+    int128_t val = -1234567891011121314;
+    EXPECT_DECODED_KEY_EQ(INT128, "(int128 key=-1234567891011121314)",
+                          "\x7f\xff\xff\xff\xff\xff\xff\xff\xee\xdd\xef\x0b\x4d\x2d\xcf\x5e", &val);
+  }
+
+  {
     Slice val("aKey");
-    EXPECT_DECODED_KEY_EQ(STRING, "(string key=aKey)", "aKey", &val);
+    EXPECT_DECODED_KEY_EQ(STRING, R"((string key="aKey"))", "aKey", &val);
   }
 }
 
@@ -200,7 +224,7 @@ TEST_F(EncodedKeyTest, TestDecodeCompoundKeys) {
     builder.AddColumnKey(&key1);
     key.reset(builder.BuildEncodedKey());
 
-    EXPECT_ROWKEY_EQ(schema, "(uint16 key0=12345, string key1=aKey)", *key);
+    EXPECT_ROWKEY_EQ(schema, R"((uint16 key0=12345, string key1="aKey"))", *key);
   }
 
   {
@@ -217,13 +241,13 @@ TEST_F(EncodedKeyTest, TestDecodeCompoundKeys) {
     builder.AddColumnKey(&key2);
     key.reset(builder.BuildEncodedKey());
 
-    EXPECT_ROWKEY_EQ(schema, "(uint16 key0=12345, string key1=aKey, uint8 key2=123)", *key);
+    EXPECT_ROWKEY_EQ(schema, R"((uint16 key0=12345, string key1="aKey", uint8 key2=123))", *key);
   }
 }
 
 TEST_F(EncodedKeyTest, TestConstructFromEncodedString) {
   gscoped_ptr<EncodedKey> key;
-  Arena arena(1024, 1024*1024);
+  Arena arena(1024);
 
   {
     // Integer type compound key.
@@ -248,7 +272,7 @@ TEST_F(EncodedKeyTest, TestRandomStringEncoding) {
   Random r(SeedRandom());
   char buf[80];
   faststring encoded;
-  Arena arena(1024, 1024);
+  Arena arena(1024);
   for (int i = 0; i < 10000; i++) {
     encoded.clear();
     arena.Reset();

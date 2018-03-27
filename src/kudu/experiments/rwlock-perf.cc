@@ -15,25 +15,34 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <boost/ptr_container/ptr_vector.hpp>
+
+#include <sched.h>
+
+#include <cinttypes>
+#include <cstdint>
+#include <cstdio>
+#include <iostream>
+#include <mutex>
+#include <thread>
+#include <vector>
+
 #include <boost/smart_ptr/detail/spinlock.hpp>
-#include <boost/smart_ptr/detail/yield_k.hpp>
-#include <boost/thread/mutex.hpp>
-#include <boost/thread/shared_mutex.hpp>
-#include <boost/thread/thread.hpp>
 #include <gflags/gflags.h>
 #include <glog/logging.h>
-#include <stdio.h>
-#include <unistd.h>
 
-#include "kudu/gutil/atomicops.h"
 #include "kudu/gutil/macros.h"
+#include "kudu/gutil/port.h"
 #include "kudu/gutil/sysinfo.h"
 #include "kudu/gutil/walltime.h"
-#include "kudu/util/errno.h"
+#include "kudu/util/flags.h"
 #include "kudu/util/locks.h"
+#include "kudu/util/logging.h"
+#include "kudu/util/rw_mutex.h"
 
 DEFINE_int32(num_threads, 8, "Number of threads to test");
+
+using std::thread;
+using std::vector;
 
 class my_spinlock : public boost::detail::spinlock {
  public:
@@ -45,21 +54,19 @@ class my_spinlock : public boost::detail::spinlock {
   DISALLOW_COPY_AND_ASSIGN(my_spinlock);
 };
 
-struct per_cpu_lock {
-  struct padded_lock {
+struct PerCpuLock {
+  struct PaddedLock {
     my_spinlock lock;
     char padding[CACHELINE_SIZE - sizeof(my_spinlock)];
   };
 
-  per_cpu_lock() {
-    errno = 0;
+  PerCpuLock() {
     n_cpus_ = base::NumCPUs();
-    CHECK_EQ(errno, 0) << kudu::ErrnoToString(errno);
     CHECK_GT(n_cpus_, 0);
-    locks_ = new padded_lock[n_cpus_];
+    locks_ = new PaddedLock[n_cpus_];
   }
 
-  ~per_cpu_lock() {
+  ~PerCpuLock() {
     delete [] locks_;
   }
 
@@ -70,23 +77,19 @@ struct per_cpu_lock {
   }
 
   int n_cpus_;
-  padded_lock *locks_;
+  PaddedLock *locks_;
 
 };
 
-struct shared_data {
-  shared_data() {
-    errno = 0;
-  }
-
+struct SharedData {
   kudu::rw_spinlock rw_spinlock;
-  boost::shared_mutex rwlock;
-  boost::mutex lock;
+  kudu::RWMutex rwlock;
+  std::mutex lock;
   kudu::percpu_rwlock per_cpu;
 };
 
 
-class noop_lock {
+class NoopLock {
  public:
   void lock() {}
   void unlock() {}
@@ -111,7 +114,7 @@ static void depend_on(float val) {
   }
 }
 
-void shared_rwlock_entry(shared_data *shared) {
+void shared_rwlock_entry(SharedData *shared) {
   float result = 1;
   for (int i = 0; i < 1000000; i++) {
     shared->rwlock.lock_shared();
@@ -121,7 +124,7 @@ void shared_rwlock_entry(shared_data *shared) {
   depend_on(result);
 }
 
-void shared_rw_spinlock_entry(shared_data *shared) {
+void shared_rw_spinlock_entry(SharedData *shared) {
   float result = 1;
   for (int i = 0; i < 1000000; i++) {
     shared->rw_spinlock.lock_shared();
@@ -131,7 +134,7 @@ void shared_rw_spinlock_entry(shared_data *shared) {
   depend_on(result);
 }
 
-void shared_mutex_entry(shared_data *shared) {
+void shared_mutex_entry(SharedData *shared) {
   float result = 1;
   for (int i = 0; i < 1000000; i++) {
     shared->lock.lock();
@@ -154,7 +157,7 @@ void own_mutex_entry() {
   depend_on(result);
 }
 
-void percpu_rwlock_entry(shared_data *shared) {
+void percpu_rwlock_entry(SharedData *shared) {
   float result = 1;
   for (int i = 0; i < 1000000; i++) {
     kudu::rw_spinlock &l = shared->per_cpu.get_lock();
@@ -177,41 +180,32 @@ enum TestMethod {
   RW_SPINLOCK
 };
 
-void test_shared_lock(int num_threads,
-                      TestMethod method,
-                      const char *name) {
-  boost::ptr_vector<boost::thread> threads;
-  shared_data shared;
+void test_shared_lock(int num_threads, TestMethod method, const char *name) {
+  vector<thread> threads;
+  SharedData shared;
 
   for (int i = 0; i < num_threads; i++) {
     switch (method) {
       case SHARED_RWLOCK:
-        threads.push_back(new boost::thread(
-                            shared_rwlock_entry, &shared));
+        threads.emplace_back(shared_rwlock_entry, &shared);
         break;
       case SHARED_MUTEX:
-        threads.push_back(new boost::thread(
-                            shared_mutex_entry, &shared));
+        threads.emplace_back(shared_mutex_entry, &shared);
         break;
       case OWN_MUTEX:
-        threads.push_back(new boost::thread(
-                            own_mutex_entry<boost::mutex>));
+        threads.emplace_back(own_mutex_entry<std::mutex>);
         break;
       case OWN_SPINLOCK:
-        threads.push_back(new boost::thread(
-                            own_mutex_entry<my_spinlock>));
+        threads.emplace_back(own_mutex_entry<my_spinlock>);
         break;
       case NO_LOCK:
-        threads.push_back(new boost::thread(
-                            own_mutex_entry<noop_lock>));
+        threads.emplace_back(own_mutex_entry<NoopLock>);
         break;
       case PERCPU_RWLOCK:
-        threads.push_back(new boost::thread(
-                            percpu_rwlock_entry, &shared));
+        threads.emplace_back(percpu_rwlock_entry, &shared);
         break;
       case RW_SPINLOCK:
-        threads.push_back(new boost::thread(
-                              shared_rw_spinlock_entry, &shared));
+        threads.emplace_back(shared_rw_spinlock_entry, &shared);
         break;
       default:
         CHECK(0) << "bad method: " << method;
@@ -219,22 +213,26 @@ void test_shared_lock(int num_threads,
   }
 
   int64_t start = CycleClock::Now();
-  for (boost::thread &thr : threads) {
+  for (thread& thr : threads) {
     thr.join();
   }
   int64_t end = CycleClock::Now();
 
-  printf("%13s  % 7d  %ldM\n",
-         name, num_threads, (end-start)/1000000);
+  printf("%13s  % 7d  %" PRId64 "M\n", name, num_threads, (end-start)/1000000);
 }
 
 int main(int argc, char **argv) {
+  kudu::ParseCommandLineFlags(&argc, &argv, true);
+  if (argc != 1) {
+    std::cerr << "usage: " << argv[0] << std::endl;
+    return 1;
+  }
+  kudu::InitGoogleLoggingSafe(argv[0]);
+
   printf("        Test   Threads  Cycles\n");
   printf("------------------------------\n");
 
-  for (int num_threads = 1;
-       num_threads < FLAGS_num_threads;
-       num_threads++) {
+  for (int num_threads = 1; num_threads <= FLAGS_num_threads; num_threads++) {
     test_shared_lock(num_threads, SHARED_RWLOCK, "shared_rwlock");
     test_shared_lock(num_threads, SHARED_MUTEX, "shared_mutex");
     test_shared_lock(num_threads, OWN_MUTEX, "own_mutex");

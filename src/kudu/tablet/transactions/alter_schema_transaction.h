@@ -18,22 +18,28 @@
 #ifndef KUDU_TABLET_ALTER_SCHEMA_TRANSACTION_H_
 #define KUDU_TABLET_ALTER_SCHEMA_TRANSACTION_H_
 
+#include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 
+#include "kudu/consensus/consensus.pb.h"
+#include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/macros.h"
+#include "kudu/gutil/port.h"
 #include "kudu/tablet/transactions/transaction.h"
-#include "kudu/util/locks.h"
+#include "kudu/tserver/tserver_admin.pb.h"
+#include "kudu/util/status.h"
 
 namespace kudu {
 
 class Schema;
-
-namespace consensus {
-class Consensus;
-}
+class rw_semaphore;
 
 namespace tablet {
+
+class TabletReplica;
 
 // Transaction Context for the AlterSchema operation.
 // Keeps track of the Transaction states (request, result, ...)
@@ -42,17 +48,17 @@ class AlterSchemaTransactionState : public TransactionState {
   ~AlterSchemaTransactionState() {
   }
 
-  AlterSchemaTransactionState(TabletPeer* tablet_peer,
+  AlterSchemaTransactionState(TabletReplica* tablet_replica,
                               const tserver::AlterSchemaRequestPB* request,
                               tserver::AlterSchemaResponsePB* response)
-      : TransactionState(tablet_peer),
+      : TransactionState(tablet_replica),
         schema_(NULL),
         request_(request),
         response_(response) {
   }
 
   const tserver::AlterSchemaRequestPB* request() const OVERRIDE { return request_; }
-  tserver::AlterSchemaResponsePB* response() OVERRIDE { return response_; }
+  tserver::AlterSchemaResponsePB* response() const OVERRIDE { return response_; }
 
   void set_schema(const Schema* schema) { schema_ = schema; }
   const Schema* schema() const { return schema_; }
@@ -102,7 +108,8 @@ class AlterSchemaTransactionState : public TransactionState {
 // Executes the alter schema transaction,.
 class AlterSchemaTransaction : public Transaction {
  public:
-  AlterSchemaTransaction(AlterSchemaTransactionState* tx_state, consensus::DriverType type);
+  AlterSchemaTransaction(std::unique_ptr<AlterSchemaTransactionState> tx_state,
+                         consensus::DriverType type);
 
   virtual AlterSchemaTransactionState* state() OVERRIDE { return state_.get(); }
   virtual const AlterSchemaTransactionState* state() const OVERRIDE { return state_.get(); }
@@ -127,7 +134,7 @@ class AlterSchemaTransaction : public Transaction {
   virtual std::string ToString() const OVERRIDE;
 
  private:
-  gscoped_ptr<AlterSchemaTransactionState> state_;
+  std::unique_ptr<AlterSchemaTransactionState> state_;
   DISALLOW_COPY_AND_ASSIGN(AlterSchemaTransaction);
 };
 

@@ -17,24 +17,39 @@
 
 #include "kudu/rpc/negotiation.h"
 
-#include <sys/time.h>
 #include <poll.h>
+#include <sys/socket.h>
 
+#include <cerrno>
+#include <ctime>
+#include <memory>
+#include <ostream>
 #include <string>
+#include <utility>
 
+#include <boost/optional/optional.hpp>
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 
-#include "kudu/gutil/stringprintf.h"
+#include "kudu/gutil/port.h"
 #include "kudu/gutil/strings/substitute.h"
-#include "kudu/rpc/blocking_ops.h"
+#include "kudu/rpc/client_negotiation.h"
 #include "kudu/rpc/connection.h"
+#include "kudu/rpc/connection_id.h"
+#include "kudu/rpc/messenger.h"
 #include "kudu/rpc/reactor.h"
+#include "kudu/rpc/rpc_controller.h"
 #include "kudu/rpc/rpc_header.pb.h"
-#include "kudu/rpc/sasl_client.h"
-#include "kudu/rpc/sasl_common.h"
-#include "kudu/rpc/sasl_server.h"
+#include "kudu/rpc/server_negotiation.h"
+#include "kudu/rpc/user_credentials.h"
+#include "kudu/security/tls_context.h"
+#include "kudu/security/token.pb.h"
+#include "kudu/util/errno.h"
 #include "kudu/util/flag_tags.h"
+#include "kudu/util/logging.h"
+#include "kudu/util/monotime.h"
+#include "kudu/util/net/socket.h"
+#include "kudu/util/slice.h"
 #include "kudu/util/status.h"
 #include "kudu/util/trace.h"
 
@@ -44,75 +59,44 @@ TAG_FLAG(rpc_trace_negotiation, runtime);
 TAG_FLAG(rpc_trace_negotiation, advanced);
 TAG_FLAG(rpc_trace_negotiation, experimental);
 
+DEFINE_int32(rpc_negotiation_inject_delay_ms, 0,
+             "If enabled, injects the given number of milliseconds delay into "
+             "the RPC negotiation process on the server side.");
+TAG_FLAG(rpc_negotiation_inject_delay_ms, unsafe);
+
+DEFINE_bool(rpc_encrypt_loopback_connections, false,
+            "Whether to encrypt data transfer on RPC connections that stay within "
+            "a single host. Encryption here is likely to offer no additional "
+            "security benefit since only a local 'root' user could intercept the "
+            "traffic, and wire encryption does not suitably protect against such "
+            "an attacker.");
+TAG_FLAG(rpc_encrypt_loopback_connections, advanced);
+
+using std::string;
+using std::unique_ptr;
+using strings::Substitute;
+
 namespace kudu {
 namespace rpc {
 
-using std::shared_ptr;
-using strings::Substitute;
-
-// Client: Send ConnectionContextPB message based on information stored in the Connection object.
-static Status SendConnectionContext(Connection* conn, const MonoTime& deadline) {
-  TRACE("Sending connection context");
-  RequestHeader header;
-  header.set_call_id(kConnectionContextCallId);
-
-  ConnectionContextPB conn_context;
-  conn_context.mutable_user_info()->set_effective_user(conn->user_credentials().effective_user());
-  conn_context.mutable_user_info()->set_real_user(conn->user_credentials().real_user());
-
-  return SendFramedMessageBlocking(conn->socket(), header, conn_context, deadline);
+const char* AuthenticationTypeToString(AuthenticationType t) {
+  switch (t) {
+    case AuthenticationType::INVALID: return "INVALID"; break;
+    case AuthenticationType::SASL: return "SASL"; break;
+    case AuthenticationType::TOKEN: return "TOKEN"; break;
+    case AuthenticationType::CERTIFICATE: return "CERTIFICATE"; break;
+  }
+  return "<cannot reach here>";
 }
 
-// Server: Receive ConnectionContextPB message and update the corresponding fields in the
-// associated Connection object. Perform validation against SASL-negotiated information
-// as needed.
-static Status RecvConnectionContext(Connection* conn, const MonoTime& deadline) {
-  TRACE("Waiting for connection context");
-  faststring recv_buf(1024); // Should be plenty for a ConnectionContextPB message.
-  RequestHeader header;
-  Slice param_buf;
-  RETURN_NOT_OK(ReceiveFramedMessageBlocking(conn->socket(), &recv_buf,
-                                             &header, &param_buf, deadline));
-  DCHECK(header.IsInitialized());
-
-  if (header.call_id() != kConnectionContextCallId) {
-    return Status::IllegalState("Expected ConnectionContext callid, received",
-        Substitute("$0", header.call_id()));
-  }
-
-  ConnectionContextPB conn_context;
-  if (!conn_context.ParseFromArray(param_buf.data(), param_buf.size())) {
-    return Status::InvalidArgument("Invalid ConnectionContextPB message, missing fields",
-        conn_context.InitializationErrorString());
-  }
-
-  // Update the fields of our Connection object from the ConnectionContextPB.
-  if (conn_context.has_user_info()) {
-    // Validate real user against SASL impl.
-    if (conn->sasl_server().negotiated_mechanism() == SaslMechanism::PLAIN) {
-      if (conn->sasl_server().plain_auth_user() != conn_context.user_info().real_user()) {
-        return Status::NotAuthorized(
-            "ConnectionContextPB specified different real user than sent in SASL negotiation",
-            StringPrintf("\"%s\" vs. \"%s\"",
-                conn_context.user_info().real_user().c_str(),
-                conn->sasl_server().plain_auth_user().c_str()));
-      }
-    }
-    conn->mutable_user_credentials()->set_real_user(conn_context.user_info().real_user());
-
-    // TODO: Validate effective user when we implement impersonation.
-    if (conn_context.user_info().has_effective_user()) {
-      conn->mutable_user_credentials()->set_effective_user(
-        conn_context.user_info().effective_user());
-    }
-  }
-  return Status::OK();
+std::ostream& operator<<(std::ostream& o, AuthenticationType authentication_type) {
+  return o << AuthenticationTypeToString(authentication_type);
 }
 
 // Wait for the client connection to be established and become ready for writing.
-static Status WaitForClientConnect(Connection* conn, const MonoTime& deadline) {
+static Status WaitForClientConnect(Socket* socket, const MonoTime& deadline) {
   TRACE("Waiting for socket to connect");
-  int fd = conn->socket()->GetFd();
+  int fd = socket->GetFd();
   struct pollfd poll_fd;
   poll_fd.fd = fd;
   poll_fd.events = POLLOUT;
@@ -121,8 +105,8 @@ static Status WaitForClientConnect(Connection* conn, const MonoTime& deadline) {
   MonoTime now;
   MonoDelta remaining;
   while (true) {
-    now = MonoTime::Now(MonoTime::FINE);
-    remaining = deadline.GetDeltaSince(now);
+    now = MonoTime::Now();
+    remaining = deadline - now;
     DVLOG(4) << "Client waiting to connect for negotiation, time remaining until timeout deadline: "
              << remaining.ToString();
     if (PREDICT_FALSE(remaining.ToNanoseconds() <= 0)) {
@@ -171,47 +155,144 @@ static Status WaitForClientConnect(Connection* conn, const MonoTime& deadline) {
 }
 
 // Disable / reset socket timeouts.
-static Status DisableSocketTimeouts(Connection* conn) {
-  RETURN_NOT_OK(conn->socket()->SetSendTimeout(MonoDelta::FromNanoseconds(0L)));
-  RETURN_NOT_OK(conn->socket()->SetRecvTimeout(MonoDelta::FromNanoseconds(0L)));
+static Status DisableSocketTimeouts(Socket* socket) {
+  RETURN_NOT_OK(socket->SetSendTimeout(MonoDelta::FromNanoseconds(0L)));
+  RETURN_NOT_OK(socket->SetRecvTimeout(MonoDelta::FromNanoseconds(0L)));
   return Status::OK();
 }
 
 // Perform client negotiation. We don't LOG() anything, we leave that to our caller.
 static Status DoClientNegotiation(Connection* conn,
-                                  const MonoTime& deadline) {
-  RETURN_NOT_OK(WaitForClientConnect(conn, deadline));
-  RETURN_NOT_OK(conn->SetNonBlocking(false));
-  RETURN_NOT_OK(conn->InitSaslClient());
-  conn->sasl_client().set_deadline(deadline);
-  RETURN_NOT_OK(conn->sasl_client().Negotiate());
-  RETURN_NOT_OK(SendConnectionContext(conn, deadline));
-  RETURN_NOT_OK(DisableSocketTimeouts(conn));
+                                  RpcAuthentication authentication,
+                                  RpcEncryption encryption,
+                                  MonoTime deadline,
+                                  unique_ptr<ErrorStatusPB>* rpc_error) {
+  const auto* messenger = conn->reactor_thread()->reactor()->messenger();
+  // Prefer secondary credentials (such as authn token) if permitted by policy.
+  const auto authn_token = (conn->credentials_policy() == CredentialsPolicy::PRIMARY_CREDENTIALS)
+      ? boost::none : messenger->authn_token();
+  ClientNegotiation client_negotiation(conn->release_socket(),
+                                       &messenger->tls_context(),
+                                       authn_token,
+                                       encryption,
+                                       messenger->sasl_proto_name());
+
+  client_negotiation.set_server_fqdn(conn->outbound_connection_id().hostname());
+
+  if (authentication != RpcAuthentication::DISABLED) {
+    Status s = client_negotiation.EnableGSSAPI();
+    if (!s.ok()) {
+      // If we can't enable GSSAPI, it's likely the client is just missing the
+      // appropriate SASL plugin. We don't want to require it to be installed
+      // if the user doesn't care about connecting to servers using Kerberos
+      // authentication. So, we'll just VLOG this here. If we try to connect
+      // to a server which requires Kerberos, we'll get a negotiation error
+      // at that point.
+      if (VLOG_IS_ON(1)) {
+        KLOG_FIRST_N(INFO, 1) << "Couldn't enable GSSAPI (Kerberos) SASL plugin: "
+                              << s.message().ToString()
+                              << ". This process will be unable to connect to "
+                              << "servers requiring Kerberos authentication.";
+      }
+
+      if (authentication == RpcAuthentication::REQUIRED &&
+          !authn_token &&
+          !messenger->tls_context().has_signed_cert()) {
+        return Status::InvalidArgument(
+            "Kerberos, token, or PKI certificate credentials must be provided in order to "
+            "require authentication for a client");
+      }
+    }
+  }
+
+  if (authentication != RpcAuthentication::REQUIRED) {
+    const auto& creds = conn->outbound_connection_id().user_credentials();
+    RETURN_NOT_OK(client_negotiation.EnablePlain(creds.real_user(), ""));
+  }
+
+  client_negotiation.set_deadline(deadline);
+
+  RETURN_NOT_OK(WaitForClientConnect(client_negotiation.socket(), deadline));
+  RETURN_NOT_OK(client_negotiation.socket()->SetNonBlocking(false));
+  RETURN_NOT_OK(client_negotiation.Negotiate(rpc_error));
+  RETURN_NOT_OK(DisableSocketTimeouts(client_negotiation.socket()));
+
+  // Transfer the negotiated socket and state back to the connection.
+  conn->adopt_socket(client_negotiation.release_socket());
+  conn->set_remote_features(client_negotiation.take_server_features());
+  conn->set_confidential(client_negotiation.tls_negotiated() ||
+      (conn->socket()->IsLoopbackConnection() && !FLAGS_rpc_encrypt_loopback_connections));
+
+  // Sanity check: if no authn token was supplied as user credentials,
+  // the negotiated authentication type cannot be AuthenticationType::TOKEN.
+  DCHECK(!(authn_token == boost::none &&
+           client_negotiation.negotiated_authn() == AuthenticationType::TOKEN));
 
   return Status::OK();
 }
 
 // Perform server negotiation. We don't LOG() anything, we leave that to our caller.
 static Status DoServerNegotiation(Connection* conn,
+                                  RpcAuthentication authentication,
+                                  RpcEncryption encryption,
                                   const MonoTime& deadline) {
-  RETURN_NOT_OK(conn->SetNonBlocking(false));
-  RETURN_NOT_OK(conn->InitSaslServer());
-  conn->sasl_server().set_deadline(deadline);
-  RETURN_NOT_OK(conn->sasl_server().Negotiate());
-  RETURN_NOT_OK(RecvConnectionContext(conn, deadline));
-  RETURN_NOT_OK(DisableSocketTimeouts(conn));
+  const auto* messenger = conn->reactor_thread()->reactor()->messenger();
+  if (authentication == RpcAuthentication::REQUIRED &&
+      messenger->keytab_file().empty() &&
+      !messenger->tls_context().is_external_cert()) {
+    return Status::InvalidArgument("RPC authentication (--rpc_authentication) may not be "
+                                   "required unless Kerberos (--keytab_file) or external PKI "
+                                   "(--rpc_certificate_file et al) are configured");
+  }
+
+  if (FLAGS_rpc_negotiation_inject_delay_ms > 0) {
+    LOG(WARNING) << "Injecting " << FLAGS_rpc_negotiation_inject_delay_ms
+                 << "ms delay in negotiation";
+    SleepFor(MonoDelta::FromMilliseconds(FLAGS_rpc_negotiation_inject_delay_ms));
+  }
+
+  // Create a new ServerNegotiation to handle the synchronous negotiation.
+  ServerNegotiation server_negotiation(conn->release_socket(),
+                                       &messenger->tls_context(),
+                                       &messenger->token_verifier(),
+                                       encryption,
+                                       messenger->sasl_proto_name());
+
+  if (authentication != RpcAuthentication::DISABLED && !messenger->keytab_file().empty()) {
+    RETURN_NOT_OK(server_negotiation.EnableGSSAPI());
+  }
+  if (authentication != RpcAuthentication::REQUIRED) {
+    RETURN_NOT_OK(server_negotiation.EnablePlain());
+  }
+
+  server_negotiation.set_deadline(deadline);
+
+  RETURN_NOT_OK(server_negotiation.socket()->SetNonBlocking(false));
+
+  RETURN_NOT_OK(server_negotiation.Negotiate());
+  RETURN_NOT_OK(DisableSocketTimeouts(server_negotiation.socket()));
+
+  // Transfer the negotiated socket and state back to the connection.
+  conn->adopt_socket(server_negotiation.release_socket());
+  conn->set_remote_features(server_negotiation.take_client_features());
+  conn->set_remote_user(server_negotiation.take_authenticated_user());
+  conn->set_confidential(server_negotiation.tls_negotiated() ||
+      (conn->socket()->IsLoopbackConnection() && !FLAGS_rpc_encrypt_loopback_connections));
 
   return Status::OK();
 }
 
-// Perform negotiation for a connection (either server or client)
 void Negotiation::RunNegotiation(const scoped_refptr<Connection>& conn,
-                                 const MonoTime& deadline) {
+                                 RpcAuthentication authentication,
+                                 RpcEncryption encryption,
+                                 MonoTime deadline) {
   Status s;
+  unique_ptr<ErrorStatusPB> rpc_error;
   if (conn->direction() == Connection::SERVER) {
-    s = DoServerNegotiation(conn.get(), deadline);
+    s = DoServerNegotiation(conn.get(), authentication, encryption, deadline);
   } else {
-    s = DoClientNegotiation(conn.get(), deadline);
+    s = DoClientNegotiation(conn.get(), authentication, encryption, deadline,
+                            &rpc_error);
   }
 
   if (PREDICT_FALSE(!s.ok())) {
@@ -222,17 +303,23 @@ void Negotiation::RunNegotiation(const scoped_refptr<Connection>& conn,
   }
   TRACE("Negotiation complete: $0", s.ToString());
 
-  bool is_bad = !s.ok() && !(s.IsNetworkError() && s.posix_code() == ECONNREFUSED);
+  bool is_bad = !s.ok() && !(
+      (s.IsNetworkError() && s.posix_code() == ECONNREFUSED) ||
+      s.IsNotAuthorized());
 
   if (is_bad || FLAGS_rpc_trace_negotiation) {
-    string msg = Trace::CurrentTrace()->DumpToString(true);
+    string msg = Trace::CurrentTrace()->DumpToString();
     if (is_bad) {
       LOG(WARNING) << "Failed RPC negotiation. Trace:\n" << msg;
     } else {
       LOG(INFO) << "RPC negotiation tracing enabled. Trace:\n" << msg;
     }
   }
-  conn->CompleteNegotiation(s);
+
+  if (conn->direction() == Connection::SERVER && s.IsNotAuthorized()) {
+    LOG(WARNING) << "Unauthorized connection attempt: " << s.message().ToString();
+  }
+  conn->CompleteNegotiation(std::move(s), std::move(rpc_error));
 }
 
 

@@ -14,15 +14,55 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+syntax = "proto2";
 package kudu.consensus;
 
-option java_package = "org.kududb.consensus";
+option java_package = "org.apache.kudu.consensus";
 
 import "kudu/common/common.proto";
 
 // ===========================================================================
 //  Consensus Metadata
 // ===========================================================================
+
+// Per-replica attributes.
+message RaftPeerAttrsPB {
+  // Whether to promote a replica when it has caught up with the leader,
+  // changing its membership type from NON_VOTER to VOTER. This field is
+  // applicable only for NON_VOTER replicas.
+  optional bool promote = 1 [ default = false ];
+
+  // If set to 'true', the replica needs to be replaced regardless of
+  // its health report.
+  optional bool replace = 2 [ default = false ];
+}
+
+// Report on a replica's (peer's) health.
+message HealthReportPB {
+  // HealthStatus respresents a fully-connected state machine, where
+  // transitions between any of the states are allowed.
+  enum HealthStatus {
+    // No information on the health status.
+    UNKNOWN = 999;
+
+    // Replica has failed and needs replacement. The failure might be a
+    // transient one, so replica may return to a healthy state soon.
+    FAILED = 0;
+
+    // Replica is functioning properly.
+    HEALTHY = 1;
+
+    // Replica has failed in an irreversible and unrecoverable way and needs
+    // replacement. The failure is permanent and the replica definitely cannot
+    // return to a healthy state.
+    FAILED_UNRECOVERABLE = 2;
+  }
+
+  // Overall health status of a replica. Reflects at least the responsiveness
+  // (i.e. time of last contact) and the lag of the replica's WAL
+  // behind the leader's.
+  optional HealthStatus overall_health = 1;
+}
 
 // A peer in a configuration.
 message RaftPeerPB {
@@ -55,27 +95,21 @@ message RaftPeerPB {
     NON_VOTER = 0;
     VOTER = 1;
   };
+
   // Permanent uuid is optional: RaftPeerPB/RaftConfigPB instances may
   // be created before the permanent uuid is known (e.g., when
   // manually specifying a configuration for Master/CatalogManager);
-  // permament uuid can be retrieved at a later time through RPC.
+  // permanent uuid can be retrieved at a later time through RPC.
   optional bytes permanent_uuid = 1;
   optional MemberType member_type = 2;
   optional HostPortPB last_known_addr = 3;
-}
 
-enum ConsensusConfigType {
-  CONSENSUS_CONFIG_UNKNOWN = 999;
+  // Replica attributes.
+  optional RaftPeerAttrsPB attrs = 4;
 
-  // Committed consensus config. This includes the consensus configuration that
-  // has been serialized through consensus and committed, thus having a valid
-  // opid_index field set.
-  CONSENSUS_CONFIG_COMMITTED = 1;
-
-  // Active consensus config. This could be a pending consensus config that
-  // has not yet been committed. If the config is not committed, its opid_index
-  // field will not be set.
-  CONSENSUS_CONFIG_ACTIVE = 2;
+  // Replica's health report, as seen by the leader. This is a run-time
+  // only field, it should not be persisted or read from the persistent storage.
+  optional HealthReportPB health_report = 5;
 }
 
 // A set of peers, serving a single tablet.
@@ -86,9 +120,11 @@ message RaftConfigPB {
   // It is left undefined if the operation isn't committed.
   optional int64 opid_index = 1;
 
-  // Whether this is a local or distributed configuration (i.e. whether to use a local or dist
-  // implementation of consensus).
-  optional bool local = 2 [default = true];
+  // Obsolete. This parameter has been retired.
+  optional bool OBSOLETE_local = 2;
+
+  // Flag to allow unsafe config change operations.
+  optional bool unsafe_config_change = 4 [ default = false ];
 
   // The set of peers in the configuration.
   repeated RaftPeerPB peers = 3;
@@ -108,29 +144,19 @@ message ConsensusStatePB {
   // to a term check on the UpdateConsensus() RPC request.
   //
   // Whenever the local peer sees a new term, the leader flag is cleared until
-  // a new leader is acknowledged based on the above critera. Simply casting a
-  // vote for a peer is not sufficient to assume that that peer has won the
+  // a new leader is acknowledged based on the above criteria. Simply casting a
+  // vote for a peer is not sufficient to assume that the peer has won the
   // election, so we do not update this field based on our vote.
   //
-  // The leader listed here, if any, should always be a member of 'configuration', and
-  // the term that the node is leader of _must_ equal the term listed above in
-  // the 'current_term' field. The Master will use the combination of current
-  // term and leader uuid to determine when to update its cache of the current
-  // leader for client lookup purposes.
-  //
-  // There is a corner case in Raft where a node may be elected leader of a
-  // pending (uncommitted) configuration. In such a case, if the leader of the pending
-  // configuration is not a member of the committed configuration, and it is the committed
-  // configuration that is being reported, then the leader_uuid field should be
-  // cleared by the process filling in the ConsensusStatePB object.
+  // The leader may be a part of the committed or the pending configuration (or both).
   optional string leader_uuid = 2;
 
-  // The peers. In some contexts, this will be the committed configuration,
-  // which will always have configuration.opid_index set. In other contexts, this may
-  // a "pending" configuration, which is active but in the process of being committed.
-  // In any case, initial peership is set on tablet start, so this
+  // The committed peers. Initial peership is set on tablet start, so this
   // field should always be present.
-  required RaftConfigPB config = 3;
+  required RaftConfigPB committed_config = 3;
+
+  // The peers in the pending configuration, if there is one.
+  optional RaftConfigPB pending_config = 4;
 }
 
 // This PB is used to serialize all of the persistent state needed for
@@ -146,7 +172,7 @@ message ConsensusMetadataPB {
   // Whenever a new election is started, the candidate increments this by one
   // and requests votes from peers.
   //
-  // If any RPC or RPC response is received from another node containing a term higher
+  // If any RPC request or response is received from another node containing a term higher
   // than this one, the server should step down to FOLLOWER and set its current_term to
   // match the caller's term.
   //

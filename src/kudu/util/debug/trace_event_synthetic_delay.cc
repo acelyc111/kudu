@@ -2,8 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "kudu/gutil/singleton.h"
 #include "kudu/util/debug/trace_event_synthetic_delay.h"
+
+#include <cstring>
+#include <ostream>
+
+#include <glog/logging.h>
+
+#include "kudu/gutil/dynamic_annotations.h"
+#include "kudu/gutil/port.h"
+#include "kudu/gutil/singleton.h"
 
 namespace {
 const int kMaxSyntheticDelays = 32;
@@ -135,14 +143,12 @@ MonoTime TraceEventSyntheticDelay::CalculateEndTimeLocked(
     return MonoTime();
   else if (mode_ == ALTERNATING && trigger_count_++ % 2)
     return MonoTime();
-  MonoTime end = start_time;
-  end.AddDelta(target_duration_);
-  return end;
+  return start_time + target_duration_;
 }
 
 void TraceEventSyntheticDelay::ApplyDelay(const MonoTime& end_time) {
   TRACE_EVENT0("synthetic_delay", name_.c_str());
-  while (clock_->Now().ComesBefore(end_time)) {
+  while (clock_->Now() < end_time) {
     // Busy loop.
   }
 }
@@ -183,7 +189,7 @@ TraceEventSyntheticDelay* TraceEventSyntheticDelayRegistry::GetOrCreateDelay(
 }
 
 MonoTime TraceEventSyntheticDelayRegistry::Now() {
-  return MonoTime::Now(MonoTime::FINE);
+  return MonoTime::Now();
 }
 
 void TraceEventSyntheticDelayRegistry::ResetAllDelays() {

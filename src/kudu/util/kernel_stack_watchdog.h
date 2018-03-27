@@ -53,18 +53,24 @@
 #ifndef KUDU_UTIL_KERNEL_STACK_WATCHDOG_H
 #define KUDU_UTIL_KERNEL_STACK_WATCHDOG_H
 
+#include <ctime>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include <glog/logging.h>
+
+#include "kudu/gutil/atomicops.h"
 #include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/macros.h"
+#include "kudu/gutil/port.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/singleton.h"
 #include "kudu/gutil/walltime.h"
 #include "kudu/util/countdown_latch.h"
+#include "kudu/util/locks.h"
 #include "kudu/util/mutex.h"
-#include "kudu/util/monotime.h"
 #include "kudu/util/threadlocal.h"
 
 #define SCOPED_WATCH_STACK(threshold_ms) \
@@ -159,15 +165,28 @@ class KernelStackWatchdog {
   ~KernelStackWatchdog();
 
   // Get or create the TLS for the current thread.
-  static TLS* GetTLS();
+  static TLS* GetTLS() {
+    if (PREDICT_FALSE(!tls_)) {
+      CreateAndRegisterTLS();
+    }
+    return tls_;
+  }
+
+  // Create a new TLS for the current thread, and register it with the watchdog.
+  // Installs a callback to automatically unregister the thread upon its exit.
+  static void CreateAndRegisterTLS();
+
+  // Callback which is registered to run at thread-exit time by CreateAndRegisterTLS().
+  static void ThreadExiting(void* tls_void);
 
   // Register a new thread's TLS with the watchdog.
   // Called by any thread the first time it enters a watched section, when its TLS
   // is constructed.
   void Register(TLS* tls);
 
-  // Called when a thread's TLS is destructed (i.e. when the thread exits).
-  void Unregister(TLS* tls);
+  // Called when a thread is in the process of exiting, and has a registered TLS
+  // object.
+  void Unregister();
 
   // The actual watchdog loop that the watchdog thread runs.
   void RunThread();
@@ -177,12 +196,31 @@ class KernelStackWatchdog {
   typedef std::unordered_map<pid_t, TLS*> TLSMap;
   TLSMap tls_by_tid_;
 
+  // If a thread exits while the watchdog is in the middle of accessing the TLS
+  // objects, we can't immediately delete the TLS struct. Instead, the thread
+  // enqueues it here for later deletion by the watchdog thread within RunThread().
+  std::vector<std::unique_ptr<TLS>> pending_delete_;
+
   // If non-NULL, warnings will be emitted into this vector instead of glog.
   // Used by tests.
   gscoped_ptr<std::vector<std::string> > log_collector_;
 
-  // Lock protecting tls_by_tid_ and log_collector_.
-  mutable Mutex lock_;
+  // Lock protecting log_collector_.
+  mutable simple_spinlock log_lock_;
+
+  // Lock protecting tls_by_tid_ and pending_delete_.
+  mutable simple_spinlock tls_lock_;
+
+  // Lock which prevents threads from unregistering while the watchdog
+  // sends signals.
+  //
+  // This is used to prevent the watchdog from sending a signal to a pid just
+  // after the pid has actually exited and been reused. Sending a signal to
+  // a non-Kudu thread could have unintended consequences.
+  //
+  // When this lock is held concurrently with 'tls_lock_' or 'log_lock_',
+  // this lock must be acquired first.
+  Mutex unregister_lock_;
 
   // The watchdog thread itself.
   scoped_refptr<Thread> thread_;
@@ -200,6 +238,8 @@ class ScopedWatchKernelStack {
   // watchdog thread will log a warning including the message 'label'. 'label'
   // is not copied or freed.
   ScopedWatchKernelStack(const char* label, int threshold_ms) {
+    if (threshold_ms <= 0) return;
+
     // Rather than just using the lazy GetTLS() method, we'll first try to load
     // the TLS ourselves. This is usually successful, and avoids us having to inline
     // the TLS construction path at call sites.
@@ -230,7 +270,9 @@ class ScopedWatchKernelStack {
   }
 
   ~ScopedWatchKernelStack() {
-    KernelStackWatchdog::TLS::Data* tls = &DCHECK_NOTNULL(KernelStackWatchdog::tls_)->data_;
+    if (!KernelStackWatchdog::tls_) return;
+
+    KernelStackWatchdog::TLS::Data* tls = &KernelStackWatchdog::tls_->data_;
     int d = tls->depth_;
     DCHECK_GT(d, 0);
 

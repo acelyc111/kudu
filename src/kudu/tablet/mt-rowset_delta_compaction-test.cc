@@ -15,15 +15,33 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <boost/thread/thread.hpp>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <vector>
 
+#include <gflags/gflags.h>
+#include <glog/logging.h>
+#include <gtest/gtest.h>
+
+#include "kudu/common/common.pb.h"
+#include "kudu/common/iterator.h"
+#include "kudu/common/rowblock.h"
+#include "kudu/common/schema.h"
 #include "kudu/gutil/atomicops.h"
-#include "kudu/gutil/stringprintf.h"
+#include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/strings/substitute.h"
-#include "kudu/gutil/walltime.h"
-#include "kudu/util/thread.h"
 #include "kudu/tablet/diskrowset-test-base.h"
+#include "kudu/tablet/diskrowset.h"
+#include "kudu/tablet/mvcc.h"
+#include "kudu/tablet/tablet.pb.h"
+#include "kudu/util/memory/arena.h"
+#include "kudu/util/monotime.h"
+#include "kudu/util/status.h"
+#include "kudu/util/test_macros.h"
+#include "kudu/util/test_util.h"
+#include "kudu/util/thread.h"
 
 enum {
   kDefaultNumSecondsPerThread = 1,
@@ -38,6 +56,7 @@ DEFINE_int32(num_seconds_per_thread, kDefaultNumSecondsPerThread,
              "Minimum number of seconds each thread should work");
 
 using std::shared_ptr;
+using std::vector;
 
 namespace kudu {
 namespace tablet {
@@ -88,11 +107,12 @@ class TestMultiThreadedRowSetDeltaCompaction : public TestRowSet {
   }
 
   void ReadVerify(DiskRowSet *rs) {
-    Arena arena(1024, 1024*1024);
+    Arena arena(1024);
     RowBlock dst(schema_, 1000, &arena);
     gscoped_ptr<RowwiseIterator> iter;
     ASSERT_OK(rs->NewRowIterator(&schema_,
                                  MvccSnapshot::CreateSnapshotIncludingAllTransactions(),
+                                 UNORDERED,
                                  &iter));
     uint32_t expected = NoBarrier_Load(&update_counter_);
     ASSERT_OK(iter->Init(nullptr));

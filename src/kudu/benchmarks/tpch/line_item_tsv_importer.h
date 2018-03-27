@@ -17,7 +17,6 @@
 #ifndef KUDU_TPCH_LINE_ITEM_TSV_IMPORTER_H
 #define KUDU_TPCH_LINE_ITEM_TSV_IMPORTER_H
 
-#include <iostream>
 #include <fstream>
 #include <vector>
 #include <string>
@@ -36,7 +35,7 @@ static const char* const kPipeSeparator = "|";
 // Utility class used to parse the lineitem tsv file
 class LineItemTsvImporter {
  public:
-  explicit LineItemTsvImporter(const string &path) : in_(path.c_str()),
+  explicit LineItemTsvImporter(const std::string &path) : in_(path.c_str()),
     updated_(false) {
     CHECK(in_.is_open()) << "not able to open input file: " << path;
   }
@@ -127,8 +126,8 @@ class LineItemTsvImporter {
     CHECK_OK(row->SetDouble(col_idx, number));
   }
   std::ifstream in_;
-  vector<StringPiece> columns_;
-  string line_, tmp_;
+  std::vector<StringPiece> columns_;
+  std::string line_, tmp_;
   bool updated_, done_;
 };
 } // namespace kudu

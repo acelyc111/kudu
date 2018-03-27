@@ -15,33 +15,35 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef KUDU_FS_BLOCK_MANAGER_H
-#define KUDU_FS_BLOCK_MANAGER_H
+#pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
-#include <stdint.h>
 #include <string>
 #include <vector>
 
-#include "kudu/fs/block_id.h"
-#include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/ref_counted.h"
-#include "kudu/gutil/stl_util.h"
-#include "kudu/gutil/strings/substitute.h"
+#include "kudu/util/metrics.h"
 #include "kudu/util/status.h"
-
-DECLARE_bool(block_coalesce_close);
 
 namespace kudu {
 
+class BlockId;
+class Env;
 class MemTracker;
-class MetricEntity;
 class Slice;
+
+template <typename T>
+class ArrayView;
 
 namespace fs {
 
+class BlockCreationTransaction;
+class BlockDeletionTransaction;
 class BlockManager;
+class FsErrorManager;
+struct FsReport;
 
 // The smallest unit of Kudu data that is backed by the local filesystem.
 //
@@ -65,11 +67,12 @@ class Block {
 // Close() is an expensive operation, as it must flush both dirty block data
 // and metadata to disk. The block manager API provides two ways to improve
 // Close() performance:
-// 1. FlushDataAsync() before Close(). If there's enough work to be done
-//    between the two calls, there will be less outstanding I/O to wait for
-//    during Close().
-// 2. CloseBlocks() on a group of blocks. This at least ensures that, when
-//    waiting on outstanding I/O, the waiting is done in parallel.
+// 1. Finalize() before Close(). When 'block_manager_preflush_control' is set
+//    to 'finalize', if there's enough work to be done between the two calls,
+//    there will be less outstanding I/O to wait for during Close().
+// 2. CloseBlocks() on a group of blocks. This ensures: 1) flushing of dirty
+//    blocks are grouped together if possible, resulting in less I/O.
+//    2) when waiting on outstanding I/O, the waiting is done in parallel.
 //
 // NOTE: if a WritableBlock is not explicitly Close()ed, it will be aborted
 // (i.e. deleted).
@@ -82,9 +85,9 @@ class WritableBlock : public Block {
     // There is some dirty data in the block.
     DIRTY,
 
-    // There is an outstanding flush operation asynchronously flushing
-    // dirty block data to disk.
-    FLUSHING,
+    // No more data may be written to the block, but it is not yet guaranteed
+    // to be durably stored on disk.
+    FINALIZED,
 
     // The block is closed. No more operations can be performed on it.
     CLOSED
@@ -112,16 +115,21 @@ class WritableBlock : public Block {
   // outstanding data to reach the disk.
   virtual Status Append(const Slice& data) = 0;
 
-  // Begins an asynchronous flush of dirty block data to disk.
+  // Appends multiple chunks of data referenced by 'data' to the block.
   //
-  // This is purely a performance optimization for Close(); if there is
-  // other work to be done between the final Append() and the future
-  // Close(), FlushDataAsync() will reduce the amount of time spent waiting
-  // for outstanding I/O to complete in Close(). This is analogous to
-  // readahead or prefetching.
+  // Does not guarantee durability of 'data'; Close() must be called for all
+  // outstanding data to reach the disk.
+  virtual Status AppendV(ArrayView<const Slice> data) = 0;
+
+  // Signals that the block will no longer receive writes. Does not guarantee
+  // durability; Close() must still be called for that.
   //
-  // Data may not be written to the block after FlushDataAsync() is called.
-  virtual Status FlushDataAsync() = 0;
+  // When 'block_manager_preflush_control' is set to 'finalize', it also begins an
+  // asynchronous flush of dirty block data to disk. If there is other work
+  // to be done between the final Append() and the future Close(),
+  // Finalize() will reduce the amount of time spent waiting for outstanding
+  // I/O to complete in Close(). This is analogous to readahead or prefetching.
+  virtual Status Finalize() = 0;
 
   // Returns the number of bytes successfully appended via Append().
   virtual size_t BytesAppended() const = 0;
@@ -142,28 +150,33 @@ class ReadableBlock : public Block {
   // Returns the on-disk size of a written block.
   virtual Status Size(uint64_t* sz) const = 0;
 
-  // Reads exactly 'length' bytes beginning from 'offset' in the block,
-  // returning an error if fewer bytes exist. A slice referencing the
-  // results is written to 'result' and may be backed by memory in
-  // 'scratch'. As such, 'scratch' must be at least 'length' in size and
-  // must remain alive while 'result' is used.
-  //
-  // Does not modify 'result' on error (but may modify 'scratch').
-  virtual Status Read(uint64_t offset, size_t length,
-                      Slice* result, uint8_t* scratch) const = 0;
+  // Reads exactly 'result.size' bytes beginning from 'offset' in the block,
+  // returning an error if fewer bytes exist.
+  // Sets "result" to the data that was read.
+  // If an error was encountered, returns a non-OK status.
+  virtual Status Read(uint64_t offset, Slice result) const = 0;
+
+  // Reads exactly the "results" aggregate bytes, based on each Slice's "size",
+  // beginning from 'offset' in the block, returning an error if fewer bytes exist.
+  // Sets each "result" to the data that was read.
+  // If an error was encountered, returns a non-OK status.
+  virtual Status ReadV(uint64_t offset, ArrayView<Slice> results) const = 0;
 
   // Returns the memory usage of this object including the object itself.
   virtual size_t memory_footprint() const = 0;
 };
 
-// Provides options and hints for block placement.
+// Provides options and hints for block placement. This is used for identifying
+// the correct DataDirGroups to place blocks. In the future this may also be
+// used to specify directories based on block type (e.g. to prefer bloom block
+// placement into SSD-backed directories).
 struct CreateBlockOptions {
+  const std::string tablet_id;
 };
 
 // Block manager creation options.
 struct BlockManagerOptions {
   BlockManagerOptions();
-  ~BlockManagerOptions();
 
   // The entity under which all metrics should be grouped. If NULL, metrics
   // will not be produced.
@@ -175,9 +188,6 @@ struct BlockManagerOptions {
   // If NULL, new memory trackers will be parented to the root tracker.
   std::shared_ptr<MemTracker> parent_mem_tracker;
 
-  // The paths where data blocks will be stored. Cannot be empty.
-  std::vector<std::string> root_paths;
-
   // Whether the block manager should only allow reading. Defaults to false.
   bool read_only;
 };
@@ -186,18 +196,29 @@ struct BlockManagerOptions {
 // thread-safe.
 class BlockManager {
  public:
+  // Lists the available block manager types.
+  static std::vector<std::string> block_manager_types() {
+#if defined(__linux__)
+    return { "file", "log" };
+#else
+    return { "file" };
+#endif
+  }
+
   virtual ~BlockManager() {}
 
-  // Creates a new on-disk representation for this block manager. Must be
-  // followed up with a call to Open() to use the block manager.
+  // Opens an existing on-disk representation of this block manager and
+  // checks it for inconsistencies. If found, and if the block manager was not
+  // constructed in read-only mode, an attempt will be made to repair them.
   //
-  // Returns an error if one already exists or cannot be created.
-  virtual Status Create() = 0;
-
-  // Opens an existing on-disk representation of this block manager.
+  // If 'report' is not nullptr, it will be populated with the results of the
+  // check (and repair, if applicable); otherwise, the results of the check
+  // will be logged and the presence of fatal inconsistencies will manifest as
+  // a returned error.
   //
-  // Returns an error if one does not exist or cannot be opened.
-  virtual Status Open() = 0;
+  // Returns an error if an on-disk representation does not exist or cannot be
+  // opened.
+  virtual Status Open(FsReport* report) = 0;
 
   // Creates a new block using the provided options and opens it for
   // writing. The block's ID will be generated.
@@ -207,74 +228,96 @@ class BlockManager {
   //
   // Does not modify 'block' on error.
   virtual Status CreateBlock(const CreateBlockOptions& opts,
-                                      gscoped_ptr<WritableBlock>* block) = 0;
-
-  // Like the above but uses default options.
-  virtual Status CreateBlock(gscoped_ptr<WritableBlock>* block) = 0;
+                             std::unique_ptr<WritableBlock>* block) = 0;
 
   // Opens an existing block for reading.
   //
+  // While it is safe to delete a block that has already been opened, it is
+  // not safe to do so concurrently with the OpenBlock() call itself. In some
+  // block manager implementations this may result in unusual behavior. For
+  // example, OpenBlock() may succeed but subsequent ReadableBlock operations
+  // may fail.
+  //
   // Does not modify 'block' on error.
   virtual Status OpenBlock(const BlockId& block_id,
-                           gscoped_ptr<ReadableBlock>* block) = 0;
+                           std::unique_ptr<ReadableBlock>* block) = 0;
 
-  // Deletes an existing block, allowing its space to be reclaimed by the
-  // filesystem. The change is immediately made durable.
+  // Constructs a block creation transaction to group a set of block creation
+  // operations and closes the registered blocks together.
+  virtual std::unique_ptr<BlockCreationTransaction> NewCreationTransaction() = 0;
+
+  // Constructs a block deletion transaction to group a set of block deletion
+  // operations. Similar to 'DeleteBlock', the actual deletion will take place
+  // after the last open reader or writer is closed.
+  virtual std::shared_ptr<BlockDeletionTransaction> NewDeletionTransaction() = 0;
+
+  // Retrieves the IDs of all blocks under management by this block manager.
+  // These include ReadableBlocks as well as WritableBlocks.
   //
-  // Blocks may be deleted while they are open for reading or writing;
-  // the actual deletion will take place after the last open reader or
-  // writer is closed.
-  virtual Status DeleteBlock(const BlockId& block_id) = 0;
+  // Returned block IDs are not guaranteed to be in any particular order,
+  // nor is the order guaranteed to be deterministic. Furthermore, if
+  // concurrent operations are ongoing, some of the blocks themselves may not
+  // even exist after the call.
+  virtual Status GetAllBlockIds(std::vector<BlockId>* block_ids) = 0;
 
-  // Closes (and fully synchronizes) the given blocks. Effectively like
-  // Close() for each block but may be optimized for groups of blocks.
-  //
-  // On success, guarantees that outstanding data is durable.
-  virtual Status CloseBlocks(const std::vector<WritableBlock*>& blocks) = 0;
+  // Notifies the block manager of the presence of a block id. This allows
+  // block managers that use sequential block ids to avoid reusing
+  // externally-referenced ids that they may not have previously found (e.g.
+  // because those ids' blocks were on a data directory that failed).
+  virtual void NotifyBlockId(BlockId block_id) = 0;
 
- protected:
-  static const char* kInstanceMetadataFileName;
+  // Exposes the FsErrorManager used to handle fs errors.
+  virtual FsErrorManager* error_manager() = 0;
 };
 
-// Closes a group of blocks.
-//
-// Blocks must be closed explicitly via CloseBlocks(), otherwise they will
-// be deleted in the in the destructor.
-class ScopedWritableBlockCloser {
+// Group a set of block creations together in a transaction. This has two
+// major motivations:
+//  1) the underlying block manager can optimize synchronization for
+//     a batch of blocks if possible to achieve better performance.
+//  2) to be able to track all blocks created in one logical operation.
+// This class is not thread-safe. It is not recommended to share a transaction
+// between threads. If necessary, use external synchronization to guarantee
+// thread safety.
+class BlockCreationTransaction {
  public:
-  ScopedWritableBlockCloser() {}
+  virtual ~BlockCreationTransaction() = default;
 
-  ~ScopedWritableBlockCloser() {
-    for (WritableBlock* block : blocks_) {
-      WARN_NOT_OK(block->Abort(), strings::Substitute(
-          "Failed to abort block with id $0", block->id().ToString()));
-    }
-    STLDeleteElements(&blocks_);
-  }
+  // Add a block to the creation transaction.
+  virtual void AddCreatedBlock(std::unique_ptr<WritableBlock> block) = 0;
 
-  void AddBlock(gscoped_ptr<WritableBlock> block) {
-    blocks_.push_back(block.release());
-  }
-
-  Status CloseBlocks() {
-    if (blocks_.empty()) {
-      return Status::OK();
-    }
-    ElementDeleter deleter(&blocks_);
-
-    // We assume every block is using the same block manager, so any
-    // block's manager will do.
-    BlockManager* bm = blocks_[0]->block_manager();
-    return bm->CloseBlocks(blocks_);
-  }
-
-  const std::vector<WritableBlock*>& blocks() const { return blocks_; }
-
- private:
-  std::vector<WritableBlock*> blocks_;
+  // Commit all the created blocks and close them together.
+  // On success, guarantees that outstanding data is durable.
+  virtual Status CommitCreatedBlocks() = 0;
 };
+
+// Group a set of block deletions together in a transaction. Similar to
+// BlockCreationTransaction, this has two major motivations:
+//  1) the underlying block manager can optimize deletions for a batch
+//     of blocks if possible to achieve better performance.
+//  2) to be able to track all blocks deleted in one logical operation.
+// This class is not thread-safe. It is not recommended to share a transaction
+// between threads. If necessary, use external synchronization to guarantee
+// thread safety.
+class BlockDeletionTransaction {
+ public:
+  virtual ~BlockDeletionTransaction() = default;
+
+  // Add a block to the deletion transaction.
+  virtual void AddDeletedBlock(BlockId block) = 0;
+
+  // Deletes a group of blocks given the block IDs, the actual deletion will take
+  // place after the last open reader or writer is closed for each block that needs
+  // be to deleted. The 'deleted' out parameter will be set with the list of block
+  // IDs that were successfully deleted, regardless of the value of returned 'status'
+  // is OK or error.
+  //
+  // Returns the first deletion failure that was seen, if any.
+  virtual Status CommitDeletedBlocks(std::vector<BlockId>* deleted) = 0;
+};
+
+// Compute an upper bound for a file cache embedded within a block manager
+// using resource limits obtained from the system.
+int64_t GetFileCacheCapacityForBlockManager(Env* env);
 
 } // namespace fs
 } // namespace kudu
-
-#endif

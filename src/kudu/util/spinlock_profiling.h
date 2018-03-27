@@ -17,9 +17,9 @@
 #ifndef KUDU_UTIL_SPINLOCK_PROFILING_H
 #define KUDU_UTIL_SPINLOCK_PROFILING_H
 
+#include <cstdint>
 #include <iosfwd>
 
-#include "kudu/gutil/macros.h"
 #include "kudu/gutil/ref_counted.h"
 
 namespace kudu {
@@ -63,7 +63,7 @@ void StartSynchronizationProfiling();
 // due to the contention buffer overflowing. If profiling is enabled during this
 // call, then the 'drop_count' may be slightly out-of-date with respect to the
 // returned samples.
-void FlushSynchronizationProfile(std::stringstream* out, int64_t* drop_count);
+void FlushSynchronizationProfile(std::ostringstream* out, int64_t* drop_count);
 
 // Stop collecting contention profiles.
 void StopSynchronizationProfiling();

@@ -23,22 +23,27 @@
 #include <utility>
 #include <vector>
 
+#include <gflags/gflags_declare.h>
+#include <llvm/ADT/Twine.h>
+#include <llvm/ADT/ilist_iterator.h>
 #include <llvm/ExecutionEngine/ExecutionEngine.h>
 #include <llvm/IR/Argument.h>
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
-#include <llvm/IR/IRBuilder.h>
-#include <llvm/IR/Module.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/Type.h>
+#include <llvm/IR/Value.h>
 
 #include "kudu/codegen/jit_wrapper.h"
 #include "kudu/codegen/module_builder.h"
+#include "kudu/common/common.pb.h"
 #include "kudu/common/row.h"
 #include "kudu/common/schema.h"
+#include "kudu/common/types.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/strings/strcat.h"
-#include "kudu/util/faststring.h"
 #include "kudu/util/status.h"
 
 namespace llvm {
@@ -51,9 +56,7 @@ using llvm::ConstantInt;
 using llvm::ExecutionEngine;
 using llvm::Function;
 using llvm::FunctionType;
-using llvm::GenericValue;
 using llvm::LLVMContext;
-using llvm::Module;
 using llvm::PointerType;
 using llvm::Type;
 using llvm::Value;
@@ -65,6 +68,9 @@ using std::vector;
 DECLARE_bool(codegen_dump_functions);
 
 namespace kudu {
+
+class faststring;
+
 namespace codegen {
 
 namespace {
@@ -203,10 +209,6 @@ llvm::Function* MakeProjection(const string& name,
     success = builder->CreateAnd(success, result);
     success->setName(StrCat("success", success_update_number++));
   }
-
-  // TODO: Copy adapted base data
-  DCHECK(proj.adapter_cols_mapping().size() == 0)
-    << "Value Adapter not supported yet";
 
   // Fill defaults
   for (size_t dfl_idx : proj.projection_defaults()) {
@@ -380,7 +382,7 @@ struct DefaultEquals {
 
 struct ColumnSchemaEqualsType {
   bool operator()(const ColumnSchema& s1, const ColumnSchema& s2) {
-    return s1.EqualsType(s2);
+    return s1.EqualsPhysicalType(s2);
   }
 };
 
@@ -396,71 +398,67 @@ bool ContainerEquals(const T& t1, const T& t2) {
   return ContainerEquals(t1, t2, DefaultEquals());
 }
 
-// This method defines what makes (base, projection) schema pairs compatible.
-// In other words, this method can be thought of as the equivalence relation
-// on the set of all well-formed (base, projection) schema pairs that
-// partitions the set into equivalence classes which will have the exact
-// same projection function code.
-//
-// This equivalence relation can be decomposed as:
-//
-//   ProjectionsCompatible((base1, proj1), (base2, proj2)) :=
-//     WELLFORMED(base1, proj1) &&
-//     WELLFORMED(base2, proj2) &&
-//     PROJEQUALS(base1, base2) &&
-//     PROJEQUALS(proj1, proj2) &&
-//     MAP(base1, proj1) == MAP(base2, proj2)
-//
-// where WELLFORMED checks that a projection is well-formed (i.e., a
-// kudu::RowProjector can be initialized with the schema pair), PROJEQUAL
-// is a relaxed version of the Schema::Equals() operator that is
-// independent of column names and column IDs, and MAP addresses
-// the actual dependency on column identification - which is the effect
-// that those attributes have on the RowProjector's mapping (i.e., different
-// names and IDs are ok, so long as the mapping is the same). Note that
-// key columns are not given any special meaning in projection. Types
-// and nullability of columns must be exactly equal between the two
-// schema pairs.
-//
-// Status::OK corresponds to true in the equivalence relation and other
-// statuses correspond to false, explaining why the projections are
-// incompatible.
-Status ProjectionsCompatible(const Schema& base1, const Schema& proj1,
-                             const Schema& base2, const Schema& proj2) {
-  kudu::RowProjector rp1(&base1, &proj1), rp2(&base2, &proj2);
-  RETURN_NOT_OK_PREPEND(rp1.Init(), "(base1, proj1) projection "
-                        "schema pair not well formed: ");
-  RETURN_NOT_OK_PREPEND(rp2.Init(), "(base2, proj2) projection "
-                        "schema pair not well formed: ");
-
-  if (!ContainerEquals(base1.columns(), base2.columns(),
-                       ColumnSchemaEqualsType())) {
-    return Status::IllegalState("base schema types unequal");
-  }
-  if (!ContainerEquals(proj1.columns(), proj2.columns(),
-                       ColumnSchemaEqualsType())) {
-    return Status::IllegalState("projection schema types unequal");
-  }
-
-  if (!ContainerEquals(rp1.base_cols_mapping(), rp2.base_cols_mapping())) {
-    return Status::IllegalState("base column mappings do not match");
-  }
-  if (!ContainerEquals(rp1.adapter_cols_mapping(), rp2.adapter_cols_mapping())) {
-    return Status::IllegalState("adapter column mappings do not match");
-  }
-  if (!ContainerEquals(rp1.projection_defaults(), rp2.projection_defaults())) {
-    return Status::IllegalState("projection default indices do not match");
-  }
-
-  return Status::OK();
-}
-
 } // anonymous namespace
 
 Status RowProjector::Init() {
   RETURN_NOT_OK(projector_.Init());
 #ifndef NDEBUG
-  RETURN_NOT_OK_PREPEND(ProjectionsCompatible(
+  // This method defines what makes (base, projection) schema pairs compatible.
+  // In other words, this method can be thought of as the equivalence relation
+  // on the set of all well-formed (base, projection) schema pairs that
+  // partitions the set into equivalence classes which will have the exact
+  // same projection function code.
+  //
+  // This equivalence relation can be decomposed as:
+  //
+  //   compat_check((base1, proj1), (base2, proj2)) :=
+  //     WELLFORMED(base1, proj1) &&
+  //     WELLFORMED(base2, proj2) &&
+  //     PROJEQUALS(base1, base2) &&
+  //     PROJEQUALS(proj1, proj2) &&
+  //     MAP(base1, proj1) == MAP(base2, proj2)
+  //
+  // where WELLFORMED checks that a projection is well-formed (i.e., a
+  // kudu::RowProjector can be initialized with the schema pair), PROJEQUAL
+  // is a relaxed version of the Schema::Equals() operator that is
+  // independent of column names and column IDs, and MAP addresses
+  // the actual dependency on column identification - which is the effect
+  // that those attributes have on the RowProjector's mapping (i.e., different
+  // names and IDs are ok, so long as the mapping is the same). Note that
+  // key columns are not given any special meaning in projection. Physical types
+  // and nullability of columns must be exactly equal between the two
+  // schema pairs.
+  //
+  // Status::OK corresponds to true in the equivalence relation and other
+  // statuses correspond to false, explaining why the projections are
+  // incompatible.
+  auto compat_check = [](const Schema& base1, const Schema& proj1,
+                         const Schema& base2, const Schema& proj2) {
+    kudu::RowProjector rp1(&base1, &proj1), rp2(&base2, &proj2);
+    RETURN_NOT_OK_PREPEND(rp1.Init(), "(base1, proj1) projection "
+                          "schema pair not well formed: ");
+    RETURN_NOT_OK_PREPEND(rp2.Init(), "(base2, proj2) projection "
+                          "schema pair not well formed: ");
+
+    if (!ContainerEquals(base1.columns(), base2.columns(),
+                         ColumnSchemaEqualsType())) {
+      return Status::IllegalState("base schema types unequal");
+    }
+    if (!ContainerEquals(proj1.columns(), proj2.columns(),
+                         ColumnSchemaEqualsType())) {
+      return Status::IllegalState("projection schema types unequal");
+    }
+
+    if (!ContainerEquals(rp1.base_cols_mapping(), rp2.base_cols_mapping())) {
+      return Status::IllegalState("base column mappings do not match");
+    }
+    if (!ContainerEquals(rp1.projection_defaults(), rp2.projection_defaults())) {
+      return Status::IllegalState("projection default indices do not match");
+    }
+
+    return Status::OK();
+  };
+  RETURN_NOT_OK_PREPEND(compat_check(
                           *projector_.base_schema(), *projector_.projection(),
                           functions_->base_schema(), functions_->projection()),
                         "Codegenned row projector's schemas incompatible "

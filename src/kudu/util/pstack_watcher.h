@@ -17,16 +17,20 @@
 #ifndef KUDU_UTIL_PSTACK_WATCHER_H
 #define KUDU_UTIL_PSTACK_WATCHER_H
 
+#include <sys/types.h>
+
 #include <string>
 #include <vector>
 
+#include "kudu/gutil/ref_counted.h"
 #include "kudu/util/condition_variable.h"
 #include "kudu/util/monotime.h"
 #include "kudu/util/mutex.h"
 #include "kudu/util/status.h"
-#include "kudu/util/thread.h"
 
 namespace kudu {
+
+class Thread;
 
 // PstackWatcher is an object which will pstack the current process and print
 // the results to stdout.  It does this after a certain timeout has occured.
@@ -76,7 +80,7 @@ class PstackWatcher {
   static Status RunPstack(const std::string& progname, pid_t pid);
 
   // Invoke and wait for the stack dump program.
-  static Status RunStackDump(const std::string& prog, const std::vector<std::string>& argv);
+  static Status RunStackDump(const std::vector<std::string>& argv);
 
   // Run the thread that waits for the specified duration before logging a
   // pstack.

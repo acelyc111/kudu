@@ -18,15 +18,17 @@
 #define KUDU_CFILE_TYPE_ENCODINGS_H_
 
 #include "kudu/common/common.pb.h"
+#include "kudu/gutil/macros.h"
+#include "kudu/util/make_shared.h"
 #include "kudu/util/status.h"
 
 namespace kudu {
+class Slice;
 class TypeInfo;
 
 namespace cfile {
 class BlockBuilder;
 class BlockDecoder;
-class CFileReader;
 class CFileIterator;
 struct WriterOptions;
 
@@ -52,7 +54,7 @@ class TypeEncodingInfo {
   Status CreateBlockDecoder(BlockDecoder **bd, const Slice &slice,
                             CFileIterator *iter) const;
  private:
-
+  ALLOW_MAKE_SHARED(TypeEncodingInfo);
   friend class TypeEncodingResolver;
   template<typename TypeEncodingTraitsClass> TypeEncodingInfo(TypeEncodingTraitsClass t);
 

@@ -20,15 +20,19 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "kudu/common/generic_iterators.h"
-#include "kudu/gutil/stl_util.h"
-#include "kudu/gutil/stringprintf.h"
+#include "kudu/common/iterator.h"
+#include "kudu/common/schema.h"
+#include "kudu/common/timestamp.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/tablet/rowset_metadata.h"
 
 using std::shared_ptr;
+using std::string;
+using std::vector;
 using strings::Substitute;
 
 namespace kudu { namespace tablet {
@@ -71,25 +75,34 @@ string DuplicatingRowSet::ToString() const {
 
 Status DuplicatingRowSet::NewRowIterator(const Schema *projection,
                                          const MvccSnapshot &snap,
+                                         OrderMode order,
                                          gscoped_ptr<RowwiseIterator>* out) const {
   // Use the original rowset.
   if (old_rowsets_.size() == 1) {
-    return old_rowsets_[0]->NewRowIterator(projection, snap, out);
-  } else {
-    // Union between them
-
-    vector<shared_ptr<RowwiseIterator> > iters;
-    for (const shared_ptr<RowSet> &rowset : old_rowsets_) {
-      gscoped_ptr<RowwiseIterator> iter;
-      RETURN_NOT_OK_PREPEND(rowset->NewRowIterator(projection, snap, &iter),
-                            Substitute("Could not create iterator for rowset $0",
-                                       rowset->ToString()));
-      iters.push_back(shared_ptr<RowwiseIterator>(iter.release()));
-    }
-
-    out->reset(new UnionIterator(iters));
-    return Status::OK();
+    return old_rowsets_[0]->NewRowIterator(projection, snap, order, out);
   }
+  // Union or merge between them
+
+  vector<shared_ptr<RowwiseIterator> > iters;
+  for (const shared_ptr<RowSet> &rowset : old_rowsets_) {
+    gscoped_ptr<RowwiseIterator> iter;
+    RETURN_NOT_OK_PREPEND(rowset->NewRowIterator(projection, snap, order, &iter),
+                          Substitute("Could not create iterator for rowset $0",
+                                     rowset->ToString()));
+    iters.push_back(shared_ptr<RowwiseIterator>(iter.release()));
+  }
+
+  switch (order) {
+    case ORDERED:
+      out->reset(new MergeIterator(*projection, std::move(iters)));
+      break;
+    case UNORDERED:
+      out->reset(new UnionIterator(std::move(iters)));
+      break;
+    default:
+      LOG(FATAL) << "unknown order: " << order;
+  }
+  return Status::OK();
 }
 
 Status DuplicatingRowSet::NewCompactionInput(const Schema* projection,
@@ -147,9 +160,8 @@ Status DuplicatingRowSet::MutateRow(Timestamp timestamp,
       break;
       #endif
     } else if (!s.IsNotFound()) {
-      LOG(FATAL) << "Unable to mirror update to rowset " << new_rowset->ToString()
-                 << " for key: " << probe.schema()->CreateKeyProjection().DebugRow(probe.row_key())
-                 << ": " << s.ToString();
+      RETURN_NOT_OK_PREPEND(s, Substitute("Unable to mirror update to rowset $0 for key: $1",
+          new_rowset->ToString(), probe.schema()->CreateKeyProjection().DebugRow(probe.row_key())));
     }
     // IsNotFound is OK - it might be in a different one.
   }
@@ -186,24 +198,40 @@ Status DuplicatingRowSet::CountRows(rowid_t *count) const {
   return Status::OK();
 }
 
-Status DuplicatingRowSet::GetBounds(Slice *min_encoded_key,
-                                    Slice *max_encoded_key) const {
+Status DuplicatingRowSet::GetBounds(string* min_encoded_key,
+                                    string* max_encoded_key) const {
   // The range out of the output rowset always spans the full range
   // of the input rowsets, since no new rows can be inserted.
   // The output rowsets are in ascending order, so their total range
   // spans the range [front().min, back().max].
-  Slice junk;
+  string junk;
   RETURN_NOT_OK(new_rowsets_.front()->GetBounds(min_encoded_key, &junk));
   RETURN_NOT_OK(new_rowsets_.back()->GetBounds(&junk, max_encoded_key));
   return Status::OK();
 }
 
-uint64_t DuplicatingRowSet::EstimateOnDiskSize() const {
+uint64_t DuplicatingRowSet::OnDiskSize() const {
+  uint64_t size = 0;
+  for (const shared_ptr<RowSet> &rs : new_rowsets_) {
+    size += rs->OnDiskSize();
+  }
+  return size;
+}
+
+uint64_t DuplicatingRowSet::OnDiskBaseDataSize() const {
+  uint64_t size = 0;
+  for (const shared_ptr<RowSet> &rs : new_rowsets_) {
+    size += rs->OnDiskBaseDataSize();
+  }
+  return size;
+}
+
+uint64_t DuplicatingRowSet::OnDiskBaseDataSizeWithRedos() const {
   // The actual value of this doesn't matter, since it won't be selected
   // for compaction.
   uint64_t size = 0;
   for (const shared_ptr<RowSet> &rs : new_rowsets_) {
-    size += rs->EstimateOnDiskSize();
+    size += rs->OnDiskBaseDataSizeWithRedos();
   }
   return size;
 }

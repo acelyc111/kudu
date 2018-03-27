@@ -15,28 +15,50 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <glog/logging.h>
-#include <gtest/gtest.h>
+#include <algorithm>
 #include <memory>
+#include <cstdlib>
+#include <cstdint>
+#include <ostream>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
+#include <gflags/gflags.h>
+#include <glog/logging.h>
+#include <glog/stl_logging.h>
+#include <gtest/gtest.h>
+
+#include "kudu/common/column_predicate.h"
+#include "kudu/common/columnblock.h"
+#include "kudu/common/common.pb.h"
 #include "kudu/common/iterator.h"
 #include "kudu/common/generic_iterators.h"
+#include "kudu/common/column_materialization_context.h"
 #include "kudu/common/rowblock.h"
 #include "kudu/common/scan_spec.h"
 #include "kudu/common/schema.h"
+#include "kudu/common/types.h"
 #include "kudu/gutil/casts.h"
 #include "kudu/gutil/mathlimits.h"
+#include "kudu/gutil/port.h"
+#include "kudu/util/memory/arena.h"
+#include "kudu/util/status.h"
 #include "kudu/util/stopwatch.h"
 #include "kudu/util/test_macros.h"
-#include "kudu/util/test_util.h"
 
 DEFINE_int32(num_lists, 3, "Number of lists to merge");
 DEFINE_int32(num_rows, 1000, "Number of entries per list");
 DEFINE_int32(num_iters, 1, "Number of times to run merge");
 
+using std::make_shared;
+using std::shared_ptr;
+using std::string;
+using std::vector;
+
 namespace kudu {
 
-using std::shared_ptr;
+struct IteratorStats;
 
 static const Schema kIntSchema({ ColumnSchema("val", UINT32) }, 1);
 
@@ -46,19 +68,26 @@ class VectorIterator : public ColumnwiseIterator {
  public:
   explicit VectorIterator(vector<uint32_t> ints)
       : ints_(std::move(ints)),
-        cur_idx_(0) {
+        cur_idx_(0),
+        block_size_(ints_.size()) {
+  }
+
+  // Set the number of rows that will be returned in each
+  // call to PrepareBatch().
+  void set_block_size(int block_size) {
+    block_size_ = block_size;
   }
 
   Status Init(ScanSpec *spec) OVERRIDE {
     return Status::OK();
   }
 
-  virtual Status PrepareBatch(size_t *nrows) OVERRIDE {
-    int rem = ints_.size() - cur_idx_;
-    if (rem < *nrows) {
-      *nrows = rem;
-    }
-    prepared_ = rem;
+  virtual Status PrepareBatch(size_t* nrows) OVERRIDE {
+    prepared_ = std::min<int64_t>({
+        static_cast<int64_t>(ints_.size()) - cur_idx_,
+        block_size_,
+        static_cast<int64_t>(*nrows) });
+    *nrows = prepared_;
     return Status::OK();
   }
 
@@ -67,12 +96,13 @@ class VectorIterator : public ColumnwiseIterator {
     return Status::OK();
   }
 
-  virtual Status MaterializeColumn(size_t col, ColumnBlock *dst) OVERRIDE {
-    CHECK_EQ(UINT32, dst->type_info()->physical_type());
-    DCHECK_LE(prepared_, dst->nrows());
+  Status MaterializeColumn(ColumnMaterializationContext* ctx) override {
+    ctx->SetDecoderEvalNotSupported();
+    CHECK_EQ(UINT32, ctx->block()->type_info()->physical_type());
+    DCHECK_LE(prepared_, ctx->block()->nrows());
 
     for (size_t i = 0; i < prepared_; i++) {
-      dst->SetCellValue(i, &(ints_[cur_idx_++]));
+      ctx->block()->SetCellValue(i, &(ints_[cur_idx_++]));
     }
 
     return Status::OK();
@@ -102,6 +132,7 @@ class VectorIterator : public ColumnwiseIterator {
  private:
   vector<uint32_t> ints_;
   int cur_idx_;
+  int block_size_;
   size_t prepared_;
 };
 
@@ -112,7 +143,7 @@ TEST(TestMergeIterator, TestMergeEmpty) {
     new MaterializingIterator(
       shared_ptr<ColumnwiseIterator>(new VectorIterator(empty_vec))));
 
-  vector<shared_ptr<RowwiseIterator> > to_merge;
+  vector<shared_ptr<RowwiseIterator>> to_merge;
   to_merge.push_back(iter);
 
   MergeIterator merger(kIntSchema, to_merge);
@@ -126,17 +157,17 @@ class TestIntRangePredicate {
   TestIntRangePredicate(uint32_t lower, uint32_t upper) :
     lower_(lower),
     upper_(upper),
-    pred_(kIntSchema.column(0), &lower_, &upper_) {}
+    pred_(ColumnPredicate::Range(kIntSchema.column(0), &lower_, &upper_)) {}
 
   uint32_t lower_, upper_;
-  ColumnRangePredicate pred_;
+  ColumnPredicate pred_;
 };
 
 void TestMerge(const TestIntRangePredicate &predicate) {
-  vector<shared_ptr<RowwiseIterator> > to_merge;
+  vector<shared_ptr<RowwiseIterator>> to_merge;
   vector<uint32_t> ints;
-  vector<uint32_t> all_ints;
-  all_ints.reserve(FLAGS_num_rows * FLAGS_num_lists);
+  vector<uint32_t> expected;
+  expected.reserve(FLAGS_num_rows * FLAGS_num_lists);
 
   // Setup predicate exclusion
   ScanSpec spec;
@@ -151,24 +182,22 @@ void TestMerge(const TestIntRangePredicate &predicate) {
     for (int j = 0; j < FLAGS_num_rows; j++) {
       entry += rand() % 5;
       ints.push_back(entry);
-      // Evaluate the predicate before pushing to all_ints
-      if (entry >= predicate.lower_ && entry <= predicate.upper_) {
-        all_ints.push_back(entry);
+      // Evaluate the predicate before pushing to 'expected'.
+      if (entry >= predicate.lower_ && entry < predicate.upper_) {
+        expected.push_back(entry);
       }
     }
 
-    shared_ptr<RowwiseIterator> iter(
-      new MaterializingIterator(
-        shared_ptr<ColumnwiseIterator>(new VectorIterator(ints))));
-    vector<shared_ptr<RowwiseIterator> > to_union;
-    to_union.push_back(iter);
-    to_merge.push_back(shared_ptr<RowwiseIterator>(new UnionIterator(to_union)));
+    shared_ptr<VectorIterator> it(new VectorIterator(ints));
+    it->set_block_size(10);
+    shared_ptr<RowwiseIterator> iter(new MaterializingIterator(it));
+    to_merge.emplace_back(new UnionIterator({ iter }));
   }
 
-  VLOG(1) << "Predicate expects " << all_ints.size() << " results";
+  VLOG(1) << "Predicate expects " << expected.size() << " results: " << expected;
 
   LOG_TIMING(INFO, "std::sort the expected results") {
-    std::sort(all_ints.begin(), all_ints.end());
+    std::sort(expected.begin(), expected.end());
   }
 
   for (int trial = 0; trial < FLAGS_num_iters; trial++) {
@@ -186,14 +215,15 @@ void TestMerge(const TestIntRangePredicate &predicate) {
         for (int i = 0; i < dst.nrows(); i++) {
           uint32_t this_row = *kIntSchema.ExtractColumnFromRow<UINT32>(dst.row(i), 0);
           ASSERT_GE(this_row, predicate.lower_) << "Yielded integer excluded by predicate";
-          ASSERT_LE(this_row, predicate.upper_) << "Yielded integer excluded by predicate";
-          if (all_ints[total_idx] != this_row) {
-            ASSERT_EQ(all_ints[total_idx], this_row) <<
+          ASSERT_LT(this_row, predicate.upper_) << "Yielded integer excluded by predicate";
+          if (expected[total_idx] != this_row) {
+            ASSERT_EQ(expected[total_idx], this_row) <<
               "Yielded out of order at idx " << total_idx;
           }
           total_idx++;
         }
       }
+      ASSERT_EQ(total_idx, expected.size());
     }
   }
 }
@@ -203,9 +233,17 @@ TEST(TestMergeIterator, TestMerge) {
   TestMerge(predicate);
 }
 
-
-TEST(TestMergeIterator, TestPredicate) {
+TEST(TestMergeIterator, TestMergePredicate) {
   TestIntRangePredicate predicate(0, FLAGS_num_rows / 5);
+  TestMerge(predicate);
+}
+
+// Regression test for a bug in the merge which would incorrectly
+// drop a merge input if it received an entirely non-selected block.
+// This predicate excludes the first half of the rows but accepts the
+// second half.
+TEST(TestMergeIterator, TestMergePredicate2) {
+  TestIntRangePredicate predicate(FLAGS_num_rows / 2, MathLimits<uint32_t>::kMax);
   TestMerge(predicate);
 }
 
@@ -213,11 +251,11 @@ TEST(TestMergeIterator, TestPredicate) {
 // to single columns.
 TEST(TestMaterializingIterator, TestMaterializingPredicatePushdown) {
   ScanSpec spec;
-  TestIntRangePredicate pred1(20, 29);
+  TestIntRangePredicate pred1(20, 30);
   spec.AddPredicate(pred1.pred_);
   LOG(INFO) << "Predicate: " << pred1.pred_.ToString();
 
-  vector<uint32> ints;
+  vector<uint32_t> ints;
   for (int i = 0; i < 100; i++) {
     ints.push_back(i);
   }
@@ -225,10 +263,9 @@ TEST(TestMaterializingIterator, TestMaterializingPredicatePushdown) {
   shared_ptr<VectorIterator> colwise(new VectorIterator(ints));
   MaterializingIterator materializing(colwise);
   ASSERT_OK(materializing.Init(&spec));
-  ASSERT_EQ(0, spec.predicates().size())
-    << "Iterator should have pushed down predicate";
+  ASSERT_EQ(0, spec.predicates().size()) << "Iterator should have pushed down predicate";
 
-  Arena arena(1024, 1024);
+  Arena arena(1024);
   RowBlock dst(kIntSchema, 100, &arena);
   ASSERT_OK(materializing.NextBlock(&dst));
   ASSERT_EQ(dst.nrows(), 100);
@@ -245,11 +282,11 @@ TEST(TestMaterializingIterator, TestMaterializingPredicatePushdown) {
 // input.
 TEST(TestPredicateEvaluatingIterator, TestPredicateEvaluation) {
   ScanSpec spec;
-  TestIntRangePredicate pred1(20, 29);
+  TestIntRangePredicate pred1(20, 30);
   spec.AddPredicate(pred1.pred_);
   LOG(INFO) << "Predicate: " << pred1.pred_.ToString();
 
-  vector<uint32> ints;
+  vector<uint32_t> ints;
   for (int i = 0; i < 100; i++) {
     ints.push_back(i);
   }
@@ -273,10 +310,10 @@ TEST(TestPredicateEvaluatingIterator, TestPredicateEvaluation) {
 
   ASSERT_EQ(0, spec.predicates().size())
     << "Iterator tree should have accepted predicate";
-  ASSERT_EQ(1, pred_eval->predicates_.size())
+  ASSERT_EQ(1, pred_eval->col_predicates_.size())
     << "Predicate should be evaluated by the outer iterator";
 
-  Arena arena(1024, 1024);
+  Arena arena(1024);
   RowBlock dst(kIntSchema, 100, &arena);
   ASSERT_OK(outer_iter->NextBlock(&dst));
   ASSERT_EQ(dst.nrows(), 100);
@@ -294,12 +331,91 @@ TEST(TestPredicateEvaluatingIterator, TestPredicateEvaluation) {
 TEST(TestPredicateEvaluatingIterator, TestDontWrapWhenNoPredicates) {
   ScanSpec spec;
 
-  vector<uint32> ints;
+  vector<uint32_t> ints;
   shared_ptr<VectorIterator> colwise(new VectorIterator(ints));
   shared_ptr<RowwiseIterator> materializing(new MaterializingIterator(colwise));
   shared_ptr<RowwiseIterator> outer_iter(materializing);
   ASSERT_OK(PredicateEvaluatingIterator::InitAndMaybeWrap(&outer_iter, &spec));
   ASSERT_EQ(outer_iter, materializing) << "InitAndMaybeWrap should not have wrapped iter";
+}
+
+// Test row-wise iterator which does nothing.
+class DummyIterator : public RowwiseIterator {
+ public:
+
+  explicit DummyIterator(Schema schema)
+      : schema_(std::move(schema)) {
+  }
+
+  Status Init(ScanSpec* /*spec*/) override {
+    return Status::OK();
+  }
+
+  virtual Status NextBlock(RowBlock* /*dst*/) override {
+    LOG(FATAL) << "unimplemented!";
+    return Status::OK();
+  }
+
+  virtual bool HasNext() const override {
+    LOG(FATAL) << "unimplemented!";
+    return false;
+  }
+
+  virtual string ToString() const override {
+    return "DummyIterator";
+  }
+
+  virtual const Schema& schema() const override {
+    return schema_;
+  }
+
+  virtual void GetIteratorStats(vector<IteratorStats>* stats) const override {
+    stats->resize(schema().num_columns());
+  }
+
+ private:
+  Schema schema_;
+};
+
+TEST(TestPredicateEvaluatingIterator, TestPredicateEvaluationOrder) {
+  Schema schema({ ColumnSchema("a_int64", INT64),
+                  ColumnSchema("b_int64", INT64),
+                  ColumnSchema("c_int32", INT32) }, 3);
+
+  int64_t zero = 0;
+  int64_t two = 2;
+  auto a_equality = ColumnPredicate::Equality(schema.column(0), &zero);
+  auto b_equality = ColumnPredicate::Equality(schema.column(1), &zero);
+  auto c_equality = ColumnPredicate::Equality(schema.column(2), &zero);
+  auto a_range = ColumnPredicate::Range(schema.column(0), &zero, &two);
+
+  { // Test that more selective predicates come before others.
+    ScanSpec spec;
+    spec.AddPredicate(a_range);
+    spec.AddPredicate(b_equality);
+    spec.AddPredicate(c_equality);
+
+    shared_ptr<RowwiseIterator> iter = make_shared<DummyIterator>(schema);
+    ASSERT_OK(PredicateEvaluatingIterator::InitAndMaybeWrap(&iter, &spec));
+
+    PredicateEvaluatingIterator* pred_eval = down_cast<PredicateEvaluatingIterator*>(iter.get());
+    ASSERT_TRUE(pred_eval->col_predicates_ ==
+                vector<ColumnPredicate>({ c_equality, b_equality, a_range }));
+  }
+
+  { // Test that smaller columns come before larger ones, and ties are broken by idx.
+    ScanSpec spec;
+    spec.AddPredicate(b_equality);
+    spec.AddPredicate(a_equality);
+    spec.AddPredicate(c_equality);
+
+    shared_ptr<RowwiseIterator> iter = make_shared<DummyIterator>(schema);
+    ASSERT_OK(PredicateEvaluatingIterator::InitAndMaybeWrap(&iter, &spec));
+
+    PredicateEvaluatingIterator* pred_eval = down_cast<PredicateEvaluatingIterator*>(iter.get());
+    ASSERT_TRUE(pred_eval->col_predicates_ ==
+                vector<ColumnPredicate>({ c_equality, a_equality, b_equality }));
+  }
 }
 
 } // namespace kudu

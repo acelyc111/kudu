@@ -17,10 +17,12 @@
 #ifndef KUDU_UTIL_ROLLING_LOG_H
 #define KUDU_UTIL_ROLLING_LOG_H
 
+#include <cstdint>
+#include <memory>
 #include <string>
 
-#include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/macros.h"
+#include "kudu/gutil/port.h"
 #include "kudu/gutil/strings/stringpiece.h"
 #include "kudu/util/status.h"
 
@@ -62,11 +64,21 @@ class RollingLog {
   // the log as necessary if it is not open.
   Status Open();
 
-  // Set the size limit for the current and any future log files.
+  // Set the pre-compression size threshold at which the log file will be rolled.
+  // If the log is already open, this applies for the the current and any future
+  // log file.
   //
-  // There is no limit on the total number of previous log segments. We rely
-  // on system utilities to clean up old logs to maintain some size limit.
-  void SetSizeLimitBytes(int64_t bytes);
+  // NOTE: This is the limit on a single segment of the log, not a limit on the total
+  // size of the log.
+  //
+  // NOTE: The threshold is checked _after_ each call to Append(). So, the size of
+  // the log may overshoot this threshold by as much as the size of a single appended
+  // message.
+  void SetRollThresholdBytes(int64_t size);
+
+  // Set the total number of log segments to be retained. When the log is rolled,
+  // old segments are removed to achieve the targeted number of segments.
+  void SetMaxNumSegments(int num_segments);
 
   // If compression is enabled, log files are compressed.
   // NOTE: this requires that the passed-in Env instance is the local file system.
@@ -74,19 +86,25 @@ class RollingLog {
 
   // Append the given data to the current log file.
   //
-  // If appending this data would cross the configured file size limit, a new file
-  // is created and the data is appended there.
-  //
-  // Note that this is a synchronous API and causes potentially-blocking IO on the
-  // current thread. However, this does not fsync() or otherwise ensure durability
-  // of the appended data.
-  Status Append(StringPiece data);
+  // If, after appending this data, the file size has crossed the configured roll
+  // threshold, a new empty log file is created. Note that this is a synchronous API and
+  // causes potentially-blocking IO on the current thread. However, this does not fsync()
+  // or otherwise ensure durability of the appended data.
+  Status Append(StringPiece data) WARN_UNUSED_RESULT;
 
   // Close the log.
   Status Close();
 
+  // Return the number of times this log has rolled since it was first opened.
+  int roll_count() const {
+    return roll_count_;
+  }
+
  private:
   std::string GetLogFileName(int sequence) const;
+
+  // Get a glob pattern matching all log files written by this instance.
+  std::string GetLogFilePattern() const;
 
   // Compress the given path, writing a new file '<path>.gz'.
   Status CompressFile(const std::string& path) const;
@@ -95,10 +113,13 @@ class RollingLog {
   const std::string log_dir_;
   const std::string log_name_;
 
-  int64_t size_limit_bytes_;
+  int64_t roll_threshold_bytes_;
+  int max_num_segments_;
 
-  gscoped_ptr<WritableFile> file_;
+  std::unique_ptr<WritableFile> file_;
   bool compress_after_close_;
+
+  int roll_count_ = 0;
 
   DISALLOW_COPY_AND_ASSIGN(RollingLog);
 };

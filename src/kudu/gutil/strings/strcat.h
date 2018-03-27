@@ -7,8 +7,9 @@
 #ifndef STRINGS_STRCAT_H_
 #define STRINGS_STRCAT_H_
 
+#include <cstring>
 #include <string>
-using std::string;
+#include <utility>
 
 #include "kudu/gutil/integral_types.h"
 #include "kudu/gutil/strings/numbers.h"
@@ -64,7 +65,7 @@ struct AlphaNum {
   AlphaNum(const char *c_str) : piece(c_str) {}  // NOLINT(runtime/explicit)
   AlphaNum(StringPiece pc)
       : piece(std::move(pc)) {}            // NOLINT(runtime/explicit)
-  AlphaNum(const string &s) : piece(s) {}  // NOLINT(runtime/explicit)
+  AlphaNum(const std::string &s) : piece(s) {}  // NOLINT(runtime/explicit)
 
   StringPiece::size_type size() const { return piece.size(); }
   const char *data() const { return piece.data(); }
@@ -99,19 +100,19 @@ extern AlphaNum gEmptyAlphaNum;
 //    be a reference into str.
 // ----------------------------------------------------------------------
 
-string StrCat(const AlphaNum &a);
-string StrCat(const AlphaNum &a, const AlphaNum &b);
-string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c);
-string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
+std::string StrCat(const AlphaNum &a);
+std::string StrCat(const AlphaNum &a, const AlphaNum &b);
+std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c);
+std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
               const AlphaNum &d);
-string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
+std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
               const AlphaNum &d, const AlphaNum &e);
-string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
+std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
               const AlphaNum &d, const AlphaNum &e, const AlphaNum &f);
-string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
+std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
               const AlphaNum &d, const AlphaNum &e, const AlphaNum &f,
               const AlphaNum &g);
-string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
+std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
               const AlphaNum &d, const AlphaNum &e, const AlphaNum &f,
               const AlphaNum &g, const AlphaNum &h);
 
@@ -119,13 +120,13 @@ namespace strings {
 namespace internal {
 
 // Do not call directly - this is not part of the public API.
-string StrCatNineOrMore(const AlphaNum *a1, ...);
+  std::string StrCatNineOrMore(const AlphaNum *a1, ...);
 
 }  // namespace internal
 }  // namespace strings
 
 // Support 9 or more arguments
-inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
+inline std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                      const AlphaNum &d, const AlphaNum &e, const AlphaNum &f,
                      const AlphaNum &g, const AlphaNum &h, const AlphaNum &i) {
   const AlphaNum* null_alphanum = NULL;
@@ -133,7 +134,7 @@ inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                                              null_alphanum);
 }
 
-inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
+inline std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                      const AlphaNum &d, const AlphaNum &e, const AlphaNum &f,
                      const AlphaNum &g, const AlphaNum &h, const AlphaNum &i,
                      const AlphaNum &j) {
@@ -142,7 +143,7 @@ inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                                              &j, null_alphanum);
 }
 
-inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
+inline std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                      const AlphaNum &d, const AlphaNum &e, const AlphaNum &f,
                      const AlphaNum &g, const AlphaNum &h, const AlphaNum &i,
                      const AlphaNum &j, const AlphaNum &k) {
@@ -151,7 +152,7 @@ inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                                              &j, &k, null_alphanum);
 }
 
-inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
+inline std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                      const AlphaNum &d, const AlphaNum &e, const AlphaNum &f,
                      const AlphaNum &g, const AlphaNum &h, const AlphaNum &i,
                      const AlphaNum &j, const AlphaNum &k, const AlphaNum &l) {
@@ -160,7 +161,7 @@ inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                                              &j, &k, &l, null_alphanum);
 }
 
-inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
+inline std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                      const AlphaNum &d, const AlphaNum &e, const AlphaNum &f,
                      const AlphaNum &g, const AlphaNum &h, const AlphaNum &i,
                      const AlphaNum &j, const AlphaNum &k, const AlphaNum &l,
@@ -170,7 +171,7 @@ inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                                              &j, &k, &l, &m, null_alphanum);
 }
 
-inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
+inline std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                      const AlphaNum &d, const AlphaNum &e, const AlphaNum &f,
                      const AlphaNum &g, const AlphaNum &h, const AlphaNum &i,
                      const AlphaNum &j, const AlphaNum &k, const AlphaNum &l,
@@ -180,7 +181,7 @@ inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                                              &j, &k, &l, &m, &n, null_alphanum);
 }
 
-inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
+inline std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                      const AlphaNum &d, const AlphaNum &e, const AlphaNum &f,
                      const AlphaNum &g, const AlphaNum &h, const AlphaNum &i,
                      const AlphaNum &j, const AlphaNum &k, const AlphaNum &l,
@@ -191,7 +192,7 @@ inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                                              null_alphanum);
 }
 
-inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
+inline std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                      const AlphaNum &d, const AlphaNum &e, const AlphaNum &f,
                      const AlphaNum &g, const AlphaNum &h, const AlphaNum &i,
                      const AlphaNum &j, const AlphaNum &k, const AlphaNum &l,
@@ -203,7 +204,7 @@ inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                                              null_alphanum);
 }
 
-inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
+inline std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                      const AlphaNum &d, const AlphaNum &e, const AlphaNum &f,
                      const AlphaNum &g, const AlphaNum &h, const AlphaNum &i,
                      const AlphaNum &j, const AlphaNum &k, const AlphaNum &l,
@@ -215,7 +216,7 @@ inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                                              null_alphanum);
 }
 
-inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
+inline std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                      const AlphaNum &d, const AlphaNum &e, const AlphaNum &f,
                      const AlphaNum &g, const AlphaNum &h, const AlphaNum &i,
                      const AlphaNum &j, const AlphaNum &k, const AlphaNum &l,
@@ -227,7 +228,7 @@ inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                                              null_alphanum);
 }
 
-inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
+inline std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                      const AlphaNum &d, const AlphaNum &e, const AlphaNum &f,
                      const AlphaNum &g, const AlphaNum &h, const AlphaNum &i,
                      const AlphaNum &j, const AlphaNum &k, const AlphaNum &l,
@@ -240,7 +241,7 @@ inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                                              &s, null_alphanum);
 }
 
-inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
+inline std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                      const AlphaNum &d, const AlphaNum &e, const AlphaNum &f,
                      const AlphaNum &g, const AlphaNum &h, const AlphaNum &i,
                      const AlphaNum &j, const AlphaNum &k, const AlphaNum &l,
@@ -253,7 +254,7 @@ inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                                              &s, &t, null_alphanum);
 }
 
-inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
+inline std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                      const AlphaNum &d, const AlphaNum &e, const AlphaNum &f,
                      const AlphaNum &g, const AlphaNum &h, const AlphaNum &i,
                      const AlphaNum &j, const AlphaNum &k, const AlphaNum &l,
@@ -266,7 +267,7 @@ inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                                              &s, &t, &u, null_alphanum);
 }
 
-inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
+inline std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                      const AlphaNum &d, const AlphaNum &e, const AlphaNum &f,
                      const AlphaNum &g, const AlphaNum &h, const AlphaNum &i,
                      const AlphaNum &j, const AlphaNum &k, const AlphaNum &l,
@@ -280,7 +281,7 @@ inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                                              &s, &t, &u, &v, null_alphanum);
 }
 
-inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
+inline std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                      const AlphaNum &d, const AlphaNum &e, const AlphaNum &f,
                      const AlphaNum &g, const AlphaNum &h, const AlphaNum &i,
                      const AlphaNum &j, const AlphaNum &k, const AlphaNum &l,
@@ -294,7 +295,7 @@ inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                                              &s, &t, &u, &v, &w, null_alphanum);
 }
 
-inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
+inline std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                      const AlphaNum &d, const AlphaNum &e, const AlphaNum &f,
                      const AlphaNum &g, const AlphaNum &h, const AlphaNum &i,
                      const AlphaNum &j, const AlphaNum &k, const AlphaNum &l,
@@ -309,7 +310,7 @@ inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                                              null_alphanum);
 }
 
-inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
+inline std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                      const AlphaNum &d, const AlphaNum &e, const AlphaNum &f,
                      const AlphaNum &g, const AlphaNum &h, const AlphaNum &i,
                      const AlphaNum &j, const AlphaNum &k, const AlphaNum &l,
@@ -325,7 +326,7 @@ inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                                              null_alphanum);
 }
 
-inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
+inline std::string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
                      const AlphaNum &d, const AlphaNum &e, const AlphaNum &f,
                      const AlphaNum &g, const AlphaNum &h, const AlphaNum &i,
                      const AlphaNum &j, const AlphaNum &k, const AlphaNum &l,
@@ -362,15 +363,15 @@ inline string StrCat(const AlphaNum &a, const AlphaNum &b, const AlphaNum &c,
 //    worked around as consecutive calls to StrAppend are quite efficient.
 // ----------------------------------------------------------------------
 
-void StrAppend(string *dest,      const AlphaNum &a);
-void StrAppend(string *dest,      const AlphaNum &a, const AlphaNum &b);
-void StrAppend(string *dest,      const AlphaNum &a, const AlphaNum &b,
+void StrAppend(std::string *dest,      const AlphaNum &a);
+void StrAppend(std::string *dest,      const AlphaNum &a, const AlphaNum &b);
+void StrAppend(std::string *dest,      const AlphaNum &a, const AlphaNum &b,
                const AlphaNum &c);
-void StrAppend(string *dest,      const AlphaNum &a, const AlphaNum &b,
+void StrAppend(std::string *dest,      const AlphaNum &a, const AlphaNum &b,
                const AlphaNum &c, const AlphaNum &d);
 
 // Support up to 9 params by using a default empty AlphaNum.
-void StrAppend(string *dest,      const AlphaNum &a, const AlphaNum &b,
+void StrAppend(std::string *dest,      const AlphaNum &a, const AlphaNum &b,
                const AlphaNum &c, const AlphaNum &d, const AlphaNum &e,
                const AlphaNum &f = gEmptyAlphaNum,
                const AlphaNum &g = gEmptyAlphaNum,

@@ -17,38 +17,46 @@
 #ifndef KUDU_TSERVER_SCANNERS_H
 #define KUDU_TSERVER_SCANNERS_H
 
-#include <boost/thread/shared_mutex.hpp>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include <glog/logging.h>
+#include <gtest/gtest_prod.h>
+
 #include "kudu/common/iterator_stats.h"
 #include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/macros.h"
 #include "kudu/gutil/ref_counted.h"
-#include "kudu/tablet/tablet_peer.h"
+#include "kudu/tablet/tablet_replica.h"
 #include "kudu/util/auto_release_pool.h"
+#include "kudu/util/condition_variable.h"
+#include "kudu/util/locks.h"
 #include "kudu/util/memory/arena.h"
 #include "kudu/util/metrics.h"
 #include "kudu/util/monotime.h"
+#include "kudu/util/mutex.h"
 #include "kudu/util/oid_generator.h"
+#include "kudu/util/rw_mutex.h"
 
 namespace kudu {
 
-class MetricEntity;
 class RowwiseIterator;
 class ScanSpec;
 class Schema;
 class Status;
 class Thread;
 
-struct IteratorStats;
-
 namespace tserver {
 
 class Scanner;
+enum class ScanState;
+struct ScanDescriptor;
 struct ScannerMetrics;
 typedef std::shared_ptr<Scanner> SharedScanner;
 
@@ -69,8 +77,9 @@ class ScannerManager {
   Status StartRemovalThread();
 
   // Create a new scanner with a unique ID, inserting it into the map.
-  void NewScanner(const scoped_refptr<tablet::TabletPeer>& tablet_peer,
+  void NewScanner(const scoped_refptr<tablet::TabletReplica>& tablet_replica,
                   const std::string& requestor_string,
+                  uint64_t row_format_flags,
                   SharedScanner* scanner);
 
   // Lookup the given scanner by its ID.
@@ -89,7 +98,10 @@ class ScannerManager {
   // List all active scanners.
   // Note this method will not return a consistent view
   // of all active scanners if under concurrent modifications.
-  void ListScanners(std::vector<SharedScanner>* scanners);
+  void ListScanners(std::vector<SharedScanner>* scanners) const;
+
+  // List active and recently completed scans.
+  std::vector<ScanDescriptor> ListScans() const;
 
   // Iterate through scanners and remove any which are past their TTL.
   void RemoveExpiredScanners();
@@ -103,11 +115,9 @@ class ScannerManager {
 
   typedef std::unordered_map<std::string, SharedScanner> ScannerMap;
 
-  typedef std::pair<std::string, SharedScanner> ScannerMapEntry;
-
   struct ScannerMapStripe {
     // Lock protecting the scanner map.
-    mutable boost::shared_mutex lock_;
+    mutable RWMutex lock_;
     // Map of the currently active scanners.
     ScannerMap scanners_by_id_;
   };
@@ -115,7 +125,10 @@ class ScannerManager {
   // Periodically call RemoveExpiredScanners().
   void RunRemovalThread();
 
-  ScannerMapStripe& GetStripeByScannerId(const string& scanner_id);
+  ScannerMapStripe& GetStripeByScannerId(const std::string& scanner_id);
+
+  // Adds the scan descriptor to the completed scans FIFO.
+  void RecordCompletedScanUnlocked(ScanDescriptor descriptor);
 
   // (Optional) scanner metrics for this instance.
   gscoped_ptr<ScannerMetrics> metrics_;
@@ -123,10 +136,15 @@ class ScannerManager {
   // If true, removal thread should shut itself down. Protected
   // by 'shutdown_lock_' and 'shutdown_cv_'.
   bool shutdown_;
-  mutable boost::mutex shutdown_lock_;
-  boost::condition_variable shutdown_cv_;
+  mutable Mutex shutdown_lock_;
+  ConditionVariable shutdown_cv_;
 
   std::vector<ScannerMapStripe*> scanner_maps_;
+
+  // completed_scans_ is a FIFO ring buffer of completed scans.
+  mutable RWMutex completed_scans_lock_;
+  std::vector<ScanDescriptor> completed_scans_;
+  size_t completed_scans_offset_;
 
   // Generator for scanner IDs.
   ObjectIdGenerator oid_generator_;
@@ -165,9 +183,10 @@ class ScopedUnregisterScanner {
 // An open scanner on the server side.
 class Scanner {
  public:
-  explicit Scanner(std::string id,
-                   const scoped_refptr<tablet::TabletPeer>& tablet_peer,
-                   std::string requestor_string, ScannerMetrics* metrics);
+  Scanner(std::string id,
+          const scoped_refptr<tablet::TabletReplica>& tablet_replica,
+          std::string requestor_string, ScannerMetrics* metrics,
+          uint64_t row_format_flags);
   ~Scanner();
 
   // Attach an actual iterator and a ScanSpec to this Scanner.
@@ -179,7 +198,7 @@ class Scanner {
   // Once a Scanner is initialized, it is safe to assume that iter() and spec()
   // return non-NULL for the lifetime of the Scanner object.
   bool IsInitialized() const {
-    boost::lock_guard<simple_spinlock> l(lock_);
+    std::lock_guard<simple_spinlock> l(lock_);
     return iter_ != NULL;
   }
 
@@ -212,31 +231,31 @@ class Scanner {
   // Return the ScanSpec associated with this Scanner.
   const ScanSpec& spec() const;
 
-  const std::string tablet_id() const {
-    // scanners-test passes a null tablet_peer.
-    return tablet_peer_ ? tablet_peer_->tablet_id() : "null tablet";
+  const std::string& tablet_id() const {
+    // scanners-test passes a null tablet_replica.
+    return tablet_replica_ ? tablet_replica_->tablet_id() : kNullTabletId;
   }
 
-  const scoped_refptr<tablet::TabletPeer>& tablet_peer() const { return tablet_peer_; }
+  const scoped_refptr<tablet::TabletReplica>& tablet_replica() const { return tablet_replica_; }
 
   const std::string& requestor_string() const { return requestor_string_; }
 
   // Returns the current call sequence ID of the scanner.
   uint32_t call_seq_id() const {
-    boost::lock_guard<simple_spinlock> l(lock_);
+    std::lock_guard<simple_spinlock> l(lock_);
     return call_seq_id_;
   }
 
   // Increments the call sequence ID.
   void IncrementCallSeqId() {
-    boost::lock_guard<simple_spinlock> l(lock_);
+    std::lock_guard<simple_spinlock> l(lock_);
     call_seq_id_ += 1;
   }
 
   // Return the delta from the last time this scan was updated to 'now'.
   MonoDelta TimeSinceLastAccess(const MonoTime& now) const {
-    boost::lock_guard<simple_spinlock> l(lock_);
-    return now.GetDeltaSince(last_access_time_);
+    std::lock_guard<simple_spinlock> l(lock_);
+    return now - last_access_time_;
   }
 
   // Returns the time this scan was started.
@@ -270,14 +289,22 @@ class Scanner {
     already_reported_stats_ = stats;
   }
 
+  uint64_t row_format_flags() const {
+    return row_format_flags_;
+  }
+
+  ScanDescriptor descriptor() const;
+
  private:
   friend class ScannerManager;
+
+  static const std::string kNullTabletId;
 
   // The unique ID of this scanner.
   const std::string id_;
 
   // Tablet associated with the scanner.
-  const scoped_refptr<tablet::TabletPeer> tablet_peer_;
+  const scoped_refptr<tablet::TabletReplica> tablet_replica_;
 
   // Information about the requestor. Populated from
   // RpcContext::requestor_string().
@@ -319,9 +346,50 @@ class Scanner {
   // response.
   Arena arena_;
 
+  // The row format flags the client passed, if any.
+  const uint64_t row_format_flags_;
+
   DISALLOW_COPY_AND_ASSIGN(Scanner);
 };
 
+enum class ScanState {
+  // The scan is actively running.
+  kActive,
+  // The scan is complete.
+  kComplete,
+  // The scan failed.
+  kFailed,
+  // The scan timed out due to inactivity.
+  kExpired,
+};
+
+// ScanDescriptor holds information about a scan. The ScanDescriptor can outlive
+// the associated scanner without holding open any of the scanner's resources.
+struct ScanDescriptor {
+  // The tablet ID.
+  std::string tablet_id;
+  // The scanner ID.
+  std::string scanner_id;
+
+  // The scan requestor.
+  std::string requestor;
+
+  // The table name.
+  std::string table_name;
+  // The selected columns.
+  std::vector<std::string> projected_columns;
+  // The scan predicates. Holds both the primary key and column predicates.
+  std::vector<std::string> predicates;
+
+  // The per-column scan stats, paired with the column name.
+  std::vector<std::pair<std::string, IteratorStats>> iterator_stats;
+
+  ScanState state;
+
+  MonoTime start_time;
+  MonoTime last_access_time;
+  uint32_t last_call_seq_id;
+};
 
 } // namespace tserver
 } // namespace kudu

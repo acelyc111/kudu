@@ -14,56 +14,61 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 #include "kudu/server/webserver.h"
 
 #include <algorithm>
-#include <stdio.h>
-#include <signal.h>
-#include <string>
+#include <csignal>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <functional>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <sstream>
+#include <string>
+#include <unordered_set>
+#include <utility>
 #include <vector>
-#include <boost/lexical_cast.hpp>
-#include <boost/bind.hpp>
-#include <boost/mem_fn.hpp>
-#include <boost/algorithm/string.hpp>
+
+#include <boost/algorithm/string.hpp> // IWYU pragma: keep
 #include <gflags/gflags.h>
 #include <glog/logging.h>
+#include <mustache.h>
 #include <squeasel.h>
 
+#include "kudu/gutil/macros.h"
 #include "kudu/gutil/map-util.h"
 #include "kudu/gutil/stl_util.h"
-#include "kudu/gutil/stringprintf.h"
 #include "kudu/gutil/strings/join.h"
 #include "kudu/gutil/strings/numbers.h"
 #include "kudu/gutil/strings/split.h"
 #include "kudu/gutil/strings/stringpiece.h"
+#include "kudu/gutil/strings/substitute.h"
+#include "kudu/security/openssl_util.h"
+#include "kudu/util/easy_json.h"
 #include "kudu/util/env.h"
 #include "kudu/util/flag_tags.h"
+#include "kudu/util/locks.h"
+#include "kudu/util/logging.h"
 #include "kudu/util/net/net_util.h"
+#include "kudu/util/net/sockaddr.h"
 #include "kudu/util/url-coding.h"
 #include "kudu/util/version_info.h"
+
+struct sockaddr_in;
 
 #if defined(__APPLE__)
 typedef sig_t sighandler_t;
 #endif
 
-using std::string;
+using mustache::RenderTemplate;
+using std::ostringstream;
 using std::stringstream;
+using std::string;
 using std::vector;
-using std::make_pair;
+using strings::Substitute;
 
 DEFINE_int32(webserver_max_post_length_bytes, 1024 * 1024,
              "The maximum length of a POST request that will be accepted by "
@@ -71,13 +76,45 @@ DEFINE_int32(webserver_max_post_length_bytes, 1024 * 1024,
 TAG_FLAG(webserver_max_post_length_bytes, advanced);
 TAG_FLAG(webserver_max_post_length_bytes, runtime);
 
+DEFINE_string(webserver_x_frame_options, "DENY",
+              "The webserver will add an 'X-Frame-Options' HTTP header with this value "
+              "to all responses. This can help prevent clickjacking attacks.");
+TAG_FLAG(webserver_x_frame_options, advanced);
+
+
+namespace {
+  // Last error message from the webserver.
+  string kWebserverLastErrMsg;
+
+  string HttpStatusCodeToString(kudu::HttpStatusCode code) {
+    switch (code) {
+      case kudu::HttpStatusCode::Ok:
+        return "200 OK";
+      case kudu::HttpStatusCode::BadRequest:
+        return "400 Bad Request";
+      case kudu::HttpStatusCode::NotFound:
+        return "404 Not Found";
+      case kudu::HttpStatusCode::LengthRequired:
+        return "411 Length Required";
+      case kudu::HttpStatusCode::RequestEntityTooLarge:
+        return "413 Request Entity Too Large";
+      case kudu::HttpStatusCode::InternalServerError:
+        return "500 Internal Server Error";
+      case kudu::HttpStatusCode::ServiceUnavailable:
+        return "503 Service Unavailable";
+    }
+    LOG(FATAL) << "Unexpected HTTP response code";
+  }
+
+}  // anonymous namespace
+
 namespace kudu {
 
 Webserver::Webserver(const WebserverOptions& opts)
   : opts_(opts),
     context_(nullptr) {
   string host = opts.bind_interface.empty() ? "0.0.0.0" : opts.bind_interface;
-  http_address_ = host + ":" + boost::lexical_cast<string>(opts.port);
+  http_address_ = host + ":" + std::to_string(opts.port);
 }
 
 Webserver::~Webserver() {
@@ -85,16 +122,17 @@ Webserver::~Webserver() {
   STLDeleteValues(&path_handlers_);
 }
 
-void Webserver::RootHandler(const Webserver::WebRequest& args, stringstream* output) {
-  (*output) << "<h2>Status Pages</h2>";
+void Webserver::RootHandler(const Webserver::WebRequest& /* args */,
+                            Webserver::WebResponse* resp) {
+  EasyJson path_handlers = resp->output->Set("path_handlers", EasyJson::kArray);
   for (const PathHandlerMap::value_type& handler : path_handlers_) {
     if (handler.second->is_on_nav_bar()) {
-      (*output) << "<a href=\"" << handler.first << "\">" << handler.second->alias() << "</a><br/>";
+      EasyJson path_handler = path_handlers.PushBack(EasyJson::kObject);
+      path_handler["path"] = handler.first;
+      path_handler["alias"] = handler.second->alias();
     }
   }
-  (*output) << "<hr/>\n";
-  (*output) << "<h2>Version Info</h2>\n";
-  (*output) << "<pre>" << EscapeForHtmlToString(VersionInfo::GetAllVersionInfo()) << "</pre>";
+  (*resp->output)["version_info"] = EscapeForHtmlToString(VersionInfo::GetAllVersionInfo());
 }
 
 void Webserver::BuildArgumentMap(const string& args, ArgumentMap* output) {
@@ -134,54 +172,88 @@ Status Webserver::BuildListenSpec(string* spec) const {
 Status Webserver::Start() {
   LOG(INFO) << "Starting webserver on " << http_address_;
 
-  vector<const char*> options;
+  vector<string> options;
 
   if (static_pages_available()) {
     LOG(INFO) << "Document root: " << opts_.doc_root;
-    options.push_back("document_root");
-    options.push_back(opts_.doc_root.c_str());
-    options.push_back("enable_directory_listing");
-    options.push_back("no");
+    options.emplace_back("document_root");
+    options.push_back(opts_.doc_root);
+    options.emplace_back("enable_directory_listing");
+    options.emplace_back("no");
   } else {
     LOG(INFO)<< "Document root disabled";
   }
 
   if (IsSecure()) {
     LOG(INFO) << "Webserver: Enabling HTTPS support";
-    options.push_back("ssl_certificate");
-    options.push_back(opts_.certificate_file.c_str());
+
+    // Initialize OpenSSL, and prevent Squeasel from also performing global OpenSSL
+    // initialization.
+    security::InitializeOpenSSL();
+    options.emplace_back("ssl_global_init");
+    options.emplace_back("false");
+
+    options.emplace_back("ssl_certificate");
+    options.push_back(opts_.certificate_file);
+
+    if (!opts_.private_key_file.empty()) {
+      options.emplace_back("ssl_private_key");
+      options.push_back(opts_.private_key_file);
+
+      string key_password;
+      if (!opts_.private_key_password_cmd.empty()) {
+        RETURN_NOT_OK(security::GetPasswordFromShellCommand(opts_.private_key_password_cmd,
+                                                            &key_password));
+      }
+      options.emplace_back("ssl_private_key_password");
+      options.push_back(key_password); // maybe empty if not configured.
+    }
+
+    options.emplace_back("ssl_ciphers");
+    options.emplace_back(opts_.tls_ciphers);
+    options.emplace_back("ssl_min_version");
+    options.emplace_back(opts_.tls_min_protocol);
   }
 
   if (!opts_.authentication_domain.empty()) {
-    options.push_back("authentication_domain");
-    options.push_back(opts_.authentication_domain.c_str());
+    options.emplace_back("authentication_domain");
+    options.push_back(opts_.authentication_domain);
   }
 
   if (!opts_.password_file.empty()) {
     // Mongoose doesn't log anything if it can't stat the password file (but will if it
     // can't open it, which it tries to do during a request)
     if (!Env::Default()->FileExists(opts_.password_file)) {
-      stringstream ss;
+      ostringstream ss;
       ss << "Webserver: Password file does not exist: " << opts_.password_file;
       return Status::InvalidArgument(ss.str());
     }
     LOG(INFO) << "Webserver: Password file is " << opts_.password_file;
-    options.push_back("global_passwords_file");
-    options.push_back(opts_.password_file.c_str());
+    options.emplace_back("global_auth_file");
+    options.push_back(opts_.password_file);
   }
 
-  options.push_back("listening_ports");
+  options.emplace_back("listening_ports");
   string listening_str;
   RETURN_NOT_OK(BuildListenSpec(&listening_str));
-  options.push_back(listening_str.c_str());
+  options.push_back(listening_str);
+
+  // initialize the advertised addresses
+  if (!opts_.webserver_advertised_addresses.empty()) {
+    RETURN_NOT_OK(ParseAddressList(opts_.webserver_advertised_addresses,
+                                   opts_.port,
+                                   &webserver_advertised_addresses_));
+    for (const Sockaddr& addr : webserver_advertised_addresses_) {
+      if (addr.port() == 0) {
+        return Status::InvalidArgument("advertising an ephemeral webserver port is not supported",
+                                       addr.ToString());
+      }
+    }
+  }
 
   // Num threads
-  options.push_back("num_threads");
-  string num_threads_str = SimpleItoa(opts_.num_worker_threads);
-  options.push_back(num_threads_str.c_str());
-
-  // Options must be a NULL-terminated list
-  options.push_back(nullptr);
+  options.emplace_back("num_threads");
+  options.push_back(std::to_string(opts_.num_worker_threads));
 
   // mongoose ignores SIGCHLD and we need it to run kinit. This means that since
   // mongoose does not reap its own children CGI programs must be avoided.
@@ -193,28 +265,38 @@ Status Webserver::Start() {
   callbacks.begin_request = &Webserver::BeginRequestCallbackStatic;
   callbacks.log_message = &Webserver::LogMessageCallbackStatic;
 
+  // Options must be a NULL-terminated list of C strings.
+  vector<const char*> c_options;
+  for (const auto& opt : options) {
+    c_options.push_back(opt.c_str());
+  }
+  c_options.push_back(nullptr);
+
   // To work around not being able to pass member functions as C callbacks, we store a
   // pointer to this server in the per-server state, and register a static method as the
   // default callback. That method unpacks the pointer to this and calls the real
   // callback.
-  context_ = sq_start(&callbacks, reinterpret_cast<void*>(this), &options[0]);
+  context_ = sq_start(&callbacks, reinterpret_cast<void*>(this), &c_options[0]);
 
   // Restore the child signal handler so wait() works properly.
   signal(SIGCHLD, sig_chld);
 
   if (context_ == nullptr) {
-    stringstream error_msg;
-    error_msg << "Webserver: Could not start on address " << http_address_;
     Sockaddr addr;
     addr.set_port(opts_.port);
     TryRunLsof(addr);
-    return Status::NetworkError(error_msg.str());
+    string err_msg = Substitute("Webserver: could not start on address $0", http_address_);
+    if (!kWebserverLastErrMsg.empty()) {
+      err_msg = Substitute("$0: $1", err_msg, kWebserverLastErrMsg);
+    }
+    return Status::RuntimeError(err_msg);
   }
 
   PathHandlerCallback default_callback =
-    boost::bind<void>(boost::mem_fn(&Webserver::RootHandler), this, _1, _2);
+      std::bind<void>(std::mem_fn(&Webserver::RootHandler),
+                      this, std::placeholders::_1, std::placeholders::_2);
 
-  RegisterPathHandler("/", "Home", default_callback);
+  RegisterPathHandler("/", "Home", default_callback, true /* styled */, true /* on_nav_bar */);
 
   vector<Sockaddr> addrs;
   RETURN_NOT_OK(GetBoundAddresses(&addrs));
@@ -239,7 +321,7 @@ void Webserver::Stop() {
 
 Status Webserver::GetBoundAddresses(std::vector<Sockaddr>* addrs) const {
   if (!context_) {
-    return Status::IllegalState("Not started");
+    return Status::ServiceUnavailable("Not started");
   }
 
   struct sockaddr_in** sockaddrs;
@@ -260,10 +342,30 @@ Status Webserver::GetBoundAddresses(std::vector<Sockaddr>* addrs) const {
   return Status::OK();
 }
 
-int Webserver::LogMessageCallbackStatic(const struct sq_connection* connection,
+Status Webserver::GetAdvertisedAddresses(vector<Sockaddr>* addresses) const {
+  if (!context_) {
+    return Status::ServiceUnavailable("Not started");
+  }
+  if (webserver_advertised_addresses_.empty()) {
+    return GetBoundAddresses(addresses);
+  }
+  *addresses = webserver_advertised_addresses_;
+  return Status::OK();
+}
+
+int Webserver::LogMessageCallbackStatic(const struct sq_connection* /*connection*/,
                                         const char* message) {
   if (message != nullptr) {
-    LOG(INFO) << "Webserver: " << message;
+    // Using the ERROR severity for squeasel messages: as per source code at
+    // https://github.com/cloudera/squeasel/blob/\
+    //     c304d3f3481b07bf153979155f02e0aab24d01de/squeasel.c#L392
+    // the squeasel server uses the log callback to report on errors.
+    {
+      static simple_spinlock kErrMsgLock_;
+      std::unique_lock<simple_spinlock> l(kErrMsgLock_);
+      kWebserverLastErrMsg = message;
+    }
+    LOG(ERROR) << "Webserver: " << message;
     return 1;
   }
   return 0;
@@ -279,7 +381,7 @@ int Webserver::BeginRequestCallback(struct sq_connection* connection,
                                     struct sq_request_info* request_info) {
   PathHandler* handler;
   {
-    boost::shared_lock<boost::shared_mutex> lock(lock_);
+    shared_lock<RWMutex> l(lock_);
     PathHandlerMap::const_iterator it = path_handlers_.find(request_info->uri);
     if (it == path_handlers_.end()) {
       // Let Mongoose deal with this request; returning NULL will fall through
@@ -287,19 +389,18 @@ int Webserver::BeginRequestCallback(struct sq_connection* connection,
       if (!opts_.doc_root.empty() && opts_.enable_doc_root) {
         VLOG(2) << "HTTP File access: " << request_info->uri;
         return 0;
-      } else {
-        sq_printf(connection, "HTTP/1.1 404 Not Found\r\n"
-                  "Content-Type: text/plain\r\n\r\n");
-        sq_printf(connection, "No handler for URI %s\r\n\r\n", request_info->uri);
-        return 1;
       }
+      sq_printf(connection,
+                "HTTP/1.1 %s\r\nContent-Type: text/plain\r\n\r\n",
+                HttpStatusCodeToString(HttpStatusCode::NotFound).c_str());
+      sq_printf(connection, "No handler for URI %s\r\n\r\n", request_info->uri);
+      return 1;
     }
     handler = it->second;
   }
 
   return RunPathHandler(*handler, connection, request_info);
 }
-
 
 int Webserver::RunPathHandler(const PathHandler& handler,
                               struct sq_connection* connection,
@@ -318,14 +419,18 @@ int Webserver::RunPathHandler(const PathHandler& handler,
     int32_t content_len = 0;
     if (content_len_str == nullptr ||
         !safe_strto32(content_len_str, &content_len)) {
-      sq_printf(connection, "HTTP/1.1 411 Length Required\r\n");
+      sq_printf(connection,
+                "HTTP/1.1 %s\r\n",
+                HttpStatusCodeToString(HttpStatusCode::LengthRequired).c_str());
       return 1;
     }
     if (content_len > FLAGS_webserver_max_post_length_bytes) {
-      // TODO: for this and other HTTP requests, we should log the
+      // TODO(wdb): for this and other HTTP requests, we should log the
       // remote IP, etc.
       LOG(WARNING) << "Rejected POST with content length " << content_len;
-      sq_printf(connection, "HTTP/1.1 413 Request Entity Too Large\r\n");
+      sq_printf(connection,
+                "HTTP/1.1 %s\r\n",
+                HttpStatusCodeToString(HttpStatusCode::RequestEntityTooLarge).c_str());
       return 1;
     }
 
@@ -337,7 +442,9 @@ int Webserver::RunPathHandler(const PathHandler& handler,
         LOG(WARNING) << "error reading POST data: expected "
                      << content_len << " bytes but only read "
                      << req.post_data.size();
-        sq_printf(connection, "HTTP/1.1 500 Internal Server Error\r\n");
+        sq_printf(connection,
+                  "HTTP/1.1 %s\r\n",
+                  HttpStatusCodeToString(HttpStatusCode::InternalServerError).c_str());
         return 1;
       }
 
@@ -350,84 +457,155 @@ int Webserver::RunPathHandler(const PathHandler& handler,
     use_style = false;
   }
 
-  stringstream output;
-  if (use_style) BootstrapPageHeader(&output);
-  for (const PathHandlerCallback& callback_ : handler.callbacks()) {
-    callback_(req, &output);
-  }
-  if (use_style) BootstrapPageFooter(&output);
-
-  string str = output.str();
-  // Without styling, render the page as plain text
-  if (!use_style) {
-    sq_printf(connection, "HTTP/1.1 200 OK\r\n"
-              "Content-Type: text/plain\r\n"
-              "Content-Length: %zd\r\n"
-              "\r\n", str.length());
+  ostringstream content;
+  PrerenderedWebResponse resp { HttpStatusCode::Ok, HttpResponseHeaders{}, &content };
+  // Enable or disable redaction from the web UI based on the setting of --redact.
+  // This affects operations like default value and scan predicate pretty printing.
+  if (kudu::g_should_redact == kudu::RedactContext::ALL) {
+    handler.callback()(req, &resp);
   } else {
-    sq_printf(connection, "HTTP/1.1 200 OK\r\n"
-              "Content-Type: text/html\r\n"
-              "Content-Length: %zd\r\n"
-              "\r\n", str.length());
+    ScopedDisableRedaction s;
+    handler.callback()(req, &resp);
   }
 
-  // Make sure to use sq_write for printing the body; sq_printf truncates at 8kb
-  sq_write(connection, str.c_str(), str.length());
+  string full_content;
+  if (use_style) {
+    stringstream output;
+    RenderMainTemplate(content.str(), &output);
+    full_content = output.str();
+  } else {
+    full_content = content.str();
+  }
+
+  ostringstream headers_stream;
+  headers_stream << Substitute("HTTP/1.1 $0\r\n", HttpStatusCodeToString(resp.status_code));
+  headers_stream << Substitute("Content-Type: $0\r\n", use_style ? "text/html" : "text/plain");
+  headers_stream << Substitute("Content-Length: $0\r\n", full_content.length());
+  headers_stream << Substitute("X-Frame-Options: $0\r\n", FLAGS_webserver_x_frame_options);
+  std::unordered_set<string> invalid_headers{"Content-Type", "Content-Length", "X-Frame-Options"};
+  for (const auto& entry : resp.response_headers) {
+    // It's forbidden to override the above headers.
+    if (ContainsKey(invalid_headers, entry.first)) {
+      LOG(FATAL) << "Reserved header " << entry.first << " was overridden "
+          "by handler for " << handler.alias();
+    }
+    headers_stream << Substitute("$0: $1\r\n", entry.first, entry.second);
+  }
+  headers_stream << "\r\n";
+  string headers = headers_stream.str();
+
+  // Make sure to use sq_write for printing the body; sq_printf truncates at 8KB.
+  sq_write(connection, headers.c_str(), headers.length());
+  sq_write(connection, full_content.c_str(), full_content.length());
   return 1;
 }
 
 void Webserver::RegisterPathHandler(const string& path, const string& alias,
     const PathHandlerCallback& callback, bool is_styled, bool is_on_nav_bar) {
-  boost::lock_guard<boost::shared_mutex> lock(lock_);
-  auto it = path_handlers_.find(path);
-  if (it == path_handlers_.end()) {
-    it = path_handlers_.insert(
-        make_pair(path, new PathHandler(is_styled, is_on_nav_bar, alias))).first;
-  }
-  it->second->AddCallback(callback);
+  string render_path = (path == "/") ? "/home" : path;
+  auto wrapped_cb = [=](const WebRequest& args, PrerenderedWebResponse* rendered_resp) {
+    EasyJson ej;
+    WebResponse resp { HttpStatusCode::Ok, HttpResponseHeaders{}, &ej };
+    callback(args, &resp);
+    stringstream out;
+    Render(render_path, ej, is_styled, &out);
+    rendered_resp->status_code = resp.status_code;
+    rendered_resp->response_headers = std::move(resp.response_headers);
+    *rendered_resp->output << out.rdbuf();
+  };
+  RegisterPrerenderedPathHandler(path, alias, wrapped_cb, is_styled, is_on_nav_bar);
 }
 
-const char* const PAGE_HEADER = "<!DOCTYPE html>"
-" <html>"
-"   <head><title>Kudu</title>"
-" <link href='/bootstrap/css/bootstrap.min.css' rel='stylesheet' media='screen' />"
-" <link href='/kudu.css' rel='stylesheet' />"
-" </head>"
-" <body>";
+void Webserver::RegisterPrerenderedPathHandler(const string& path, const string& alias,
+    const PrerenderedPathHandlerCallback& callback, bool is_styled, bool is_on_nav_bar) {
+  std::lock_guard<RWMutex> l(lock_);
+  InsertOrDie(&path_handlers_, path, new PathHandler(is_styled, is_on_nav_bar, alias, callback));
+}
 
-static const char* const NAVIGATION_BAR_PREFIX =
-"<div class='navbar navbar-inverse navbar-fixed-top'>"
-"      <div class='navbar-inner'>"
-"        <div class='container-fluid'>"
-"          <a href='/'>"
-"            <img src=\"/logo.png\" width='61' height='45' alt=\"Kudu\" style=\"float:left\"/>"
-"          </a>"
-"          <div class='nav-collapse collapse'>"
-"            <ul class='nav'>";
+string Webserver::MustachePartialTag(const string& path) const {
+  return Substitute("{{> $0.mustache}}", path);
+}
 
-static const char* const NAVIGATION_BAR_SUFFIX =
-"            </ul>"
-"          </div>"
-"        </div>"
-"      </div>"
-"    </div>"
-"    <div class='container-fluid'>";
+bool Webserver::MustacheTemplateAvailable(const string& path) const {
+  if (!static_pages_available()) {
+    return false;
+  }
+  return Env::Default()->FileExists(Substitute("$0$1.mustache", opts_.doc_root, path));
+}
 
-void Webserver::BootstrapPageHeader(stringstream* output) {
-  (*output) << PAGE_HEADER;
-  (*output) << NAVIGATION_BAR_PREFIX;
+static const char* const kMainTemplate = R"(
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Kudu</title>
+    <meta charset='utf-8'/>
+    <link href='/bootstrap/css/bootstrap.min.css' rel='stylesheet' media='screen' />
+    <script src='/jquery-3.2.1.min.js' defer></script>
+    <script src='/bootstrap/js/bootstrap.min.js' defer></script>
+    <link href='/kudu.css' rel='stylesheet' />
+  </head>
+  <body>
+
+    <nav class="navbar navbar-default">
+      <div class="container-fluid">
+        <div class="navbar-header">
+          <a class="navbar-brand" style="padding-top: 5px;" href="/">
+            <img src="/logo.png" width='61' height='45' alt="Kudu" />
+          </a>
+        </div>
+        <div id="navbar" class="navbar-collapse collapse">
+          <ul class="nav navbar-nav">
+           {{#path_handlers}}
+            <li><a class="nav-link"href="{{path}}">{{alias}}</a></li>
+           {{/path_handlers}}
+          </ul>
+        </div><!--/.nav-collapse -->
+      </div><!--/.container-fluid -->
+    </nav>
+      {{^static_pages_available}}
+      <div style="color: red">
+        <strong>Static pages not available. Configure KUDU_HOME or use the --webserver_doc_root
+        flag to fix page styling.</strong>
+      </div>
+      {{/static_pages_available}}
+      {{{content}}}
+    </div>
+    {{#footer_html}}
+    <footer class="footer"><div class="container text-muted">
+      {{{.}}}
+    </div></footer>
+    {{/footer_html}}
+  </body>
+</html>
+)";
+
+void Webserver::RenderMainTemplate(const string& content, stringstream* output) {
+  EasyJson ej;
+  ej["static_pages_available"] = static_pages_available();
+  ej["content"] = content;
+  {
+    shared_lock<RWMutex> l(lock_);
+    ej["footer_html"] = footer_html_;
+  }
+  EasyJson path_handlers = ej.Set("path_handlers", EasyJson::kArray);
   for (const PathHandlerMap::value_type& handler : path_handlers_) {
     if (handler.second->is_on_nav_bar()) {
-      (*output) << "<li><a href=\"" << handler.first << "\">" << handler.second->alias()
-                << "</a></li>";
+      EasyJson path_handler = path_handlers.PushBack(EasyJson::kObject);
+      path_handler["path"] = handler.first;
+      path_handler["alias"] = handler.second->alias();
     }
   }
-  (*output) << NAVIGATION_BAR_SUFFIX;
+  RenderTemplate(kMainTemplate, opts_.doc_root, ej.value(), output);
+}
 
-  if (!static_pages_available()) {
-    (*output) << "<div style=\"color: red\"><strong>"
-              << "Static pages not available. Configure KUDU_HOME or use the --webserver_doc_root "
-              << "flag to fix page styling.</strong></div>\n";
+void Webserver::Render(const string& path, const EasyJson& ej, bool use_style,
+                       stringstream* output) {
+  if (MustacheTemplateAvailable(path)) {
+    RenderTemplate(MustachePartialTag(path), opts_.doc_root, ej.value(), output);
+  } else if (use_style) {
+    (*output) << "<pre>" << ej.ToString() << "</pre>";
+  } else {
+    (*output) << ej.ToString();
   }
 }
 
@@ -436,19 +614,8 @@ bool Webserver::static_pages_available() const {
 }
 
 void Webserver::set_footer_html(const std::string& html) {
-  boost::lock_guard<boost::shared_mutex> l(lock_);
+  std::lock_guard<RWMutex> l(lock_);
   footer_html_ = html;
-}
-
-void Webserver::BootstrapPageFooter(stringstream* output) {
-  boost::shared_lock<boost::shared_mutex> l(lock_);
-  *output << "</div>\n"; // end bootstrap 'container' div
-  if (!footer_html_.empty()) {
-    *output << "<footer class=\"footer\"><div class=\"container text-muted\">";
-    *output << footer_html_;
-    *output << "</div></footer>";
-  }
-  *output << "</body></html>";
 }
 
 } // namespace kudu

@@ -19,8 +19,9 @@ set(TABLET_SRCS
   tablet.cc
   tablet_bootstrap.cc
   tablet_metrics.cc
-  tablet_peer_mm_ops.cc
-  tablet_peer.cc
+  tablet_mm_ops.cc
+  tablet_replica_mm_ops.cc
+  tablet_replica.cc
   transactions/transaction.cc
   transactions/alter_schema_transaction.cc
   transactions/transaction_driver.cc
@@ -33,7 +34,6 @@ set(TABLET_SRCS
   delta_key.cc
   diskrowset.cc
   lock_manager.cc
-  maintenance_manager.cc
   memrowset.cc
   multi_column_writer.cc
   mutation.cc
@@ -74,12 +74,12 @@ ADD_EXPORTABLE_LIBRARY(tablet_proto
 
 add_library(tablet ${TABLET_SRCS})
 target_link_libraries(tablet
+  clock
   tablet_proto
   codegen
   kudu_common
   cfile
   gutil
-  server_common
   kudu_fs
   kudu_util
   consensus)
@@ -87,8 +87,16 @@ target_link_libraries(tablet
 set(KUDU_TEST_LINK_LIBS tablet ${KUDU_MIN_TEST_LIBS})
 ADD_KUDU_TEST(tablet-test)
 ADD_KUDU_TEST(tablet_metadata-test)
-ADD_KUDU_TEST(mt-tablet-test RUN_SERIAL true)
-ADD_KUDU_TEST(compaction_policy-test)
+ADD_KUDU_TEST(mt-tablet-test RUN_SERIAL true NUM_SHARDS 4)
+
+# Copy data file needed for compaction_policy-test.
+execute_process(COMMAND ln -sf ${CMAKE_CURRENT_SOURCE_DIR}/ycsb-test-rowsets.tsv
+  ${EXECUTABLE_OUTPUT_PATH})
+ADD_KUDU_TEST(compaction_policy-test
+  # Can't use dist-test because it relies on a data file.
+  LABELS no_dist_test)
+
+ADD_KUDU_TEST(all_types-scan-correctness-test NUM_SHARDS 8 PROCESSORS 2)
 ADD_KUDU_TEST(diskrowset-test)
 ADD_KUDU_TEST(mt-diskrowset-test RUN_SERIAL true)
 ADD_KUDU_TEST(memrowset-test)
@@ -97,20 +105,22 @@ ADD_KUDU_TEST(deltafile-test)
 ADD_KUDU_TEST(cfile_set-test)
 ADD_KUDU_TEST(tablet-pushdown-test)
 ADD_KUDU_TEST(tablet-schema-test)
+ADD_KUDU_TEST(tablet-decoder-eval-test)
 ADD_KUDU_TEST(tablet_bootstrap-test)
-ADD_KUDU_TEST(maintenance_manager-test)
 ADD_KUDU_TEST(metadata-test)
 ADD_KUDU_TEST(mvcc-test)
 ADD_KUDU_TEST(compaction-test)
 ADD_KUDU_TEST(lock_manager-test)
-ADD_KUDU_TEST(rowset_tree-test)
+ADD_KUDU_TEST(rowset_tree-test NUM_SHARDS 6)
 ADD_KUDU_TEST(composite-pushdown-test)
 ADD_KUDU_TEST(delta_compaction-test)
-ADD_KUDU_TEST(mt-rowset_delta_compaction-test)
+ADD_KUDU_TEST(mt-rowset_delta_compaction-test PROCESSORS 2)
 ADD_KUDU_TEST(major_delta_compaction-test)
 ADD_KUDU_TEST(transactions/transaction_tracker-test)
-ADD_KUDU_TEST(tablet_peer-test)
+ADD_KUDU_TEST(tablet_history_gc-test)
+ADD_KUDU_TEST(tablet_replica-test)
 ADD_KUDU_TEST(tablet_random_access-test)
+ADD_KUDU_TEST(tablet_throttle-test)
 ADD_KUDU_TEST(tablet_mm_ops-test)
 
 # Some tests don't have dependencies on other tablet stuff

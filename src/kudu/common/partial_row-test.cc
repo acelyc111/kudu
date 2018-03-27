@@ -15,12 +15,21 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <cstdint>
+#include <functional>
+#include <string>
+
 #include <gtest/gtest.h>
 
+#include "kudu/common/common.pb.h"
 #include "kudu/common/partial_row.h"
-#include "kudu/common/row.h"
 #include "kudu/common/schema.h"
+#include "kudu/util/slice.h"
+#include "kudu/util/status.h"
+#include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
+
+using std::string;
 
 namespace kudu {
 
@@ -30,12 +39,84 @@ class PartialRowTest : public KuduTest {
     : schema_({ ColumnSchema("key", INT32),
                 ColumnSchema("int_val", INT32),
                 ColumnSchema("string_val", STRING, true),
-                ColumnSchema("binary_val", BINARY, true) },
+                ColumnSchema("binary_val", BINARY, true),
+                ColumnSchema("decimal_val", DECIMAL32, true, nullptr, nullptr,
+                             ColumnStorageAttributes(), ColumnTypeAttributes(6, 2)) },
               1) {
     SeedRandom();
   }
+
  protected:
+  // A couple of typedefs to facilitate transformation of KuduPartialRow member
+  // function pointers into std::function<...> wrappers.
+  //
+  // The typedefs and explicit casting below via static_cast<>
+  // would not be necessary if the
+  // KuduPartialRow::Set{Binary,String}{,Copy,NoCopy}() and
+  // KuduPartialRow::Get{Binary,String}() methods had no overloaded
+  // counterparts for column name-based and index-based operations.
+  typedef Status (KuduPartialRow::*BinarySetter)(int, const Slice&);
+  typedef Status (KuduPartialRow::*BinaryGetter)(int, Slice*) const;
+
+  // Expected behavior of the
+  // KuduPartialRow::Set{Binary,String}{,Copy,NoCopy}() methods:
+  // whether the source data is copied or not.
+  enum CopyBehavior {
+    COPY,
+    NO_COPY,
+  };
+
   Schema schema_;
+
+  // Utility method to perform checks on copy/no-copy behavior of the
+  // PartialRow::Set{Binary,String}{,Copy,NoCopy}() methods.
+  void BinaryDataSetterTest(
+      std::function<Status(const KuduPartialRow&, int, Slice*)> getter,
+      std::function<Status(KuduPartialRow&, int, const Slice&)> setter,
+      int column_idx, CopyBehavior copy_behavior) {
+
+    KuduPartialRow row(&schema_);
+    string src_data = "src-data";
+    ASSERT_OK(setter(row, column_idx, src_data));
+
+    Slice column_slice;
+    ASSERT_OK(getter(row, column_idx, &column_slice));
+
+    // Check that the row's column contains the right data.
+    EXPECT_EQ("src-data", column_slice.ToString());
+
+    switch (copy_behavior) {
+      case COPY:
+        // Check that the row keeps an independent copy of the source data.
+        EXPECT_NE(reinterpret_cast<uintptr_t>(src_data.data()),
+                  reinterpret_cast<uintptr_t>(column_slice.data()));
+        break;
+      case NO_COPY:
+        // Check that the row keeps a reference to the source data.
+        EXPECT_EQ(reinterpret_cast<uintptr_t>(src_data.data()),
+                  reinterpret_cast<uintptr_t>(column_slice.data()));
+        break;
+      default:
+        ASSERT_TRUE(false) << "unexpected copy behavior specified";
+        break;  // unreachable
+    }
+
+    // Additional, more high-level check.
+    src_data.replace(0, src_data.find("-"), "new");
+    ASSERT_EQ("new-data", src_data);
+
+    switch (copy_behavior) {
+      case COPY:
+        EXPECT_EQ("src-data", column_slice.ToString());
+        break;
+      case NO_COPY:
+        EXPECT_EQ("new-data", column_slice.ToString());
+        break;
+      default:
+        ASSERT_TRUE(false) << "unexpected copy behavior specified";
+        break;  // unreachable
+    }
+  }
 };
 
 TEST_F(PartialRowTest, UnitTest) {
@@ -73,7 +154,7 @@ TEST_F(PartialRowTest, UnitTest) {
   EXPECT_OK(row.SetStringCopy("string_val", "hello world"));
   EXPECT_TRUE(row.IsColumnSet(1));
   EXPECT_TRUE(row.IsColumnSet(2));
-  EXPECT_EQ("int32 key=12345, int32 int_val=54321, string string_val=hello world",
+  EXPECT_EQ(R"(int32 key=12345, int32 int_val=54321, string string_val="hello world")",
             row.ToString());
   Slice slice;
   EXPECT_OK(row.GetString("string_val", &slice));
@@ -102,7 +183,7 @@ TEST_F(PartialRowTest, UnitTest) {
 
   // Set the NULL string back to non-NULL
   EXPECT_OK(row.SetStringCopy("string_val", "goodbye world"));
-  EXPECT_EQ("int32 key=12345, int32 int_val=54321, string string_val=goodbye world",
+  EXPECT_EQ(R"(int32 key=12345, int32 int_val=54321, string string_val="goodbye world")",
             row.ToString());
 
   // Unset some columns.
@@ -118,11 +199,38 @@ TEST_F(PartialRowTest, UnitTest) {
 
   // Set the binary column as a copy.
   EXPECT_OK(row.SetBinaryCopy("binary_val", "hello_world"));
-  EXPECT_EQ("int32 int_val=99999, binary binary_val=hello_world",
+  EXPECT_EQ(R"(int32 int_val=99999, binary binary_val="hello_world")",
               row.ToString());
   // Unset the binary column.
   EXPECT_OK(row.Unset("binary_val"));
   EXPECT_EQ("int32 int_val=99999", row.ToString());
+
+  // Unset the column by index
+  EXPECT_OK(row.Unset(1));
+  EXPECT_EQ("", row.ToString());
+
+  // Set a decimal column
+  EXPECT_OK(row.SetUnscaledDecimal("decimal_val", 123456));
+  EXPECT_TRUE(row.IsColumnSet(4));
+  EXPECT_EQ("decimal decimal_val=123456_D32", row.ToString());
+
+  // Set the max decimal value for the decimal_val column
+  EXPECT_OK(row.SetUnscaledDecimal("decimal_val", 999999));
+  EXPECT_EQ("decimal decimal_val=999999_D32", row.ToString());
+
+  // Set the min decimal value for the decimal_val column
+  EXPECT_OK(row.SetUnscaledDecimal("decimal_val", -999999));
+  EXPECT_EQ("decimal decimal_val=-999999_D32", row.ToString());
+
+  // Set a value that's too large for the decimal_val column
+  s = row.SetUnscaledDecimal("decimal_val", 1000000);
+  EXPECT_EQ("Invalid argument: value 10000.00 out of range for decimal column 'decimal_val'",
+            s.ToString());
+
+  // Set a value that's too small for the decimal_val column
+  s = row.SetUnscaledDecimal("decimal_val", -1000000);
+  EXPECT_EQ("Invalid argument: value -10000.00 out of range for decimal column 'decimal_val'",
+            s.ToString());
 
   // Even though the storage is actually the same at the moment, we shouldn't be
   // able to set string columns with SetBinary and vice versa.
@@ -167,8 +275,8 @@ TEST_F(PartialRowTest, TestCopy) {
   // Check a copy with a borrowed value.
   string borrowed_string = "borrowed-string";
   string borrowed_binary = "borrowed-binary";
-  ASSERT_OK(row.SetString(2, borrowed_string));
-  ASSERT_OK(row.SetBinary(3, borrowed_binary));
+  ASSERT_OK(row.SetStringNoCopy(2, borrowed_string));
+  ASSERT_OK(row.SetBinaryNoCopy(3, borrowed_binary));
 
   copy = row;
   ASSERT_OK(copy.GetString(2, &string_val));
@@ -182,6 +290,54 @@ TEST_F(PartialRowTest, TestCopy) {
   EXPECT_EQ("mutated--string", string_val.ToString());
   ASSERT_OK(copy.GetBinary(3, &string_val));
   EXPECT_EQ("mutated--binary", string_val.ToString());
+}
+
+// Check that PartialRow::SetBinaryCopy() copies the input data.
+TEST_F(PartialRowTest, TestSetBinaryCopy) {
+  BinaryDataSetterTest(
+      static_cast<BinaryGetter>(&KuduPartialRow::GetBinary),
+      static_cast<BinarySetter>(&KuduPartialRow::SetBinaryCopy),
+      3, COPY);
+}
+
+// Check that PartialRow::SetStringCopy() copies the input data.
+TEST_F(PartialRowTest, TestSetStringCopy) {
+  BinaryDataSetterTest(
+      static_cast<BinaryGetter>(&KuduPartialRow::GetString),
+      static_cast<BinarySetter>(&KuduPartialRow::SetStringCopy),
+      2, COPY);
+}
+
+// Check that PartialRow::SetBinaryNoCopy() does not copy the input data.
+TEST_F(PartialRowTest, TestSetBinaryNoCopy) {
+  BinaryDataSetterTest(
+      static_cast<BinaryGetter>(&KuduPartialRow::GetBinary),
+      static_cast<BinarySetter>(&KuduPartialRow::SetBinaryNoCopy),
+      3, NO_COPY);
+}
+
+// Check that PartialRow::SetStringNoCopy() does not copy the input data.
+TEST_F(PartialRowTest, TestSetStringNoCopy) {
+  BinaryDataSetterTest(
+      static_cast<BinaryGetter>(&KuduPartialRow::GetString),
+      static_cast<BinarySetter>(&KuduPartialRow::SetStringNoCopy),
+      2, NO_COPY);
+}
+
+// Check that PartialRow::SetBinary() copies the input data.
+TEST_F(PartialRowTest, TestSetBinary) {
+  BinaryDataSetterTest(
+      static_cast<BinaryGetter>(&KuduPartialRow::GetBinary),
+      static_cast<BinarySetter>(&KuduPartialRow::SetBinary),
+      3, COPY);
+}
+
+// Check that PartialRow::SetString() copies the input data.
+TEST_F(PartialRowTest, TestSetString) {
+  BinaryDataSetterTest(
+      static_cast<BinaryGetter>(&KuduPartialRow::GetString),
+      static_cast<BinarySetter>(&KuduPartialRow::SetString),
+      2, COPY);
 }
 
 } // namespace kudu

@@ -17,25 +17,36 @@
 #ifndef KUDU_TABLET_ROWSET_H
 #define KUDU_TABLET_ROWSET_H
 
-#include <boost/thread/mutex.hpp>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <mutex>
+#include <ostream>
 #include <string>
 #include <vector>
 
-#include "kudu/cfile/cfile_util.h"
-#include "kudu/common/iterator.h"
+#include <glog/logging.h>
+
+#include "kudu/common/common.pb.h"
+#include "kudu/common/encoded_key.h"
+#include "kudu/common/row.h"
 #include "kudu/common/rowid.h"
-#include "kudu/common/schema.h"
+#include "kudu/common/timestamp.h"
+#include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/macros.h"
-#include "kudu/tablet/mvcc.h"
+#include "kudu/gutil/move.h"
+#include "kudu/gutil/port.h"
 #include "kudu/util/bloom_filter.h"
-#include "kudu/util/faststring.h"
-#include "kudu/util/slice.h"
 #include "kudu/util/status.h"
+// IWYU pragma: no_include "kudu/util/monotime.h"
 
 namespace kudu {
 
+class MonoTime; // IWYU pragma: keep
 class RowChangeList;
+class RowwiseIterator;
+class Schema;
+class Slice;
 
 namespace consensus {
 class OpId;
@@ -86,6 +97,7 @@ class RowSet {
   // The returned iterator is not Initted.
   virtual Status NewRowIterator(const Schema *projection,
                                 const MvccSnapshot &snap,
+                                OrderMode order,
                                 gscoped_ptr<RowwiseIterator>* out) const = 0;
 
   // Create the input to be used for a compaction.
@@ -99,29 +111,35 @@ class RowSet {
   virtual Status CountRows(rowid_t *count) const = 0;
 
   // Return the bounds for this RowSet. 'min_encoded_key' and 'max_encoded_key'
-  // are set to the first and last encoded keys for this RowSet. The storage
-  // for these slices is part of the RowSet and only guaranteed to stay valid
-  // until the RowSet is destroyed.
+  // are set to the first and last encoded keys for this RowSet.
   //
   // In the case that the rowset is still mutable (eg MemRowSet), this may
   // return Status::NotImplemented.
-  virtual Status GetBounds(Slice *min_encoded_key,
-                           Slice *max_encoded_key) const = 0;
+  virtual Status GetBounds(std::string* min_encoded_key,
+                           std::string* max_encoded_key) const = 0;
 
   // Return a displayable string for this rowset.
-  virtual string ToString() const = 0;
+  virtual std::string ToString() const = 0;
 
   // Dump the full contents of this rowset, for debugging.
   // This is very verbose so only useful within unit tests.
-  virtual Status DebugDump(vector<string> *lines = NULL) = 0;
+  virtual Status DebugDump(std::vector<std::string> *lines = NULL) = 0;
 
-  // Estimate the number of bytes on-disk
-  virtual uint64_t EstimateOnDiskSize() const = 0;
+  // Return the size of this rowset on disk, in bytes.
+  virtual uint64_t OnDiskSize() const = 0;
+
+  // Return the size of this rowset's base data on disk, in bytes.
+  // Excludes bloomfiles and the ad hoc index.
+  virtual uint64_t OnDiskBaseDataSize() const = 0;
+
+  // Return the size, in bytes, of this rowset's base data and REDO deltas.
+  // Does not include bloomfiles, the ad hoc index, or UNDO deltas.
+  virtual uint64_t OnDiskBaseDataSizeWithRedos() const = 0;
 
   // Return the lock used for including this DiskRowSet in a compaction.
   // This prevents multiple compactions and flushes from trying to include
   // the same rowset.
-  virtual boost::mutex *compact_flush_lock() = 0;
+  virtual std::mutex *compact_flush_lock() = 0;
 
   // Returns the metadata associated with this rowset.
   virtual std::shared_ptr<RowSetMetadata> metadata() = 0;
@@ -144,6 +162,56 @@ class RowSet {
   // Compact delta stores if more than one.
   virtual Status MinorCompactDeltaStores() = 0;
 
+  // Estimate the number of bytes in ancient undo delta stores. This may be an
+  // overestimate. The argument 'ancient_history_mark' must be valid (it may
+  // not be equal to Timestamp::kInvalidTimestamp).
+  virtual Status EstimateBytesInPotentiallyAncientUndoDeltas(Timestamp ancient_history_mark,
+                                                             int64_t* bytes) = 0;
+
+  // Initialize undo delta blocks until the given 'deadline' is passed, or
+  // until all undo delta blocks with a max timestamp older than
+  // 'ancient_history_mark' have been initialized.
+  //
+  // Invoking this method may also improve the estimate given by
+  // EstimateBytesInPotentiallyAncientUndoDeltas().
+  //
+  // If this method returns OK, it returns the number of blocks actually
+  // initialized in the out-param 'delta_blocks_initialized' and the number of
+  // bytes that can be freed from disk in 'bytes_in_ancient_undos'.
+  //
+  // If 'ancient_history_mark' is set to Timestamp::kInvalidTimestamp then the
+  // 'max_timestamp' of the blocks being initialized is ignored and no
+  // age-based short-circuiting takes place.
+  // If 'deadline' is not Initialized() then no deadline is enforced.
+  //
+  // The out-parameters, 'delta_blocks_initialized' and 'bytes_in_ancient_undos',
+  // may be passed in as nullptr.
+  virtual Status InitUndoDeltas(Timestamp ancient_history_mark,
+                                MonoTime deadline,
+                                int64_t* delta_blocks_initialized,
+                                int64_t* bytes_in_ancient_undos) = 0;
+
+  // Delete all initialized undo delta blocks with a max timestamp earlier than
+  // the specified 'ancient_history_mark'.
+  //
+  // Note: This method does not flush updates to the rowset metadata. If this
+  // method returns OK, the caller is responsible for persisting changes to the
+  // rowset metadata by explicity flushing it.
+  //
+  // Note also: Blocks are not actually deleted until the rowset metadata is
+  // flushed, because that invokes tablet metadata flush, which iterates over
+  // and deletes the blocks present in the metadata orphans list.
+  //
+  // If this method returns OK, it also returns the number of delta blocks
+  // deleted and the number of bytes deleted in the out-params 'blocks_deleted'
+  // and 'bytes_deleted', respectively.
+  //
+  // The out-parameters, 'blocks_deleted' and 'bytes_deleted', may be passed in
+  // as nullptr.
+  virtual Status DeleteAncientUndoDeltas(Timestamp ancient_history_mark,
+                                         int64_t* blocks_deleted,
+                                         int64_t* bytes_deleted) = 0;
+
   virtual ~RowSet() {}
 
   // Return true if this RowSet is available for compaction, based on
@@ -159,14 +227,20 @@ class RowSet {
     // the compaction selection has finished because only one thread
     // makes compaction selection at a time on a given Tablet due to
     // Tablet::compact_select_lock_.
-    boost::mutex::scoped_try_lock try_lock(*compact_flush_lock());
-    return try_lock.owns_lock();
+    std::unique_lock<std::mutex> try_lock(*compact_flush_lock(), std::try_to_lock);
+    return try_lock.owns_lock() && !has_been_compacted();
   }
 
+  // Checked while validating that a rowset is available for compaction.
+  virtual bool has_been_compacted() const = 0;
+
+  // Set after a compaction has completed to indicate that the rowset has been
+  // removed from the rowset tree and is thus longer available for compaction.
+  virtual void set_has_been_compacted() = 0;
 };
 
 // Used often enough, may as well typedef it.
-typedef vector<std::shared_ptr<RowSet> > RowSetVector;
+typedef std::vector<std::shared_ptr<RowSet> > RowSetVector;
 // Structure which caches an encoded and hashed key, suitable
 // for probing against rowsets.
 class RowSetKeyProbe {
@@ -177,7 +251,7 @@ class RowSetKeyProbe {
   // NOTE: row_key is not copied and must be valid for the lifetime
   // of this object.
   explicit RowSetKeyProbe(ConstContiguousRow row_key)
-      : row_key_(std::move(row_key)) {
+      : row_key_(row_key) {
     encoded_key_ = EncodedKey::FromContiguousRow(row_key_);
     bloom_probe_ = BloomKeyProbe(encoded_key_slice());
   }
@@ -265,6 +339,7 @@ class DuplicatingRowSet : public RowSet {
 
   virtual Status NewRowIterator(const Schema *projection,
                                 const MvccSnapshot &snap,
+                                OrderMode order,
                                 gscoped_ptr<RowwiseIterator>* out) const OVERRIDE;
 
   virtual Status NewCompactionInput(const Schema* projection,
@@ -273,25 +348,40 @@ class DuplicatingRowSet : public RowSet {
 
   Status CountRows(rowid_t *count) const OVERRIDE;
 
-  virtual Status GetBounds(Slice *min_encoded_key,
-                           Slice *max_encoded_key) const OVERRIDE;
+  virtual Status GetBounds(std::string* min_encoded_key,
+                           std::string* max_encoded_key) const OVERRIDE;
 
-  uint64_t EstimateOnDiskSize() const OVERRIDE;
+  // Return the total size on-disk of this rowset, in bytes.
+  uint64_t OnDiskSize() const OVERRIDE;
 
-  string ToString() const OVERRIDE;
+  // Return the total size on-disk of this rowset's data (i.e. excludes metadata), in bytes.
+  uint64_t OnDiskBaseDataSize() const OVERRIDE;
 
-  virtual Status DebugDump(vector<string> *lines = NULL) OVERRIDE;
+  // Return the size, in bytes, of this rowset's data, not including UNDOs.
+  uint64_t OnDiskBaseDataSizeWithRedos() const OVERRIDE;
+
+  std::string ToString() const OVERRIDE;
+
+  virtual Status DebugDump(std::vector<std::string> *lines = NULL) OVERRIDE;
 
   std::shared_ptr<RowSetMetadata> metadata() OVERRIDE;
 
   // A flush-in-progress rowset should never be selected for compaction.
-  boost::mutex *compact_flush_lock() OVERRIDE {
+  std::mutex *compact_flush_lock() OVERRIDE {
     LOG(FATAL) << "Cannot be compacted";
     return NULL;
   }
 
   virtual bool IsAvailableForCompaction() OVERRIDE {
     return false;
+  }
+
+  virtual bool has_been_compacted() const OVERRIDE {
+    return false;
+  }
+
+  virtual void set_has_been_compacted() OVERRIDE {
+    LOG(FATAL) << "Cannot be compacted";
   }
 
   ~DuplicatingRowSet();
@@ -310,6 +400,29 @@ class DuplicatingRowSet : public RowSet {
     // It's important that DuplicatingRowSet does not FlushDeltas. This prevents
     // a bug where we might end up with out-of-order deltas. See the long
     // comment in Tablet::Flush(...)
+    return Status::OK();
+  }
+
+  Status EstimateBytesInPotentiallyAncientUndoDeltas(Timestamp /*ancient_history_mark*/,
+                                                     int64_t* bytes) OVERRIDE {
+    DCHECK(bytes);
+    *bytes = 0;
+    return Status::OK();
+  }
+
+  Status InitUndoDeltas(Timestamp /*ancient_history_mark*/,
+                        MonoTime /*deadline*/,
+                        int64_t* delta_blocks_initialized,
+                        int64_t* bytes_in_ancient_undos) OVERRIDE {
+    if (delta_blocks_initialized) *delta_blocks_initialized = 0;
+    if (bytes_in_ancient_undos) *bytes_in_ancient_undos = 0;
+    return Status::OK();
+  }
+
+  Status DeleteAncientUndoDeltas(Timestamp /*ancient_history_mark*/,
+                                 int64_t* blocks_deleted, int64_t* bytes_deleted) OVERRIDE {
+    if (blocks_deleted) *blocks_deleted = 0;
+    if (bytes_deleted) *bytes_deleted = 0;
     return Status::OK();
   }
 

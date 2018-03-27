@@ -20,17 +20,25 @@
 #ifndef KUDU_UTIL_THREAD_H
 #define KUDU_UTIL_THREAD_H
 
-#include <boost/bind.hpp>
-#include <boost/function.hpp>
 #include <pthread.h>
-#include <string>
+#if defined(__linux__)
+#include <syscall.h>
+#else
 #include <sys/syscall.h>
-#include <sys/types.h>
-#include <vector>
+#endif
+#include <unistd.h>
+
+#include <cstdint>
+#include <string>
+#include <utility>
+
+#include <boost/bind.hpp>     // IWYU pragma: keep
+#include <boost/function.hpp> // IWYU pragma: keep
 
 #include "kudu/gutil/atomicops.h"
+#include "kudu/gutil/macros.h"
 #include "kudu/gutil/ref_counted.h"
-#include "kudu/util/async_util.h"
+#include "kudu/util/countdown_latch.h"
 #include "kudu/util/status.h"
 
 namespace kudu {
@@ -110,10 +118,19 @@ class ThreadJoiner {
 // (Join() and the destructor) are constrained: the child may not Join() on
 // itself, and the destructor is only run when there's one referent left.
 // These constraints allow us to access thread internals without any locks.
-//
-// TODO: Consider allowing fragment IDs as category parameters.
 class Thread : public RefCountedThreadSafe<Thread> {
  public:
+
+  // Flags passed to Thread::CreateWithFlags().
+  enum CreateFlags {
+    NO_FLAGS = 0,
+
+    // Disable the use of KernelStackWatchdog to detect and log slow
+    // thread creations. This is necessary when starting the kernel stack
+    // watchdog thread itself to avoid reentrancy.
+    NO_STACK_WATCHDOG = 1 << 0
+  };
+
   // This constructor pattern mimics that in boost::thread. There is
   // one constructor for each number of arguments that the thread
   // function accepts. To extend the set of acceptable signatures, add
@@ -129,48 +146,55 @@ class Thread : public RefCountedThreadSafe<Thread> {
   //  - A1...An - argument types whose instances are passed to f(...)
   //  - holder - optional shared pointer to hold a reference to the created thread.
   template <class F>
+  static Status CreateWithFlags(const std::string& category, const std::string& name,
+                                const F& f, uint64_t flags,
+                                scoped_refptr<Thread>* holder) {
+    return StartThread(category, name, f, flags, holder);
+
+  }
+  template <class F>
   static Status Create(const std::string& category, const std::string& name, const F& f,
                        scoped_refptr<Thread>* holder) {
-    return StartThread(category, name, f, holder);
+    return StartThread(category, name, f, NO_FLAGS, holder);
   }
 
   template <class F, class A1>
   static Status Create(const std::string& category, const std::string& name, const F& f,
                        const A1& a1, scoped_refptr<Thread>* holder) {
-    return StartThread(category, name, boost::bind(f, a1), holder);
+    return StartThread(category, name, boost::bind(f, a1), NO_FLAGS, holder);
   }
 
   template <class F, class A1, class A2>
   static Status Create(const std::string& category, const std::string& name, const F& f,
                        const A1& a1, const A2& a2, scoped_refptr<Thread>* holder) {
-    return StartThread(category, name, boost::bind(f, a1, a2), holder);
+    return StartThread(category, name, boost::bind(f, a1, a2), NO_FLAGS, holder);
   }
 
   template <class F, class A1, class A2, class A3>
   static Status Create(const std::string& category, const std::string& name, const F& f,
                        const A1& a1, const A2& a2, const A3& a3, scoped_refptr<Thread>* holder) {
-    return StartThread(category, name, boost::bind(f, a1, a2, a3), holder);
+    return StartThread(category, name, boost::bind(f, a1, a2, a3), NO_FLAGS, holder);
   }
 
   template <class F, class A1, class A2, class A3, class A4>
   static Status Create(const std::string& category, const std::string& name, const F& f,
                        const A1& a1, const A2& a2, const A3& a3, const A4& a4,
                        scoped_refptr<Thread>* holder) {
-    return StartThread(category, name, boost::bind(f, a1, a2, a3, a4), holder);
+    return StartThread(category, name, boost::bind(f, a1, a2, a3, a4), NO_FLAGS, holder);
   }
 
   template <class F, class A1, class A2, class A3, class A4, class A5>
   static Status Create(const std::string& category, const std::string& name, const F& f,
                        const A1& a1, const A2& a2, const A3& a3, const A4& a4, const A5& a5,
                        scoped_refptr<Thread>* holder) {
-    return StartThread(category, name, boost::bind(f, a1, a2, a3, a4, a5), holder);
+    return StartThread(category, name, boost::bind(f, a1, a2, a3, a4, a5), NO_FLAGS, holder);
   }
 
   template <class F, class A1, class A2, class A3, class A4, class A5, class A6>
   static Status Create(const std::string& category, const std::string& name, const F& f,
                        const A1& a1, const A2& a2, const A3& a3, const A4& a4, const A5& a5,
                        const A6& a6, scoped_refptr<Thread>* holder) {
-    return StartThread(category, name, boost::bind(f, a1, a2, a3, a4, a5, a6), holder);
+    return StartThread(category, name, boost::bind(f, a1, a2, a3, a4, a5, a6), NO_FLAGS, holder);
   }
 
   // Emulates boost::thread and detaches.
@@ -180,19 +204,18 @@ class Thread : public RefCountedThreadSafe<Thread> {
   // will be unregistered with the ThreadMgr and will not appear in the debug UI.
   void Join() { ThreadJoiner(this).Join(); }
 
-  // Call the given Closure on the thread before it exits. The closures are executed
-  // in the order they are added.
+  // The thread ID assigned to this thread by the operating system. If the thread
+  // has not yet started running, returns INVALID_TID.
   //
-  // NOTE: This must only be called on the currently executing thread, to avoid having
-  // to reason about complicated races (eg registering a callback on an already-dead
-  // thread).
-  //
-  // This callback is guaranteed to be called except in the case of a process crash.
-  void CallAtExit(const Closure& cb);
-
-  // The thread ID assigned to this thread by the operating system. If the OS does not
-  // support retrieving the tid, returns Thread::INVALID_TID.
-  int64_t tid() const { return tid_; }
+  // NOTE: this may block for a short amount of time if the thread has just been
+  // started.
+  int64_t tid() const {
+    int64_t t = base::subtle::Acquire_Load(&tid_);
+    if (t != PARENT_WAITING_TID) {
+      return tid_;
+    }
+    return WaitForTid();
+  }
 
   // Returns the thread's pthread ID.
   pthread_t pthread_id() const { return thread_; }
@@ -254,12 +277,10 @@ class Thread : public RefCountedThreadSafe<Thread> {
  private:
   friend class ThreadJoiner;
 
-  // The various special values for tid_ that describe the various steps
-  // in the parent<-->child handshake.
+  // See 'tid_' docs.
   enum {
     INVALID_TID = -1,
-    CHILD_WAITING_TID = -2,
-    PARENT_WAITING_TID = -3,
+    PARENT_WAITING_TID = -2,
   };
 
   // Function object that wraps the user-supplied function to run in a separate thread.
@@ -269,7 +290,7 @@ class Thread : public RefCountedThreadSafe<Thread> {
       : thread_(0),
         category_(std::move(category)),
         name_(std::move(name)),
-        tid_(CHILD_WAITING_TID),
+        tid_(INVALID_TID),
         functor_(std::move(functor)),
         done_(1),
         joinable_(false) {}
@@ -283,6 +304,13 @@ class Thread : public RefCountedThreadSafe<Thread> {
 
   // OS-specific thread ID. Once the constructor finishes StartThread(),
   // guaranteed to be set either to a non-negative integer, or to INVALID_TID.
+  //
+  // The tid_ member goes through the following states:
+  // 1. INVALID_TID: the thread has not been started, or has already exited.
+  // 2. PARENT_WAITING_TID: the parent has started the thread, but the
+  //    thread has not yet begun running. Therefore the TID is not yet known
+  //    but it will be set once the thread starts.
+  // 3. <positive value>: the thread is running.
   int64_t tid_;
 
   // User function to be executed by this thread.
@@ -301,14 +329,16 @@ class Thread : public RefCountedThreadSafe<Thread> {
   // thread is not a Thread.
   static __thread Thread* tls_;
 
-  std::vector<Closure> exit_callbacks_;
+  // Wait for the running thread to publish its tid.
+  int64_t WaitForTid() const;
 
   // Starts the thread running SuperviseThread(), and returns once that thread has
   // initialised and its TID has been read. Waits for notification from the started
   // thread that initialisation is complete before returning. On success, stores a
   // reference to the thread in holder.
   static Status StartThread(const std::string& category, const std::string& name,
-                            const ThreadFunctor& functor, scoped_refptr<Thread>* holder);
+                            const ThreadFunctor& functor, uint64_t flags,
+                            scoped_refptr<Thread>* holder);
 
   // Wrapper for the user-supplied function. Invoked from the new thread,
   // with the Thread as its only argument. Executes functor_, but before
@@ -335,7 +365,7 @@ class Thread : public RefCountedThreadSafe<Thread> {
 };
 
 // Registers /threadz with the debug webserver, and creates thread-tracking metrics under
-// the given entity.
+// the given entity. If 'web' is NULL, does not register the path handler.
 Status StartThreadInstrumentation(const scoped_refptr<MetricEntity>& server_metrics,
                                   WebCallbackRegistry* web);
 } // namespace kudu

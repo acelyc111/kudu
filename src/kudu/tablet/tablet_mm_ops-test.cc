@@ -15,10 +15,24 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <memory>
+#include <unordered_set>
+#include <vector>
+
+#include <gtest/gtest.h>
+
+#include "kudu/common/common.pb.h"
+#include "kudu/gutil/map-util.h"
+#include "kudu/gutil/port.h"
+#include "kudu/gutil/ref_counted.h"
+#include "kudu/tablet/tablet-test-base.h"
 #include "kudu/tablet/tablet.h"
 #include "kudu/tablet/tablet_metrics.h"
 #include "kudu/tablet/tablet_mm_ops.h"
-#include "kudu/tablet/tablet-test-base.h"
+#include "kudu/util/maintenance_manager.h"
+#include "kudu/util/metrics.h"
+#include "kudu/util/monotime.h"
+#include "kudu/util/test_macros.h"
 
 namespace kudu {
 namespace tablet {
@@ -29,7 +43,7 @@ class KuduTabletMmOpsTest : public TabletTestBase<IntKeyTestSetup<INT64>> {
 
   KuduTabletMmOpsTest()
   : Superclass(),
-    next_time_(MonoTime::Now(MonoTime::FINE)) {
+    next_time_(MonoTime::Now()) {
   }
 
   virtual void SetUp() OVERRIDE {
@@ -48,14 +62,14 @@ class KuduTabletMmOpsTest : public TabletTestBase<IntKeyTestSetup<INT64>> {
   void StatsShouldChange(MaintenanceOp* op) {
     SleepFor(MonoDelta::FromMilliseconds(1));
     op->UpdateStats(&stats_);
-    ASSERT_TRUE(next_time_.ComesBefore(stats_.last_modified()));
+    ASSERT_TRUE(next_time_ < stats_.last_modified());
     next_time_ = stats_.last_modified();
   }
 
   void StatsShouldNotChange(MaintenanceOp* op) {
     SleepFor(MonoDelta::FromMilliseconds(1));
     op->UpdateStats(&stats_);
-    ASSERT_TRUE(next_time_.Equals(stats_.last_modified()));
+    ASSERT_EQ(next_time_, stats_.last_modified());
     next_time_ = stats_.last_modified();
   }
 
@@ -68,7 +82,7 @@ class KuduTabletMmOpsTest : public TabletTestBase<IntKeyTestSetup<INT64>> {
   }
 
   void TestAffectedMetrics(MaintenanceOp* op,
-                           const unordered_set<
+                           const std::unordered_set<
                              scoped_refptr<Histogram>,
                              ScopedRefPtrHashFunctor<Histogram>,
                              ScopedRefPtrEqualToFunctor<Histogram> >& metrics) {
@@ -84,7 +98,7 @@ class KuduTabletMmOpsTest : public TabletTestBase<IntKeyTestSetup<INT64>> {
 
   MaintenanceOpStats stats_;
   MonoTime next_time_;
-  vector<scoped_refptr<Histogram> > all_possible_metrics_;
+  std::vector<scoped_refptr<Histogram> > all_possible_metrics_;
 };
 
 TEST_F(KuduTabletMmOpsTest, TestCompactRowSetsOpCacheStats) {

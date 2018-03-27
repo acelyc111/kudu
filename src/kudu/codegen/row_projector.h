@@ -18,16 +18,21 @@
 #ifndef KUDU_CODEGEN_ROW_PROJECTOR_H
 #define KUDU_CODEGEN_ROW_PROJECTOR_H
 
+#include <cstddef>
+#include <cstdint>
 #include <iosfwd>
 #include <memory>
 #include <vector>
+
+#include <glog/logging.h>
 
 #include "kudu/codegen/jit_wrapper.h"
 #include "kudu/common/row.h"
 #include "kudu/common/rowblock.h"
 #include "kudu/common/schema.h"
+#include "kudu/gutil/macros.h"
+#include "kudu/gutil/port.h"
 #include "kudu/gutil/ref_counted.h"
-#include "kudu/util/slice.h"
 #include "kudu/util/status.h"
 
 namespace llvm {
@@ -37,6 +42,7 @@ class TargetMachine;
 namespace kudu {
 
 class Arena;
+class faststring;
 
 namespace codegen {
 
@@ -127,13 +133,10 @@ class RowProjector {
                            "Base schema row: ", base_schema()->DebugRow(src_row));
   }
 
-  const vector<ProjectionIdxMapping>& base_cols_mapping() const {
+  const std::vector<ProjectionIdxMapping>& base_cols_mapping() const {
     return projector_.base_cols_mapping();
   }
-  const vector<ProjectionIdxMapping>& adapter_cols_mapping() const {
-    return projector_.adapter_cols_mapping();
-  }
-  const vector<size_t>& projection_defaults() const {
+  const std::vector<size_t>& projection_defaults() const {
     return projector_.projection_defaults();
   }
   bool is_identity() const { return projector_.is_identity(); }

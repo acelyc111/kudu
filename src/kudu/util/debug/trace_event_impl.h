@@ -5,24 +5,26 @@
 #ifndef KUDU_UTIL_DEBUG_TRACE_EVENT_IMPL_H_
 #define KUDU_UTIL_DEBUG_TRACE_EVENT_IMPL_H_
 
-#include <gtest/gtest_prod.h>
+#include <cstddef>
+#include <cstdint>
+#include <iosfwd>
 #include <stack>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
+#include <glog/logging.h>
+#include <gtest/gtest_prod.h>
 
 #include "kudu/gutil/atomicops.h"
+#include "kudu/gutil/bind_helpers.h"
 #include "kudu/gutil/callback.h"
-#include "kudu/gutil/walltime.h"
+#include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/macros.h"
 #include "kudu/gutil/ref_counted.h"
-#include "kudu/gutil/ref_counted_memory.h"
-#include "kudu/util/atomic.h"
-#include "kudu/util/condition_variable.h"
-#include "kudu/util/locks.h"
-#include "kudu/util/thread.h"
-#include "kudu/util/threadlocal.h"
+#include "kudu/gutil/spinlock.h"
+#include "kudu/gutil/walltime.h"
+#include "kudu/util/mutex.h"
 
 // Older style trace macros with explicit id and extra data
 // Only these macros result in publishing data to ETW as currently implemented.
@@ -56,6 +58,10 @@ struct hash<kudu::Thread*> {
 #endif
 
 namespace kudu {
+
+class RefCountedString;
+class Thread;
+
 namespace debug {
 
 // For any argument of type TRACE_VALUE_TYPE_CONVERTABLE the provided
@@ -76,9 +82,9 @@ class ConvertableToTraceFormat : public kudu::RefCountedThreadSafe<ConvertableTo
 };
 
 struct TraceEventHandle {
-  uint32 chunk_seq;
-  uint16 chunk_index;
-  uint16 event_index;
+  uint32_t chunk_seq;
+  uint16_t chunk_index;
+  uint16_t event_index;
 };
 
 const int kTraceMaxNumArgs = 2;
@@ -178,16 +184,16 @@ class BASE_EXPORT TraceEvent {
 // TraceBufferChunk is the basic unit of TraceBuffer.
 class BASE_EXPORT TraceBufferChunk {
  public:
-  TraceBufferChunk(uint32 seq)
+  explicit TraceBufferChunk(uint32_t seq)
       : next_free_(0),
         seq_(seq) {
   }
 
-  void Reset(uint32 new_seq);
+  void Reset(uint32_t new_seq);
   TraceEvent* AddTraceEvent(size_t* event_index);
   bool IsFull() const { return next_free_ == kTraceBufferChunkSize; }
 
-  uint32 seq() const { return seq_; }
+  uint32_t seq() const { return seq_; }
   size_t capacity() const { return kTraceBufferChunkSize; }
   size_t size() const { return next_free_; }
 
@@ -207,7 +213,7 @@ class BASE_EXPORT TraceBufferChunk {
  private:
   size_t next_free_;
   TraceEvent chunk_[kTraceBufferChunkSize];
-  uint32 seq_;
+  uint32_t seq_;
 };
 
 // TraceBuffer holds the events as they are collected.
@@ -616,6 +622,9 @@ class BASE_EXPORT TraceLog {
 
   // Called when a thread which has registered trace events is about to exit.
   void ThreadExiting();
+
+  // The static callback registered as a thread destructor.
+  static void ThreadExitingCB(void* arg);
 
   int generation() const {
     return static_cast<int>(base::subtle::NoBarrier_Load(&generation_));

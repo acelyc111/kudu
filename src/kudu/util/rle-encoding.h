@@ -14,19 +14,6 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 #ifndef IMPALA_RLE_ENCODING_H
 #define IMPALA_RLE_ENCODING_H
 
@@ -375,7 +362,7 @@ inline size_t RleDecoder<T>::Skip(size_t to_skip) {
       size_t nskip = (literal_count_ < to_skip) ? literal_count_ : to_skip;
       literal_count_ -= nskip;
       to_skip -= nskip;
-      while (nskip--) {
+      for (; nskip > 0; nskip--) {
         T value = 0;
         bool result = bit_reader_.GetValue(bit_width_, &value);
         DCHECK(result);
@@ -395,7 +382,7 @@ inline void RleEncoder<T>::Put(T value, size_t run_length) {
   DCHECK(bit_width_ == 64 || value < (1LL << bit_width_));
 
   // TODO(perf): remove the loop and use the repeat_count_
-  while (run_length--) {
+  for (; run_length > 0; run_length--) {
     if (PREDICT_TRUE(current_value_ == value)) {
       ++repeat_count_;
       if (repeat_count_ > 8) {

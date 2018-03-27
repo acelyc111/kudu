@@ -17,40 +17,40 @@
 #ifndef KUDU_MASTER_MASTER_H
 #define KUDU_MASTER_MASTER_H
 
-#include <string>
+#include <atomic>
+#include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
+#include "kudu/common/wire_protocol.pb.h"
 #include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/macros.h"
+#include "kudu/gutil/port.h"
+#include "kudu/kserver/kserver.h"
 #include "kudu/master/master_options.h"
-#include "kudu/master/master.pb.h"
-#include "kudu/server/server_base.h"
-#include "kudu/util/metrics.h"
 #include "kudu/util/promise.h"
 #include "kudu/util/status.h"
 
 namespace kudu {
 
+class HostPortPB;
 class MaintenanceManager;
-class RpcServer;
-struct RpcServerOptions;
-class ServerEntryPB;
-class ServerRegistrationPB;
+class MonoDelta;
 class ThreadPool;
 
-namespace rpc {
-class Messenger;
-class ServicePool;
-}
+namespace security {
+class TokenSigner;
+} // namespace security
 
 namespace master {
 
 class CatalogManager;
-class TSManager;
+class MasterCertAuthority;
 class MasterPathHandlers;
+class TSManager;
 
-class Master : public server::ServerBase {
+class Master : public kserver::KuduServer {
  public:
   static const uint16_t kDefaultPort = 7051;
   static const uint16_t kDefaultWebPort = 8051;
@@ -58,11 +58,12 @@ class Master : public server::ServerBase {
   explicit Master(const MasterOptions& opts);
   ~Master();
 
-  Status Init();
-  Status Start();
+  virtual Status Init() override;
+  virtual Status Start() override;
+  virtual void Shutdown() override;
 
   Status StartAsync();
-  Status WaitForCatalogManagerInit();
+  Status WaitForCatalogManagerInit() const;
 
   // Wait until this Master's catalog manager instance is the leader and is ready.
   // This method is intended for use by unit tests.
@@ -70,9 +71,11 @@ class Master : public server::ServerBase {
   Status WaitUntilCatalogManagerIsLeaderAndReadyForTests(const MonoDelta& timeout)
       WARN_UNUSED_RESULT;
 
-  void Shutdown();
-
   std::string ToString() const;
+
+  MasterCertAuthority* cert_authority() { return cert_authority_.get(); }
+
+  security::TokenSigner* token_signer() { return token_signer_.get(); }
 
   TSManager* ts_manager() { return ts_manager_.get(); }
 
@@ -86,11 +89,19 @@ class Master : public server::ServerBase {
   // Get node instance, Raft role, RPC and HTTP addresses for all
   // masters.
   //
-  // TODO move this to a separate class to be re-used in TS and
+  // NOTE: this performs a round-trip RPC to all of the masters so
+  // should not be used in any performance-critical paths.
+  //
+  // TODO(todd) move this to a separate class to be re-used in TS and
   // client; cache this information with a TTL (possibly in another
   // SysTable), so that we don't have to perform an RPC call on every
   // request.
   Status ListMasters(std::vector<ServerEntryPB>* masters) const;
+
+  // Gets the HostPorts for all of the masters in the cluster.
+  // This is not as complete as ListMasters() above, but operates just
+  // based on local state.
+  Status GetMasterHostPorts(std::vector<HostPortPB>* hostports) const;
 
   bool IsShutdown() const {
     return state_ == kStopped;
@@ -103,17 +114,23 @@ class Master : public server::ServerBase {
  private:
   friend class MasterTest;
 
+  void InitCatalogManagerTask();
+  Status InitCatalogManager();
+
+  // Initialize registration_.
+  // Requires that the web server and RPC server have been started.
+  Status InitMasterRegistration();
+
   enum MasterState {
     kStopped,
     kInitialized,
     kRunning
   };
 
-  void InitCatalogManagerTask();
-  Status InitCatalogManager();
-
   MasterState state_;
 
+  std::unique_ptr<MasterCertAuthority> cert_authority_;
+  std::unique_ptr<security::TokenSigner> token_signer_;
   gscoped_ptr<TSManager> ts_manager_;
   gscoped_ptr<CatalogManager> catalog_manager_;
   gscoped_ptr<MasterPathHandlers> path_handlers_;
@@ -126,6 +143,10 @@ class Master : public server::ServerBase {
   Promise<Status> init_status_;
 
   MasterOptions opts_;
+
+  ServerRegistrationPB registration_;
+  // True once registration_ has been initialized.
+  std::atomic<bool> registration_initialized_;
 
   // The maintenance manager for this master.
   std::shared_ptr<MaintenanceManager> maintenance_manager_;

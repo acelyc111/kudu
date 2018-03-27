@@ -17,17 +17,29 @@
 #ifndef KUDU_TABLET_DELTA_ITERATOR_MERGER_H
 #define KUDU_TABLET_DELTA_ITERATOR_MERGER_H
 
+#include <cstddef>
 #include <string>
 #include <memory>
 #include <vector>
 
+#include "kudu/common/rowid.h"
+#include "kudu/gutil/port.h"
 #include "kudu/tablet/delta_store.h"
+#include "kudu/util/status.h"
 
 namespace kudu {
 
+class Arena;
+class ColumnBlock;
 class ScanSpec;
+class Schema;
+class SelectionVector;
+struct ColumnId;
 
 namespace tablet {
+
+class Mutation;
+class MvccSnapshot;
 
 // DeltaIterator that simply combines together other DeltaIterators,
 // applying deltas from each in order.
@@ -42,7 +54,7 @@ class DeltaIteratorMerger : public DeltaIterator {
       const std::vector<std::shared_ptr<DeltaStore> > &stores,
       const Schema* projection,
       const MvccSnapshot &snapshot,
-      std::shared_ptr<DeltaIterator>* out);
+      std::unique_ptr<DeltaIterator>* out);
 
   ////////////////////////////////////////////////////////////
   // Implementations of DeltaIterator
@@ -52,17 +64,18 @@ class DeltaIteratorMerger : public DeltaIterator {
   virtual Status PrepareBatch(size_t nrows, PrepareFlag flag) OVERRIDE;
   virtual Status ApplyUpdates(size_t col_to_apply, ColumnBlock *dst) OVERRIDE;
   virtual Status ApplyDeletes(SelectionVector *sel_vec) OVERRIDE;
-  virtual Status CollectMutations(vector<Mutation *> *dst, Arena *arena) OVERRIDE;
+  virtual Status CollectMutations(std::vector<Mutation *> *dst, Arena *arena) OVERRIDE;
   virtual Status FilterColumnIdsAndCollectDeltas(const std::vector<ColumnId>& col_ids,
-                                                 vector<DeltaKeyAndUpdate>* out,
+                                                 std::vector<DeltaKeyAndUpdate>* out,
                                                  Arena* arena) OVERRIDE;
   virtual bool HasNext() OVERRIDE;
+  bool MayHaveDeltas() override;
   virtual std::string ToString() const OVERRIDE;
 
  private:
-  explicit DeltaIteratorMerger(vector<std::shared_ptr<DeltaIterator> > iters);
+  explicit DeltaIteratorMerger(std::vector<std::unique_ptr<DeltaIterator> > iters);
 
-  std::vector<std::shared_ptr<DeltaIterator> > iters_;
+  std::vector<std::unique_ptr<DeltaIterator> > iters_;
 };
 
 } // namespace tablet

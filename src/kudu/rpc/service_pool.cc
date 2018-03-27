@@ -17,23 +17,38 @@
 
 #include "kudu/rpc/service_pool.h"
 
-#include <glog/logging.h>
+#include <cstdint>
 #include <memory>
+#include <ostream>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
+#include <boost/optional/optional.hpp>
+#include <glog/logging.h>
+
+#include "kudu/gutil/basictypes.h"
 #include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/move.h"
 #include "kudu/gutil/ref_counted.h"
-#include "kudu/rpc/inbound_call.h"
-#include "kudu/rpc/messenger.h"
-#include "kudu/rpc/service_if.h"
+#include "kudu/gutil/strings/join.h"
 #include "kudu/gutil/strings/substitute.h"
+#include "kudu/rpc/inbound_call.h"
+#include "kudu/rpc/remote_method.h"
+#include "kudu/rpc/rpc_header.pb.h"
+#include "kudu/rpc/service_if.h"
+#include "kudu/rpc/service_queue.h"
+#include "kudu/util/logging.h"
 #include "kudu/util/metrics.h"
+#include "kudu/util/net/sockaddr.h"
 #include "kudu/util/status.h"
 #include "kudu/util/thread.h"
 #include "kudu/util/trace.h"
 
 using std::shared_ptr;
+using std::string;
+using std::vector;
 using strings::Substitute;
 
 METRIC_DEFINE_histogram(server, rpc_incoming_queue_time,
@@ -60,7 +75,7 @@ namespace rpc {
 ServicePool::ServicePool(gscoped_ptr<ServiceIf> service,
                          const scoped_refptr<MetricEntity>& entity,
                          size_t service_queue_length)
-  : service_(service.Pass()),
+  : service_(std::move(service)),
     service_queue_(service_queue_length),
     incoming_queue_time_(METRIC_rpc_incoming_queue_time.Instantiate(entity)),
     rpcs_timed_out_in_queue_(METRIC_rpcs_timed_out_in_queue.Instantiate(entity)),
@@ -95,7 +110,7 @@ void ServicePool::Shutdown() {
 
   // Now we must drain the service queue.
   Status status = Status::ServiceUnavailable("Service is shutting down");
-  gscoped_ptr<InboundCall> incoming;
+  std::unique_ptr<InboundCall> incoming;
   while (service_queue_.BlockingGet(&incoming)) {
     incoming.release()->RespondFailure(ErrorStatusPB::FATAL_SERVER_SHUTTING_DOWN, status);
   }
@@ -103,12 +118,62 @@ void ServicePool::Shutdown() {
   service_->Shutdown();
 }
 
+void ServicePool::RejectTooBusy(InboundCall* c) {
+  string err_msg =
+      Substitute("$0 request on $1 from $2 dropped due to backpressure. "
+                 "The service queue is full; it has $3 items.",
+                 c->remote_method().method_name(),
+                 service_->service_name(),
+                 c->remote_address().ToString(),
+                 service_queue_.max_size());
+  rpcs_queue_overflow_->Increment();
+  KLOG_EVERY_N_SECS(WARNING, 1) << err_msg;
+  c->RespondFailure(ErrorStatusPB::ERROR_SERVER_TOO_BUSY,
+                    Status::ServiceUnavailable(err_msg));
+  DLOG(INFO) << err_msg << " Contents of service queue:\n"
+             << service_queue_.ToString();
+
+  if (too_busy_hook_) {
+    too_busy_hook_();
+  }
+}
+
+RpcMethodInfo* ServicePool::LookupMethod(const RemoteMethod& method) {
+  return service_->LookupMethod(method);
+}
+
 Status ServicePool::QueueInboundCall(gscoped_ptr<InboundCall> call) {
   InboundCall* c = call.release();
 
+  vector<uint32_t> unsupported_features;
+  for (uint32_t feature : c->GetRequiredFeatures()) {
+    if (!service_->SupportsFeature(feature)) {
+      unsupported_features.push_back(feature);
+    }
+  }
+
+  if (!unsupported_features.empty()) {
+    c->RespondUnsupportedFeature(unsupported_features);
+    return Status::NotSupported("call requires unsupported application feature flags",
+                                JoinMapped(unsupported_features,
+                                           [] (uint32_t flag) { return std::to_string(flag); },
+                                           ", "));
+  }
+
   TRACE_TO(c->trace(), "Inserting onto call queue");
+
   // Queue message on service queue
-  QueueStatus queue_status = service_queue_.Put(c);
+  boost::optional<InboundCall*> evicted;
+  auto queue_status = service_queue_.Put(c, &evicted);
+  if (queue_status == QUEUE_FULL) {
+    RejectTooBusy(c);
+    return Status::OK();
+  }
+
+  if (PREDICT_FALSE(evicted != boost::none)) {
+    RejectTooBusy(*evicted);
+  }
+
   if (PREDICT_TRUE(queue_status == QUEUE_SUCCESS)) {
     // NB: do not do anything with 'c' after it is successfully queued --
     // a service thread may have already dequeued it, processed it, and
@@ -117,20 +182,7 @@ Status ServicePool::QueueInboundCall(gscoped_ptr<InboundCall> call) {
   }
 
   Status status = Status::OK();
-  if (queue_status == QUEUE_FULL) {
-    string err_msg =
-        Substitute("$0 request on $1 from $2 dropped due to backpressure. "
-        "The service queue is full; it has $3 items.",
-        c->remote_method().method_name(),
-        service_->service_name(),
-        c->remote_address().ToString(),
-        service_queue_.max_size());
-    status = Status::ServiceUnavailable(err_msg);
-    rpcs_queue_overflow_->Increment();
-    c->RespondFailure(ErrorStatusPB::ERROR_SERVER_TOO_BUSY, status);
-    DLOG(INFO) << err_msg << " Contents of service queue:\n"
-               << service_queue_.ToString();
-  } else if (queue_status == QUEUE_SHUTDOWN) {
+  if (queue_status == QUEUE_SHUTDOWN) {
     status = Status::ServiceUnavailable("Service is shutting down");
     c->RespondFailure(ErrorStatusPB::FATAL_SERVER_SHUTTING_DOWN, status);
   } else {
@@ -142,7 +194,7 @@ Status ServicePool::QueueInboundCall(gscoped_ptr<InboundCall> call) {
 
 void ServicePool::RunThread() {
   while (true) {
-    gscoped_ptr<InboundCall> incoming;
+    std::unique_ptr<InboundCall> incoming;
     if (!service_queue_.BlockingGet(&incoming)) {
       VLOG(1) << "ServicePool: messenger shutting down.";
       return;

@@ -17,32 +17,46 @@
 
 #include "kudu/codegen/module_builder.h"
 
-#include <cstdlib>
+#include <cstdint>
 #include <sstream>
 #include <string>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
+
+// NOTE: among the headers below, the MCJIT.h header file is needed
+//       for successful run-time operation of the code generator.
 #include <glog/logging.h>
+#include <llvm/ADT/StringMap.h>
 #include <llvm/ADT/StringRef.h>
-#include <llvm/Analysis/Passes.h>
 #include <llvm/ExecutionEngine/ExecutionEngine.h>
-#include <llvm/ExecutionEngine/MCJIT.h>
+#include <llvm/ExecutionEngine/MCJIT.h> // IWYU pragma: keep
+#include <llvm/IR/Constant.h>
+#include <llvm/IR/Constants.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
-#include <llvm/IR/IRBuilder.h>
-#include <llvm/IR/LegacyPassManager.h>
+#include <llvm/IR/GlobalValue.h>
 #include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Type.h>
 #include <llvm/IRReader/IRReader.h>
+#include <llvm/Pass.h>
+#include <llvm/Support/CodeGen.h>
+#include <llvm/Support/Host.h>
 #include <llvm/Support/MemoryBuffer.h>
-#include <llvm/Support/raw_os_ostream.h>
 #include <llvm/Support/SourceMgr.h>
+#include <llvm/Support/raw_os_ostream.h>
+#include <llvm/Support/raw_ostream.h>
+#include <llvm/Target/TargetMachine.h>
 #include <llvm/Transforms/IPO.h>
+#include <llvm/Transforms/IPO/AlwaysInliner.h>
 #include <llvm/Transforms/IPO/PassManagerBuilder.h>
 
 #include "kudu/codegen/precompiled.ll.h"
-#include "kudu/gutil/macros.h"
+#include "kudu/gutil/basictypes.h"
+#include "kudu/gutil/map-util.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/util/status.h"
 
@@ -61,6 +75,7 @@ using llvm::EngineBuilder;
 using llvm::ExecutionEngine;
 using llvm::Function;
 using llvm::FunctionType;
+using llvm::GlobalValue;
 using llvm::IntegerType;
 using llvm::legacy::FunctionPassManager;
 using llvm::legacy::PassManager;
@@ -75,9 +90,10 @@ using llvm::Type;
 using llvm::Value;
 using std::move;
 using std::ostream;
+using std::ostringstream;
 using std::string;
-using std::stringstream;
 using std::unique_ptr;
+using std::unordered_set;
 using std::vector;
 using strings::Substitute;
 
@@ -87,7 +103,7 @@ namespace codegen {
 namespace {
 
 string ToString(const SMDiagnostic& err) {
-  stringstream sstr;
+  ostringstream sstr;
   raw_os_ostream os(sstr);
   err.print("precompiled.ll", os);
   os.flush();
@@ -97,7 +113,7 @@ string ToString(const SMDiagnostic& err) {
 }
 
 string ToString(const Module& m) {
-  stringstream sstr;
+  ostringstream sstr;
   raw_os_ostream os(sstr);
   os << m;
   return sstr.str();
@@ -205,16 +221,33 @@ void ModuleBuilder::AddJITPromise(llvm::Function* llvm_f,
 
 namespace {
 
-#if CODEGEN_MODULE_BUILDER_DO_OPTIMIZATIONS
-
-void DoOptimizations(ExecutionEngine* engine,
-                     Module* module,
-                     const vector<const char*>& external_functions) {
+void DoOptimizations(Module* module,
+                     const unordered_set<string>& external_functions) {
   PassManagerBuilder pass_builder;
-  pass_builder.OptLevel = 2;
   // Don't optimize for code size (this corresponds to -O2/-O3)
   pass_builder.SizeLevel = 0;
-  pass_builder.Inliner = llvm::createFunctionInliningPass();
+#if CODEGEN_MODULE_BUILDER_DO_OPTIMIZATIONS
+  pass_builder.OptLevel = 2;
+  pass_builder.Inliner = llvm::createFunctionInliningPass(pass_builder.OptLevel,
+                                                          pass_builder.SizeLevel);
+#else
+  // Even if we don't want to do optimizations, we have to run the "AlwaysInliner" pass.
+  // This pass ensures that any functions marked 'always_inline' are inlined, but nothing
+  // else.
+  //
+  // If we don't, the following happens:
+  // - symbols in libc++ (eg _ZNKSt3__19basic_iosIcNS_11char_traitsIcEEE5rdbufEv) are
+  //   marked as __attribute__((always_inline)) in the header.
+  // - those symbols end up included with 'local' visibility in libc++.so, since the compiler
+  //   knows that all call sites should inline them.
+  // - if we don't run any inliner at all, then our generated code generates LLVM
+  //   'invoke' instructions to try to call these external functions, despite them
+  //   being marked 'always_inline'.
+  // - these 'invoke' instructions fail to link at runtime since they can't find the
+  //   dynamic symbol (due to its local visibility)
+  pass_builder.OptLevel = 0;
+  pass_builder.Inliner = llvm::createAlwaysInlinerLegacyPass();
+#endif
 
   FunctionPassManager fpm(module);
   pass_builder.populateFunctionPassManager(fpm);
@@ -231,7 +264,19 @@ void DoOptimizations(ExecutionEngine* engine,
   PassManager module_passes;
 
   // Internalize all functions that aren't explicitly specified with external linkage.
-  module_passes.add(llvm::createInternalizePass(external_functions));
+  module_passes.add(llvm::createInternalizePass([&](const GlobalValue& v) {
+    return ContainsKey(external_functions, v.getGlobalIdentifier());
+  }));
+
+  // Run Global Dead Code Elimination.
+  //
+  // This is responsible for removing any unreferenced functions. This is
+  // important to do even in -O0 to workaround an issue we see when our generated
+  // functions are actually empty. In that case, for whatever reason (perhaps a bug in LLVM?)
+  // the compiled module would try to include versions of functions with calls to
+  // other functions marked "alwaysinline". The latter functions would not get linked
+  // in our compiled module, and then the module would fail to load.
+  module_passes.add(llvm::createGlobalDCEPass());
   pass_builder.populateModulePassManager(module_passes);
 
   // Same as above, the result here just indicates whether optimization made any changes.
@@ -239,7 +284,18 @@ void DoOptimizations(ExecutionEngine* engine,
   ignore_result(module_passes.run(*module));
 }
 
-#endif
+vector<string> GetHostCPUAttrs() {
+  // LLVM's ExecutionEngine expects features to be enabled or disabled with a list
+  // of strings like ["+feature1", "-feature2"].
+  vector<string> attrs;
+  llvm::StringMap<bool> cpu_features;
+  llvm::sys::getHostCPUFeatures(cpu_features);
+  for (const auto& entry : cpu_features) {
+    attrs.emplace_back(
+        Substitute("$0$1", entry.second ? "+" : "-", entry.first().data()));
+  }
+  return attrs;
+}
 
 } // anonymous namespace
 
@@ -257,6 +313,8 @@ Status ModuleBuilder::Compile(unique_ptr<ExecutionEngine>* out) {
   EngineBuilder ebuilder(move(module_));
   ebuilder.setErrorStr(&str);
   ebuilder.setOptLevel(opt_level);
+  ebuilder.setMCPU(llvm::sys::getHostCPUName());
+  ebuilder.setMAttrs(GetHostCPUAttrs());
   target_ = ebuilder.selectTarget();
   unique_ptr<ExecutionEngine> local_engine(ebuilder.create(target_));
   if (!local_engine) {
@@ -266,9 +324,7 @@ Status ModuleBuilder::Compile(unique_ptr<ExecutionEngine>* out) {
   }
   module->setDataLayout(target_->createDataLayout());
 
-#if CODEGEN_MODULE_BUILDER_DO_OPTIMIZATIONS
-  DoOptimizations(local_engine.get(), module, GetFunctionNames());
-#endif
+  DoOptimizations(module, GetFunctionNames());
 
   // Compile the module
   local_engine->finalizeObject();
@@ -301,11 +357,10 @@ TargetMachine* ModuleBuilder::GetTargetMachine() const {
   return CHECK_NOTNULL(target_);
 }
 
-vector<const char*> ModuleBuilder::GetFunctionNames() const {
-  vector<const char*> ret;
+unordered_set<string> ModuleBuilder::GetFunctionNames() const {
+  unordered_set<string> ret;
   for (const JITFuture& fut : futures_) {
-    const char* name = CHECK_NOTNULL(fut.llvm_f_)->getName().data();
-    ret.push_back(name);
+    ret.insert(CHECK_NOTNULL(fut.llvm_f_)->getName());
   }
   return ret;
 }

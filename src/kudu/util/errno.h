@@ -14,9 +14,10 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-#ifndef KUDU_STRERROR_R
-#define KUDU_STRERROR_R
+#ifndef KUDU_ERRNO_H
+#define KUDU_ERRNO_H
 
+#include <cstddef>
 #include <string>
 
 namespace kudu {

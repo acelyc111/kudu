@@ -4,13 +4,10 @@
 
 #include "kudu/gutil/cpu.h"
 
-#include <stdlib.h>
-#include <string.h>
+#include <cstring>
+#include <utility>
 
-#include <algorithm>
-
-#include "kudu/gutil/basictypes.h"
-#include "kudu/gutil/strings/stringpiece.h"
+#include "kudu/gutil/integral_types.h"
 
 #if defined(__x86_64__)
 #if defined(_MSC_VER)
@@ -68,7 +65,7 @@ void __cpuid(int cpu_info[4], int info_type) {
   __asm__ volatile (
     "cpuid\n"
     : "=a"(cpu_info[0]), "=b"(cpu_info[1]), "=c"(cpu_info[2]), "=d"(cpu_info[3])
-    : "a"(info_type)
+    : "a"(info_type), "c"(0)
   );
 }
 

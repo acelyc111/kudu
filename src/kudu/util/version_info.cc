@@ -17,6 +17,7 @@
 
 #include "kudu/util/version_info.h"
 
+#include <cstring>
 #include <string>
 
 #include "kudu/generated/version_defines.h"
@@ -35,7 +36,11 @@ string VersionInfo::GetGitHash() {
   return ret;
 }
 
-string VersionInfo::GetShortVersionString() {
+string VersionInfo::GetShortVersionInfo() {
+  return KUDU_VERSION_STRING;
+}
+
+string VersionInfo::GetVersionInfo() {
   return strings::Substitute("kudu $0 (rev $1)",
                              KUDU_VERSION_STRING,
                              GetGitHash());

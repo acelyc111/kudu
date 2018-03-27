@@ -17,25 +17,28 @@
 #ifndef KUDU_SERVER_WEBUI_UTIL_H
 #define KUDU_SERVER_WEBUI_UTIL_H
 
-#include <string>
-#include <sstream>
+#include <iosfwd>
 #include <vector>
 
-#include "kudu/gutil/ref_counted.h"
+template <class T>
+class scoped_refptr;
 
 namespace kudu {
 
+class EasyJson;
 class Schema;
 class MonitoredTask;
 
-void HtmlOutputSchemaTable(const Schema& schema,
-                           std::stringstream* output);
-void HtmlOutputImpalaSchema(const std::string& table_name,
-                            const Schema& schema,
-                            const std::string& master_address,
-                            std::stringstream* output);
-void HtmlOutputTaskList(const std::vector<scoped_refptr<MonitoredTask> >& tasks,
-                        std::stringstream* output);
+// Appends a JSON array describing 'schema' to 'output', under the key "columns".
+void SchemaToJson(const Schema& schema, EasyJson* output);
+
+// Appends an HTML table describing 'schema' to 'output'.
+// TODO(wdberkeley) Remove this once /tablet is converted to a template.
+void HtmlOutputSchemaTable(const Schema& schema, std::ostringstream* output);
+
+// Appends a JSON array describing the tasks in 'tasks' to 'output', under the key "tasks".
+void TaskListToJson(const std::vector<scoped_refptr<MonitoredTask>>& tasks, EasyJson* output);
+
 } // namespace kudu
 
 #endif // KUDU_SERVER_WEBUI_UTIL_H

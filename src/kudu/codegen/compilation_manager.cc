@@ -17,24 +17,27 @@
 
 #include "kudu/codegen/compilation_manager.h"
 
-#include <boost/bind.hpp>
-#include <boost/function.hpp>
 #include <cstdlib>
+#include <memory>
+#include <ostream>
+#include <string>
+
 #include <gflags/gflags.h>
 #include <glog/logging.h>
-#include <memory>
 
 #include "kudu/codegen/code_cache.h"
 #include "kudu/codegen/code_generator.h"
 #include "kudu/codegen/jit_wrapper.h"
 #include "kudu/codegen/row_projector.h"
 #include "kudu/common/schema.h"
+#include "kudu/gutil/bind.h"
+#include "kudu/gutil/bind_helpers.h"
+#include "kudu/gutil/callback.h"
 #include "kudu/gutil/casts.h"
 #include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/util/faststring.h"
 #include "kudu/util/flag_tags.h"
-#include "kudu/util/logging.h"
 #include "kudu/util/metrics.h"
 #include "kudu/util/monotime.h"
 #include "kudu/util/slice.h"
@@ -48,6 +51,10 @@ DEFINE_bool(codegen_time_compilation, false, "Whether to print time that each co
             "generation request took.");
 TAG_FLAG(codegen_time_compilation, experimental);
 TAG_FLAG(codegen_time_compilation, runtime);
+
+DEFINE_int32(codegen_cache_capacity, 100, "Number of entries which may be stored in the "
+             "code generation cache.");
+TAG_FLAG(codegen_cache_capacity, experimental);
 
 METRIC_DEFINE_gauge_int64(server, code_cache_hits, "Codegen Cache Hits",
                           kudu::MetricUnit::kCacheHits,
@@ -78,7 +85,7 @@ class CompilationTask : public Runnable {
       generator_(generator) {}
 
   // Can only be run once.
-  virtual void Run() override {
+  void Run() override {
     // We need to fail softly because the user could have just given
     // a malformed projection schema pair, but could be long gone by
     // now so there's nowhere to return the status to.
@@ -118,7 +125,7 @@ class CompilationTask : public Runnable {
 } // anonymous namespace
 
 CompilationManager::CompilationManager()
-  : cache_(kDefaultCacheCapacity),
+  : cache_(FLAGS_codegen_cache_capacity),
     hit_counter_(0),
     query_counter_(0) {
   CHECK_OK(ThreadPoolBuilder("compiler_manager_pool")

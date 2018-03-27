@@ -17,19 +17,77 @@
 #ifndef KUDU_TABLET_COMPACTION_H
 #define KUDU_TABLET_COMPACTION_H
 
+#include <cstddef>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include "kudu/common/generic_iterators.h"
-#include "kudu/common/iterator.h"
-#include "kudu/tablet/diskrowset.h"
-#include "kudu/tablet/memrowset.h"
+#include <glog/logging.h>
+
+#include "kudu/common/rowblock.h"
+#include "kudu/common/timestamp.h"
+#include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/tablet/rowset.h"
+#include "kudu/util/status.h"
 
 namespace kudu {
+
+class Arena;
+class Schema;
+
 namespace tablet {
+
+class DiskRowSet;
+class MemRowSet;
+class Mutation;
+class MvccSnapshot;
+class RollingDiskRowSetWriter;
 struct CompactionInputRow;
-class WriteTransactionState;
+
+// Options related to tablet history garbage collection.
+class HistoryGcOpts {
+ public:
+  static HistoryGcOpts Enabled(Timestamp ahm) {
+    return HistoryGcOpts(true, ahm);
+  }
+
+  static HistoryGcOpts Disabled() {
+    return HistoryGcOpts(false, Timestamp(0));
+  }
+
+  // Returns true if Timestamp 't' is considered "ancient history" and is
+  // eligible for garbage collection. If GC is disabled, will return false for
+  // any Timestamp with a value >= 0 (that is, all valid Timestamps).
+  bool IsAncientHistory(Timestamp t) const {
+    return t < ancient_history_mark_;
+  }
+
+  // Returns true if history GC is enabled.
+  bool gc_enabled() const {
+    return gc_enabled_;
+  }
+
+  // Returns the ancient history mark.
+  Timestamp ancient_history_mark() const {
+    return ancient_history_mark_;
+  }
+
+ private:
+  HistoryGcOpts(bool gc_enabled, Timestamp ahm)
+      : gc_enabled_(gc_enabled),
+        ancient_history_mark_(ahm) {
+  }
+
+  // Whether historical records prior to the ancient history mark should be
+  // garbage-collected (deleted).
+  const bool gc_enabled_;
+
+  // A timestamp prior to which no history will be preserved.
+  // Ignored if 'enabled' != GC_ENABLED.
+  const Timestamp ancient_history_mark_;
+};
 
 // Interface for an input feeding into a compaction or flush.
 class CompactionInput {
@@ -56,16 +114,17 @@ class CompactionInput {
 
   // Create an input which merges several other compaction inputs. The inputs are merged
   // in key-order according to the given schema. All inputs must have matching schemas.
-  static CompactionInput *Merge(const vector<std::shared_ptr<CompactionInput> > &inputs,
+  static CompactionInput *Merge(const std::vector<std::shared_ptr<CompactionInput> > &inputs,
                                 const Schema *schema);
 
   virtual Status Init() = 0;
-  virtual Status PrepareBlock(vector<CompactionInputRow> *block) = 0;
+  virtual Status PrepareBlock(std::vector<CompactionInputRow> *block) = 0;
 
   // Returns the arena for this compaction input corresponding to the last
   // prepared block. This must be called *after* PrepareBlock() as if this
   // is a MergeCompactionInput only then will the right arena be selected.
-  virtual Arena*  PreparedBlockArena() = 0;
+  virtual Arena* PreparedBlockArena() = 0;
+
   virtual Status FinishBlock() = 0;
 
   virtual bool HasMoreBlocks() = 0;
@@ -78,10 +137,10 @@ class CompactionInput {
 class RowSetsInCompaction {
  public:
   void AddRowSet(const std::shared_ptr<RowSet> &rowset,
-                 const std::shared_ptr<boost::mutex::scoped_try_lock> &lock) {
-    CHECK(lock->owns_lock());
+                 std::unique_lock<std::mutex> lock) {
+    CHECK(lock.owns_lock());
 
-    locks_.push_back(lock);
+    locks_.push_back(std::move(lock));
     rowsets_.push_back(rowset);
   }
 
@@ -104,21 +163,44 @@ class RowSetsInCompaction {
   }
 
  private:
-  typedef vector<std::shared_ptr<boost::mutex::scoped_try_lock> > LockVector;
-
   RowSetVector rowsets_;
-  LockVector locks_;
+  std::vector<std::unique_lock<std::mutex>> locks_;
 };
 
 // One row yielded by CompactionInput::PrepareBlock.
+// Looks like this (assuming n UNDO records and m REDO records):
+// UNDO_n <- ... <- UNDO_1 <- UNDO_head <- row -> REDO_head -> REDO_1 -> ... -> REDO_m
 struct CompactionInputRow {
   // The compaction input base row.
   RowBlockRow row;
   // The current redo head for this row, may be null if the base row has no mutations.
-  const Mutation* redo_head;
+  Mutation* redo_head;
   // The current undo head for this row, may be null if all undos were garbage collected.
-  const Mutation* undo_head;
+  Mutation* undo_head;
+
+  // When the same row is found in multiple rowsets because of ghost rows, this points
+  // to one that older in terms of row history.
+  CompactionInputRow* previous_ghost;
+
+  CompactionInputRow() :
+      redo_head(nullptr),
+      undo_head(nullptr),
+      previous_ghost(nullptr) {}
 };
+
+// Function shared by flushes and compactions. Removes UNDO Mutations
+// considered "ancient" from the given CompactionInputRow, modifying the undo
+// mutation list in-place.
+// 'is_garbage_collected': Set to true if the row was marked as deleted prior
+// to the ancient history mark, with no reinsertions after that. In such a
+// case, all traces of the row should be removed from disk by the caller.
+//
+// This is supposed to be called after ApplyMutationsAndGenerateUndos() where REDOS
+// are transformed in UNDOs. There can be at most one REDO in 'redo_head', a DELETE.
+void RemoveAncientUndos(const HistoryGcOpts& history_gc_opts,
+                        Mutation** undo_head,
+                        const Mutation* redo_head,
+                        bool* is_garbage_collected);
 
 // Function shared by flushes, compactions and major delta compactions. Applies all the REDO
 // mutations from 'src_row' to the 'dst_row', and generates the related UNDO mutations. Some
@@ -128,18 +210,12 @@ struct CompactionInputRow {
 //  - Major delta compaction: Applies only the REDOs that have corresponding columns in the schema
 //                            belonging to 'dst_row'. Those that don't belong to that schema are
 //                            ignored.
-//
-// Currently, 'is_garbage_collected' is always false (KUDU-236).
 Status ApplyMutationsAndGenerateUndos(const MvccSnapshot& snap,
                                       const CompactionInputRow& src_row,
-                                      const Schema* base_schema,
                                       Mutation** new_undo_head,
                                       Mutation** new_redo_head,
                                       Arena* arena,
-                                      RowBlockRow* dst_row,
-                                      bool* is_garbage_collected,
-                                      uint64_t* num_rows_history_truncated);
-
+                                      RowBlockRow* dst_row);
 
 // Iterate through this compaction input, flushing all rows to the given RollingDiskRowSetWriter.
 // The 'snap' argument should match the MvccSnapshot used to create the compaction input.
@@ -148,6 +224,7 @@ Status ApplyMutationsAndGenerateUndos(const MvccSnapshot& snap,
 // no longer be useful.
 Status FlushCompactionInput(CompactionInput *input,
                             const MvccSnapshot &snap,
+                            const HistoryGcOpts& history_gc_opts,
                             RollingDiskRowSetWriter *out);
 
 // Iterate through this compaction input, finding any mutations which came between
@@ -160,15 +237,22 @@ Status FlushCompactionInput(CompactionInput *input,
 //
 // After return of this function, this CompactionInput object is "used up" and will
 // yield no further rows.
-Status ReupdateMissedDeltas(const string &tablet_name,
+Status ReupdateMissedDeltas(const std::string &tablet_name,
                             CompactionInput *input,
+                            const HistoryGcOpts& history_gc_opts,
                             const MvccSnapshot &snap_to_exclude,
                             const MvccSnapshot &snap_to_include,
                             const RowSetVector &output_rowsets);
 
 // Dump the given compaction input to 'lines' or LOG(INFO) if it is NULL.
 // This consumes all of the input in the compaction input.
-Status DebugDumpCompactionInput(CompactionInput *input, vector<string> *lines);
+Status DebugDumpCompactionInput(CompactionInput *input, std::vector<std::string> *lines);
+
+// Helper methods to print a row with full history.
+std::string RowToString(const RowBlockRow& row,
+                        const Mutation* redo_head,
+                        const Mutation* undo_head);
+std::string CompactionInputRowToString(const CompactionInputRow& input_row);
 
 } // namespace tablet
 } // namespace kudu

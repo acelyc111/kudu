@@ -19,25 +19,43 @@
 #ifndef KUDU_UTIL_TEST_UTIL_H
 #define KUDU_UTIL_TEST_UTIL_H
 
-#include <gtest/gtest.h>
+#include <sys/types.h>
+
+#include <cstdint>
+#include <functional>
 #include <string>
 
-#include "kudu/gutil/gscoped_ptr.h"
-#include "kudu/util/env.h"
-#include "kudu/util/test_macros.h"
+#include <gflags/gflags.h>
+#include <gtest/gtest.h>
+
+#include "kudu/gutil/port.h"
+#include "kudu/util/monotime.h"
+
+#define ASSERT_EVENTUALLY(expr) do { \
+  AssertEventually(expr); \
+  NO_PENDING_FATALS(); \
+} while (0)
 
 namespace kudu {
+
+class Env;
+class Status;
+
+extern const char* kInvalidPath;
 
 class KuduTest : public ::testing::Test {
  public:
   KuduTest();
 
-  // Env passed in from subclass, for tests that run in-memory.
-  explicit KuduTest(Env *env);
-
   virtual ~KuduTest();
 
   virtual void SetUp() OVERRIDE;
+
+  // Tests assume that they run with no outside-provided kerberos credentials, and if the
+  // user happened to have some credentials available they might fail due to being already
+  // kinitted to a different realm, etc. This function overrides the relevant environment
+  // variables so that we don't pick up the user's credentials.
+  static void OverrideKrb5Environment();
 
  protected:
   // Returns absolute path based on a unit test-specific work directory, given
@@ -45,10 +63,8 @@ class KuduTest : public ::testing::Test {
   // the test ends.
   std::string GetTestPath(const std::string& relative_path);
 
-  gscoped_ptr<Env> env_;
+  Env* env_;
   google::FlagSaver flag_saver_;  // Reset flags on every test.
-
- private:
   std::string test_dir_;
 };
 
@@ -76,8 +92,41 @@ int SeedRandom();
 // Return a per-test directory in which to store test data. Guaranteed to
 // return the same directory every time for a given unit test.
 //
-// May only be called from within a gtest unit test.
+// May only be called from within a gtest unit test. Prefer KuduTest::test_dir_
+// if a KuduTest instance is available.
 std::string GetTestDataDirectory();
+
+// Wait until 'f()' succeeds without adding any GTest 'fatal failures'.
+// For example:
+//
+//   AssertEventually([]() {
+//     ASSERT_GT(ReadValueOfMetric(), 10);
+//   });
+//
+// The function is run in a loop with optional back-off.
+//
+// To check whether AssertEventually() eventually succeeded, call
+// NO_PENDING_FATALS() afterward, or use ASSERT_EVENTUALLY() which performs
+// this check automatically.
+enum class AssertBackoff {
+  // Use exponential back-off while looping, capped at one second.
+  EXPONENTIAL,
+
+  // Sleep for a millisecond while looping.
+  NONE,
+};
+void AssertEventually(const std::function<void(void)>& f,
+                      const MonoDelta& timeout = MonoDelta::FromSeconds(30),
+                      AssertBackoff backoff = AssertBackoff::EXPONENTIAL);
+
+// Count the number of open file descriptors in use by this process.
+int CountOpenFds(Env* env);
+
+// Waits for the subprocess to bind to any listening TCP port, and returns the port.
+Status WaitForTcpBind(pid_t pid, uint16_t* port, MonoDelta timeout) WARN_UNUSED_RESULT;
+
+// Waits for the subprocess to bind to any listening UDP port, and returns the port.
+Status WaitForUdpBind(pid_t pid, uint16_t* port, MonoDelta timeout) WARN_UNUSED_RESULT;
 
 } // namespace kudu
 #endif

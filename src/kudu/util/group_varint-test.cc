@@ -15,12 +15,21 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <glog/logging.h>
-#include <gtest/gtest.h>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#ifdef NDEBUG
 #include <vector>
+#endif
 
+#include <gtest/gtest.h>
+
+#include "kudu/util/faststring.h"
 #include "kudu/util/group_varint-inl.h"
+#ifdef NDEBUG
 #include "kudu/util/stopwatch.h"
+#endif
 
 namespace kudu {
 namespace coding {
@@ -41,7 +50,7 @@ static void DoTestRoundTripGVI32(
   // so append some extra padding data to ensure that it's not reading
   // uninitialized memory. The SSE implementation uses 128-bit reads
   // and the non-SSE one uses 32-bit reads.
-  buf.append(string('x', use_sse ? 16 : 4));
+  buf.append(std::string(use_sse ? 16 : 4, 'x'));
 
   uint32_t ret[4];
 

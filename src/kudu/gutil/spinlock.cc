@@ -33,10 +33,10 @@
  */
 
 #include "kudu/gutil/spinlock.h"
-#include "kudu/gutil/synchronization_profiling.h"
 #include "kudu/gutil/spinlock_internal.h"
-#include "kudu/gutil/walltime.h"
+#include "kudu/gutil/synchronization_profiling.h"
 #include "kudu/gutil/sysinfo.h"   /* for NumCPUs() */
+#include "kudu/gutil/walltime.h"
 
 namespace base {
 
@@ -57,8 +57,8 @@ const base::LinkerInitialized SpinLock::LINKER_INITIALIZED =
     base::LINKER_INITIALIZED;
 
 namespace {
-struct SpinLock_InitHelper {
-  SpinLock_InitHelper() {
+struct SpinLockInitHelper {
+  SpinLockInitHelper() {
     // On multi-cpu machines, spin for longer before yielding
     // the processor or sleeping.  Reduces idle time significantly.
     if (base::NumCPUs() > 1) {
@@ -70,7 +70,7 @@ struct SpinLock_InitHelper {
 // Hook into global constructor execution:
 // We do not do adaptive spinning before that,
 // but nothing lock-intensive should be going on at that time.
-static SpinLock_InitHelper init_helper;
+static SpinLockInitHelper init_helper;
 
 }  // unnamed namespace
 

@@ -17,14 +17,18 @@
 #ifndef KUDU_TABLET_LAYER_TEST_BASE_H
 #define KUDU_TABLET_LAYER_TEST_BASE_H
 
-#include <glog/logging.h>
-#include <gtest/gtest.h>
+#include <unistd.h>
+
 #include <memory>
 #include <string>
-#include <unistd.h>
 #include <unordered_set>
 #include <vector>
 
+#include <glog/logging.h>
+#include <gtest/gtest.h>
+
+#include "kudu/clock/clock.h"
+#include "kudu/clock/logical_clock.h"
 #include "kudu/common/iterator.h"
 #include "kudu/common/rowblock.h"
 #include "kudu/common/scan_spec.h"
@@ -32,9 +36,9 @@
 #include "kudu/consensus/log_util.h"
 #include "kudu/consensus/opid_util.h"
 #include "kudu/gutil/stringprintf.h"
-#include "kudu/server/logical_clock.h"
 #include "kudu/tablet/diskrowset.h"
 #include "kudu/tablet/tablet-test-util.h"
+#include "kudu/tablet/tablet_mem_trackers.h"
 #include "kudu/util/env.h"
 #include "kudu/util/logging.h"
 #include "kudu/util/stopwatch.h"
@@ -49,16 +53,13 @@ DEFINE_int32(n_read_passes, 10,
 namespace kudu {
 namespace tablet {
 
-using std::unordered_set;
-
 class TestRowSet : public KuduRowSetTest {
  public:
   TestRowSet()
     : KuduRowSetTest(CreateTestSchema()),
       n_rows_(FLAGS_roundtrip_num_rows),
       op_id_(consensus::MaximumOpId()),
-      mvcc_(scoped_refptr<server::Clock>(
-          server::LogicalClock::CreateStartingAt(Timestamp::kInitialTimestamp))) {
+      clock_(clock::LogicalClock::CreateStartingAt(Timestamp::kInitialTimestamp)) {
     CHECK_GT(n_rows_, 0);
   }
 
@@ -71,10 +72,10 @@ class TestRowSet : public KuduRowSetTest {
   }
 
   static Schema CreateProjection(const Schema& schema,
-                                 const vector<string>& cols) {
-    vector<ColumnSchema> col_schemas;
-    vector<ColumnId> col_ids;
-    for (const string& col : cols) {
+                                 const std::vector<std::string>& cols) {
+    std::vector<ColumnSchema> col_schemas;
+    std::vector<ColumnId> col_ids;
+    for (const std::string& col : cols) {
       int idx = schema.find_column(col);
       CHECK_GE(idx, 0);
       col_schemas.push_back(schema.column(idx));
@@ -129,7 +130,7 @@ class TestRowSet : public KuduRowSetTest {
   // Picks some number of rows from the given rowset and updates
   // them. Stores the indexes of the updated rows in *updated.
   void UpdateExistingRows(DiskRowSet *rs, float update_ratio,
-                          unordered_set<uint32_t> *updated) {
+                          std::unordered_set<uint32_t> *updated) {
     int to_update = static_cast<int>(n_rows_ * update_ratio);
     faststring update_buf;
     RowChangeListEncoder update(&update_buf);
@@ -183,7 +184,7 @@ class TestRowSet : public KuduRowSetTest {
     RowSetKeyProbe probe(rb.row());
 
     ProbeStats stats;
-    ScopedTransaction tx(&mvcc_);
+    ScopedTransaction tx(&mvcc_, clock_->Now());
     tx.StartApplying();
     Status s = rs->MutateRow(tx.timestamp(), probe, mutation, op_id_, &stats, result);
     tx.Commit();
@@ -202,20 +203,20 @@ class TestRowSet : public KuduRowSetTest {
   // Updated rows (those whose index is present in 'updated') should have
   // a 'val' column equal to idx*5.
   // Other rows should have val column equal to idx.
-  void VerifyUpdates(const DiskRowSet &rs, const unordered_set<uint32_t> &updated) {
+  void VerifyUpdates(const DiskRowSet &rs, const std::unordered_set<uint32_t> &updated) {
     LOG_TIMING(INFO, "Reading updated rows with row iter") {
       VerifyUpdatesWithRowIter(rs, updated);
     }
   }
 
   void VerifyUpdatesWithRowIter(const DiskRowSet &rs,
-                                const unordered_set<uint32_t> &updated) {
+                                const std::unordered_set<uint32_t> &updated) {
     Schema proj_val = CreateProjection(schema_, { "val" });
     MvccSnapshot snap = MvccSnapshot::CreateSnapshotIncludingAllTransactions();
     gscoped_ptr<RowwiseIterator> row_iter;
-    CHECK_OK(rs.NewRowIterator(&proj_val, snap, &row_iter));
+    CHECK_OK(rs.NewRowIterator(&proj_val, snap, UNORDERED, &row_iter));
     CHECK_OK(row_iter->Init(NULL));
-    Arena arena(1024, 1024*1024);
+    Arena arena(1024);
     int batch_size = 10000;
     RowBlock dst(proj_val, batch_size, &arena);
 
@@ -230,7 +231,7 @@ class TestRowSet : public KuduRowSetTest {
   }
 
   void VerifyUpdatedBlock(const uint32_t *from_file, int start_row, size_t n_rows,
-                          const unordered_set<uint32_t> &updated) {
+                          const std::unordered_set<uint32_t> &updated) {
       for (int j = 0; j < n_rows; j++) {
         uint32_t idx_in_file = start_row + j;
         int expected;
@@ -250,21 +251,21 @@ class TestRowSet : public KuduRowSetTest {
   // Perform a random read of the given row key,
   // asserting that the result matches 'expected_val'.
   void VerifyRandomRead(const DiskRowSet& rs, const Slice& row_key,
-                        const string& expected_val) {
-    Arena arena(256, 1024);
+                        const std::string& expected_val) {
+    Arena arena(256);
+    AutoReleasePool pool;
     ScanSpec spec;
-    ColumnRangePredicate pred(schema_.column(0), &row_key, &row_key);
+    auto pred = ColumnPredicate::Equality(schema_.column(0), &row_key);
     spec.AddPredicate(pred);
-    RangePredicateEncoder enc(&schema_, &arena);
-    enc.EncodeRangePredicates(&spec, true);
+    spec.OptimizeScan(schema_, &arena, &pool, true);
 
     MvccSnapshot snap = MvccSnapshot::CreateSnapshotIncludingAllTransactions();
     gscoped_ptr<RowwiseIterator> row_iter;
-    CHECK_OK(rs.NewRowIterator(&schema_, snap, &row_iter));
+    CHECK_OK(rs.NewRowIterator(&schema_, snap, UNORDERED, &row_iter));
     CHECK_OK(row_iter->Init(&spec));
-    vector<string> rows;
+    std::vector<std::string> rows;
     IterateToStringList(row_iter.get(), &rows);
-    string result = JoinStrings(rows, "\n");
+    std::string result = JoinStrings(rows, "\n");
     ASSERT_EQ(expected_val, result);
   }
 
@@ -274,11 +275,11 @@ class TestRowSet : public KuduRowSetTest {
                                 int expected_rows, bool do_log = true) {
     MvccSnapshot snap = MvccSnapshot::CreateSnapshotIncludingAllTransactions();
     gscoped_ptr<RowwiseIterator> row_iter;
-    CHECK_OK(rs.NewRowIterator(&schema, snap, &row_iter));
+    CHECK_OK(rs.NewRowIterator(&schema, snap, UNORDERED, &row_iter));
     CHECK_OK(row_iter->Init(NULL));
 
     int batch_size = 1000;
-    Arena arena(1024, 1024*1024);
+    Arena arena(1024);
     RowBlock dst(schema, batch_size, &arena);
 
     int i = 0;
@@ -297,7 +298,7 @@ class TestRowSet : public KuduRowSetTest {
   }
 
   void BenchmarkIterationPerformance(const DiskRowSet &rs,
-                                     const string &log_message) {
+                                     const std::string &log_message) {
     Schema proj_val = CreateProjection(schema_, { "val" });
     LOG_TIMING(INFO, log_message + " (val column only)") {
       for (int i = 0; i < FLAGS_n_read_passes; i++) {
@@ -320,7 +321,10 @@ class TestRowSet : public KuduRowSetTest {
   }
 
   Status OpenTestRowSet(std::shared_ptr<DiskRowSet> *rowset) {
-    return DiskRowSet::Open(rowset_meta_, new log::LogAnchorRegistry(), rowset);
+    return DiskRowSet::Open(rowset_meta_,
+                            new log::LogAnchorRegistry(),
+                            TabletMemTrackers(),
+                            rowset);
   }
 
   void FormatKey(int i, char *buf, size_t buf_len) {
@@ -329,6 +333,7 @@ class TestRowSet : public KuduRowSetTest {
 
   size_t n_rows_;
   consensus::OpId op_id_; // Generally a "fake" OpId for these tests.
+  scoped_refptr<clock::Clock> clock_;
   MvccManager mvcc_;
 };
 

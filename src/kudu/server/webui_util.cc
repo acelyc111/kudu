@@ -17,30 +17,59 @@
 
 #include "kudu/server/webui_util.h"
 
+#include <sstream>
 #include <string>
 
+#include "kudu/common/common.pb.h"
 #include "kudu/common/schema.h"
-#include "kudu/gutil/strings/join.h"
-#include "kudu/gutil/map-util.h"
+#include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/strings/human_readable.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/server/monitored_task.h"
+#include "kudu/util/compression/compression.pb.h"
+#include "kudu/util/easy_json.h"
+#include "kudu/util/monotime.h"
 #include "kudu/util/url-coding.h"
 
+using std::string;
 using strings::Substitute;
 
 namespace kudu {
 
-void HtmlOutputSchemaTable(const Schema& schema,
-                           std::stringstream* output) {
-  *output << "<table class='table table-striped'>\n";
-  *output << "  <tr>"
-          << "<th>Column</th><th>ID</th><th>Type</th>"
-          << "<th>Read default</th><th>Write default</th>"
-          << "</tr>\n";
-
+void SchemaToJson(const Schema& schema, EasyJson* output) {
+  EasyJson schema_json = output->Set("columns", EasyJson::kArray);
   for (int i = 0; i < schema.num_columns(); i++) {
     const ColumnSchema& col = schema.column(i);
+    EasyJson col_json = schema_json.PushBack(EasyJson::kObject);
+    col_json["name"] = col.name();
+    col_json["is_key"] = schema.is_key_column(i);
+    col_json["id"] = Substitute("$0", schema.column_id(i));
+    col_json["type"] = col.TypeToString();
+    const ColumnStorageAttributes& attrs = col.attributes();
+    col_json["encoding"] = EncodingType_Name(attrs.encoding);
+    col_json["compression"] = CompressionType_Name(attrs.compression);
+    col_json["read_default"] = col.has_read_default() ?
+                                   col.Stringify(col.read_default_value()) : "-";
+    col_json["write_default"] = col.has_write_default() ?
+                                    col.Stringify(col.write_default_value()) : "-";
+  }
+}
+
+void HtmlOutputSchemaTable(const Schema& schema,
+                           std::ostringstream* output) {
+  *output << "<table class='table table-striped'>\n";
+  *output << "  <thead><tr>"
+          << "<th>Column</th><th>ID</th><th>Type</th>"
+          << "<th>Encoding</th><th>Compression</th>"
+          << "<th>Read default</th><th>Write default</th>"
+          << "</tr></thead>\n";
+  *output << "<tbody>";
+  for (int i = 0; i < schema.num_columns(); i++) {
+    const ColumnSchema& col = schema.column(i);
+    const string& html_escaped_col_name = EscapeForHtmlToString(col.name());
+    const string& col_name = schema.is_key_column(i) ?
+                                 Substitute("<u>$0</u>", html_escaped_col_name) :
+                                 html_escaped_col_name;
     string read_default = "-";
     if (col.has_read_default()) {
       read_default = col.Stringify(col.read_default_value());
@@ -49,129 +78,53 @@ void HtmlOutputSchemaTable(const Schema& schema,
     if (col.has_write_default()) {
       write_default = col.Stringify(col.write_default_value());
     }
-    *output << Substitute("<tr><th>$0</th><td>$1</td><td>$2</td><td>$3</td><td>$4</td></tr>\n",
-                          EscapeForHtmlToString(col.name()),
+    const ColumnStorageAttributes& attrs = col.attributes();
+    const string& encoding = EncodingType_Name(attrs.encoding);
+    const string& compression = CompressionType_Name(attrs.compression);
+    *output << Substitute("<tr><th>$0</th><td>$1</td><td>$2</td><td>$3</td>"
+                          "<td>$4</td><td>$5</td><td>$6</td></tr>\n",
+                          col_name,
                           schema.column_id(i),
                           col.TypeToString(),
+                          EscapeForHtmlToString(encoding),
+                          EscapeForHtmlToString(compression),
                           EscapeForHtmlToString(read_default),
                           EscapeForHtmlToString(write_default));
   }
-  *output << "</table>\n";
+  *output << "</tbody></table>\n";
 }
 
-void HtmlOutputImpalaSchema(const std::string& table_name,
-                            const Schema& schema,
-                            const string& master_addresses,
-                            std::stringstream* output) {
-  *output << "<code><pre>\n";
-
-  // Escape table and column names with ` to avoid conflicts with Impala reserved words.
-  *output << "CREATE EXTERNAL TABLE " << EscapeForHtmlToString("`" + table_name + "`")
-          << " (\n";
-
-  vector<string> key_columns;
-
-  for (int i = 0; i < schema.num_columns(); i++) {
-    const ColumnSchema& col = schema.column(i);
-
-    *output << EscapeForHtmlToString("`" + col.name() + "`") << " ";
-    switch (col.type_info()->type()) {
-      case STRING:
-        *output << "STRING";
-        break;
-      case BINARY:
-        *output << "BINARY";
-        break;
-      case UINT8:
-      case INT8:
-        *output << "TINYINT";
-        break;
-      case UINT16:
-      case INT16:
-        *output << "SMALLINT";
-        break;
-      case UINT32:
-      case INT32:
-        *output << "INT";
-        break;
-      case UINT64:
-      case INT64:
-        *output << "BIGINT";
-        break;
-      case TIMESTAMP:
-        *output << "TIMESTAMP";
-        break;
-      case FLOAT:
-        *output << "FLOAT";
-        break;
-      case DOUBLE:
-        *output << "DOUBLE";
-        break;
-      default:
-        *output << "[unsupported type " << col.type_info()->name() << "!]";
-        break;
-    }
-    if (i < schema.num_columns() - 1) {
-      *output << ",";
-    }
-    *output << "\n";
-
-    if (schema.is_key_column(i)) {
-      key_columns.push_back(col.name());
-    }
-  }
-  *output << ")\n";
-
-  *output << "TBLPROPERTIES(\n";
-  *output << "  'storage_handler' = 'com.cloudera.kudu.hive.KuduStorageHandler',\n";
-  *output << "  'kudu.table_name' = '" << table_name << "',\n";
-  *output << "  'kudu.master_addresses' = '" << master_addresses << "',\n";
-  *output << "  'kudu.key_columns' = '" << JoinElements(key_columns, ", ") << "'\n";
-  *output << ");\n";
-  *output << "</pre></code>\n";
-}
-
-void HtmlOutputTaskList(const std::vector<scoped_refptr<MonitoredTask> >& tasks,
-                        std::stringstream* output) {
-  *output << "<table class='table table-striped'>\n";
-  *output << "  <tr><th>Task Name</th><th>State</th><th>Time</th><th>Description</th></tr>\n";
+void TaskListToJson(const std::vector<scoped_refptr<MonitoredTask> >& tasks, EasyJson* output) {
+  EasyJson tasks_json = output->Set("tasks", EasyJson::kArray);
   for (const scoped_refptr<MonitoredTask>& task : tasks) {
-    string state;
+    EasyJson task_json = tasks_json.PushBack(EasyJson::kObject);
+    task_json["name"] = task->type_name();
     switch (task->state()) {
       case MonitoredTask::kStatePreparing:
-        state = "Preparing";
+        task_json["state"] = "Preparing";
         break;
       case MonitoredTask::kStateRunning:
-        state = "Running";
+        task_json["state"] = "Running";
         break;
       case MonitoredTask::kStateComplete:
-        state = "Complete";
+        task_json["state"] = "Complete";
         break;
       case MonitoredTask::kStateFailed:
-        state = "Failed";
+        task_json["state"] = "Failed";
         break;
       case MonitoredTask::kStateAborted:
-        state = "Aborted";
+        task_json["state"] = "Aborted";
         break;
     }
-
     double running_secs = 0;
     if (task->completion_timestamp().Initialized()) {
-      running_secs = task->completion_timestamp().GetDeltaSince(
-        task->start_timestamp()).ToSeconds();
+      running_secs =
+          (task->completion_timestamp() - task->start_timestamp()).ToSeconds();
     } else if (task->start_timestamp().Initialized()) {
-      running_secs = MonoTime::Now(MonoTime::FINE).GetDeltaSince(
-        task->start_timestamp()).ToSeconds();
+      running_secs = (MonoTime::Now() - task->start_timestamp()).ToSeconds();
     }
-
-    *output << Substitute(
-        "<tr><th>$0</th><td>$1</td><td>$2</td><td>$3</td></tr>\n",
-        EscapeForHtmlToString(task->type_name()),
-        EscapeForHtmlToString(state),
-        EscapeForHtmlToString(HumanReadableElapsedTime::ToShortString(running_secs)),
-        EscapeForHtmlToString(task->description()));
+    task_json["time"] = HumanReadableElapsedTime::ToShortString(running_secs);
+    task_json["description"] = task->description();
   }
-  *output << "</table>\n";
 }
-
 } // namespace kudu

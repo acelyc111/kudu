@@ -1,13 +1,10 @@
 // Copyright 2008 Google Inc.  All rights reserved.
 
-#include <string.h>
+#include <cstring>
 #include <string>
-using std::string;
 
-#include "kudu/gutil/basictypes.h"
 #include "kudu/gutil/strings/numbers.h"
 #include "kudu/gutil/strings/stringpiece.h"
-
 
 #ifndef STRINGS_SUBSTITUTE_H_
 #define STRINGS_SUBSTITUTE_H_
@@ -75,7 +72,7 @@ class SubstituteArg {
   // object.
   inline SubstituteArg(const char* value)  // NOLINT(runtime/explicit)
     : text_(value), size_(value == NULL ? 0 : strlen(text_)) {}
-  inline SubstituteArg(const string& value)  // NOLINT(runtime/explicit)
+  inline SubstituteArg(const std::string& value)  // NOLINT(runtime/explicit)
     : text_(value.data()), size_(value.size()) {}
   inline SubstituteArg(const StringPiece& value)  // NOLINT(runtime/explicit)
     : text_(value.data()), size_(value.size()) {}
@@ -116,6 +113,12 @@ class SubstituteArg {
   inline SubstituteArg(unsigned long long value)  // NOLINT(runtime/explicit)
     : text_(scratch_),
       size_(FastUInt64ToBufferLeft(value, scratch_) - scratch_) {}
+  inline SubstituteArg(__int128 value)  // NOLINT(runtime/explicit)
+      : text_(scratch_),
+        size_(FastInt64ToBufferLeft(value, scratch_) - scratch_) {}
+  inline SubstituteArg(unsigned __int128 value)  // NOLINT(runtime/explicit)
+      : text_(scratch_),
+        size_(FastUInt64ToBufferLeft(value, scratch_) - scratch_) {}
   inline SubstituteArg(float value)  // NOLINT(runtime/explicit)
     : text_(FloatToBuffer(value, scratch_)), size_(strlen(text_)) {}
   inline SubstituteArg(double value)  // NOLINT(runtime/explicit)
@@ -131,7 +134,7 @@ class SubstituteArg {
   inline int size() const { return size_; }
 
   // Indicates that no argument was given.
-  static const SubstituteArg NoArg;
+  static const SubstituteArg kNoArg;
 
  private:
   inline SubstituteArg() : text_(NULL), size_(-1) {}
@@ -157,31 +160,31 @@ char* SubstituteToBuffer(StringPiece format,
 }  // namespace internal
 
 void SubstituteAndAppend(
-  string* output, StringPiece format,
-  const internal::SubstituteArg& arg0 = internal::SubstituteArg::NoArg,
-  const internal::SubstituteArg& arg1 = internal::SubstituteArg::NoArg,
-  const internal::SubstituteArg& arg2 = internal::SubstituteArg::NoArg,
-  const internal::SubstituteArg& arg3 = internal::SubstituteArg::NoArg,
-  const internal::SubstituteArg& arg4 = internal::SubstituteArg::NoArg,
-  const internal::SubstituteArg& arg5 = internal::SubstituteArg::NoArg,
-  const internal::SubstituteArg& arg6 = internal::SubstituteArg::NoArg,
-  const internal::SubstituteArg& arg7 = internal::SubstituteArg::NoArg,
-  const internal::SubstituteArg& arg8 = internal::SubstituteArg::NoArg,
-  const internal::SubstituteArg& arg9 = internal::SubstituteArg::NoArg);
+  std::string* output, StringPiece format,
+  const internal::SubstituteArg& arg0 = internal::SubstituteArg::kNoArg,
+  const internal::SubstituteArg& arg1 = internal::SubstituteArg::kNoArg,
+  const internal::SubstituteArg& arg2 = internal::SubstituteArg::kNoArg,
+  const internal::SubstituteArg& arg3 = internal::SubstituteArg::kNoArg,
+  const internal::SubstituteArg& arg4 = internal::SubstituteArg::kNoArg,
+  const internal::SubstituteArg& arg5 = internal::SubstituteArg::kNoArg,
+  const internal::SubstituteArg& arg6 = internal::SubstituteArg::kNoArg,
+  const internal::SubstituteArg& arg7 = internal::SubstituteArg::kNoArg,
+  const internal::SubstituteArg& arg8 = internal::SubstituteArg::kNoArg,
+  const internal::SubstituteArg& arg9 = internal::SubstituteArg::kNoArg);
 
-inline string Substitute(
+inline std::string Substitute(
   StringPiece format,
-  const internal::SubstituteArg& arg0 = internal::SubstituteArg::NoArg,
-  const internal::SubstituteArg& arg1 = internal::SubstituteArg::NoArg,
-  const internal::SubstituteArg& arg2 = internal::SubstituteArg::NoArg,
-  const internal::SubstituteArg& arg3 = internal::SubstituteArg::NoArg,
-  const internal::SubstituteArg& arg4 = internal::SubstituteArg::NoArg,
-  const internal::SubstituteArg& arg5 = internal::SubstituteArg::NoArg,
-  const internal::SubstituteArg& arg6 = internal::SubstituteArg::NoArg,
-  const internal::SubstituteArg& arg7 = internal::SubstituteArg::NoArg,
-  const internal::SubstituteArg& arg8 = internal::SubstituteArg::NoArg,
-  const internal::SubstituteArg& arg9 = internal::SubstituteArg::NoArg) {
-  string result;
+  const internal::SubstituteArg& arg0 = internal::SubstituteArg::kNoArg,
+  const internal::SubstituteArg& arg1 = internal::SubstituteArg::kNoArg,
+  const internal::SubstituteArg& arg2 = internal::SubstituteArg::kNoArg,
+  const internal::SubstituteArg& arg3 = internal::SubstituteArg::kNoArg,
+  const internal::SubstituteArg& arg4 = internal::SubstituteArg::kNoArg,
+  const internal::SubstituteArg& arg5 = internal::SubstituteArg::kNoArg,
+  const internal::SubstituteArg& arg6 = internal::SubstituteArg::kNoArg,
+  const internal::SubstituteArg& arg7 = internal::SubstituteArg::kNoArg,
+  const internal::SubstituteArg& arg8 = internal::SubstituteArg::kNoArg,
+  const internal::SubstituteArg& arg9 = internal::SubstituteArg::kNoArg) {
+  std::string result;
   SubstituteAndAppend(&result, format, arg0, arg1, arg2, arg3, arg4,
                                        arg5, arg6, arg7, arg8, arg9);
   return result;

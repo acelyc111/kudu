@@ -39,6 +39,16 @@ METRIC_DEFINE_counter(server, block_manager_total_readable_blocks,
                       kudu::MetricUnit::kBlocks,
                       "Number of data blocks opened for reading since service start");
 
+METRIC_DEFINE_counter(server, block_manager_total_blocks_created,
+                      "Data Blocks Created",
+                      kudu::MetricUnit::kBlocks,
+                      "Number of data blocks that were created since service start");
+
+METRIC_DEFINE_counter(server, block_manager_total_blocks_deleted,
+                      "Data Blocks Deleted",
+                      kudu::MetricUnit::kBlocks,
+                      "Number of data blocks that were deleted since service start");
+
 METRIC_DEFINE_counter(server, block_manager_total_bytes_written,
                       "Block Data Bytes Written",
                       kudu::MetricUnit::kBytes,
@@ -48,6 +58,11 @@ METRIC_DEFINE_counter(server, block_manager_total_bytes_read,
                       "Block Data Bytes Read",
                       kudu::MetricUnit::kBytes,
                       "Number of bytes of block data read since service start");
+
+METRIC_DEFINE_counter(server, block_manager_total_disk_sync,
+                      "Block Data Disk Synchronization Count",
+                      kudu::MetricUnit::kBlocks,
+                      "Number of disk synchronizations of block data since service start");
 
 namespace kudu {
 namespace fs {
@@ -60,8 +75,11 @@ BlockManagerMetrics::BlockManagerMetrics(const scoped_refptr<MetricEntity>& enti
     GINIT(blocks_open_writing),
     MINIT(total_readable_blocks),
     MINIT(total_writable_blocks),
+    MINIT(total_blocks_created),
+    MINIT(total_blocks_deleted),
     MINIT(total_bytes_read),
-    MINIT(total_bytes_written) {
+    MINIT(total_bytes_written),
+    MINIT(total_disk_sync) {
 }
 #undef GINIT
 #undef MINIT

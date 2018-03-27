@@ -18,10 +18,10 @@
 #include "kudu/server/server_base_options.h"
 
 #include <gflags/gflags.h>
-#include "kudu/util/flag_tags.h"
 
-namespace kudu {
-namespace server {
+#include "kudu/gutil/macros.h"
+#include "kudu/util/flag_tags.h"
+#include "kudu/util/env.h"
 
 DEFINE_string(server_dump_info_path, "",
               "Path into which the server information will be "
@@ -34,12 +34,15 @@ DEFINE_string(server_dump_info_format, "json",
 TAG_FLAG(server_dump_info_path, hidden);
 TAG_FLAG(server_dump_info_format, hidden);
 
-DEFINE_int32(metrics_log_interval_ms, 0,
+DEFINE_int32(metrics_log_interval_ms, 60000,
              "Interval (in milliseconds) at which the server will dump its "
              "metrics to a local log file. The log files are located in the same "
              "directory as specified by the -log_dir flag. If this is not a positive "
              "value, then metrics logging will be disabled.");
 TAG_FLAG(metrics_log_interval_ms, advanced);
+
+namespace kudu {
+namespace server {
 
 ServerBaseOptions::ServerBaseOptions()
   : env(Env::Default()),

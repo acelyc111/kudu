@@ -15,16 +15,24 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include "kudu/util/hexdump.h"
+
 #include <algorithm>
+#include <cctype>
+#include <cstdint>
 #include <string>
 
 #include "kudu/gutil/stringprintf.h"
-#include "kudu/util/hexdump.h"
+#include "kudu/util/logging.h"
 #include "kudu/util/slice.h"
 
 namespace kudu {
 
 std::string HexDump(const Slice &slice) {
+  if (KUDU_SHOULD_REDACT()) {
+    return kRedactionMessage;
+  }
+
   std::string output;
   output.reserve(slice.size() * 5);
 

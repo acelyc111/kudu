@@ -18,18 +18,26 @@
 #ifndef KUDU_COMMON_KEYENCODER_H
 #define KUDU_COMMON_KEYENCODER_H
 
-#include <arpa/inet.h>
-#include <climits>
-#include <nmmintrin.h>
-#include <string.h>
+#include <emmintrin.h>
+#include <smmintrin.h>
 
+#include <climits>
+#include <cstdint>
+#include <cstring>
+#include <ostream>
+
+#include <glog/logging.h>
+
+#include "kudu/common/common.pb.h"
 #include "kudu/common/types.h"
 #include "kudu/gutil/endian.h"
 #include "kudu/gutil/macros.h"
 #include "kudu/gutil/mathlimits.h"
-#include "kudu/gutil/strings/memutil.h"
+#include "kudu/gutil/port.h"
 #include "kudu/gutil/type_traits.h"
+#include "kudu/util/logging.h"
 #include "kudu/util/memory/arena.h"
+#include "kudu/util/slice.h"
 #include "kudu/util/status.h"
 
 // The SSE-based encoding is not yet working. Don't define this!
@@ -65,7 +73,8 @@ struct KeyEncoderTraits<Type,
       case 2: return BigEndian::FromHost16(x);
       case 4: return BigEndian::FromHost32(x);
       case 8: return BigEndian::FromHost64(x);
-      default: LOG(FATAL) << "bad type: " << x;
+      case 16: return BigEndian::FromHost128(x);
+      default: LOG(FATAL) << "bad type size of: " << sizeof(x);
     }
     return 0;
   }
@@ -81,7 +90,7 @@ struct KeyEncoderTraits<Type,
 
     // To encode signed integers, swap the MSB.
     if (MathLimits<cpp_type>::kIsSigned) {
-      key_unsigned ^= 1UL << (sizeof(key_unsigned) * CHAR_BIT - 1);
+      key_unsigned ^= static_cast<unsigned_cpp_type>(1) << (sizeof(key_unsigned) * CHAR_BIT - 1);
     }
     key_unsigned = SwapEndian(key_unsigned);
     dst->append(reinterpret_cast<const char*>(&key_unsigned), sizeof(key_unsigned));
@@ -92,18 +101,18 @@ struct KeyEncoderTraits<Type,
   }
 
   static Status DecodeKeyPortion(Slice* encoded_key,
-                                 bool is_last,
-                                 Arena* arena,
+                                 bool /*is_last*/,
+                                 Arena* /*arena*/,
                                  uint8_t* cell_ptr) {
     if (PREDICT_FALSE(encoded_key->size() < sizeof(cpp_type))) {
-      return Status::InvalidArgument("key too short", encoded_key->ToDebugString());
+      return Status::InvalidArgument("key too short", KUDU_REDACT(encoded_key->ToDebugString()));
     }
 
     unsigned_cpp_type val;
     memcpy(&val,  encoded_key->data(), sizeof(cpp_type));
     val = SwapEndian(val);
     if (MathLimits<cpp_type>::kIsSigned) {
-      val ^= 1UL << (sizeof(val) * CHAR_BIT - 1);
+      val ^= static_cast<unsigned_cpp_type>(1) << (sizeof(val) * CHAR_BIT - 1);
     }
     memcpy(cell_ptr, &val, sizeof(val));
     encoded_key->remove_prefix(sizeof(cpp_type));
@@ -205,7 +214,7 @@ struct KeyEncoderTraits<BINARY, Buffer> {
                                                       "\0\0", 2));
     if (PREDICT_FALSE(separator == NULL)) {
       return Status::InvalidArgument("Missing separator after composite key string component",
-                                     encoded_key->ToDebugString());
+                                     KUDU_REDACT(encoded_key->ToDebugString()));
     }
 
     uint8_t* src = encoded_key->mutable_data();

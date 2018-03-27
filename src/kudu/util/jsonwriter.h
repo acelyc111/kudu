@@ -17,17 +17,19 @@
 #ifndef KUDU_UTIL_JSONWRITER_H
 #define KUDU_UTIL_JSONWRITER_H
 
-#include <inttypes.h>
-
+#include <cstddef>
+#include <cstdint>
+#include <iosfwd>
+#include <memory>
 #include <string>
 
-#include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/macros.h"
 
 namespace google {
 namespace protobuf {
-class Message;
 class FieldDescriptor;
+class Message;
+class Reflection;
 } // namespace protobuf
 } // namespace google
 
@@ -52,7 +54,7 @@ class JsonWriter {
     COMPACT
   };
 
-  JsonWriter(std::stringstream* out, Mode mode);
+  JsonWriter(std::ostringstream* out, Mode mode);
   ~JsonWriter();
 
   void Null();
@@ -66,6 +68,8 @@ class JsonWriter {
   void String(const char* str);
   void String(const std::string& str);
 
+  // Convert the given protobuf message to JSON.
+  // The output respects redaction for 'string' and 'bytes' fields.
   void Protobuf(const google::protobuf::Message& message);
 
   template<typename T>
@@ -82,12 +86,14 @@ class JsonWriter {
 
  private:
   void ProtobufField(const google::protobuf::Message& pb,
+                     const google::protobuf::Reflection* reflection,
                      const google::protobuf::FieldDescriptor* field);
   void ProtobufRepeatedField(const google::protobuf::Message& pb,
+                             const google::protobuf::Reflection* reflection,
                              const google::protobuf::FieldDescriptor* field,
                              int index);
 
-  gscoped_ptr<JsonWriterIf> impl_;
+  std::unique_ptr<JsonWriterIf> impl_;
   DISALLOW_COPY_AND_ASSIGN(JsonWriter);
 };
 

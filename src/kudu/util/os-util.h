@@ -23,9 +23,20 @@
 #ifndef KUDU_UTIL_OS_UTIL_H
 #define KUDU_UTIL_OS_UTIL_H
 
+#include <errno.h>
+
+#include <cstdint>
 #include <string>
+#include <type_traits>
 
 #include "kudu/util/status.h"
+
+// Retry on EINTR for functions like read() that return -1 on error.
+#define RETRY_ON_EINTR(err, expr) do { \
+  static_assert(std::is_signed<decltype(err)>::value, \
+                #err " must be a signed integer"); \
+  (err) = (expr); \
+} while ((err) == -1 && errno == EINTR)
 
 namespace kudu {
 
@@ -54,11 +65,11 @@ Status ParseStat(const std::string&buffer, std::string* name, ThreadStats* stats
 // unrecognised format, or if the kernel version is not modern enough.
 Status GetThreadStats(int64_t tid, ThreadStats* stats);
 
-// Runs a shell command. Returns false if there was any error (either failure to launch or
-// non-0 exit code), and true otherwise. *msg is set to an error message including the OS
-// error string, if any, and the first 1k of output if there was any error, or just the
-// first 1k of output otherwise.
-bool RunShellProcess(const std::string& cmd, std::string* msg);
+// Disable core dumps for this process.
+//
+// This is useful particularly in tests where we have injected failures and don't
+// want to generate a core dump from an "expected" crash.
+void DisableCoreDumps();
 
 } // namespace kudu
 

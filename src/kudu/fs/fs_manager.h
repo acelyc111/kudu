@@ -15,69 +15,103 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef KUDU_FS_FS_MANAGER_H
-#define KUDU_FS_FS_MANAGER_H
+#pragma once
 
-#include <gtest/gtest_prod.h>
+#include <cstdint>
 #include <iosfwd>
 #include <memory>
-#include <set>
 #include <string>
 #include <vector>
 
-#include "kudu/gutil/gscoped_ptr.h"
+#include <boost/optional/optional.hpp>
+#include <gflags/gflags_declare.h>
+#include <glog/logging.h>
+#include <gtest/gtest_prod.h>
+
+#include "kudu/fs/data_dirs.h"
+#include "kudu/fs/error_manager.h"
+#include "kudu/gutil/macros.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/util/env.h"
+#include "kudu/util/metrics.h"
 #include "kudu/util/path_util.h"
+#include "kudu/util/status.h"
 
 DECLARE_bool(enable_data_block_fsync);
 
-namespace google {
-namespace protobuf {
-class Message;
-} // namespace protobuf
-} // namespace google
-
 namespace kudu {
-
-class MemTracker;
-class MetricEntity;
-
-namespace fs {
-class BlockManager;
-class ReadableBlock;
-class WritableBlock;
-} // namespace fs
-
-namespace itest {
-class ExternalMiniClusterFsInspector;
-}
 
 class BlockId;
 class InstanceMetadataPB;
+class MemTracker;
+
+namespace fs {
+
+class BlockManager;
+class ReadableBlock;
+class WritableBlock;
+struct FsReport;
+
+struct CreateBlockOptions;
+} // namespace fs
+
+namespace itest {
+class MiniClusterFsInspector;
+} // namespace itest
+
+namespace tserver {
+class MiniTabletServerTest_TestFsLayoutEndToEnd_Test;
+} // namespace tserver
 
 struct FsManagerOpts {
+  // Creates a new FsManagerOpts with default values.
   FsManagerOpts();
-  ~FsManagerOpts();
 
-  // The entity under which all metrics should be grouped. If NULL, metrics
+  // Creates a new FsManagerOpts with default values except 'wal_root' and
+  // 'data_roots', which are both initialized to 'root'.
+  //
+  // Should only be used in unit tests.
+  explicit FsManagerOpts(const std::string& root);
+
+  // The entity under which all metrics should be grouped. If null, metrics
   // will not be produced.
   //
-  // Defaults to NULL.
+  // Defaults to null.
   scoped_refptr<MetricEntity> metric_entity;
 
   // The memory tracker under which all new memory trackers will be parented.
-  // If NULL, new memory trackers will be parented to the root tracker.
+  // If null, new memory trackers will be parented to the root tracker.
+  //
+  // Defaults to null.
   std::shared_ptr<MemTracker> parent_mem_tracker;
 
-  // The path where WALs will be stored. Cannot be empty.
-  std::string wal_path;
+  // The directory root where WALs will be stored. Cannot be empty.
+  std::string wal_root;
 
-  // The paths where data blocks will be stored. Cannot be empty.
-  std::vector<std::string> data_paths;
+  // The directory root where data blocks will be stored. If empty, Kudu will
+  // use the WAL root.
+  std::vector<std::string> data_roots;
 
-  // Whether or not read-write operations should be allowed. Defaults to false.
+  // The directory root where metadata will be stored. If empty, Kudu will use
+  // the WAL root, or the first configured data root if metadata already exists
+  // in it from a previous deployment (the only option in Kudu 1.6 and below
+  // was to use the first data root).
+  std::string metadata_root;
+
+  // The block manager type. Must be either "file" or "log".
+  //
+  // Defaults to the value of FLAGS_block_manager.
+  std::string block_manager_type;
+
+  // Whether or not read-write operations should be allowed.
+  //
+  // Defaults to false.
   bool read_only;
+
+  // The behavior to use when comparing 'data_roots' to the on-disk path sets.
+  //
+  // Defaults to ENFORCE_CONSISTENCY.
+  fs::ConsistencyCheckBehavior consistency_check;
 };
 
 // FsManager provides helpers to read data and metadata files,
@@ -98,19 +132,41 @@ class FsManager {
   // Only for unit tests.
   FsManager(Env* env, const std::string& root_path);
 
-  FsManager(Env* env, const FsManagerOpts& opts);
+  FsManager(Env* env, FsManagerOpts opts);
   ~FsManager();
 
-  // Initialize and load the basic filesystem metadata.
-  // If the file system has not been initialized, returns NotFound.
-  // In that case, CreateInitialFileSystemLayout may be used to initialize
-  // the on-disk structures.
-  Status Open();
+  // Initialize and load the basic filesystem metadata, checking it for
+  // inconsistencies. If found, and if the FsManager was not constructed in
+  // read-only mode, an attempt will be made to repair them.
+  //
+  // If 'report' is not null, it will be populated with the results of the
+  // check (and repair, if applicable); otherwise, the results of the check
+  // will be logged and the presence of fatal inconsistencies will manifest as
+  // a returned error.
+  //
+  // If the filesystem has not been initialized, returns NotFound. In that
+  // case, CreateInitialFileSystemLayout() may be used to initialize the
+  // on-disk and in-memory structures.
+  Status Open(fs::FsReport* report = nullptr);
 
-  // Create the initial filesystem layout.
+  // Registers an error-handling callback with the FsErrorManager.
+  //
+  // If a disk failure is detected, this callback will be invoked with the
+  // relevant DataDir's UUID as its input parameter.
+  void SetErrorNotificationCb(fs::ErrorHandlerType e, fs::ErrorNotificationCb cb);
+
+  // Unregisters the error-handling callback with the FsErrorManager.
+  //
+  // This must be called before the callback's callee is destroyed. Calls to
+  // this are idempotent and are safe even if a callback has not been set.
+  void UnsetErrorNotificationCb(fs::ErrorHandlerType e);
+
+  // Create the initial filesystem layout. If 'uuid' is provided, uses it as
+  // uuid of the filesystem. Otherwise generates one at random.
   //
   // Returns an error if the file system is already initialized.
-  Status CreateInitialFileSystemLayout();
+  Status CreateInitialFileSystemLayout(
+      boost::optional<std::string> uuid = boost::none);
 
   void DumpFileSystemTree(std::ostream& out);
 
@@ -122,13 +178,14 @@ class FsManager {
   //  Data read/write interfaces
   // ==========================================================================
 
-  // Creates a new anonymous block.
+  // Creates a new block based on the options specified in 'opts'.
   //
   // Block will be synced on close.
-  Status CreateNewBlock(gscoped_ptr<fs::WritableBlock>* block);
+  Status CreateNewBlock(const fs::CreateBlockOptions& opts,
+                        std::unique_ptr<fs::WritableBlock>* block);
 
   Status OpenBlock(const BlockId& block_id,
-                   gscoped_ptr<fs::ReadableBlock>* block);
+                   std::unique_ptr<fs::ReadableBlock>* block);
 
   Status DeleteBlock(const BlockId& block_id);
 
@@ -141,7 +198,7 @@ class FsManager {
 
   std::string GetWalsRootDir() const {
     DCHECK(initted_);
-    return JoinPathSegments(canonicalized_wal_fs_root_, kWalDirName);
+    return JoinPathSegments(canonicalized_wal_fs_root_.path, kWalDirName);
   }
 
   std::string GetTabletWalDir(const std::string& tablet_id) const {
@@ -168,7 +225,7 @@ class FsManager {
   // Return the directory where the consensus metadata is stored.
   std::string GetConsensusMetadataDir() const {
     DCHECK(initted_);
-    return JoinPathSegments(canonicalized_metadata_fs_root_, kConsensusMetadataDirName);
+    return JoinPathSegments(canonicalized_metadata_fs_root_.path, kConsensusMetadataDirName);
   }
 
   // Return the path where ConsensusMetadataPB is stored.
@@ -176,10 +233,10 @@ class FsManager {
     return JoinPathSegments(GetConsensusMetadataDir(), tablet_id);
   }
 
-  Env *env() { return env_; }
+  Env* env() { return env_; }
 
   bool read_only() const {
-    return read_only_;
+    return opts_.read_only;
   }
 
   // ==========================================================================
@@ -193,7 +250,9 @@ class FsManager {
     return env_->GetChildren(path, objects);
   }
 
-  Status CreateDirIfMissing(const std::string& path, bool* created = NULL);
+  fs::DataDirManager* dd_manager() const {
+    return dd_manager_.get();
+  }
 
   fs::BlockManager* block_manager() {
     return block_manager_.get();
@@ -201,9 +260,14 @@ class FsManager {
 
  private:
   FRIEND_TEST(FsManagerTestBase, TestDuplicatePaths);
-  friend class itest::ExternalMiniClusterFsInspector; // for access to directory names
+  FRIEND_TEST(FsManagerTestBase, TestMetadataDirInWALRoot);
+  FRIEND_TEST(FsManagerTestBase, TestMetadataDirInDataRoot);
+  FRIEND_TEST(FsManagerTestBase, TestIsolatedMetadataDir);
+  FRIEND_TEST(tserver::MiniTabletServerTest, TestFsLayoutEndToEnd);
+  friend class itest::MiniClusterFsInspector; // for access to directory names
 
   // Initializes, sanitizes, and canonicalizes the filesystem roots.
+  // Determines the correct filesystem root for tablet-specific metadata.
   Status Init();
 
   // Select and create an instance of the appropriate block manager.
@@ -211,19 +275,26 @@ class FsManager {
   // Does not actually perform any on-disk operations.
   void InitBlockManager();
 
+  // Creates filesystem roots from 'canonicalized_roots', writing new on-disk
+  // instances using 'metadata'.
+  //
+  //
+  // All created directories and files will be appended to 'created_dirs' and
+  // 'created_files' respectively. It is the responsibility of the caller to
+  // synchronize the directories containing these newly created file objects.
+  Status CreateFileSystemRoots(CanonicalizedRootsList canonicalized_roots,
+                               const InstanceMetadataPB& metadata,
+                               std::vector<std::string>* created_dirs,
+                               std::vector<std::string>* created_files);
+
   // Create a new InstanceMetadataPB.
-  void CreateInstanceMetadata(InstanceMetadataPB* metadata);
+  Status CreateInstanceMetadata(boost::optional<std::string> uuid,
+                                InstanceMetadataPB* metadata);
 
   // Save a InstanceMetadataPB to the filesystem.
   // Does not mutate the current state of the fsmanager.
   Status WriteInstanceMetadata(const InstanceMetadataPB& metadata,
                                const std::string& root);
-
-  // Checks if 'path' is an empty directory.
-  //
-  // Returns an error if it's not a directory. Otherwise, sets 'is_empty'
-  // accordingly.
-  Status IsDirectoryEmpty(const std::string& path, bool* is_empty);
 
   // ==========================================================================
   //  file-system helpers
@@ -232,6 +303,16 @@ class FsManager {
                           const std::string& prefix,
                           const std::string& path,
                           const std::vector<std::string>& objects);
+
+  // Deletes leftover temporary files in all "special" top-level directories
+  // (e.g. WAL root directory).
+  //
+  // Logs warnings in case of errors.
+  void CleanTmpFiles();
+
+  // Checks that the permissions of the root data directories conform to the
+  // configured umask, and tightens them as necessary if they do not.
+  void CheckAndFixPermissions();
 
   static const char *kDataDirName;
   static const char *kTabletMetadataDirName;
@@ -242,33 +323,27 @@ class FsManager {
   static const char *kTabletSuperBlockMagicNumber;
   static const char *kConsensusMetadataDirName;
 
-  Env *env_;
+  // The environment to be used for all filesystem operations.
+  Env* env_;
 
-  // If false, operations that mutate on-disk state are prohibited.
-  const bool read_only_;
+  // The options that the FsManager was created with.
+  const FsManagerOpts opts_;
 
-  // These roots are the constructor input verbatim. None of them are used
-  // as-is; they are first canonicalized during Init().
-  const std::string wal_fs_root_;
-  const std::vector<std::string> data_fs_roots_;
-
-  scoped_refptr<MetricEntity> metric_entity_;
-
-  std::shared_ptr<MemTracker> parent_mem_tracker_;
-
-  // Canonicalized forms of 'wal_fs_root_ and 'data_fs_roots_'. Constructed
-  // during Init().
+  // Canonicalized forms of the root directories. Constructed during Init()
+  // with ordering maintained.
   //
   // - The first data root is used as the metadata root.
   // - Common roots in the collections have been deduplicated.
-  std::string canonicalized_wal_fs_root_;
-  std::string canonicalized_metadata_fs_root_;
-  std::set<std::string> canonicalized_data_fs_roots_;
-  std::set<std::string> canonicalized_all_fs_roots_;
+  CanonicalizedRootAndStatus canonicalized_wal_fs_root_;
+  CanonicalizedRootAndStatus canonicalized_metadata_fs_root_;
+  CanonicalizedRootsList canonicalized_data_fs_roots_;
+  CanonicalizedRootsList canonicalized_all_fs_roots_;
 
-  gscoped_ptr<InstanceMetadataPB> metadata_;
+  std::unique_ptr<InstanceMetadataPB> metadata_;
 
-  gscoped_ptr<fs::BlockManager> block_manager_;
+  std::unique_ptr<fs::FsErrorManager> error_manager_;
+  std::unique_ptr<fs::DataDirManager> dd_manager_;
+  std::unique_ptr<fs::BlockManager> block_manager_;
 
   bool initted_;
 
@@ -277,4 +352,3 @@ class FsManager {
 
 } // namespace kudu
 
-#endif

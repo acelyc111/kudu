@@ -15,29 +15,55 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <boost/ptr_container/ptr_vector.hpp>
-#include <gflags/gflags.h>
-#include <gtest/gtest.h>
+#include <cstdint>
+#include <cstdlib>
 #include <memory>
+#include <ostream>
+#include <string>
+#include <vector>
+
+#include <gflags/gflags.h>
+#include <gflags/gflags_declare.h>
+#include <glog/logging.h>
+#include <gtest/gtest.h>
 
 #include "kudu/codegen/compilation_manager.h"
-#include "kudu/gutil/macros.h"
+#include "kudu/common/columnblock.h"
+#include "kudu/common/common.pb.h"
+#include "kudu/common/iterator.h"
+#include "kudu/common/partial_row.h"
+#include "kudu/common/rowblock.h"
+#include "kudu/common/rowid.h"
+#include "kudu/common/schema.h"
+#include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/tablet/local_tablet_writer.h"
+#include "kudu/tablet/rowset.h"
+#include "kudu/tablet/tablet-harness.h"
 #include "kudu/tablet/tablet-test-base.h"
+#include "kudu/tablet/tablet.h"
 #include "kudu/util/countdown_latch.h"
+#include "kudu/util/faststring.h"
+#include "kudu/util/memory/arena.h"
+#include "kudu/util/monotime.h"
+#include "kudu/util/status.h"
+#include "kudu/util/stopwatch.h"
 #include "kudu/util/test_graph.h"
+#include "kudu/util/test_util.h"
 #include "kudu/util/thread.h"
 
+DECLARE_int32(tablet_history_max_age_sec);
 DECLARE_double(tablet_delta_store_major_compact_min_ratio);
 DECLARE_int32(tablet_delta_store_minor_compact_max);
 DEFINE_int32(num_insert_threads, 8, "Number of inserting threads to launch");
 DEFINE_int32(num_counter_threads, 8, "Number of counting threads to launch");
 DEFINE_int32(num_summer_threads, 1, "Number of summing threads to launch");
-DEFINE_int32(num_updater_threads, 1, "Number of updating threads to launch");
 DEFINE_int32(num_slowreader_threads, 1, "Number of 'slow' reader threads to launch");
 DEFINE_int32(num_flush_threads, 1, "Number of flusher reader threads to launch");
 DEFINE_int32(num_compact_threads, 1, "Number of compactor threads to launch");
+DEFINE_int32(num_undo_delta_gc_threads, 1, "Number of undo delta gc threads to launch");
+DEFINE_int32(num_updater_threads, 1, "Number of updating threads to launch");
 DEFINE_int32(num_flush_delta_threads, 1, "Number of delta flusher reader threads to launch");
 DEFINE_int32(num_minor_compact_deltas_threads, 1,
              "Number of delta minor compactor threads to launch");
@@ -82,8 +108,10 @@ class MultiThreadedTabletTest : public TabletTestBase<SETUP> {
     ts_collector_.StartDumperThread();
   }
 
-  MultiThreadedTabletTest()
-    : running_insert_count_(FLAGS_num_insert_threads),
+  explicit MultiThreadedTabletTest(TabletHarness::Options::ClockType clock_type =
+                                   TabletHarness::Options::ClockType::LOGICAL_CLOCK)
+    : TabletTestBase<SETUP>(clock_type),
+      running_insert_count_(FLAGS_num_insert_threads),
       ts_collector_(::testing::UnitTest::GetInstance()->current_test_info()->test_case_name()) {
   }
 
@@ -113,7 +141,7 @@ class MultiThreadedTabletTest : public TabletTestBase<SETUP> {
 
     LocalTabletWriter writer(this->tablet().get(), &this->client_schema_);
 
-    Arena tmp_arena(1024, 1024);
+    Arena tmp_arena(1024);
     RowBlock block(schema_, 1, &tmp_arena);
     faststring update_buf;
 
@@ -182,8 +210,8 @@ class MultiThreadedTabletTest : public TabletTestBase<SETUP> {
   // Thread which iterates slowly over the first 10% of the data.
   // This is meant to test that outstanding iterators don't end up
   // trying to reference already-freed memrowset memory.
-  void SlowReaderThread(int tid) {
-    Arena arena(32*1024, 256*1024);
+  void SlowReaderThread(int /*tid*/) {
+    Arena arena(32*1024);
     RowBlock block(schema_, 1, &arena);
 
     uint64_t max_rows = this->ClampRowCount(FLAGS_inserts_per_thread * FLAGS_num_insert_threads)
@@ -216,7 +244,7 @@ class MultiThreadedTabletTest : public TabletTestBase<SETUP> {
   }
 
   uint64_t CountSum(const shared_ptr<TimeSeries> &scanned_ts) {
-    Arena arena(1024, 1024); // unused, just scanning ints
+    Arena arena(1024); // unused, just scanning ints
 
     static const int kBufInts = 1024*1024 / 8;
     RowBlock block(valcol_projection_, kBufInts, &arena);
@@ -224,7 +252,7 @@ class MultiThreadedTabletTest : public TabletTestBase<SETUP> {
 
     uint64_t count_since_report = 0;
 
-    uint64_t sum = 0;
+    int64_t sum = 0;
 
     gscoped_ptr<RowwiseIterator> iter;
     CHECK_OK(tablet()->NewRowIterator(valcol_projection_, &iter));
@@ -255,9 +283,7 @@ class MultiThreadedTabletTest : public TabletTestBase<SETUP> {
     return sum;
   }
 
-
-
-  void FlushThread(int tid) {
+  void FlushThread(int /*tid*/) {
     // Start off with a very short wait time between flushes.
     // But, especially in debug mode, this will only allow a few
     // rows to get inserted between each flush, and the test will take
@@ -302,6 +328,7 @@ class MultiThreadedTabletTest : public TabletTestBase<SETUP> {
   void CompactDeltas(RowSet::DeltaCompactionType type) {
     int wait_time = 100;
     while (running_insert_count_.count() > 0) {
+      VLOG(1) << "Compacting worst deltas";
       CHECK_OK(tablet()->CompactWorstDeltas(type));
 
       // Wait, unless the inserters are all done.
@@ -313,6 +340,27 @@ class MultiThreadedTabletTest : public TabletTestBase<SETUP> {
     int wait_time = 100;
     while (running_insert_count_.count() > 0) {
       CHECK_OK(tablet()->Compact(Tablet::COMPACT_NO_FLAGS));
+
+      // Wait, unless the inserters are all done.
+      running_insert_count_.WaitFor(MonoDelta::FromMilliseconds(wait_time));
+    }
+  }
+
+  void DeleteAncientUndoDeltasThread(int /*tid*/) {
+    int wait_time = 100;
+    while (running_insert_count_.count() > 0) {
+      MonoDelta time_budget = MonoDelta::FromMilliseconds(wait_time);
+      int64_t bytes_in_ancient_undos = 0;
+      CHECK_OK(tablet()->InitAncientUndoDeltas(time_budget, &bytes_in_ancient_undos));
+      VLOG(1) << "Found " << bytes_in_ancient_undos << " bytes of ancient delta undos";
+
+      int64_t blocks_deleted = 0;
+      int64_t bytes_deleted = 0;
+      CHECK_OK(tablet()->DeleteAncientUndoDeltas(&blocks_deleted, &bytes_deleted));
+      if (blocks_deleted > 0) {
+        LOG(INFO) << "Deleted " << blocks_deleted << " blocks (" << bytes_deleted << " bytes) "
+                  << "of ancient delta undos";
+      }
 
       // Wait, unless the inserters are all done.
       running_insert_count_.WaitFor(MonoDelta::FromMilliseconds(wait_time));
@@ -413,6 +461,7 @@ TYPED_TEST(MultiThreadedTabletTest, DoTestAllAtOnce) {
   this->StartThreads(FLAGS_num_summer_threads, &TestFixture::SummerThread);
   this->StartThreads(FLAGS_num_flush_threads, &TestFixture::FlushThread);
   this->StartThreads(FLAGS_num_compact_threads, &TestFixture::CompactThread);
+  this->StartThreads(FLAGS_num_undo_delta_gc_threads, &TestFixture::DeleteAncientUndoDeltasThread);
   this->StartThreads(FLAGS_num_flush_delta_threads, &TestFixture::FlushDeltasThread);
   this->StartThreads(FLAGS_num_minor_compact_deltas_threads,
                      &TestFixture::MinorCompactDeltasThread);
@@ -443,6 +492,7 @@ TYPED_TEST(MultiThreadedTabletTest, DeleteAndReinsert) {
   FLAGS_tablet_delta_store_minor_compact_max = 10;
   this->StartThreads(FLAGS_num_flush_threads, &TestFixture::FlushThread);
   this->StartThreads(FLAGS_num_compact_threads, &TestFixture::CompactThread);
+  this->StartThreads(FLAGS_num_undo_delta_gc_threads, &TestFixture::DeleteAncientUndoDeltasThread);
   this->StartThreads(FLAGS_num_flush_delta_threads, &TestFixture::FlushDeltasThread);
   this->StartThreads(FLAGS_num_minor_compact_deltas_threads,
                      &TestFixture::MinorCompactDeltasThread);
@@ -458,6 +508,51 @@ TYPED_TEST(MultiThreadedTabletTest, DeleteAndReinsert) {
   while (sw.elapsed().wall < runtime_seconds * NANOS_PER_SECOND &&
          !this->HasFatalFailure()) {
     SleepFor(MonoDelta::FromMicroseconds(5000));
+  }
+
+  // This is sort of a hack -- the flusher thread stops when it sees this
+  // countdown latch go to 0.
+  this->running_insert_count_.Reset(0);
+  this->JoinThreads();
+}
+
+// For tests where we want to use the hybrid clock. The hybrid clock is
+// required for tablet history gc.
+template<class SETUP>
+class MultiThreadedHybridClockTabletTest : public MultiThreadedTabletTest<SETUP> {
+ public:
+  MultiThreadedHybridClockTabletTest()
+    : MultiThreadedTabletTest<SETUP>(TabletHarness::Options::ClockType::HYBRID_CLOCK) {
+  }
+};
+
+TYPED_TEST_CASE(MultiThreadedHybridClockTabletTest, TabletTestHelperTypes);
+
+// Perform many updates and continuously flush and major compact deltas, as
+// well as run undo delta gc.
+TYPED_TEST(MultiThreadedHybridClockTabletTest, UpdateNoMergeCompaction) {
+  google::FlagSaver saver;
+  FLAGS_tablet_history_max_age_sec = 0; // GC data as aggressively as possible.
+
+  FLAGS_flusher_backoff = 1.0f;
+  FLAGS_flusher_initial_frequency_ms = 1;
+  FLAGS_tablet_delta_store_major_compact_min_ratio = 0.01f;
+  FLAGS_tablet_delta_store_minor_compact_max = 10;
+  this->StartThreads(FLAGS_num_flush_threads, &TestFixture::FlushThread);
+  this->StartThreads(FLAGS_num_flush_delta_threads, &TestFixture::FlushDeltasThread);
+  this->StartThreads(FLAGS_num_major_compact_deltas_threads,
+                     &TestFixture::MajorCompactDeltasThread);
+  this->StartThreads(10, &TestFixture::DeleteAndReinsertCycleThread);
+  this->StartThreads(10, &TestFixture::StubbornlyUpdateSameRowThread);
+  this->StartThreads(FLAGS_num_undo_delta_gc_threads, &TestFixture::DeleteAncientUndoDeltasThread);
+
+  // Run very quickly in dev builds, longer in slow builds.
+  float runtime_seconds = AllowSlowTests() ? 2 : 0.1;
+  Stopwatch sw;
+  sw.start();
+  while (sw.elapsed().wall < runtime_seconds * NANOS_PER_SECOND &&
+         !this->HasFatalFailure()) {
+    SleepFor(MonoDelta::FromMilliseconds(5));
   }
 
   // This is sort of a hack -- the flusher thread stops when it sees this

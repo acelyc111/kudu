@@ -27,6 +27,7 @@
 # We also 'cat' the test log upon completion so that the test logs are
 # uploaded by the test slave back.
 
+import glob
 import optparse
 import os
 import re
@@ -94,12 +95,16 @@ def main():
   p.add_option("-e", "--env", dest="env", type="string", action="append",
                help="key=value pairs for environment variables",
                default=[])
+  p.add_option("--collect-tmpdir", dest="collect_tmpdir", action="store_true",
+               help="whether to collect the test tmpdir as an artifact if the test fails",
+               default=False)
   options, args = p.parse_args()
   if len(args) < 1:
     p.print_help(sys.stderr)
     sys.exit(1)
   test_exe = args[0]
   test_name, _ = os.path.splitext(os.path.basename(test_exe))
+  test_dir = os.path.dirname(test_exe)
 
   env = os.environ.copy()
   for env_pair in options.env:
@@ -118,13 +123,28 @@ def main():
   fixup_rpaths(os.path.join(ROOT, "build"))
   fixup_rpaths(os.path.join(ROOT, "thirdparty"))
 
+  # Add environment variables for Java dependencies. These environment variables
+  # are used in mini_hms.cc.
+  env['HIVE_HOME'] = glob.glob(os.path.join(ROOT, "thirdparty/src/apache-hive-*-bin"))[0]
+  env['HADOOP_HOME'] = glob.glob(os.path.join(ROOT, "thirdparty/src/hadoop-*"))[0]
+  env['JAVA_HOME'] = glob.glob("/usr/lib/jvm/java-1.8.0-*")[0]
+
   env['LD_LIBRARY_PATH'] = ":".join(
     [os.path.join(ROOT, "build/dist-test-system-libs/"),
-     os.path.abspath(os.path.dirname(test_exe))])
-  env['GTEST_OUTPUT'] = 'xml:' + os.path.join(ROOT, 'build/test-logs/')
-  env['ASAN_SYMBOLIZER_PATH'] = os.path.join(ROOT, "thirdparty/installed/bin/llvm-symbolizer")
+     os.path.abspath(os.path.join(test_dir, "..", "lib"))])
+
+  # Don't pollute /tmp in dist-test setting. If a test crashes, the dist-test slave
+  # will clear up our working directory but won't be able to find and clean up things
+  # left in /tmp.
+  test_tmpdir = os.path.abspath(os.path.join(ROOT, "test-tmp"))
+  env['TEST_TMPDIR'] = test_tmpdir
+
+  env['ASAN_SYMBOLIZER_PATH'] = os.path.join(ROOT, "thirdparty/installed/uninstrumented/bin/llvm-symbolizer")
   rc = subprocess.call([os.path.join(ROOT, "build-support/run-test.sh")] + args,
                        env=env)
+
+  if rc != 0 and options.collect_tmpdir:
+    os.system("tar czf %s %s" % (os.path.join(test_dir, "..", "test-logs", "test_tmpdir.tgz"), test_tmpdir))
   sys.exit(rc)
 
 

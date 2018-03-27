@@ -15,13 +15,16 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <ostream>
 #include <vector>
 
+#include <glog/logging.h>
 #include <gtest/gtest.h>
 
-#include "kudu/gutil/bind.h"
+#include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/util/once.h"
+#include "kudu/util/status.h"
 #include "kudu/util/test_macros.h"
 #include "kudu/util/thread.h"
 
@@ -61,12 +64,12 @@ TEST(TestOnce, KuduOnceDynamicTest) {
   {
     Thing t(false);
     ASSERT_EQ(0, t.value_);
-    ASSERT_FALSE(t.once_.initted());
+    ASSERT_FALSE(t.once_.init_succeeded());
 
     for (int i = 0; i < 2; i++) {
       ASSERT_OK(t.Init());
       ASSERT_EQ(1, t.value_);
-      ASSERT_TRUE(t.once_.initted());
+      ASSERT_TRUE(t.once_.init_succeeded());
     }
   }
 
@@ -75,7 +78,7 @@ TEST(TestOnce, KuduOnceDynamicTest) {
     for (int i = 0; i < 2; i++) {
       ASSERT_TRUE(t.Init().IsIllegalState());
       ASSERT_EQ(0, t.value_);
-      ASSERT_TRUE(t.once_.initted());
+      ASSERT_FALSE(t.once_.init_succeeded());
     }
   }
 }
@@ -85,7 +88,7 @@ static void InitOrGetInitted(Thing* t, int i) {
     LOG(INFO) << "Thread " << i << " initting";
     t->Init();
   } else {
-    LOG(INFO) << "Thread " << i << " value: " << t->once_.initted();
+    LOG(INFO) << "Thread " << i << " value: " << t->once_.init_succeeded();
   }
 }
 

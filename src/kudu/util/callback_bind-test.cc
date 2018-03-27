@@ -15,11 +15,21 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "kudu/gutil/bind.h"
-#include "kudu/gutil/callback.h"
-#include "kudu/gutil/macros.h"
+#include <ostream>
+#include <string>
+#include <type_traits>
+#include <utility>
 
+#include <glog/logging.h>
 #include <gtest/gtest.h>
+
+#include "kudu/gutil/bind.h"
+#include "kudu/gutil/bind_helpers.h"
+#include "kudu/gutil/callback.h"
+#include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/macros.h"
+#include "kudu/gutil/move.h"
+#include "kudu/gutil/ref_counted.h"
 
 namespace kudu {
 
@@ -84,7 +94,7 @@ TEST(CallbackBindTest, TestCallScopedPtrArg) {
   // function which takes gscoped_ptr:
   gscoped_ptr<char> foo(new char('x'));
   Callback<char(gscoped_ptr<char>)> cb = Bind(&IncrementChar);
-  ASSERT_EQ('y', cb.Run(foo.Pass()));
+  ASSERT_EQ('y', cb.Run(std::move(foo)));
 }
 
 TEST(CallbackBindTest, TestBindScopedPtrArg) {

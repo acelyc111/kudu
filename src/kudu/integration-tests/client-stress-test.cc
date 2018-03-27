@@ -15,33 +15,58 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <unistd.h>
 
-#include <memory>
+#include <cstdint>
+#include <ostream>
+#include <set>
+#include <string>
+#include <utility>
 #include <vector>
 
+#include <glog/logging.h>
+#include <gtest/gtest.h>
+
+#include "kudu/client/client-internal.h"
 #include "kudu/client/client-test-util.h"
-#include "kudu/gutil/mathlimits.h"
+#include "kudu/client/client.h"
+#include "kudu/client/scan_predicate.h"
+#include "kudu/client/shared_ptr.h"
+#include "kudu/client/value.h"
+#include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/port.h"
+#include "kudu/gutil/ref_counted.h"
+#include "kudu/gutil/strings/join.h"
 #include "kudu/gutil/strings/substitute.h"
-#include "kudu/integration-tests/external_mini_cluster.h"
+#include "kudu/integration-tests/cluster_itest_util.h"
 #include "kudu/integration-tests/test_workload.h"
+#include "kudu/mini-cluster/external_mini_cluster.h"
+#include "kudu/util/countdown_latch.h"
 #include "kudu/util/metrics.h"
+#include "kudu/util/monotime.h"
 #include "kudu/util/pstack_watcher.h"
 #include "kudu/util/random.h"
+#include "kudu/util/status.h"
+#include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
+#include "kudu/util/thread.h"
 
 METRIC_DECLARE_entity(tablet);
 METRIC_DECLARE_counter(leader_memory_pressure_rejections);
 METRIC_DECLARE_counter(follower_memory_pressure_rejections);
 
 using strings::Substitute;
+using std::set;
+using std::string;
 using std::vector;
 
 namespace kudu {
 
 using client::KuduClient;
-using client::KuduClientBuilder;
 using client::KuduScanner;
 using client::KuduTable;
+using cluster::ExternalMiniCluster;
+using cluster::ExternalMiniClusterOptions;
 
 class ClientStressTest : public KuduTest {
  public:
@@ -54,7 +79,7 @@ class ClientStressTest : public KuduTest {
       opts.master_rpc_ports = { 11010, 11011, 11012 };
     }
     opts.num_tablet_servers = 3;
-    cluster_.reset(new ExternalMiniCluster(opts));
+    cluster_.reset(new ExternalMiniCluster(std::move(opts)));
     ASSERT_OK(cluster_->Start());
   }
 
@@ -76,7 +101,7 @@ class ClientStressTest : public KuduTest {
     CHECK_OK(scanner.AddConjunctPredicate(table->NewComparisonPredicate(
         "key", client::KuduPredicate::GREATER_EQUAL,
         client::KuduValue::FromInt(start_key))));
-    ScanToStrings(&scanner, &rows);
+    CHECK_OK(ScanToStrings(&scanner, &rows));
   }
 
   virtual bool multi_master() const {
@@ -113,7 +138,7 @@ TEST_F(ClientStressTest, TestLookupTimeouts) {
 // scan starting at random points in the key space.
 TEST_F(ClientStressTest, TestStartScans) {
   for (int i = 0; i < cluster_->num_tablet_servers(); i++) {
-    cluster_->SetFlag(cluster_->tablet_server(i), "log_preallocate_segments", "0");
+    ASSERT_OK(cluster_->SetFlag(cluster_->tablet_server(i), "log_preallocate_segments", "0"));
   }
   TestWorkload work(cluster_.get());
   work.set_num_tablets(40);
@@ -125,9 +150,8 @@ TEST_F(ClientStressTest, TestStartScans) {
   // is empty.
   for (int run = 1; run <= (AllowSlowTests() ? 10 : 2); run++) {
     LOG(INFO) << "Starting run " << run;
-    KuduClientBuilder builder;
     client::sp::shared_ptr<KuduClient> client;
-    CHECK_OK(cluster_->CreateClient(builder, &client));
+    CHECK_OK(cluster_->CreateClient(nullptr, &client));
 
     CountDownLatch go_latch(1);
     vector<scoped_refptr<Thread> > threads;
@@ -180,19 +204,19 @@ TEST_F(ClientStressTest_MultiMaster, TestLeaderResolutionTimeout) {
 
   work.Start();
 
-  cluster_->tablet_server(0)->Pause();
-  cluster_->tablet_server(1)->Pause();
-  cluster_->tablet_server(2)->Pause();
-  cluster_->master(0)->Pause();
-  cluster_->master(1)->Pause();
-  cluster_->master(2)->Pause();
+  ASSERT_OK(cluster_->tablet_server(0)->Pause());
+  ASSERT_OK(cluster_->tablet_server(1)->Pause());
+  ASSERT_OK(cluster_->tablet_server(2)->Pause());
+  ASSERT_OK(cluster_->master(0)->Pause());
+  ASSERT_OK(cluster_->master(1)->Pause());
+  ASSERT_OK(cluster_->master(2)->Pause());
   SleepFor(MonoDelta::FromMilliseconds(300));
-  cluster_->tablet_server(0)->Resume();
-  cluster_->tablet_server(1)->Resume();
-  cluster_->tablet_server(2)->Resume();
-  cluster_->master(0)->Resume();
-  cluster_->master(1)->Resume();
-  cluster_->master(2)->Resume();
+  ASSERT_OK(cluster_->tablet_server(0)->Resume());
+  ASSERT_OK(cluster_->tablet_server(1)->Resume());
+  ASSERT_OK(cluster_->tablet_server(2)->Resume());
+  ASSERT_OK(cluster_->master(0)->Resume());
+  ASSERT_OK(cluster_->master(1)->Resume());
+  ASSERT_OK(cluster_->master(2)->Resume());
   SleepFor(MonoDelta::FromMilliseconds(100));
 
   // Set an explicit timeout. This test has caused deadlocks in the past.
@@ -213,8 +237,7 @@ class ClientStressTest_LowMemory : public ClientStressTest {
     ExternalMiniClusterOptions opts;
     opts.extra_tserver_flags.push_back(Substitute(
         "--memory_limit_hard_bytes=$0", kMemLimitBytes));
-    opts.extra_tserver_flags.push_back(
-        "--memory_limit_soft_percentage=0");
+    opts.extra_tserver_flags.emplace_back("--memory_limit_soft_percentage=0");
     return opts;
   }
 };
@@ -222,7 +245,14 @@ class ClientStressTest_LowMemory : public ClientStressTest {
 // Stress test where, due to absurdly low memory limits, many client requests
 // are rejected, forcing the client to retry repeatedly.
 TEST_F(ClientStressTest_LowMemory, TestMemoryThrottling) {
+#ifdef THREAD_SANITIZER
+  // TSAN tests run much slower, so we don't want to wait for as many
+  // rejections before declaring the test to be passed.
+  const int64_t kMinRejections = 20;
+#else
   const int64_t kMinRejections = 100;
+#endif
+
   const MonoDelta kMaxWaitTime = MonoDelta::FromSeconds(60);
 
   TestWorkload work(cluster_.get());
@@ -230,8 +260,7 @@ TEST_F(ClientStressTest_LowMemory, TestMemoryThrottling) {
   work.Start();
 
   // Wait until we've rejected some number of requests.
-  MonoTime deadline = MonoTime::Now(MonoTime::FINE);
-  deadline.AddDelta(kMaxWaitTime);
+  MonoTime deadline = MonoTime::Now() + kMaxWaitTime;
   while (true) {
     int64_t total_num_rejections = 0;
 
@@ -241,7 +270,8 @@ TEST_F(ClientStressTest_LowMemory, TestMemoryThrottling) {
     // or metric is truly missing, we'll eventually timeout and fail.
     for (int i = 0; i < cluster_->num_tablet_servers(); i++) {
       int64_t value;
-      Status s = cluster_->tablet_server(i)->GetInt64Metric(
+      Status s = itest::GetInt64Metric(
+          cluster_->tablet_server(i)->bound_http_hostport(),
           &METRIC_ENTITY_tablet,
           nullptr,
           &METRIC_leader_memory_pressure_rejections,
@@ -251,7 +281,8 @@ TEST_F(ClientStressTest_LowMemory, TestMemoryThrottling) {
         ASSERT_OK(s);
         total_num_rejections += value;
       }
-      s = cluster_->tablet_server(i)->GetInt64Metric(
+      s = itest::GetInt64Metric(
+          cluster_->tablet_server(i)->bound_http_hostport(),
           &METRIC_ENTITY_tablet,
           nullptr,
           &METRIC_follower_memory_pressure_rejections,
@@ -264,10 +295,27 @@ TEST_F(ClientStressTest_LowMemory, TestMemoryThrottling) {
     }
     if (total_num_rejections >= kMinRejections) {
       break;
-    } else if (deadline.ComesBefore(MonoTime::Now(MonoTime::FINE))) {
-      FAIL() << "Ran for " << kMaxWaitTime.ToString() << ", deadline expired";
+    } else if (MonoTime::Now() > deadline) {
+      FAIL() << "Ran for " << kMaxWaitTime.ToString() << ", deadline expired and only saw "
+             << total_num_rejections << " memory rejections";
     }
     SleepFor(MonoDelta::FromMilliseconds(200));
+  }
+}
+
+// This test just creates a bunch of clients and makes sure that the generated client ids
+// are unique among the created clients.
+TEST_F(ClientStressTest, TestUniqueClientIds) {
+  set<string> client_ids;
+  for (int i = 0; i < 1000; i++) {
+    client::sp::shared_ptr<KuduClient> client;
+    ASSERT_OK(cluster_->CreateClient(nullptr, &client));
+    const string& client_id = client->data_->client_id_;
+    auto result = client_ids.emplace(client_id);
+    EXPECT_TRUE(result.second) << "Unique id generation failed. New client id: "
+                               << client_id
+                               << " had already been used. Generated ids: "
+                               << JoinStrings(client_ids, ",");
   }
 }
 

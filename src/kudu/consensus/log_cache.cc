@@ -17,27 +17,36 @@
 
 #include "kudu/consensus/log_cache.h"
 
-#include <algorithm>
-#include <gflags/gflags.h>
-#include <google/protobuf/wire_format_lite.h>
-#include <google/protobuf/wire_format_lite_inl.h>
 #include <map>
+#include <mutex>
+#include <ostream>
+#include <string>
+#include <utility>
 #include <vector>
 
+#include <gflags/gflags.h>
+#include <glog/logging.h>
+#include <google/protobuf/wire_format_lite.h>
+#include <google/protobuf/wire_format_lite_inl.h>
+
+#include "kudu/consensus/consensus.pb.h"
 #include "kudu/consensus/log.h"
 #include "kudu/consensus/log_reader.h"
+#include "kudu/consensus/opid.pb.h"
+#include "kudu/consensus/opid_util.h"
 #include "kudu/consensus/ref_counted_replicate.h"
 #include "kudu/gutil/bind.h"
+#include "kudu/gutil/bind_helpers.h"
 #include "kudu/gutil/map-util.h"
-#include "kudu/gutil/stl_util.h"
+#include "kudu/gutil/mathlimits.h"
 #include "kudu/gutil/strings/human_readable.h"
 #include "kudu/gutil/strings/substitute.h"
-#include "kudu/util/debug-util.h"
 #include "kudu/util/flag_tags.h"
-#include "kudu/util/mem_tracker.h"
-#include "kudu/util/metrics.h"
 #include "kudu/util/locks.h"
 #include "kudu/util/logging.h"
+#include "kudu/util/mem_tracker.h"
+#include "kudu/util/metrics.h"
+#include "kudu/util/pb_util.h"
 
 DEFINE_int32(log_cache_size_limit_mb, 128,
              "The total per-tablet size of consensus entries which may be kept in memory. "
@@ -51,6 +60,9 @@ DEFINE_int32(global_log_cache_size_limit_mb, 1024,
              "caching log entries across all tablets is kept under this threshold.");
 TAG_FLAG(global_log_cache_size_limit_mb, advanced);
 
+using kudu::pb_util::SecureShortDebugString;
+using std::string;
+using std::vector;
 using strings::Substitute;
 
 namespace kudu {
@@ -79,13 +91,13 @@ LogCache::LogCache(const scoped_refptr<MetricEntity>& metric_entity,
     metrics_(metric_entity) {
 
 
-  const int64_t max_ops_size_bytes = FLAGS_log_cache_size_limit_mb * 1024 * 1024;
-  const int64_t global_max_ops_size_bytes = FLAGS_global_log_cache_size_limit_mb * 1024 * 1024;
+  const int64_t max_ops_size_bytes = FLAGS_log_cache_size_limit_mb * 1024L * 1024L;
+  const int64_t global_max_ops_size_bytes = FLAGS_global_log_cache_size_limit_mb * 1024L * 1024L;
 
   // Set up (or reuse) a tracker with the global limit. It is parented directly
   // to the root tracker so that it's always global.
-  parent_tracker_ = MemTracker::FindOrCreateTracker(global_max_ops_size_bytes,
-                                                    kParentMemTrackerId);
+  parent_tracker_ = MemTracker::FindOrCreateGlobalTracker(global_max_ops_size_bytes,
+                                                          kParentMemTrackerId);
 
   // And create a child tracker with the per-tablet limit.
   tracker_ = MemTracker::CreateTracker(
@@ -97,56 +109,67 @@ LogCache::LogCache(const scoped_refptr<MetricEntity>& metric_entity,
   // code paths elsewhere.
   auto zero_op = new ReplicateMsg();
   *zero_op->mutable_id() = MinimumOpId();
-  InsertOrDie(&cache_, 0, make_scoped_refptr_replicate(zero_op));
+  InsertOrDie(&cache_, 0, { make_scoped_refptr_replicate(zero_op), zero_op->SpaceUsed() });
 }
 
 LogCache::~LogCache() {
   tracker_->Release(tracker_->consumption());
   cache_.clear();
-
-  // Don't need to unregister parent_tracker_ because it is reused in each
-  // LogCache, not duplicated.
-  tracker_->UnregisterFromParent();
 }
 
 void LogCache::Init(const OpId& preceding_op) {
-  lock_guard<simple_spinlock> l(&lock_);
+  std::lock_guard<simple_spinlock> l(lock_);
   CHECK_EQ(cache_.size(), 1)
     << "Cache should have only our special '0' op";
   next_sequential_op_index_ = preceding_op.index() + 1;
   min_pinned_op_index_ = next_sequential_op_index_;
 }
 
+void LogCache::TruncateOpsAfter(int64_t index) {
+  std::unique_lock<simple_spinlock> l(lock_);
+  TruncateOpsAfterUnlocked(index);
+}
+
+void LogCache::TruncateOpsAfterUnlocked(int64_t index) {
+  int64_t first_to_truncate = index + 1;
+  // If the index is not consecutive then it must be lower than or equal
+  // to the last index, i.e. we're overwriting.
+  CHECK_LE(first_to_truncate, next_sequential_op_index_);
+
+  // Now remove the overwritten operations.
+  for (int64_t i = first_to_truncate; i < next_sequential_op_index_; ++i) {
+    auto it = cache_.find(i);
+    if (it != cache_.end()) {
+      AccountForMessageRemovalUnlocked(it->second);
+      cache_.erase(it);
+    }
+  }
+  next_sequential_op_index_ = index + 1;
+}
+
 Status LogCache::AppendOperations(const vector<ReplicateRefPtr>& msgs,
                                   const StatusCallback& callback) {
-  unique_lock<simple_spinlock> l(&lock_);
+  CHECK_GT(msgs.size(), 0);
 
-  int size = msgs.size();
-  CHECK_GT(size, 0);
+  // SpaceUsed is relatively expensive, so do calculations outside the lock
+  // and cache the result with each message.
+  int64_t mem_required = 0;
+  vector<CacheEntry> entries_to_insert;
+  entries_to_insert.reserve(msgs.size());
+  for (const auto& msg : msgs) {
+    CacheEntry e = { msg, static_cast<int64_t>(msg->get()->SpaceUsedLong()) };
+    mem_required += e.mem_usage;
+    entries_to_insert.emplace_back(std::move(e));
+  }
 
-  // If we're not appending a consecutive op we're likely overwriting and
-  // need to replace operations in the cache.
   int64_t first_idx_in_batch = msgs.front()->get()->id().index();
   int64_t last_idx_in_batch = msgs.back()->get()->id().index();
 
+  std::unique_lock<simple_spinlock> l(lock_);
+  // If we're not appending a consecutive op we're likely overwriting and
+  // need to replace operations in the cache.
   if (first_idx_in_batch != next_sequential_op_index_) {
-    // If the index is not consecutive then it must be lower than or equal
-    // to the last index, i.e. we're overwriting.
-    CHECK_LE(first_idx_in_batch, next_sequential_op_index_);
-
-    // Now remove the overwritten operations.
-    for (int64_t i = first_idx_in_batch; i < next_sequential_op_index_; ++i) {
-      ReplicateRefPtr msg = EraseKeyReturnValuePtr(&cache_, i);
-      if (msg != nullptr) {
-        AccountForMessageRemovalUnlocked(msg);
-      }
-    }
-  }
-
-
-  int64_t mem_required = 0;
-  for (const auto& msg : msgs) {
-    mem_required += msg->get()->SpaceUsed();
+    TruncateOpsAfterUnlocked(first_idx_in_batch - 1);
   }
 
   // Try to consume the memory. If it can't be consumed, we may need to evict.
@@ -173,8 +196,10 @@ Status LogCache::AppendOperations(const vector<ReplicateRefPtr>& msgs,
     borrowed_memory = parent_tracker_->LimitExceeded();
   }
 
-  for (const auto& msg : msgs) {
-    InsertOrDie(&cache_,  msg->get()->id().index(), msg);
+  for (auto& e : entries_to_insert) {
+    auto index = e.msg->get()->id().index();
+    EmplaceOrDie(&cache_, index, std::move(e));
+    next_sequential_op_index_ = index + 1;
   }
 
   // We drop the lock during the AsyncAppendReplicates call, since it may block
@@ -182,23 +207,22 @@ Status LogCache::AppendOperations(const vector<ReplicateRefPtr>& msgs,
   // our callback and blocked on this lock.
   l.unlock();
 
+  metrics_.log_cache_size->IncrementBy(mem_required);
+  metrics_.log_cache_num_ops->IncrementBy(msgs.size());
+
   Status log_status = log_->AsyncAppendReplicates(
     msgs, Bind(&LogCache::LogCallback,
                Unretained(this),
                last_idx_in_batch,
                borrowed_memory,
                callback));
-  l.lock();
+
   if (!log_status.ok()) {
-    LOG_WITH_PREFIX_UNLOCKED(WARNING) << "Couldn't append to log: " << log_status.ToString();
+    LOG_WITH_PREFIX_UNLOCKED(ERROR) << "Couldn't append to log: " << log_status.ToString();
     tracker_->Release(mem_required);
     return log_status;
   }
 
-  metrics_.log_cache_size->IncrementBy(mem_required);
-  metrics_.log_cache_num_ops->IncrementBy(msgs.size());
-
-  next_sequential_op_index_ = msgs.back()->get()->id().index() + 1;
 
   return Status::OK();
 }
@@ -208,7 +232,7 @@ void LogCache::LogCallback(int64_t last_idx_in_batch,
                            const StatusCallback& user_callback,
                            const Status& log_status) {
   if (log_status.ok()) {
-    lock_guard<simple_spinlock> l(&lock_);
+    std::lock_guard<simple_spinlock> l(lock_);
     if (min_pinned_op_index_ <= last_idx_in_batch) {
       VLOG_WITH_PREFIX_UNLOCKED(1) << "Updating pinned index to " << (last_idx_in_batch + 1);
       min_pinned_op_index_ = last_idx_in_batch + 1;
@@ -227,14 +251,14 @@ void LogCache::LogCallback(int64_t last_idx_in_batch,
 }
 
 bool LogCache::HasOpBeenWritten(int64_t index) const {
-  lock_guard<simple_spinlock> l(&lock_);
+  std::lock_guard<simple_spinlock> l(lock_);
   return index < next_sequential_op_index_;
 }
 
 Status LogCache::LookupOpId(int64_t op_index, OpId* op_id) const {
   // First check the log cache itself.
   {
-    unique_lock<simple_spinlock> l(&lock_);
+    std::lock_guard<simple_spinlock> l(lock_);
 
     // We sometimes try to look up OpIds that have never been written
     // on the local node. In that case, don't try to read the op from
@@ -247,13 +271,13 @@ Status LogCache::LookupOpId(int64_t op_index, OpId* op_id) const {
     }
     auto iter = cache_.find(op_index);
     if (iter != cache_.end()) {
-      *op_id = iter->second->get()->id();
+      *op_id = iter->second.msg->get()->id();
       return Status::OK();
     }
   }
 
   // If it misses, read from the log.
-  return log_->GetLogReader()->LookupOpId(op_index, op_id);
+  return log_->reader()->LookupOpId(op_index, op_id);
 }
 
 namespace {
@@ -275,7 +299,7 @@ Status LogCache::ReadOps(int64_t after_op_index,
   DCHECK_GE(after_op_index, 0);
   RETURN_NOT_OK(LookupOpId(after_op_index, preceding_op));
 
-  unique_lock<simple_spinlock> l(&lock_);
+  std::unique_lock<simple_spinlock> l(lock_);
   int64_t next_index = after_op_index + 1;
 
   // Return as many operations as we can, up to the limit
@@ -299,18 +323,20 @@ Status LogCache::ReadOps(int64_t after_op_index,
 
       vector<ReplicateMsg*> raw_replicate_ptrs;
       RETURN_NOT_OK_PREPEND(
-        log_->GetLogReader()->ReadReplicatesInRange(
+        log_->reader()->ReadReplicatesInRange(
           next_index, up_to, remaining_space, &raw_replicate_ptrs),
         Substitute("Failed to read ops $0..$1", next_index, up_to));
       l.lock();
-      LOG_WITH_PREFIX_UNLOCKED(INFO) << "Successfully read " << raw_replicate_ptrs.size() << " ops "
-                            << "from disk.";
+      VLOG_WITH_PREFIX_UNLOCKED(2)
+          << "Successfully read " << raw_replicate_ptrs.size() << " ops "
+          << "from disk (" << next_index << ".."
+          << (next_index + raw_replicate_ptrs.size() - 1) << ")";
 
       for (ReplicateMsg* msg : raw_replicate_ptrs) {
         CHECK_EQ(next_index, msg->id().index());
 
         remaining_space -= TotalByteSizeForMessage(*msg);
-        if (remaining_space > 0) {
+        if (remaining_space > 0 || messages->empty()) {
           messages->push_back(make_scoped_refptr_replicate(msg));
           next_index++;
         } else {
@@ -321,7 +347,7 @@ Status LogCache::ReadOps(int64_t after_op_index,
     } else {
       // Pull contiguous messages from the cache until the size limit is achieved.
       for (; iter != cache_.end(); ++iter) {
-        const ReplicateRefPtr& msg = iter->second;
+        const ReplicateRefPtr& msg = iter->second.msg;
         int64_t index = msg->get()->id().index();
         if (index != next_index) {
           continue;
@@ -342,7 +368,7 @@ Status LogCache::ReadOps(int64_t after_op_index,
 
 
 void LogCache::EvictThroughOp(int64_t index) {
-  lock_guard<simple_spinlock> lock(&lock_);
+  std::lock_guard<simple_spinlock> lock(lock_);
 
   EvictSomeUnlocked(index, MathLimits<int64_t>::kMax);
 }
@@ -356,7 +382,8 @@ void LogCache::EvictSomeUnlocked(int64_t stop_after_index, int64_t bytes_to_evic
 
   int64_t bytes_evicted = 0;
   for (auto iter = cache_.begin(); iter != cache_.end();) {
-    const ReplicateRefPtr& msg = (*iter).second;
+    const CacheEntry& entry = (*iter).second;
+    const ReplicateRefPtr& msg = entry.msg;
     VLOG_WITH_PREFIX_UNLOCKED(2) << "considering for eviction: " << msg->get()->id();
     int64_t msg_index = msg->get()->id().index();
     if (msg_index == 0) {
@@ -377,8 +404,8 @@ void LogCache::EvictSomeUnlocked(int64_t stop_after_index, int64_t bytes_to_evic
     }
 
     VLOG_WITH_PREFIX_UNLOCKED(2) << "Evicting cache. Removing: " << msg->get()->id();
-    AccountForMessageRemovalUnlocked(msg);
-    bytes_evicted += msg->get()->SpaceUsed();
+    AccountForMessageRemovalUnlocked(entry);
+    bytes_evicted += entry.mem_usage;
     cache_.erase(iter++);
 
     if (bytes_evicted >= bytes_to_evict) {
@@ -388,9 +415,9 @@ void LogCache::EvictSomeUnlocked(int64_t stop_after_index, int64_t bytes_to_evic
   VLOG_WITH_PREFIX_UNLOCKED(1) << "Evicting log cache: after state: " << ToStringUnlocked();
 }
 
-void LogCache::AccountForMessageRemovalUnlocked(const ReplicateRefPtr& msg) {
-  tracker_->Release(msg->get()->SpaceUsed());
-  metrics_.log_cache_size->DecrementBy(msg->get()->SpaceUsed());
+void LogCache::AccountForMessageRemovalUnlocked(const LogCache::CacheEntry& entry) {
+  tracker_->Release(entry.mem_usage);
+  metrics_.log_cache_size->DecrementBy(entry.mem_usage);
   metrics_.log_cache_num_ops->Decrement();
 }
 
@@ -399,7 +426,7 @@ int64_t LogCache::BytesUsed() const {
 }
 
 string LogCache::StatsString() const {
-  lock_guard<simple_spinlock> lock(&lock_);
+  std::lock_guard<simple_spinlock> lock(lock_);
   return StatsStringUnlocked();
 }
 
@@ -410,7 +437,7 @@ string LogCache::StatsStringUnlocked() const {
 }
 
 std::string LogCache::ToString() const {
-  lock_guard<simple_spinlock> lock(&lock_);
+  std::lock_guard<simple_spinlock> lock(lock_);
   return ToStringUnlocked();
 }
 
@@ -435,12 +462,12 @@ void LogCache::DumpToLog() const {
 }
 
 void LogCache::DumpToStrings(vector<string>* lines) const {
-  lock_guard<simple_spinlock> lock(&lock_);
+  std::lock_guard<simple_spinlock> lock(lock_);
   int counter = 0;
   lines->push_back(ToStringUnlocked());
   lines->push_back("Messages:");
-  for (const MessageCache::value_type& entry : cache_) {
-    const ReplicateMsg* msg = entry.second->get();
+  for (const auto& entry : cache_) {
+    const ReplicateMsg* msg = entry.second.msg->get();
     lines->push_back(
       Substitute("Message[$0] $1.$2 : REPLICATE. Type: $3, Size: $4",
                  counter++, msg->id().term(), msg->id().index(),
@@ -452,19 +479,19 @@ void LogCache::DumpToStrings(vector<string>* lines) const {
 void LogCache::DumpToHtml(std::ostream& out) const {
   using std::endl;
 
-  lock_guard<simple_spinlock> lock(&lock_);
+  std::lock_guard<simple_spinlock> lock(lock_);
   out << "<h3>Messages:</h3>" << endl;
   out << "<table>" << endl;
   out << "<tr><th>Entry</th><th>OpId</th><th>Type</th><th>Size</th><th>Status</th></tr>" << endl;
 
   int counter = 0;
-  for (const MessageCache::value_type& entry : cache_) {
-    const ReplicateMsg* msg = entry.second->get();
+  for (const auto& entry : cache_) {
+    const ReplicateMsg* msg = entry.second.msg->get();
     out << Substitute("<tr><th>$0</th><th>$1.$2</th><td>REPLICATE $3</td>"
                       "<td>$4</td><td>$5</td></tr>",
                       counter++, msg->id().term(), msg->id().index(),
                       OperationType_Name(msg->op_type()),
-                      msg->ByteSize(), msg->id().ShortDebugString()) << endl;
+                      msg->ByteSize(), SecureShortDebugString(msg->id())) << endl;
   }
   out << "</table>";
 }

@@ -17,10 +17,16 @@
 
 #include "kudu/util/curl_util.h"
 
-#include "kudu/gutil/strings/substitute.h"
+#include <cstddef>
+#include <cstdint>
+#include <ostream>
 
 #include <curl/curl.h>
 #include <glog/logging.h>
+
+#include "kudu/gutil/strings/substitute.h"
+#include "kudu/security/openssl_util.h"
+#include "kudu/util/faststring.h"
 
 namespace kudu {
 
@@ -45,6 +51,10 @@ size_t WriteCallback(void* buffer, size_t size, size_t nmemb, void* user_ptr) {
 } // anonymous namespace
 
 EasyCurl::EasyCurl() {
+  // Use our own SSL initialization, and disable curl's.
+  // Both of these calls are idempotent.
+  security::InitializeOpenSSL();
+  CHECK_EQ(0, curl_global_init(CURL_GLOBAL_DEFAULT & ~CURL_GLOBAL_SSL));
   curl_ = curl_easy_init();
   CHECK(curl_) << "Could not init curl";
 }
@@ -68,7 +78,13 @@ Status EasyCurl::DoRequest(const std::string& url,
                            faststring* dst) {
   CHECK_NOTNULL(dst)->clear();
 
+  RETURN_NOT_OK(TranslateError(curl_easy_setopt(
+      curl_, CURLOPT_SSL_VERIFYPEER,
+      static_cast<long>(verify_peer_)))); // NOLINT(runtime/int)
   RETURN_NOT_OK(TranslateError(curl_easy_setopt(curl_, CURLOPT_URL, url.c_str())));
+  if (return_headers_) {
+    RETURN_NOT_OK(TranslateError(curl_easy_setopt(curl_, CURLOPT_HEADER, 1)));
+  }
   RETURN_NOT_OK(TranslateError(curl_easy_setopt(curl_, CURLOPT_WRITEFUNCTION, WriteCallback)));
   RETURN_NOT_OK(TranslateError(curl_easy_setopt(curl_, CURLOPT_WRITEDATA,
                                                 static_cast<void *>(dst))));
@@ -77,6 +93,12 @@ Status EasyCurl::DoRequest(const std::string& url,
                                                   post_data->c_str())));
   }
 
+  RETURN_NOT_OK(TranslateError(curl_easy_setopt(curl_, CURLOPT_HTTPAUTH, CURLAUTH_ANY)));
+  if (timeout_.Initialized()) {
+    RETURN_NOT_OK(TranslateError(curl_easy_setopt(curl_, CURLOPT_NOSIGNAL, 1)));
+    RETURN_NOT_OK(TranslateError(curl_easy_setopt(curl_, CURLOPT_TIMEOUT_MS,
+        timeout_.ToMilliseconds())));
+  }
   RETURN_NOT_OK(TranslateError(curl_easy_perform(curl_)));
   long rc; // NOLINT(runtime/int) curl wants a long
   RETURN_NOT_OK(TranslateError(curl_easy_getinfo(curl_, CURLINFO_RESPONSE_CODE, &rc)));

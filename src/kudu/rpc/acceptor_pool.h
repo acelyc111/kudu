@@ -18,10 +18,12 @@
 #ifndef KUDU_RPC_ACCEPTOR_POOL_H
 #define KUDU_RPC_ACCEPTOR_POOL_H
 
+#include <stdint.h>
 #include <vector>
 
 #include "kudu/gutil/atomicops.h"
-#include "kudu/util/thread.h"
+#include "kudu/gutil/macros.h"
+#include "kudu/gutil/ref_counted.h"
 #include "kudu/util/net/sockaddr.h"
 #include "kudu/util/net/socket.h"
 #include "kudu/util/status.h"
@@ -29,7 +31,7 @@
 namespace kudu {
 
 class Counter;
-class Socket;
+class Thread;
 
 namespace rpc {
 
@@ -58,6 +60,9 @@ class AcceptorPool {
   // socket is open, and if the specified port is 0 then this will return the
   // actual port that was bound.
   Status GetBoundAddress(Sockaddr* addr) const;
+
+  // Return the number of connections accepted by this messenger. Thread-safe.
+  int64_t num_rpc_connections_accepted() const;
 
  private:
   void RunThread();

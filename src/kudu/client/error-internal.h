@@ -19,15 +19,19 @@
 
 #include "kudu/client/client.h"
 #include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/macros.h"
+#include "kudu/util/status.h"
 
 namespace kudu {
 
 namespace client {
 
+class KuduWriteOperation;
+
 class KuduError::Data {
  public:
-  Data(gscoped_ptr<KuduWriteOperation> failed_op, const Status& error);
-  ~Data();
+  Data(gscoped_ptr<KuduWriteOperation> failed_op, Status error);
+  ~Data() = default;
 
   gscoped_ptr<KuduWriteOperation> failed_op_;
   Status status_;

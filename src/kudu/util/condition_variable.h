@@ -67,13 +67,13 @@
 
 #include <pthread.h>
 
-#include "kudu/util/monotime.h"
-#include "kudu/util/mutex.h"
+#include "kudu/gutil/macros.h"
 
 namespace kudu {
 
-class ConditionVarImpl;
-class TimeDelta;
+class MonoDelta;
+class MonoTime;
+class Mutex;
 
 class ConditionVariable {
  public:
@@ -86,10 +86,15 @@ class ConditionVariable {
   // sleep, and the reacquires it when it is signaled.
   void Wait() const;
 
+  // Like Wait(), but only waits up to a certain point in time.
+  //
+  // Returns true if we were Signal()'ed, or false if we reached 'until'.
+  bool WaitUntil(const MonoTime& until) const;
+
   // Like Wait(), but only waits up to a limited amount of time.
   //
-  // Returns true if we were Signal()'ed, or false if 'max_time' elapsed.
-  bool TimedWait(const MonoDelta& max_time) const;
+  // Returns true if we were Signal()'ed, or false if 'delta' elapsed.
+  bool WaitFor(const MonoDelta& delta) const;
 
   // Broadcast() revives all waiting threads.
   void Broadcast();

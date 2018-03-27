@@ -30,8 +30,11 @@ add_library(kudu_fs
   block_manager.cc
   block_manager_metrics.cc
   block_manager_util.cc
+  data_dirs.cc
+  error_manager.cc
   file_block_manager.cc
   fs_manager.cc
+  fs_report.cc
   log_block_manager.cc)
 
 target_link_libraries(kudu_fs
@@ -39,9 +42,24 @@ target_link_libraries(kudu_fs
   kudu_util
   gutil)
 
+add_library(kudu_fs_test_util
+  log_block_manager-test-util.cc)
+
+target_link_libraries(kudu_fs_test_util
+  fs_proto
+  kudu_fs
+  kudu_util
+  gutil)
+
 # Tests
-set(KUDU_TEST_LINK_LIBS kudu_fs ${KUDU_MIN_TEST_LIBS})
+set(KUDU_TEST_LINK_LIBS kudu_fs kudu_fs_test_util ${KUDU_MIN_TEST_LIBS})
 ADD_KUDU_TEST(block_manager-test)
 ADD_KUDU_TEST(block_manager_util-test)
 ADD_KUDU_TEST(block_manager-stress-test RUN_SERIAL true)
+ADD_KUDU_TEST(data_dirs-test)
+ADD_KUDU_TEST(error_manager-test)
 ADD_KUDU_TEST(fs_manager-test)
+if (NOT APPLE)
+  # Will only pass on Linux.
+  ADD_KUDU_TEST(log_block_manager-test)
+endif()

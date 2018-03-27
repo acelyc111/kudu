@@ -18,46 +18,53 @@
 #ifndef KUDU_CFILE_CFILE_WRITER_H
 #define KUDU_CFILE_CFILE_WRITER_H
 
-#include <boost/utility.hpp>
-#include <unordered_map>
-#include <stdint.h>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "kudu/cfile/block_encodings.h"
-#include "kudu/cfile/block_compression.h"
-#include "kudu/cfile/cfile.pb.h"
 #include "kudu/cfile/cfile_util.h"
-#include "kudu/cfile/type_encodings.h"
-#include "kudu/common/key_encoder.h"
-#include "kudu/common/types.h"
+#include "kudu/common/rowid.h"
 #include "kudu/fs/block_id.h"
 #include "kudu/fs/block_manager.h"
 #include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/macros.h"
-#include "kudu/gutil/strings/stringpiece.h"
-#include "kudu/util/env.h"
+#include "kudu/util/bitmap.h"
+#include "kudu/util/compression/compression.pb.h"
+#include "kudu/util/faststring.h"
 #include "kudu/util/rle-encoding.h"
+#include "kudu/util/slice.h"
 #include "kudu/util/status.h"
 
+namespace google {
+namespace protobuf {
+template <typename Element>
+class RepeatedPtrField; // IWYU pragma: keep
+}
+}
+
 namespace kudu {
-class Arena;
+
+class TypeInfo;
+template <typename Buffer>
+class KeyEncoder;
 
 namespace cfile {
-using std::unordered_map;
 
+class BlockBuilder;
 class BlockPointer;
-class BTreeInfoPB;
-class GVIntBlockBuilder;
-class BinaryPrefixBlockBuilder;
+class CompressedBlockBuilder;
+class FileMetadataPairPB;
 class IndexTreeBuilder;
+class TypeEncodingInfo;
 
 // Magic used in header/footer
-extern const char kMagicString[];
-
-const int kCFileMajorVersion = 1;
-const int kCFileMinorVersion = 0;
+extern const char kMagicStringV1[];
+extern const char kMagicStringV2[];
+extern const int kMagicLength;
+extern const size_t kChecksumSize;
 
 class NullBitmapBuilder {
  public:
@@ -96,10 +103,11 @@ class NullBitmapBuilder {
 // Main class used to write a CFile.
 class CFileWriter {
  public:
-  explicit CFileWriter(const WriterOptions &options,
+  explicit CFileWriter(WriterOptions options,
                        const TypeInfo* typeinfo,
                        bool is_nullable,
-                       gscoped_ptr<fs::WritableBlock> block);
+                       std::unique_ptr<fs::WritableBlock> block);
+
   ~CFileWriter();
 
   Status Start();
@@ -107,8 +115,9 @@ class CFileWriter {
   // Close the CFile and close the underlying writable block.
   Status Finish();
 
-  // Close the CFile and release the underlying writable block to 'closer'.
-  Status FinishAndReleaseBlock(fs::ScopedWritableBlockCloser* closer);
+  // Close the CFile, finalizing the underlying block and releasing
+  // it to 'transaction'.
+  Status FinishAndReleaseBlock(fs::BlockCreationTransaction* transaction);
 
   bool finished() {
     return state_ == kWriterFinished;
@@ -138,22 +147,41 @@ class CFileWriter {
   //
   // The Slices in 'data_slices' are concatenated to form the block.
   //
-  // validx_key may be NULL if this file writer has not been configured with
-  // value indexing.
-  Status AppendRawBlock(const vector<Slice> &data_slices,
+  // validx_key and validx_prev may be NULL if this file writer has not been
+  // configured with value indexing.
+  //
+  // validx_prev should be a Slice pointing to the last key of the previous block.
+  // It will be used to optimize the value index entry for the block.
+  Status AppendRawBlock(const std::vector<Slice> &data_slices,
                         size_t ordinal_pos,
-                        const void *validx_key,
+                        const void *validx_curr,
+                        const Slice &validx_prev,
                         const char *name_for_log);
 
 
   // Return the amount of data written so far to this CFile.
   // More data may be written by Finish(), but this is an approximation.
-  size_t written_size() const;
+  size_t written_size() const {
+    // This is a low estimate, but that's OK -- this is checked after every block
+    // write during flush/compact, so better to give a fast slightly-inaccurate result
+    // than spend a lot of effort trying to improve accuracy by a few KB.
+    return off_;
+  }
+
+  // Return the number of values written to the file.
+  // This includes NULL cells, but does not include any "raw" blocks
+  // appended.
+  int written_value_count() const {
+    return value_count_;
+  }
 
   std::string ToString() const { return block_->id().ToString(); }
 
+  fs::WritableBlock* block() const { return block_.get(); }
+
   // Wrapper for AddBlock() to append the dictionary block to the end of a Cfile.
-  Status AppendDictBlock(const vector<Slice> &data_slices, BlockPointer *block_ptr,
+  Status AppendDictBlock(const std::vector<Slice> &data_slices,
+                         BlockPointer *block_ptr,
                          const char *name_for_log) {
     return AddBlock(data_slices, block_ptr, name_for_log);
   }
@@ -166,11 +194,11 @@ class CFileWriter {
   // Append the given block into the file.
   //
   // Sets *block_ptr to correspond to the newly inserted block.
-  Status AddBlock(const vector<Slice> &data_slices,
+  Status AddBlock(const std::vector<Slice> &data_slices,
                   BlockPointer *block_ptr,
                   const char *name_for_log);
 
-  Status WriteRawData(const Slice& data);
+  Status WriteRawData(const std::vector<Slice>& data);
 
   Status FinishCurDataBlock();
 
@@ -179,7 +207,7 @@ class CFileWriter {
   void FlushMetadataToPB(google::protobuf::RepeatedPtrField<FileMetadataPairPB> *field);
 
   // Block being written.
-  gscoped_ptr<fs::WritableBlock> block_;
+  std::unique_ptr<fs::WritableBlock> block_;
 
   // Current file offset.
   uint64_t off_;
@@ -195,15 +223,15 @@ class CFileWriter {
   const TypeInfo* typeinfo_;
   const TypeEncodingInfo* type_encoding_info_;
 
-  // The key-encoder. Only set if the writer is writing an embedded
-  // value index.
-  const KeyEncoder<faststring>* key_encoder_;
+  // The last key written to the block.
+  // Only set if the writer is writing an embedded value index.
+  faststring last_key_;
 
   // a temporary buffer for encoding
   faststring tmp_buf_;
 
   // Metadata which has been added to the writer but not yet flushed.
-  vector<pair<string, string> > unflushed_metadata_;
+  std::vector<std::pair<std::string, std::string> > unflushed_metadata_;
 
   gscoped_ptr<BlockBuilder> data_block_;
   gscoped_ptr<IndexTreeBuilder> posidx_builder_;

@@ -19,18 +19,24 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
+#include <ostream>
+
+#include <glog/logging.h>
 
 #include "kudu/gutil/stl_util.h"
 #include "kudu/tablet/rowset.h"
-#include "kudu/util/interval_tree.h"
+#include "kudu/tablet/rowset_metadata.h"
 #include "kudu/util/interval_tree-inl.h"
+#include "kudu/util/interval_tree.h"
 #include "kudu/util/slice.h"
 
 using std::vector;
 using std::shared_ptr;
+using std::string;
 
 namespace kudu {
 namespace tablet {
@@ -44,16 +50,30 @@ bool RSEndpointBySliceCompare(const RowSetTree::RSEndpoint& a,
   if (slice_cmp) return slice_cmp < 0;
   ptrdiff_t rs_cmp = a.rowset_ - b.rowset_;
   if (rs_cmp) return rs_cmp < 0;
-  return b.endpoint_ == RowSetTree::STOP;
+  if (a.endpoint_ != b.endpoint_) return a.endpoint_ == RowSetTree::START;
+  return false;
 }
+
+// Wrapper used when making batch queries into the interval tree.
+struct QueryStruct {
+  // The slice of the operation performing the query.
+  Slice slice;
+  // The original index of this slice in the incoming batch.
+  int idx;
+};
 
 } // anonymous namespace
 
 // Entry for use in the interval tree.
 struct RowSetWithBounds {
-  RowSet *rowset;
   string min_key;
   string max_key;
+
+  // NOTE: the ordering of struct fields here is purposeful: we access
+  // min_key and max_key frequently, so putting them first in the struct
+  // ensures they fill a single 64-byte cache line (each is 32 bytes).
+  // The 'rowset' pointer is accessed comparitively rarely.
+  RowSet *rowset;
 };
 
 // Traits struct for IntervalTree.
@@ -72,6 +92,15 @@ struct RowSetIntervalTraits {
   static int compare(const Slice &a, const Slice &b) {
     return a.compare(b);
   }
+
+  static int compare(const Slice &a, const QueryStruct &b) {
+    return a.compare(b.slice);
+  }
+
+  static int compare(const QueryStruct &a, const Slice &b) {
+    return -compare(b, a);
+  }
+
 };
 
 RowSetTree::RowSetTree()
@@ -92,7 +121,7 @@ Status RowSetTree::Reset(const RowSetVector &rowsets) {
   for (const shared_ptr<RowSet> &rs : rowsets) {
     gscoped_ptr<RowSetWithBounds> rsit(new RowSetWithBounds());
     rsit->rowset = rs.get();
-    Slice min_key, max_key;
+    string min_key, max_key;
     Status s = rs->GetBounds(&min_key, &max_key);
     if (s.IsNotSupported()) {
       // This rowset is a MemRowSet, for which the bounds change as more
@@ -109,13 +138,15 @@ Status RowSetTree::Reset(const RowSetVector &rowsets) {
     }
     DCHECK_LE(min_key.compare(max_key), 0)
       << "Rowset min must be <= max: " << rs->ToString();
-    // Load into key endpoints.
-    endpoints.push_back(RSEndpoint(rsit->rowset, START, min_key));
-    endpoints.push_back(RSEndpoint(rsit->rowset, STOP, max_key));
 
     // Load bounds and save entry
-    rsit->min_key = min_key.ToString();
-    rsit->max_key = max_key.ToString();
+    rsit->min_key = std::move(min_key);
+    rsit->max_key = std::move(max_key);
+
+    // Load into key endpoints.
+    endpoints.emplace_back(rsit->rowset, START, rsit->min_key);
+    endpoints.emplace_back(rsit->rowset, STOP, rsit->max_key);
+
     entries.push_back(rsit.release());
   }
 
@@ -128,6 +159,15 @@ Status RowSetTree::Reset(const RowSetVector &rowsets) {
   tree_.reset(new IntervalTree<RowSetIntervalTraits>(entries_));
   key_endpoints_.swap(endpoints);
   all_rowsets_.assign(rowsets.begin(), rowsets.end());
+
+  // Build the mapping from DRS ID to DRS.
+  drs_by_id_.clear();
+  for (auto& rs : all_rowsets_) {
+    if (rs->metadata()) {
+      InsertOrDie(&drs_by_id_, rs->metadata()->id(), rs.get());
+    }
+  }
+
   initted_ = true;
 
   return Status::OK();
@@ -177,6 +217,37 @@ void RowSetTree::FindRowSetsWithKeyInRange(const Slice &encoded_key,
     rowsets->push_back(rs->rowset);
   }
 }
+
+void RowSetTree::ForEachRowSetContainingKeys(
+    const std::vector<Slice>& encoded_keys,
+    const std::function<void(RowSet*, int)>& cb) const {
+
+  DCHECK(std::is_sorted(encoded_keys.cbegin(), encoded_keys.cend(),
+                        Slice::Comparator()));
+  // All rowsets with unknown bounds need to be checked.
+  for (const shared_ptr<RowSet> &rs : unbounded_rowsets_) {
+    for (int i = 0; i < encoded_keys.size(); i++) {
+      cb(rs.get(), i);
+    }
+  }
+
+  // The interval tree batch query callback would naturally just give us back
+  // the matching Slices, but that won't allow us to easily tell the caller
+  // which specific operation _index_ matched the RowSet. So, we make a vector
+  // of QueryStructs to pair the Slice with its original index.
+  vector<QueryStruct> queries;
+  queries.resize(encoded_keys.size());
+  for (int i = 0; i < encoded_keys.size(); i++) {
+    queries[i] = {encoded_keys[i], i};
+  }
+
+  tree_->ForEachIntervalContainingPoints(
+      queries,
+      [&](const QueryStruct& qs, RowSetWithBounds* rs) {
+        cb(rs->rowset, qs.idx);
+      });
+}
+
 
 RowSetTree::~RowSetTree() {
   STLDeleteElements(&entries_);

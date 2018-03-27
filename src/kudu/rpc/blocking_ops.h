@@ -18,9 +18,6 @@
 #ifndef KUDU_RPC_BLOCKING_OPS_H
 #define KUDU_RPC_BLOCKING_OPS_H
 
-#include <set>
-#include <string>
-
 namespace google {
 namespace protobuf {
 class MessageLite;
@@ -32,16 +29,13 @@ namespace kudu {
 class faststring;
 class MonoTime;
 class Slice;
-class Sockaddr;
 class Socket;
 class Status;
 
 namespace rpc {
 
-class SaslMessagePB;
-
 // Returns OK if socket is in blocking mode. Otherwise, returns an error.
-Status EnsureBlockingMode(const Socket* const sock);
+Status CheckInBlockingMode(const Socket* sock);
 
 // Encode and send a message over a socket.
 // header: Request or Response header protobuf.

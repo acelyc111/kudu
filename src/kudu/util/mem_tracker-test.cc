@@ -17,17 +17,22 @@
 
 #include "kudu/util/mem_tracker.h"
 
+#include <atomic>
+#include <functional>
+#include <memory>
 #include <string>
+#include <system_error>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
-#include <boost/bind.hpp>
-#include <gperftools/malloc_extension.h>
+#include <glog/logging.h>
+#include <gtest/gtest.h>
 
+#include "kudu/gutil/strings/substitute.h"
+#include "kudu/util/monotime.h"
 #include "kudu/util/test_util.h"
-
-DECLARE_int32(memory_limit_soft_percentage);
 
 namespace kudu {
 
@@ -38,6 +43,7 @@ using std::shared_ptr;
 using std::string;
 using std::unordered_map;
 using std::vector;
+using strings::Substitute;
 
 TEST(MemTrackerTest, SingleTrackerNoLimit) {
   shared_ptr<MemTracker> t = MemTracker::CreateTracker(-1, "t");
@@ -113,63 +119,15 @@ TEST(MemTrackerTest, TrackerHierarchy) {
 
 class GcFunctionHelper {
  public:
-  static const int NUM_RELEASE_BYTES = 1;
+  static const int kNumReleaseBytes = 1;
 
   explicit GcFunctionHelper(MemTracker* tracker) : tracker_(tracker) { }
 
-  void GcFunc() { tracker_->Release(NUM_RELEASE_BYTES); }
+  void GcFunc() { tracker_->Release(kNumReleaseBytes); }
 
  private:
   MemTracker* tracker_;
 };
-
-TEST(MemTrackerTest, GcFunctions) {
-  shared_ptr<MemTracker> t = MemTracker::CreateTracker(10, "");
-  ASSERT_TRUE(t->has_limit());
-
-  t->Consume(9);
-  EXPECT_FALSE(t->LimitExceeded());
-
-  // Test TryConsume()
-  EXPECT_FALSE(t->TryConsume(2));
-  EXPECT_EQ(t->consumption(), 9);
-  EXPECT_FALSE(t->LimitExceeded());
-
-  // Attach GcFunction that releases 1 byte
-  GcFunctionHelper gc_func_helper(t.get());
-  t->AddGcFunction(boost::bind(&GcFunctionHelper::GcFunc, &gc_func_helper));
-  EXPECT_TRUE(t->TryConsume(2));
-  EXPECT_EQ(t->consumption(), 10);
-  EXPECT_FALSE(t->LimitExceeded());
-
-  // GcFunction will be called even though TryConsume() fails
-  EXPECT_FALSE(t->TryConsume(2));
-  EXPECT_EQ(t->consumption(), 9);
-  EXPECT_FALSE(t->LimitExceeded());
-
-  // GcFunction won't be called
-  EXPECT_TRUE(t->TryConsume(1));
-  EXPECT_EQ(t->consumption(), 10);
-  EXPECT_FALSE(t->LimitExceeded());
-
-  // Test LimitExceeded()
-  t->Consume(1);
-  EXPECT_EQ(t->consumption(), 11);
-  EXPECT_FALSE(t->LimitExceeded());
-  EXPECT_EQ(t->consumption(), 10);
-
-  // Add more GcFunctions, test that we only call them until the limit is no longer
-  // exceeded
-  GcFunctionHelper gc_func_helper2(t.get());
-  t->AddGcFunction(boost::bind(&GcFunctionHelper::GcFunc, &gc_func_helper2));
-  GcFunctionHelper gc_func_helper3(t.get());
-  t->AddGcFunction(boost::bind(&GcFunctionHelper::GcFunc, &gc_func_helper3));
-  t->Consume(1);
-  EXPECT_EQ(t->consumption(), 11);
-  EXPECT_FALSE(t->LimitExceeded());
-  EXPECT_EQ(t->consumption(), 10);
-  t->Release(10);
-}
 
 TEST(MemTrackerTest, STLContainerAllocator) {
   shared_ptr<MemTracker> t = MemTracker::CreateTracker(-1, "t");
@@ -216,7 +174,7 @@ TEST(MemTrackerTest, FindFunctionsTakeOwnership) {
 
   {
     shared_ptr<MemTracker> m = MemTracker::CreateTracker(-1, "test");
-    ref = MemTracker::FindOrCreateTracker(-1, m->id());
+    ref = MemTracker::FindOrCreateGlobalTracker(-1, m->id());
   }
   LOG(INFO) << ref->ToString();
   ref.reset();
@@ -245,96 +203,83 @@ TEST(MemTrackerTest, ScopedTrackedConsumption) {
   ASSERT_EQ(0, m->consumption());
 }
 
-TEST(MemTrackerTest, SoftLimitExceeded) {
-  const int kNumIters = 100000;
-  const int kMemLimit = 1000;
-  google::FlagSaver saver;
-  FLAGS_memory_limit_soft_percentage = 0;
-  shared_ptr<MemTracker> m = MemTracker::CreateTracker(kMemLimit, "test");
-
-  // Consumption is 0; the soft limit is never exceeded.
-  for (int i = 0; i < kNumIters; i++) {
-    ASSERT_FALSE(m->SoftLimitExceeded(nullptr));
-  }
-
-  // Consumption is half of the actual limit, so we expect to exceed the soft
-  // limit roughly half the time.
-  ScopedTrackedConsumption consumption(m, kMemLimit / 2);
-  int exceeded_count = 0;
-  for (int i = 0; i < kNumIters; i++) {
-    double current_percentage;
-    if (m->SoftLimitExceeded(&current_percentage)) {
-      exceeded_count++;
-      ASSERT_NEAR(50, current_percentage, 0.1);
-    }
-  }
-  double exceeded_pct = static_cast<double>(exceeded_count) / kNumIters * 100;
-  ASSERT_TRUE(exceeded_pct > 47 && exceeded_pct < 52);
-
-  // Consumption is over the limit; the soft limit is always exceeded.
-  consumption.Reset(kMemLimit + 1);
-  for (int i = 0; i < kNumIters; i++) {
-    double current_percentage;
-    ASSERT_TRUE(m->SoftLimitExceeded(&current_percentage));
-    ASSERT_NEAR(100, current_percentage, 0.1);
-  }
-}
-
-#ifdef TCMALLOC_ENABLED
-TEST(MemTrackerTest, TcMallocRootTracker) {
-  shared_ptr<MemTracker> root = MemTracker::GetRootTracker();
-
-  // The root tracker's consumption and tcmalloc should agree.
-  size_t value;
-  root->UpdateConsumption();
-  ASSERT_TRUE(MallocExtension::instance()->GetNumericProperty(
-      "generic.current_allocated_bytes", &value));
-  ASSERT_EQ(value, root->consumption());
-
-  // Explicit Consume() and Release() have no effect.
-  root->Consume(100);
-  ASSERT_EQ(value, root->consumption());
-  root->Release(3);
-  ASSERT_EQ(value, root->consumption());
-
-  // But if we allocate something really big, we should see a change.
-  gscoped_ptr<char[]> big_alloc(new char[4*1024*1024]);
-  // clang in release mode can optimize out the above allocation unless
-  // we do something with the pointer... so we just log it.
-  VLOG(8) << static_cast<void*>(big_alloc.get());
-  root->UpdateConsumption();
-  ASSERT_GT(root->consumption(), value);
-}
-#endif
-
-TEST(MemTrackerTest, UnregisterFromParent) {
+TEST(MemTrackerTest, CollisionDetection) {
   shared_ptr<MemTracker> p = MemTracker::CreateTracker(-1, "parent");
   shared_ptr<MemTracker> c = MemTracker::CreateTracker(-1, "child", p);
-  vector<shared_ptr<MemTracker> > all;
+  vector<shared_ptr<MemTracker>> all;
 
   // Three trackers: root, parent, and child.
   MemTracker::ListTrackers(&all);
   ASSERT_EQ(3, all.size());
 
-  c->UnregisterFromParent();
-
-  // Now only two because the child cannot be found from the root, though it is
-  // still alive.
+  // Now only two because the child has been destroyed.
+  c.reset();
   MemTracker::ListTrackers(&all);
   ASSERT_EQ(2, all.size());
   shared_ptr<MemTracker> not_found;
   ASSERT_FALSE(MemTracker::FindTracker("child", &not_found, p));
 
-  // We can also recreate the child with the same name without colliding
-  // with the old one.
-  shared_ptr<MemTracker> c2 = MemTracker::CreateTracker(-1, "child", p);
+  // Let's duplicate the parent. It's not recommended, but it's allowed.
+  shared_ptr<MemTracker> p2 = MemTracker::CreateTracker(-1, "parent");
+  ASSERT_EQ(p->ToString(), p2->ToString());
 
-  // We should still able to walk up to the root from the unregistered child
-  // without crashing.
-  LOG(INFO) << c->ToString();
+  // Only when we do a Find() operation do we crash.
+#ifndef NDEBUG
+  const string kDeathMsg = "Multiple memtrackers with same id";
+  EXPECT_DEATH({
+    shared_ptr<MemTracker> found;
+    MemTracker::FindTracker("parent", &found);
+  }, kDeathMsg);
+  EXPECT_DEATH({
+    MemTracker::FindOrCreateGlobalTracker(-1, "parent");
+  }, kDeathMsg);
+#endif
+}
 
-  // And this should no-op.
-  c->UnregisterFromParent();
+TEST(MemTrackerTest, TestMultiThreadedRegisterAndDestroy) {
+  std::atomic<bool> done(false);
+  vector<std::thread> threads;
+  for (int i = 0; i < 10; i++) {
+    threads.emplace_back([&done]{
+        while (!done.load()) {
+          shared_ptr<MemTracker> t = MemTracker::FindOrCreateGlobalTracker(
+              1000, "foo");
+        }
+      });
+  }
+
+  SleepFor(MonoDelta::FromSeconds(AllowSlowTests() ? 5 : 1));
+  done.store(true);
+  for (auto& t : threads) {
+    t.join();
+  }
+}
+
+TEST(MemTrackerTest, TestMultiThreadedCreateFind) {
+  shared_ptr<MemTracker> p = MemTracker::CreateTracker(-1, "p");
+  shared_ptr<MemTracker> c1 = MemTracker::CreateTracker(-1, "c1", p);
+  std::atomic<bool> done(false);
+  vector<std::thread> threads;
+  threads.emplace_back([&]{
+    while (!done.load()) {
+      shared_ptr<MemTracker> c1_copy;
+      CHECK(MemTracker::FindTracker(c1->id(), &c1_copy, p));
+    }
+  });
+  for (int i = 0; i < 5; i++) {
+    threads.emplace_back([&, i]{
+      while (!done.load()) {
+        shared_ptr<MemTracker> c2 =
+            MemTracker::CreateTracker(-1, Substitute("ci-$0", i), p);
+      }
+    });
+  }
+
+  SleepFor(MonoDelta::FromMilliseconds(500));
+  done.store(true);
+  for (auto& t : threads) {
+    t.join();
+  }
 }
 
 } // namespace kudu

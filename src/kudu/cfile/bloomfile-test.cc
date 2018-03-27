@@ -15,8 +15,26 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <cstdint>
+#include <cstdlib>
+#include <memory>
+#include <ostream>
+#include <utility>
+
+#include <glog/logging.h>
+#include <gtest/gtest.h>
+
 #include "kudu/cfile/bloomfile-test-base.h"
+#include "kudu/cfile/bloomfile.h"
+#include "kudu/cfile/cfile_util.h"
+#include "kudu/fs/block_manager.h"
 #include "kudu/fs/fs-test-util.h"
+#include "kudu/fs/fs_manager.h"
+#include "kudu/gutil/endian.h"
+#include "kudu/util/bloom_filter.h"
+#include "kudu/util/mem_tracker.h"
+#include "kudu/util/slice.h"
+#include "kudu/util/test_macros.h"
 
 using std::shared_ptr;
 
@@ -24,6 +42,8 @@ namespace kudu {
 namespace cfile {
 
 using fs::CountingReadableBlock;
+using fs::ReadableBlock;
+using std::unique_ptr;
 
 class BloomFileTest : public BloomFileTestBase {
 
@@ -41,7 +61,7 @@ class BloomFileTest : public BloomFileTestBase {
 
     int positive_count = 0;
     // Check that the FP rate for keys we didn't insert is what we expect.
-    for (uint64 i = 0; i < FLAGS_n_keys; i++) {
+    for (uint64_t i = 0; i < FLAGS_n_keys; i++) {
       uint64_t key = random();
       Slice s(reinterpret_cast<char *>(&key), sizeof(key));
 
@@ -94,20 +114,22 @@ TEST_F(BloomFileTest, TestLazyInit) {
   int64_t initial_mem_usage = tracker->consumption();
 
   // Open the bloom file using a "counting" readable block.
-  gscoped_ptr<ReadableBlock> block;
+  unique_ptr<ReadableBlock> block;
   ASSERT_OK(fs_manager_->OpenBlock(block_id_, &block));
   size_t bytes_read = 0;
-  gscoped_ptr<ReadableBlock> count_block(
-      new CountingReadableBlock(block.Pass(), &bytes_read));
+  unique_ptr<ReadableBlock> count_block(
+      new CountingReadableBlock(std::move(block), &bytes_read));
 
-  // Lazily opening the bloom file should not trigger any reads.
-  gscoped_ptr<BloomFileReader> reader;
+  // Lazily opening the bloom file should not trigger any reads,
+  // and the file size should be available before Init().
+  unique_ptr<BloomFileReader> reader;
   ReaderOptions opts;
   opts.parent_mem_tracker = tracker;
-  ASSERT_OK(BloomFileReader::OpenNoInit(count_block.Pass(), opts, &reader));
+  ASSERT_OK(BloomFileReader::OpenNoInit(std::move(count_block), opts, &reader));
   ASSERT_EQ(0, bytes_read);
   int64_t lazy_mem_usage = tracker->consumption();
   ASSERT_GT(lazy_mem_usage, initial_mem_usage);
+  ASSERT_GT(reader->FileSize(), 0);
 
   // But initializing it should (only the first time), and the bloom's
   // memory usage should increase.
@@ -122,8 +144,8 @@ TEST_F(BloomFileTest, TestLazyInit) {
   // same number of bytes read.
   ASSERT_OK(fs_manager_->OpenBlock(block_id_, &block));
   bytes_read = 0;
-  count_block.reset(new CountingReadableBlock(block.Pass(), &bytes_read));
-  ASSERT_OK(BloomFileReader::Open(count_block.Pass(), ReaderOptions(), &reader));
+  count_block.reset(new CountingReadableBlock(std::move(block), &bytes_read));
+  ASSERT_OK(BloomFileReader::Open(std::move(count_block), ReaderOptions(), &reader));
   ASSERT_EQ(bytes_read_after_init, bytes_read);
 }
 

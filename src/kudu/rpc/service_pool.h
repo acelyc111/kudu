@@ -18,16 +18,19 @@
 #ifndef KUDU_SERVICE_POOL_H
 #define KUDU_SERVICE_POOL_H
 
+#include <cstddef>
+#include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include "kudu/gutil/macros.h"
 #include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/macros.h"
+#include "kudu/gutil/port.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/rpc/rpc_service.h"
-#include "kudu/util/blocking_queue.h"
+#include "kudu/rpc/service_queue.h"
 #include "kudu/util/mutex.h"
-#include "kudu/util/thread.h"
 #include "kudu/util/status.h"
 
 namespace kudu {
@@ -35,12 +38,15 @@ namespace kudu {
 class Counter;
 class Histogram;
 class MetricEntity;
-class Socket;
+class Thread;
 
 namespace rpc {
 
-class Messenger;
+class InboundCall;
+class RemoteMethod;
 class ServiceIf;
+
+struct RpcMethodInfo;
 
 // A pool of threads that handle new incoming RPC calls.
 // Also includes a queue that calls get pushed onto for handling by the pool.
@@ -51,16 +57,33 @@ class ServicePool : public RpcService {
               size_t service_queue_length);
   virtual ~ServicePool();
 
+  // Set a hook function to be called when any RPC gets rejected because
+  // the service queue is full.
+  //
+  // NOTE: This hook runs on a reactor thread so must execute quickly.
+  // Additionally, if a service queue is overflowing, the server is likely
+  // under a lot of load, so hooks should be careful to throttle their own
+  // execution.
+  void set_too_busy_hook(std::function<void(void)> hook) {
+    too_busy_hook_ = std::move(hook);
+  }
+
   // Start up the thread pool.
   virtual Status Init(int num_threads);
 
   // Shut down the queue and the thread pool.
   virtual void Shutdown();
 
+  RpcMethodInfo* LookupMethod(const RemoteMethod& method) override;
+
   virtual Status QueueInboundCall(gscoped_ptr<InboundCall> call) OVERRIDE;
 
   const Counter* RpcsTimedOutInQueueMetricForTests() const {
     return rpcs_timed_out_in_queue_.get();
+  }
+
+  const Histogram* IncomingQueueTimeMetricForTests() const {
+    return incoming_queue_time_.get();
   }
 
   const Counter* RpcsQueueOverflowMetric() const {
@@ -71,15 +94,19 @@ class ServicePool : public RpcService {
 
  private:
   void RunThread();
+  void RejectTooBusy(InboundCall* c);
+
   gscoped_ptr<ServiceIf> service_;
   std::vector<scoped_refptr<kudu::Thread> > threads_;
-  BlockingQueue<InboundCall*> service_queue_;
+  LifoServiceQueue service_queue_;
   scoped_refptr<Histogram> incoming_queue_time_;
   scoped_refptr<Counter> rpcs_timed_out_in_queue_;
   scoped_refptr<Counter> rpcs_queue_overflow_;
 
   mutable Mutex shutdown_lock_;
   bool closing_;
+
+  std::function<void(void)> too_busy_hook_;
 
   DISALLOW_COPY_AND_ASSIGN(ServicePool);
 };

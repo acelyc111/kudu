@@ -16,63 +16,108 @@
 // under the License.
 
 #include <algorithm>
+#include <memory>
+#include <ostream>
+#include <string>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 
 #include "kudu/cfile/bloomfile.h"
+#include "kudu/cfile/cfile_reader.h"
 #include "kudu/cfile/cfile_util.h"
-#include "kudu/cfile/cfile_writer.h"
+#include "kudu/common/column_materialization_context.h"
+#include "kudu/common/columnblock.h"
+#include "kudu/common/encoded_key.h"
+#include "kudu/common/iterator_stats.h"
+#include "kudu/common/rowblock.h"
+#include "kudu/common/rowid.h"
 #include "kudu/common/scan_spec.h"
-#include "kudu/gutil/algorithm.h"
+#include "kudu/common/schema.h"
+#include "kudu/fs/block_id.h"
+#include "kudu/fs/block_manager.h"
+#include "kudu/fs/fs_manager.h"
 #include "kudu/gutil/dynamic_annotations.h"
-#include "kudu/gutil/map-util.h"
-#include "kudu/gutil/stl_util.h"
+#include "kudu/gutil/macros.h"
+#include "kudu/gutil/port.h"
+#include "kudu/gutil/stringprintf.h"
 #include "kudu/gutil/strings/substitute.h"
-#include "kudu/tablet/diskrowset.h"
 #include "kudu/tablet/cfile_set.h"
+#include "kudu/tablet/diskrowset.h"
+#include "kudu/tablet/rowset.h"
+#include "kudu/tablet/rowset_metadata.h"
 #include "kudu/util/flag_tags.h"
+#include "kudu/util/logging.h"
+#include "kudu/util/slice.h"
+#include "kudu/util/status.h"
 
 DEFINE_bool(consult_bloom_filters, true, "Whether to consult bloom filters on row presence checks");
 TAG_FLAG(consult_bloom_filters, hidden);
 
 namespace kudu {
+
+class MemTracker;
+
 namespace tablet {
 
+using cfile::BloomFileReader;
+using cfile::CFileIterator;
+using cfile::CFileReader;
+using cfile::ColumnIterator;
 using cfile::ReaderOptions;
 using cfile::DefaultColumnValueIterator;
 using fs::ReadableBlock;
 using std::shared_ptr;
+using std::string;
+using std::unique_ptr;
+using std::vector;
 using strings::Substitute;
 
 ////////////////////////////////////////////////////////////
 // Utilities
 ////////////////////////////////////////////////////////////
 
-static Status OpenReader(const shared_ptr<RowSetMetadata>& rowset_metadata,
-                         ColumnId col_id,
-                         gscoped_ptr<CFileReader> *new_reader) {
-  FsManager* fs = rowset_metadata->fs_manager();
-  gscoped_ptr<ReadableBlock> block;
-  BlockId block_id = rowset_metadata->column_data_block_for_col_id(col_id);
+static Status OpenReader(FsManager* fs,
+                         shared_ptr<MemTracker> parent_mem_tracker,
+                         const BlockId& block_id,
+                         unique_ptr<CFileReader>* new_reader) {
+  unique_ptr<ReadableBlock> block;
   RETURN_NOT_OK(fs->OpenBlock(block_id, &block));
 
-  // TODO: somehow pass reader options in schema
   ReaderOptions opts;
-  return CFileReader::OpenNoInit(block.Pass(), opts, new_reader);
+  opts.parent_mem_tracker = std::move(parent_mem_tracker);
+  return CFileReader::OpenNoInit(std::move(block),
+                                 std::move(opts),
+                                 new_reader);
 }
 
 ////////////////////////////////////////////////////////////
 // CFile Base
 ////////////////////////////////////////////////////////////
 
-CFileSet::CFileSet(shared_ptr<RowSetMetadata> rowset_metadata)
-    : rowset_metadata_(std::move(rowset_metadata)) {}
+CFileSet::CFileSet(shared_ptr<RowSetMetadata> rowset_metadata,
+                   shared_ptr<MemTracker> parent_mem_tracker)
+    : rowset_metadata_(std::move(rowset_metadata)),
+      parent_mem_tracker_(std::move(parent_mem_tracker)) {
+}
 
 CFileSet::~CFileSet() {
 }
 
+Status CFileSet::Open(shared_ptr<RowSetMetadata> rowset_metadata,
+                      shared_ptr<MemTracker> parent_mem_tracker,
+                      shared_ptr<CFileSet>* cfile_set) {
+  shared_ptr<CFileSet> cfs(new CFileSet(std::move(rowset_metadata),
+                                        std::move(parent_mem_tracker)));
+  RETURN_NOT_OK(cfs->DoOpen());
 
-Status CFileSet::Open() {
+  cfile_set->swap(cfs);
+  return Status::OK();
+}
+
+Status CFileSet::DoOpen() {
   RETURN_NOT_OK(OpenBloomReader());
 
   // Lazily open the column data cfiles. Each one will be fully opened
@@ -82,20 +127,27 @@ Status CFileSet::Open() {
     ColumnId col_id = e.first;
     DCHECK(!ContainsKey(readers_by_col_id_, col_id)) << "already open";
 
-    gscoped_ptr<CFileReader> reader;
-    RETURN_NOT_OK(OpenReader(rowset_metadata_, col_id, &reader));
-    readers_by_col_id_[col_id] = shared_ptr<CFileReader>(reader.release());
+    unique_ptr<CFileReader> reader;
+    RETURN_NOT_OK(OpenReader(rowset_metadata_->fs_manager(),
+                             parent_mem_tracker_,
+                             rowset_metadata_->column_data_block_for_col_id(col_id),
+                             &reader));
+    readers_by_col_id_[col_id] = std::move(reader);
     VLOG(1) << "Successfully opened cfile for column id " << col_id
             << " in " << rowset_metadata_->ToString();
+  }
+  readers_by_col_id_.shrink_to_fit();
+
+  if (rowset_metadata_->has_adhoc_index_block()) {
+    RETURN_NOT_OK(OpenReader(rowset_metadata_->fs_manager(),
+                             parent_mem_tracker_,
+                             rowset_metadata_->adhoc_index_block(),
+                             &ad_hoc_idx_reader_));
   }
 
   // However, the key reader should always be fully opened, so that we
   // can figure out where in the rowset tree we belong.
-  if (rowset_metadata_->has_adhoc_index_block()) {
-    RETURN_NOT_OK(OpenAdHocIndexReader());
-  } else {
-    RETURN_NOT_OK(key_index_reader()->Init());
-  }
+  RETURN_NOT_OK(key_index_reader()->Init());
 
   // Determine the upper and lower key bounds for this CFileSet.
   RETURN_NOT_OK(LoadMinMaxKeys());
@@ -103,31 +155,16 @@ Status CFileSet::Open() {
   return Status::OK();
 }
 
-Status CFileSet::OpenAdHocIndexReader() {
-  if (ad_hoc_idx_reader_ != nullptr) {
-    return Status::OK();
-  }
-
-  FsManager* fs = rowset_metadata_->fs_manager();
-  gscoped_ptr<ReadableBlock> block;
-  RETURN_NOT_OK(fs->OpenBlock(rowset_metadata_->adhoc_index_block(), &block));
-
-  ReaderOptions opts;
-  return CFileReader::Open(block.Pass(), opts, &ad_hoc_idx_reader_);
-}
-
-
 Status CFileSet::OpenBloomReader() {
-  if (bloom_reader_ != nullptr) {
-    return Status::OK();
-  }
-
   FsManager* fs = rowset_metadata_->fs_manager();
-  gscoped_ptr<ReadableBlock> block;
+  unique_ptr<ReadableBlock> block;
   RETURN_NOT_OK(fs->OpenBlock(rowset_metadata_->bloom_block(), &block));
 
   ReaderOptions opts;
-  Status s = BloomFileReader::OpenNoInit(block.Pass(), opts, &bloom_reader_);
+  opts.parent_mem_tracker = parent_mem_tracker_;
+  Status s = BloomFileReader::OpenNoInit(std::move(block),
+                                         std::move(opts),
+                                         &bloom_reader_);
   if (!s.ok()) {
     LOG(WARNING) << "Unable to open bloom file in " << rowset_metadata_->ToString() << ": "
                  << s.ToString();
@@ -146,9 +183,9 @@ Status CFileSet::LoadMinMaxKeys() {
     return Status::Corruption("No max key found", ToString());
   }
   if (Slice(min_encoded_key_).compare(max_encoded_key_) > 0) {
-    return Status::Corruption(StringPrintf("Min key %s > max key %s",
-                                           Slice(min_encoded_key_).ToDebugString().c_str(),
-                                           Slice(max_encoded_key_).ToDebugString().c_str()),
+    return Status::Corruption(Substitute("Min key $0 > max key $1",
+                                         KUDU_REDACT(Slice(min_encoded_key_).ToDebugString()),
+                                         KUDU_REDACT(Slice(max_encoded_key_).ToDebugString())),
                               ToString());
   }
 
@@ -179,25 +216,36 @@ Status CFileSet::CountRows(rowid_t *count) const {
   return key_index_reader()->CountRows(count);
 }
 
-Status CFileSet::GetBounds(Slice *min_encoded_key,
-                           Slice *max_encoded_key) const {
-  *min_encoded_key = Slice(min_encoded_key_);
-  *max_encoded_key = Slice(max_encoded_key_);
+Status CFileSet::GetBounds(string* min_encoded_key,
+                           string* max_encoded_key) const {
+  *min_encoded_key = min_encoded_key_;
+  *max_encoded_key = max_encoded_key_;
   return Status::OK();
 }
 
-uint64_t CFileSet::EstimateOnDiskSize() const {
+uint64_t CFileSet::AdhocIndexOnDiskSize() const {
+  if (ad_hoc_idx_reader_) {
+    return ad_hoc_idx_reader_->file_size();
+  }
+  return 0;
+}
+
+uint64_t CFileSet::BloomFileOnDiskSize() const {
+  return bloom_reader_->FileSize();
+}
+
+uint64_t CFileSet::OnDiskDataSize() const {
   uint64_t ret = 0;
-  for (const ReaderMap::value_type& e : readers_by_col_id_) {
-    const shared_ptr<CFileReader> &reader = e.second;
-    ret += reader->file_size();
+  for (const auto& e : readers_by_col_id_) {
+    ret += e.second->file_size();
   }
   return ret;
 }
 
-Status CFileSet::FindRow(const RowSetKeyProbe &probe, rowid_t *idx,
+Status CFileSet::FindRow(const RowSetKeyProbe &probe,
+                         boost::optional<rowid_t>* idx,
                          ProbeStats* stats) const {
-  if (bloom_reader_ != nullptr && FLAGS_consult_bloom_filters) {
+  if (FLAGS_consult_bloom_filters) {
     // Fully open the BloomFileReader if it was lazily opened earlier.
     //
     // If it's already initialized, this is a no-op.
@@ -207,11 +255,17 @@ Status CFileSet::FindRow(const RowSetKeyProbe &probe, rowid_t *idx,
     bool present;
     Status s = bloom_reader_->CheckKeyPresent(probe.bloom_probe(), &present);
     if (s.ok() && !present) {
-      return Status::NotFound("not present in bloom filter");
-    } else if (!s.ok()) {
-      LOG(WARNING) << "Unable to query bloom: " << s.ToString()
-                   << " (disabling bloom for this rowset from this point forward)";
-      const_cast<CFileSet *>(this)->bloom_reader_.reset(nullptr);
+      *idx = boost::none;
+      return Status::OK();
+    }
+    if (!s.ok()) {
+      KLOG_EVERY_N_SECS(WARNING, 1) << Substitute("Unable to query bloom in $0: $1",
+          rowset_metadata_->bloom_block().ToString(), s.ToString());
+      if (PREDICT_FALSE(s.IsDiskFailure())) {
+        // If the bloom lookup failed because of a disk failure, return early
+        // since I/O to the tablet should be stopped.
+        return s;
+      }
       // Continue with the slow path
     }
   }
@@ -220,13 +274,15 @@ Status CFileSet::FindRow(const RowSetKeyProbe &probe, rowid_t *idx,
   CFileIterator *key_iter = nullptr;
   RETURN_NOT_OK(NewKeyIterator(&key_iter));
 
-  gscoped_ptr<CFileIterator> key_iter_scoped(key_iter); // free on return
+  unique_ptr<CFileIterator> key_iter_scoped(key_iter); // free on return
 
   bool exact;
-  RETURN_NOT_OK(key_iter->SeekAtOrAfter(probe.encoded_key(), &exact));
-  if (!exact) {
-    return Status::NotFound("not present in storefile (failed seek)");
+  Status s = key_iter->SeekAtOrAfter(probe.encoded_key(), &exact);
+  if (s.IsNotFound() || (s.ok() && !exact)) {
+    *idx = boost::none;
+    return Status::OK();
   }
+  RETURN_NOT_OK(s);
 
   *idx = key_iter->GetCurrentOrdinal();
   return Status::OK();
@@ -234,17 +290,13 @@ Status CFileSet::FindRow(const RowSetKeyProbe &probe, rowid_t *idx,
 
 Status CFileSet::CheckRowPresent(const RowSetKeyProbe &probe, bool *present,
                                  rowid_t *rowid, ProbeStats* stats) const {
-
-  Status s = FindRow(probe, rowid, stats);
-  if (s.IsNotFound()) {
-    // In the case that the key comes past the end of the file, Seek
-    // will return NotFound. In that case, it is OK from this function's
-    // point of view - just a non-present key.
-    *present = false;
-    return Status::OK();
+  boost::optional<rowid_t> opt_rowid;
+  RETURN_NOT_OK(FindRow(probe, &opt_rowid, stats));
+  *present = opt_rowid != boost::none;
+  if (*present) {
+    *rowid = *opt_rowid;
   }
-  *present = true;
-  return s;
+  return Status::OK();
 }
 
 Status CFileSet::NewKeyIterator(CFileIterator **key_iter) const {
@@ -255,13 +307,11 @@ Status CFileSet::NewKeyIterator(CFileIterator **key_iter) const {
 // Iterator
 ////////////////////////////////////////////////////////////
 CFileSet::Iterator::~Iterator() {
-  STLDeleteElements(&col_iters_);
 }
 
 Status CFileSet::Iterator::CreateColumnIterators(const ScanSpec* spec) {
   DCHECK_EQ(0, col_iters_.size());
-  vector<ColumnIterator*> ret_iters;
-  ElementDeleter del(&ret_iters);
+  vector<unique_ptr<ColumnIterator>> ret_iters;
   ret_iters.reserve(projection_->num_columns());
 
   CFileReader::CacheControl cache_blocks = CFileReader::CACHE_BLOCK;
@@ -283,15 +333,15 @@ Status CFileSet::Iterator::CreateColumnIterators(const ScanSpec* spec) {
         return Status::Corruption(Substitute("column $0 has no data in rowset $1",
                                              col_schema.ToString(), base_data_->ToString()));
       }
-      ret_iters.push_back(new DefaultColumnValueIterator(col_schema.type_info(),
-                                                         col_schema.read_default_value()));
+      ret_iters.emplace_back(new DefaultColumnValueIterator(col_schema.type_info(),
+                                                            col_schema.read_default_value()));
       continue;
     }
     CFileIterator *iter;
     RETURN_NOT_OK_PREPEND(base_data_->NewColumnIterator(col_id, cache_blocks, &iter),
                           Substitute("could not create iterator for column $0",
                                      projection_->column(proj_col_idx).ToString()));
-    ret_iters.push_back(iter);
+    ret_iters.emplace_back(iter);
   }
 
   col_iters_.swap(ret_iters);
@@ -365,9 +415,9 @@ Status CFileSet::Iterator::PushdownRangeScanPredicate(ScanSpec *spec) {
       LOG(DFATAL) << "CFileSet indicated upper bound was within range, but "
                   << "key iterator could not seek. "
                   << "CFileSet upper_bound = "
-                  << Slice(base_data_->max_encoded_key_).ToDebugString()
+                  << KUDU_REDACT(Slice(base_data_->max_encoded_key_).ToDebugString())
                   << ", enc_key = "
-                  << spec->exclusive_upper_bound_key()->encoded_key().ToDebugString();
+                  << KUDU_REDACT(spec->exclusive_upper_bound_key()->encoded_key().ToDebugString());
     } else {
       RETURN_NOT_OK(s);
 
@@ -401,14 +451,13 @@ Status CFileSet::Iterator::PrepareBatch(size_t *n) {
   return Status::OK();
 }
 
-
-Status CFileSet::Iterator::PrepareColumn(size_t idx) {
-  if (cols_prepared_[idx]) {
+Status CFileSet::Iterator::PrepareColumn(ColumnMaterializationContext *ctx) {
+  if (cols_prepared_[ctx->col_idx()]) {
     // Already prepared in this batch.
     return Status::OK();
   }
 
-  ColumnIterator* col_iter = col_iters_[idx];
+  ColumnIterator* col_iter = col_iters_[ctx->col_idx()].get();
   size_t n = prepared_count_;
 
   if (!col_iter->seeked() || col_iter->GetCurrentOrdinal() != cur_idx_) {
@@ -422,18 +471,19 @@ Status CFileSet::Iterator::PrepareColumn(size_t idx) {
 
   Status s = col_iter->PrepareBatch(&n);
   if (!s.ok()) {
-    LOG(WARNING) << "Unable to prepare column " << idx << ": " << s.ToString();
+    LOG(WARNING) << "Unable to prepare column " << ctx->col_idx() << ": " << s.ToString();
     return s;
   }
 
   if (n != prepared_count_) {
     return Status::Corruption(
-      StringPrintf("Column %zd (%s) didn't yield enough rows at offset %zd: expected "
-                   "%zd but only got %zd", idx, projection_->column(idx).ToString().c_str(),
-                   cur_idx_, prepared_count_, n));
+            StringPrintf("Column %zd (%s) didn't yield enough rows at offset %zd: expected "
+                                 "%zd but only got %zd", ctx->col_idx(),
+                         projection_->column(ctx->col_idx()).ToString().c_str(),
+                         cur_idx_, prepared_count_, n));
   }
 
-  cols_prepared_[idx] = true;
+  cols_prepared_[ctx->col_idx()] = true;
 
   return Status::OK();
 }
@@ -443,13 +493,16 @@ Status CFileSet::Iterator::InitializeSelectionVector(SelectionVector *sel_vec) {
   return Status::OK();
 }
 
-Status CFileSet::Iterator::MaterializeColumn(size_t col_idx, ColumnBlock *dst) {
-  CHECK_EQ(prepared_count_, dst->nrows());
-  DCHECK_LT(col_idx, col_iters_.size());
+Status CFileSet::Iterator::MaterializeColumn(ColumnMaterializationContext *ctx) {
+  CHECK_EQ(prepared_count_, ctx->block()->nrows());
+  DCHECK_LT(ctx->col_idx(), col_iters_.size());
 
-  RETURN_NOT_OK(PrepareColumn(col_idx));
-  ColumnIterator* iter = col_iters_[col_idx];
-  return iter->Scan(dst);
+  RETURN_NOT_OK(PrepareColumn(ctx));
+  ColumnIterator* iter = col_iters_[ctx->col_idx()].get();
+
+  RETURN_NOT_OK(iter->Scan(ctx));
+
+  return Status::OK();
 }
 
 Status CFileSet::Iterator::FinishBatch() {
@@ -475,7 +528,7 @@ Status CFileSet::Iterator::FinishBatch() {
 void CFileSet::Iterator::GetIteratorStats(vector<IteratorStats>* stats) const {
   stats->clear();
   stats->reserve(col_iters_.size());
-  for (const ColumnIterator* iter : col_iters_) {
+  for (const auto& iter : col_iters_) {
     ANNOTATE_IGNORE_READS_BEGIN();
     stats->push_back(iter->io_statistics());
     ANNOTATE_IGNORE_READS_END();

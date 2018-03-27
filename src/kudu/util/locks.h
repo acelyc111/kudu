@@ -17,23 +17,22 @@
 #ifndef KUDU_UTIL_LOCKS_H
 #define KUDU_UTIL_LOCKS_H
 
-#include <algorithm>
+#include <sched.h>
+
+#include <algorithm>  // IWYU pragma: keep
+#include <cstddef>
+#include <mutex>
+
 #include <glog/logging.h>
 
-#include "kudu/gutil/atomicops.h"
 #include "kudu/gutil/dynamic_annotations.h"
 #include "kudu/gutil/macros.h"
 #include "kudu/gutil/port.h"
 #include "kudu/gutil/spinlock.h"
 #include "kudu/gutil/sysinfo.h"
-#include "kudu/util/errno.h"
 #include "kudu/util/rw_semaphore.h"
 
 namespace kudu {
-
-using base::subtle::Acquire_CompareAndSwap;
-using base::subtle::NoBarrier_Load;
-using base::subtle::Release_Store;
 
 // Wrapper around the Google SpinLock class to adapt it to the method names
 // expected by Boost.
@@ -158,9 +157,17 @@ class rw_spinlock {
 class percpu_rwlock {
  public:
   percpu_rwlock() {
-    errno = 0;
-    n_cpus_ = base::NumCPUs();
-    CHECK_EQ(errno, 0) << ErrnoToString(errno);
+#if defined(__APPLE__) || defined(THREAD_SANITIZER)
+    // OSX doesn't have a way to get the index of the CPU running this thread, so
+    // we'll just use a single lock.
+    //
+    // TSAN limits the number of simultaneous lock acquisitions to 64, so we
+    // can't create one lock per core on machines with lots of cores. So, we'll
+    // also just use a single lock.
+    n_cpus_ = 1;
+#else
+    n_cpus_ = base::MaxCPUIndex() + 1;
+#endif
     CHECK_GT(n_cpus_, 0);
     locks_ = new padded_lock[n_cpus_];
   }
@@ -170,9 +177,8 @@ class percpu_rwlock {
   }
 
   rw_spinlock &get_lock() {
-#if defined(__APPLE__)
-    // OSX doesn't have a way to get the CPU, so we'll pick a random one.
-    int cpu = reinterpret_cast<uintptr_t>(this) % n_cpus_;
+#if defined(__APPLE__) || defined(THREAD_SANITIZER)
+    int cpu = 0;
 #else
     int cpu = sched_getcpu();
     CHECK_LT(cpu, n_cpus_);
@@ -231,84 +237,31 @@ class percpu_rwlock {
   padded_lock *locks_;
 };
 
-// Simpler version of boost::lock_guard. Only supports the basic object
-// lifecycle and defers any error checking to the underlying mutex.
-template <typename Mutex>
-class lock_guard {
- public:
-  explicit lock_guard(Mutex* m)
-    : m_(DCHECK_NOTNULL(m)) {
-    m_->lock();
-  }
+// Simple implementation of the std::shared_lock API, which is not available in
+// the standard library until C++14. Defers error checking to the underlying
+// mutex.
 
-  ~lock_guard() {
-    m_->unlock();
-  }
-
- private:
-  Mutex* m_;
-  DISALLOW_COPY_AND_ASSIGN(lock_guard<Mutex>);
-};
-
-// Simpler version of boost::unique_lock. Tracks lock acquisition and will
-// report attempts to double lock() or unlock().
-template <typename Mutex>
-class unique_lock {
- public:
-  unique_lock()
-    : locked_(false),
-      m_(NULL) {
-  }
-
-  explicit unique_lock(Mutex* m)
-    : locked_(true),
-      m_(m) {
-    m_->lock();
-  }
-
-  ~unique_lock() {
-    if (locked_) {
-      m_->unlock();
-      locked_ = false;
-    }
-  }
-
-  void lock() {
-    DCHECK(!locked_);
-    m_->lock();
-    locked_ = true;
-  }
-
-  void unlock() {
-    DCHECK(locked_);
-    m_->unlock();
-    locked_ = false;
-  }
-
-  void swap(unique_lock<Mutex>* other) {
-    DCHECK(other != NULL) << "The passed unique_lock is null";
-    std::swap(locked_, other->locked_);
-    std::swap(m_, other->m_);
-  }
-
- private:
-  bool locked_;
-  Mutex* m_;
-  DISALLOW_COPY_AND_ASSIGN(unique_lock<Mutex>);
-};
-
-// Simpler version of boost::shared_lock. Defers error checking to the
-// underlying mutex.
 template <typename Mutex>
 class shared_lock {
  public:
-  explicit shared_lock()
-    : m_(NULL) {
+  shared_lock()
+      : m_(nullptr) {
   }
 
-  explicit shared_lock(Mutex* m)
-    : m_(DCHECK_NOTNULL(m)) {
+  explicit shared_lock(Mutex& m)
+      : m_(&m) {
     m_->lock_shared();
+  }
+
+  shared_lock(Mutex& m, std::try_to_lock_t t)
+      : m_(nullptr) {
+    if (m.try_lock_shared()) {
+      m_ = &m;
+    }
+  }
+
+  bool owns_lock() const {
+    return m_;
   }
 
   void swap(shared_lock& other) {
@@ -316,7 +269,7 @@ class shared_lock {
   }
 
   ~shared_lock() {
-    if (m_ != NULL) {
+    if (m_ != nullptr) {
       m_->unlock_shared();
     }
   }

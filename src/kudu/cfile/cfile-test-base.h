@@ -20,28 +20,28 @@
 
 #include <glog/logging.h>
 #include <algorithm>
+#include <functional>
 #include <stdlib.h>
 #include <string>
+#include <vector>
 
-#include "kudu/cfile/cfile-test-base.h"
+#include "kudu/cfile/cfile.pb.h"
 #include "kudu/cfile/cfile_reader.h"
 #include "kudu/cfile/cfile_writer.h"
-#include "kudu/cfile/cfile.pb.h"
 #include "kudu/common/columnblock.h"
 #include "kudu/fs/fs_manager.h"
+#include "kudu/gutil/port.h"
 #include "kudu/gutil/stringprintf.h"
+#include "kudu/util/int128.h"
+#include "kudu/util/status.h"
+#include "kudu/util/stopwatch.h"
 #include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
-#include "kudu/util/stopwatch.h"
-#include "kudu/util/status.h"
 
 DEFINE_int32(cfile_test_block_size, 1024,
              "Block size to use for testing cfiles. "
              "Default is low to stress code, but can be set higher for "
              "performance testing");
-
-using kudu::fs::ReadableBlock;
-using kudu::fs::WritableBlock;
 
 namespace kudu {
 namespace cfile {
@@ -161,6 +161,7 @@ template<bool HAS_NULLS>
 class UInt8DataGenerator : public DataGenerator<UINT8, HAS_NULLS> {
  public:
   UInt8DataGenerator() {}
+  ATTRIBUTE_NO_SANITIZE_INTEGER
   uint8_t BuildTestValue(size_t block_index, size_t value) OVERRIDE {
     return (value * 10) % 256;
   }
@@ -170,6 +171,7 @@ template<bool HAS_NULLS>
 class Int8DataGenerator : public DataGenerator<INT8, HAS_NULLS> {
  public:
   Int8DataGenerator() {}
+  ATTRIBUTE_NO_SANITIZE_INTEGER
   int8_t BuildTestValue(size_t block_index, size_t value) OVERRIDE {
     return ((value * 10) % 128) * (value % 2 == 0 ? -1 : 1);
   }
@@ -179,6 +181,7 @@ template<bool HAS_NULLS>
 class UInt16DataGenerator : public DataGenerator<UINT16, HAS_NULLS> {
  public:
   UInt16DataGenerator() {}
+  ATTRIBUTE_NO_SANITIZE_INTEGER
   uint16_t BuildTestValue(size_t block_index, size_t value) OVERRIDE {
     return (value * 10) % 65536;
   }
@@ -188,6 +191,7 @@ template<bool HAS_NULLS>
 class Int16DataGenerator : public DataGenerator<INT16, HAS_NULLS> {
  public:
   Int16DataGenerator() {}
+  ATTRIBUTE_NO_SANITIZE_INTEGER
   int16_t BuildTestValue(size_t block_index, size_t value) OVERRIDE {
     return ((value * 10) % 32768) * (value % 2 == 0 ? -1 : 1);
   }
@@ -197,6 +201,7 @@ template<bool HAS_NULLS>
 class UInt32DataGenerator : public DataGenerator<UINT32, HAS_NULLS> {
  public:
   UInt32DataGenerator() {}
+  ATTRIBUTE_NO_SANITIZE_INTEGER
   uint32_t BuildTestValue(size_t block_index, size_t value) OVERRIDE {
     return value * 10;
   }
@@ -206,8 +211,41 @@ template<bool HAS_NULLS>
 class Int32DataGenerator : public DataGenerator<INT32, HAS_NULLS> {
  public:
   Int32DataGenerator() {}
+  ATTRIBUTE_NO_SANITIZE_INTEGER
   int32_t BuildTestValue(size_t block_index, size_t value) OVERRIDE {
     return (value * 10) *(value % 2 == 0 ? -1 : 1);
+  }
+};
+
+template<bool HAS_NULLS>
+class UInt64DataGenerator : public DataGenerator<UINT64, HAS_NULLS> {
+ public:
+  UInt64DataGenerator() {}
+  ATTRIBUTE_NO_SANITIZE_INTEGER
+  uint64_t BuildTestValue(size_t /*block_index*/, size_t value) OVERRIDE {
+    return value * 0x123456789abcdefULL;
+  }
+};
+
+template<bool HAS_NULLS>
+class Int64DataGenerator : public DataGenerator<INT64, HAS_NULLS> {
+ public:
+  Int64DataGenerator() {}
+  ATTRIBUTE_NO_SANITIZE_INTEGER
+  int64_t BuildTestValue(size_t /*block_index*/, size_t value) OVERRIDE {
+    int64_t r = (value * 0x123456789abcdefULL) & 0x7fffffffffffffffULL;
+    return value % 2 == 0 ? r : -r;
+  }
+};
+
+template<bool HAS_NULLS>
+class Int128DataGenerator : public DataGenerator<INT128, HAS_NULLS> {
+public:
+  Int128DataGenerator() {}
+  ATTRIBUTE_NO_SANITIZE_INTEGER
+  int128_t BuildTestValue(size_t /*block_index*/, size_t value) OVERRIDE {
+    int128_t r = (value * 0x123456789abcdefULL) & 0x7fffffffffffffffULL;
+    return value % 2 == 0 ? r : -r;
   }
 };
 
@@ -228,32 +266,27 @@ template<bool HAS_NULLS>
 class StringDataGenerator : public DataGenerator<STRING, HAS_NULLS> {
  public:
   explicit StringDataGenerator(const char* format)
-  : format_(format) {
+      : StringDataGenerator(
+          [=](size_t x) { return StringPrintf(format, x); }) {
+  }
+
+  explicit StringDataGenerator(std::function<std::string(size_t)> formatter)
+      : formatter_(std::move(formatter)) {
   }
 
   Slice BuildTestValue(size_t block_index, size_t value) OVERRIDE {
-    char *buf = data_buffer_[block_index].data;
-    int len = snprintf(buf, kItemBufferSize - 1, format_, value);
-    DCHECK_LT(len, kItemBufferSize);
-    return Slice(buf, len);
+    data_buffers_[block_index] = formatter_(value);
+    return Slice(data_buffers_[block_index]);
   }
 
   void Resize(size_t num_entries) OVERRIDE {
-    if (num_entries > this->block_entries()) {
-      data_buffer_.reset(new Buffer[num_entries]);
-    }
+    data_buffers_.resize(num_entries);
     DataGenerator<STRING, HAS_NULLS>::Resize(num_entries);
   }
 
  private:
-  static const int kItemBufferSize = 16;
-
-  struct Buffer {
-    char data[kItemBufferSize];
-  };
-
-  gscoped_array<Buffer> data_buffer_;
-  const char* format_;
+  std::vector<std::string> data_buffers_;
+  std::function<std::string(size_t)> formatter_;
 };
 
 // Class for generating strings that contain duplicate
@@ -295,16 +328,29 @@ class DuplicateStringDataGenerator : public DataGenerator<STRING, HAS_NULLS> {
   int num_;
 };
 
+// Generator for fully random int32 data.
+class RandomInt32DataGenerator : public DataGenerator<INT32, /* HAS_NULLS= */ false> {
+ public:
+  int32_t BuildTestValue(size_t /*block_index*/, size_t /*value*/) override {
+    return random();
+  }
+};
+
 class CFileTestBase : public KuduTest {
  public:
   void SetUp() OVERRIDE {
     KuduTest::SetUp();
 
-    fs_manager_.reset(new FsManager(env_.get(), GetTestPath("fs_root")));
+    fs_manager_.reset(new FsManager(env_, GetTestPath("fs_root")));
     ASSERT_OK(fs_manager_->CreateInitialFileSystemLayout());
     ASSERT_OK(fs_manager_->Open());
   }
 
+  // Place a ColumnBlock and SelectionVector into a context. This context will
+  // not support decoder evaluation.
+  ColumnMaterializationContext CreateNonDecoderEvalContext(ColumnBlock* cb, SelectionVector* sel) {
+    return ColumnMaterializationContext(0, nullptr, cb, sel);
+  }
  protected:
   enum Flags {
     NO_FLAGS = 0,
@@ -319,8 +365,8 @@ class CFileTestBase : public KuduTest {
                      int num_entries,
                      uint32_t flags,
                      BlockId* block_id) {
-    gscoped_ptr<WritableBlock> sink;
-    ASSERT_OK(fs_manager_->CreateNewBlock(&sink));
+    std::unique_ptr<fs::WritableBlock> sink;
+    ASSERT_OK(fs_manager_->CreateNewBlock({}, &sink));
     *block_id = sink->id();
     WriterOptions opts;
     opts.write_posidx = true;
@@ -336,12 +382,14 @@ class CFileTestBase : public KuduTest {
     opts.storage_attributes.encoding = encoding;
     opts.storage_attributes.compression = compression;
     CFileWriter w(opts, GetTypeInfo(DataGeneratorType::kDataType),
-                  DataGeneratorType::has_nulls(), sink.Pass());
+                  DataGeneratorType::has_nulls(), std::move(sink));
 
     ASSERT_OK(w.Start());
 
-    // Append given number of values to the test tree
-    const size_t kBufferSize = 8192;
+    // Append given number of values to the test tree. We use 100 to match
+    // the output block size of compaction (kCompactionOutputBlockNumRows in
+    // compaction.cc, unfortunately not linkable from the cfile/ module)
+    const size_t kBufferSize = 100;
     size_t i = 0;
     while (i < num_entries) {
       int towrite = std::min(num_entries - i, kBufferSize);
@@ -371,33 +419,34 @@ class CFileTestBase : public KuduTest {
 // enough guarantees on alignment and it can't seem to decode the
 // constant stride.
 template<class Indexable, typename SumType>
+ATTRIBUTE_NO_SANITIZE_INTEGER
 SumType FastSum(const Indexable &data, size_t n) {
   SumType sums[4] = {0, 0, 0, 0};
-  int rem = n;
+  size_t rem = n;
   int i = 0;
-  while (rem >= 4) {
+  for (; rem >= 4; rem -= 4) {
     sums[0] += data[i];
     sums[1] += data[i+1];
     sums[2] += data[i+2];
     sums[3] += data[i+3];
     i += 4;
-    rem -= 4;
   }
-  while (rem > 0) {
+  for (; rem > 0; rem--) {
     sums[3] += data[i++];
-    rem--;
   }
   return sums[0] + sums[1] + sums[2] + sums[3];
 }
 
 template<DataType Type, typename SumType>
-static void TimeReadFileForDataType(gscoped_ptr<CFileIterator> &iter, int &count) {
+void TimeReadFileForDataType(gscoped_ptr<CFileIterator> &iter, int &count) {
   ScopedColumnBlock<Type> cb(8192);
-
+  SelectionVector sel(cb.nrows());
+  ColumnMaterializationContext ctx(0, nullptr, &cb, &sel);
+  ctx.SetDecoderEvalNotSupported();
   SumType sum = 0;
   while (iter->HasNext()) {
     size_t n = cb.nrows();
-    ASSERT_OK_FAST(iter->CopyNextValues(&n, &cb));
+    ASSERT_OK_FAST(iter->CopyNextValues(&n, &ctx));
     sum += FastSum<ScopedColumnBlock<Type>, SumType>(cb, n);
     count += n;
     cb.arena()->Reset();
@@ -407,14 +456,19 @@ static void TimeReadFileForDataType(gscoped_ptr<CFileIterator> &iter, int &count
 }
 
 template<DataType Type>
-static void ReadBinaryFile(CFileIterator* iter, int* count) {
+void ReadBinaryFile(CFileIterator* iter, int* count) {
   ScopedColumnBlock<Type> cb(100);
+  SelectionVector sel(cb.nrows());
+  ColumnMaterializationContext ctx(0, nullptr, &cb, &sel);
+  ctx.SetDecoderEvalNotSupported();
   uint64_t sum_lens = 0;
   while (iter->HasNext()) {
     size_t n = cb.nrows();
-    ASSERT_OK_FAST(iter->CopyNextValues(&n, &cb));
-    for (int i = 0; i < n; i++) {
-      sum_lens += cb[i].size();
+    ASSERT_OK_FAST(iter->CopyNextValues(&n, &ctx));
+    for (size_t i = 0; i < n; i++) {
+      if (!cb.is_null(i)) {
+        sum_lens += cb[i].size();
+      }
     }
     *count += n;
     cb.arena()->Reset();
@@ -423,19 +477,19 @@ static void ReadBinaryFile(CFileIterator* iter, int* count) {
   LOG(INFO) << "Count: " << *count;
 }
 
-static void TimeReadFile(FsManager* fs_manager, const BlockId& block_id, size_t *count_ret) {
+void TimeReadFile(FsManager* fs_manager, const BlockId& block_id, size_t *count_ret) {
   Status s;
 
-  gscoped_ptr<fs::ReadableBlock> source;
+  std::unique_ptr<fs::ReadableBlock> source;
   ASSERT_OK(fs_manager->OpenBlock(block_id, &source));
-  gscoped_ptr<CFileReader> reader;
-  ASSERT_OK(CFileReader::Open(source.Pass(), ReaderOptions(), &reader));
+  std::unique_ptr<CFileReader> reader;
+  ASSERT_OK(CFileReader::Open(std::move(source), ReaderOptions(), &reader));
 
   gscoped_ptr<CFileIterator> iter;
   ASSERT_OK(reader->NewIterator(&iter, CFileReader::CACHE_BLOCK));
   ASSERT_OK(iter->SeekToOrdinal(0));
 
-  Arena arena(8192, 8*1024*1024);
+  Arena arena(8192);
   int count = 0;
   switch (reader->type_info()->physical_type()) {
     case UINT8:
@@ -445,7 +499,7 @@ static void TimeReadFile(FsManager* fs_manager, const BlockId& block_id, size_t 
     }
     case INT8:
     {
-      TimeReadFileForDataType<INT8, uint64_t>(iter, count);
+      TimeReadFileForDataType<INT8, int64_t>(iter, count);
       break;
     }
     case UINT16:
@@ -455,7 +509,7 @@ static void TimeReadFile(FsManager* fs_manager, const BlockId& block_id, size_t 
     }
     case INT16:
     {
-      TimeReadFileForDataType<INT16, uint64_t>(iter, count);
+      TimeReadFileForDataType<INT16, int64_t>(iter, count);
       break;
     }
     case UINT32:
@@ -466,6 +520,21 @@ static void TimeReadFile(FsManager* fs_manager, const BlockId& block_id, size_t 
     case INT32:
     {
       TimeReadFileForDataType<INT32, int64_t>(iter, count);
+      break;
+    }
+    case UINT64:
+    {
+      TimeReadFileForDataType<UINT64, uint64_t>(iter, count);
+      break;
+    }
+    case INT64:
+    {
+      TimeReadFileForDataType<INT64, int64_t>(iter, count);
+      break;
+    }
+    case INT128:
+    {
+      TimeReadFileForDataType<INT128, int128_t>(iter, count);
       break;
     }
     case FLOAT:

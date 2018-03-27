@@ -15,17 +15,39 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <algorithm>
+#include <cinttypes>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
-#include <algorithm>
-#include <vector>
-
+#include "kudu/common/column_predicate.h"
+#include "kudu/common/common.pb.h"
+#include "kudu/common/iterator.h"
+#include "kudu/common/iterator_stats.h"
+#include "kudu/common/partial_row.h"
+#include "kudu/common/row.h"
+#include "kudu/common/scan_spec.h"
 #include "kudu/common/schema.h"
+#include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/stringprintf.h"
+#include "kudu/tablet/local_tablet_writer.h"
+#include "kudu/tablet/tablet-test-util.h"
 #include "kudu/tablet/tablet.h"
-#include "kudu/tablet/tablet-test-base.h"
+#include "kudu/util/auto_release_pool.h"
+#include "kudu/util/memory/arena.h"
+#include "kudu/util/status.h"
+#include "kudu/util/stopwatch.h"
 #include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
+
+using std::string;
+using std::vector;
 
 namespace kudu {
 namespace tablet {
@@ -45,7 +67,7 @@ class TabletPushdownTest : public KuduTabletTest,
                               ColumnSchema("string_val", STRING) }, 1)) {
   }
 
-  virtual void SetUp() OVERRIDE {
+  void SetUp() override {
     KuduTabletTest::SetUp();
 
     FillTestTablet();
@@ -81,6 +103,10 @@ class TabletPushdownTest : public KuduTabletTest,
   // the same set of rows. Run the scan and verify that the
   // expected rows are returned.
   void TestScanYieldsExpectedResults(ScanSpec spec) {
+    Arena arena(128);
+    AutoReleasePool pool;
+    spec.OptimizeScan(schema_, &arena, &pool, true);
+
     gscoped_ptr<RowwiseIterator> iter;
     ASSERT_OK(tablet()->NewRowIterator(client_schema_, &iter));
     ASSERT_OK(iter->Init(&spec));
@@ -95,9 +121,9 @@ class TabletPushdownTest : public KuduTabletTest,
       LOG(INFO) << str;
     }
     ASSERT_EQ(11, results.size());
-    ASSERT_EQ("(int32 key=200, int32 int_val=2000, string string_val=00000200)",
+    ASSERT_EQ(R"((int32 key=200, int32 int_val=2000, string string_val="00000200"))",
               results[0]);
-    ASSERT_EQ("(int32 key=210, int32 int_val=2100, string string_val=00000210)",
+    ASSERT_EQ(R"((int32 key=210, int32 int_val=2100, string string_val="00000210"))",
               results[10]);
 
     int expected_blocks_from_disk;
@@ -134,8 +160,8 @@ class TabletPushdownTest : public KuduTabletTest,
       vector<IteratorStats> stats;
       iter->GetIteratorStats(&stats);
       for (const IteratorStats& col_stats : stats) {
-        EXPECT_EQ(expected_blocks_from_disk, col_stats.data_blocks_read_from_disk);
-        EXPECT_EQ(expected_rows_from_disk, col_stats.cells_read_from_disk);
+        EXPECT_EQ(expected_blocks_from_disk, col_stats.blocks_read);
+        EXPECT_EQ(expected_rows_from_disk, col_stats.cells_read);
       }
     }
   }
@@ -144,6 +170,10 @@ class TabletPushdownTest : public KuduTabletTest,
   // returns the expected number of rows. The rows themselves
   // should be empty.
   void TestCountOnlyScanYieldsExpectedResults(ScanSpec spec) {
+    Arena arena(128);
+    AutoReleasePool pool;
+    spec.OptimizeScan(schema_, &arena, &pool, true);
+
     Schema empty_schema(std::vector<ColumnSchema>(), 0);
     gscoped_ptr<RowwiseIterator> iter;
     ASSERT_OK(tablet()->NewRowIterator(empty_schema, &iter));
@@ -164,8 +194,8 @@ class TabletPushdownTest : public KuduTabletTest,
 TEST_P(TabletPushdownTest, TestPushdownIntKeyRange) {
   ScanSpec spec;
   int32_t lower = 200;
-  int32_t upper = 210;
-  ColumnRangePredicate pred0(schema_.column(0), &lower, &upper);
+  int32_t upper = 211;
+  auto pred0 = ColumnPredicate::Range(schema_.column(0), &lower, &upper);
   spec.AddPredicate(pred0);
 
   TestScanYieldsExpectedResults(spec);
@@ -177,8 +207,8 @@ TEST_P(TabletPushdownTest, TestPushdownIntValueRange) {
 
   ScanSpec spec;
   int32_t lower = 2000;
-  int32_t upper = 2100;
-  ColumnRangePredicate pred1(schema_.column(1), &lower, &upper);
+  int32_t upper = 2101;
+  auto pred1 = ColumnPredicate::Range(schema_.column(1), &lower, &upper);
   spec.AddPredicate(pred1);
 
   TestScanYieldsExpectedResults(spec);
@@ -194,6 +224,71 @@ TEST_P(TabletPushdownTest, TestPushdownIntValueRange) {
 INSTANTIATE_TEST_CASE_P(AllMemory, TabletPushdownTest, ::testing::Values(ALL_IN_MEMORY));
 INSTANTIATE_TEST_CASE_P(SplitMemoryDisk, TabletPushdownTest, ::testing::Values(SPLIT_MEMORY_DISK));
 INSTANTIATE_TEST_CASE_P(AllDisk, TabletPushdownTest, ::testing::Values(ALL_ON_DISK));
+
+class TabletSparsePushdownTest : public KuduTabletTest {
+ public:
+  TabletSparsePushdownTest()
+      : KuduTabletTest(Schema({ ColumnSchema("key", INT32),
+                                ColumnSchema("val", INT32, true) },
+                              1)) {
+  }
+
+  void SetUp() override {
+    KuduTabletTest::SetUp();
+
+    RowBuilder rb(client_schema_);
+
+    LocalTabletWriter writer(tablet().get(), &client_schema_);
+    KuduPartialRow row(&client_schema_);
+
+    // FLAGS_scanner_batch_size_rows * 2
+    int kWidth = 100 * 2;
+    for (int i = 0; i < kWidth * 2; i++) {
+      CHECK_OK(row.SetInt32(0, i));
+      if (i % 3 == 0) {
+        CHECK_OK(row.SetNull(1));
+      } else {
+        CHECK_OK(row.SetInt32(1, i % kWidth));
+      }
+      ASSERT_OK_FAST(writer.Insert(row));
+    }
+    ASSERT_OK(tablet()->Flush());
+  }
+};
+
+// The is a regression test for KUDU-2231, which fixed a CFileReader bug causing
+// blocks to be repeatedly materialized when a scan had predicates on other
+// columns which caused sections of a column to be skipped. The setup for this
+// test creates a dataset and predicate which only match every-other batch of
+// 100 rows of the 'val' column.
+TEST_F(TabletSparsePushdownTest, Kudu2231) {
+  ScanSpec spec;
+  int32_t value = 50;
+  spec.AddPredicate(ColumnPredicate::Equality(schema_.column(1), &value));
+
+  gscoped_ptr<RowwiseIterator> iter;
+  ASSERT_OK(tablet()->NewRowIterator(client_schema_, &iter));
+  ASSERT_OK(iter->Init(&spec));
+  ASSERT_TRUE(spec.predicates().empty()) << "Should have accepted all predicates";
+
+  vector<string> results;
+  ASSERT_OK(IterateToStringList(iter.get(), &results));
+
+  EXPECT_EQ(results, vector<string>({
+      "(int32 key=50, int32 val=50)",
+      "(int32 key=250, int32 val=50)",
+  }));
+
+  vector<IteratorStats> stats;
+  iter->GetIteratorStats(&stats);
+
+  ASSERT_EQ(2, stats.size());
+  EXPECT_EQ(1, stats[0].blocks_read);
+  EXPECT_EQ(1, stats[1].blocks_read);
+
+  EXPECT_EQ(400, stats[0].cells_read);
+  EXPECT_EQ(400, stats[1].cells_read);
+}
 
 } // namespace tablet
 } // namespace kudu

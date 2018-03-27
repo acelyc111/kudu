@@ -19,35 +19,39 @@
 #ifndef KUDU_CLIENT_META_CACHE_H
 #define KUDU_CLIENT_META_CACHE_H
 
-#include <boost/function.hpp>
 #include <map>
-#include <string>
 #include <memory>
+#include <set>
+#include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
+#include <glog/logging.h>
+#include <gtest/gtest_prod.h>
+
+#include "kudu/client/replica_controller-internal.h"
 #include "kudu/common/partition.h"
 #include "kudu/consensus/metadata.pb.h"
 #include "kudu/gutil/macros.h"
 #include "kudu/gutil/ref_counted.h"
-#include "kudu/util/async_util.h"
+#include "kudu/rpc/rpc.h"
 #include "kudu/util/locks.h"
 #include "kudu/util/monotime.h"
+#include "kudu/util/net/net_util.h"
 #include "kudu/util/semaphore.h"
 #include "kudu/util/status.h"
-#include "kudu/util/memory/arena.h"
-#include "kudu/util/net/net_util.h"
+#include "kudu/util/status_callback.h"
 
 namespace kudu {
 
-class KuduPartialRow;
+class Sockaddr;
 
 namespace tserver {
 class TabletServerServiceProxy;
 } // namespace tserver
 
 namespace master {
-class MasterServiceProxy;
 class TabletLocationsPB_ReplicaPB;
 class TSInfoPB;
 } // namespace master
@@ -55,12 +59,24 @@ class TSInfoPB;
 namespace client {
 
 class ClientTest_TestMasterLookupPermits_Test;
+class ClientTest_TestMetaCacheExpiry_Test;
 class KuduClient;
 class KuduTable;
 
 namespace internal {
 
+// The number of tablets to fetch from the master in a round trip when performing
+// a lookup of a single partition (e.g. for a write), or re-looking-up a tablet with
+// stale information.
+const int kFetchTabletsPerPointLookup = 10;
+// The number of tablets to fetch from the master when looking up a range of tablets.
+const int kFetchTabletsPerRangeLookup = 1000;
+
+////////////////////////////////////////////////////////////
+
 class LookupRpc;
+class MetaCache;
+class RemoteTablet;
 
 // The information cached about a given tablet server in the cluster.
 //
@@ -69,16 +85,16 @@ class RemoteTabletServer {
  public:
   explicit RemoteTabletServer(const master::TSInfoPB& pb);
 
-  // Refresh the RPC proxy to this tablet server. This may involve a DNS
-  // lookup if there is not already an active proxy.
-  void RefreshProxy(KuduClient* client, const StatusCallback& cb,
-                    bool force);
+  // Initialize the RPC proxy to this tablet server, if it is not already set up.
+  // This will involve a DNS lookup if there is not already an active proxy.
+  // If there is an active proxy, does nothing.
+  void InitProxy(KuduClient* client, const StatusCallback& cb);
 
   // Update information from the given pb.
   // Requires that 'pb''s UUID matches this server.
   void Update(const master::TSInfoPB& pb);
 
-  // Return the current proxy to this tablet server. Requires that RefreshProxy
+  // Return the current proxy to this tablet server. Requires that InitProxy()
   // be called prior to this.
   std::shared_ptr<tserver::TabletServerServiceProxy> proxy() const;
 
@@ -87,7 +103,7 @@ class RemoteTabletServer {
   void GetHostPorts(std::vector<HostPort>* host_ports) const;
 
   // Returns the remote server's uuid.
-  std::string permanent_uuid() const;
+  const std::string& permanent_uuid() const;
 
  private:
   // Internal callback for DNS resolution.
@@ -114,6 +130,56 @@ struct RemoteReplica {
 
 typedef std::unordered_map<std::string, RemoteTabletServer*> TabletServerMap;
 
+// A ServerPicker for tablets servers, backed by the MetaCache.
+// Replicas are returned fully initialized and ready to be used.
+class MetaCacheServerPicker : public rpc::ServerPicker<RemoteTabletServer> {
+ public:
+  MetaCacheServerPicker(KuduClient* client,
+                        const scoped_refptr<MetaCache>& meta_cache,
+                        const KuduTable* table,
+                        RemoteTablet* const tablet);
+
+  virtual ~MetaCacheServerPicker() {}
+  void PickLeader(const ServerPickedCallback& callback, const MonoTime& deadline) override;
+
+  // In the case of this MetaCacheServerPicker class, the implementation of this
+  // method is very selective. It marks only servers hosting the remote tablet
+  // the MetaCacheServerPicker object is bound to, not the entire RemoteTabletServer.
+  void MarkServerFailed(RemoteTabletServer* replica, const Status& status) override;
+
+  void MarkReplicaNotLeader(RemoteTabletServer* replica) override;
+  void MarkResourceNotFound(RemoteTabletServer* replica) override;
+ private:
+
+  // Called whenever a tablet lookup in the metacache completes.
+  void LookUpTabletCb(const ServerPickedCallback& callback,
+                      const MonoTime& deadline,
+                      const Status& status);
+
+  // Called when the proxy is initialized.
+  void InitProxyCb(const ServerPickedCallback& callback,
+                   RemoteTabletServer* replica,
+                   const Status& status);
+
+  // Lock protecting accesses/updates to 'followers_'.
+  mutable simple_spinlock lock_;
+
+  // Reference to the client so that we can initialize a replica proxy, when we find it.
+  KuduClient* client_;
+
+  // A ref to the meta cache.
+  scoped_refptr<MetaCache> meta_cache_;
+
+  // The table we're writing to.
+  const KuduTable* table_;
+
+  // The tablet we're picking replicas for.
+  RemoteTablet* const tablet_;
+
+  // TSs that refused writes and that were marked as followers as a consequence.
+  std::set<RemoteTabletServer*> followers_;
+};
+
 // The client's view of a given tablet. This object manages lookups of
 // the tablet's locations, status, etc.
 //
@@ -123,7 +189,8 @@ class RemoteTablet : public RefCountedThreadSafe<RemoteTablet> {
   RemoteTablet(std::string tablet_id,
                Partition partition)
       : tablet_id_(std::move(tablet_id)),
-        partition_(std::move(partition)) {
+        partition_(std::move(partition)),
+        stale_(false) {
   }
 
   // Updates this tablet's replica locations.
@@ -131,13 +198,20 @@ class RemoteTablet : public RefCountedThreadSafe<RemoteTablet> {
                const google::protobuf::RepeatedPtrField
                  <master::TabletLocationsPB_ReplicaPB>& replicas);
 
+  // Mark this tablet as stale, indicating that the cached tablet metadata is
+  // out of date. Staleness is checked by the MetaCache when
+  // LookupTabletByKey() is called to determine whether the fast (non-network)
+  // path can be used or whether the metadata must be refreshed from the Master.
+  void MarkStale();
+
+  // Whether the tablet has been marked as stale.
+  bool stale() const;
+
   // Mark any replicas of this tablet hosted by 'ts' as failed. They will
   // not be returned in future cache lookups.
   //
   // The provided status is used for logging.
-  // Returns true if 'ts' was found among this tablet's replicas, false if not.
-  bool MarkReplicaFailed(RemoteTabletServer *ts,
-                         const Status& status);
+  void MarkReplicaFailed(RemoteTabletServer *ts, const Status& status);
 
   // Return the number of failed replicas for this tablet.
   int GetNumFailedReplicas() const;
@@ -153,6 +227,9 @@ class RemoteTablet : public RefCountedThreadSafe<RemoteTablet> {
   // Writes this tablet's TSes (across all replicas) to 'servers'. Skips
   // failed replicas.
   void GetRemoteTabletServers(std::vector<RemoteTabletServer*>* servers) const;
+
+  // Writes this tablet's replicas to 'replicas'. Skips failed replicas.
+  void GetRemoteReplicas(std::vector<RemoteReplica>* replicas) const;
 
   // Return true if the tablet currently has a known LEADER replica
   // (i.e the next call to LeaderTServer() is likely to return non-NULL)
@@ -173,10 +250,6 @@ class RemoteTablet : public RefCountedThreadSafe<RemoteTablet> {
   // Return stringified representation of the list of replicas for this tablet.
   std::string ReplicasAsString() const;
 
-  // Invalidate the current set of replicas. This will result in a new lookup of the
-  // replicas from the master on the next access.
-  void InvalidateCachedReplicas();
-
  private:
   // Same as ReplicasAsString(), except that the caller must hold lock_.
   std::string ReplicasAsStringUnlocked() const;
@@ -186,9 +259,108 @@ class RemoteTablet : public RefCountedThreadSafe<RemoteTablet> {
 
   // All non-const members are protected by 'lock_'.
   mutable simple_spinlock lock_;
+  bool stale_;
   std::vector<RemoteReplica> replicas_;
 
   DISALLOW_COPY_AND_ASSIGN(RemoteTablet);
+};
+
+// MetaCacheEntry holds either a tablet and its associated `RemoteTablet`
+// instance, or a non-covered partition range.
+class MetaCacheEntry {
+ public:
+
+  MetaCacheEntry() { }
+
+  // Construct a MetaCacheEntry representing a tablet.
+  MetaCacheEntry(MonoTime expiration_time, scoped_refptr<RemoteTablet> tablet)
+      : expiration_time_(expiration_time),
+        tablet_(std::move(tablet)) {
+  }
+
+  // Construct a MetaCacheEntry representing a non-covered range with the
+  // provided range partition bounds.
+  MetaCacheEntry(MonoTime expiration_time,
+                 std::string lower_bound_partition_key,
+                 std::string upper_bound_partition_key)
+      : expiration_time_(expiration_time),
+        lower_bound_partition_key_(std::move(lower_bound_partition_key)),
+        upper_bound_partition_key_(std::move(upper_bound_partition_key)) {
+  }
+
+  // Returns `true` if this is a non-covered partition range.
+  bool is_non_covered_range() const {
+    DCHECK(Initialized());
+    return tablet_.get() == nullptr;
+  }
+
+  // Returns the remote tablet, should only be called if this entry contains a
+  // tablet.
+  const scoped_refptr<RemoteTablet>& tablet() const {
+    DCHECK(tablet_);
+    DCHECK(Initialized());
+    return tablet_;
+  }
+
+  // Returns the inclusive lower bound partition key for the entry.
+  const std::string& lower_bound_partition_key() const {
+    DCHECK(Initialized());
+    if (is_non_covered_range()) {
+      return lower_bound_partition_key_;
+    } else {
+      return tablet_->partition().partition_key_start();
+    }
+  }
+
+  // Returns the exclusive upper bound partition key for the entry.
+  const std::string& upper_bound_partition_key() const {
+    DCHECK(Initialized());
+    if (is_non_covered_range()) {
+      return upper_bound_partition_key_;
+    } else {
+      return tablet_->partition().partition_key_end();
+    }
+  }
+
+  void refresh_expiration_time(MonoTime expiration_time) {
+    DCHECK(Initialized());
+    DCHECK(expiration_time.Initialized());
+    // Do not check that the new expiration time comes after the existing expiration
+    // time, because that may not hold if the master changes it's configured ttl.
+    expiration_time_ = expiration_time;
+  }
+
+  // Returns true if the partition key is contained in this meta cache entry.
+  bool Contains(const std::string& partition_key) const;
+
+  // Returns true if this meta cache entry is stale.
+  bool stale() const;
+
+  // Returns a formatted string representation of the metacache suitable for
+  // debug printing.
+  //
+  // This string will not be redacted, since table partitions are considered
+  // metadata.
+  std::string DebugString(const KuduTable* table) const;
+
+ private:
+
+  // Returns true if the entry is initialized.
+  bool Initialized() const {
+    return expiration_time_.Initialized();
+  }
+
+  // The expiration time of this cached entry.
+  MonoTime expiration_time_;
+
+  // The tablet. If this is a non-covered range then the tablet will be a nullptr.
+  scoped_refptr<RemoteTablet> tablet_;
+
+  // The lower bound partition key, if this is a non-covered range.
+  std::string lower_bound_partition_key_;
+
+  // The upper bound partition key, if this is a non-covered range.
+  std::string upper_bound_partition_key_;
 };
 
 // Manager of RemoteTablets and RemoteTabletServers. The client consults
@@ -198,7 +370,7 @@ class RemoteTablet : public RefCountedThreadSafe<RemoteTablet> {
 class MetaCache : public RefCountedThreadSafe<MetaCache> {
  public:
   // The passed 'client' object must remain valid as long as MetaCache is alive.
-  explicit MetaCache(KuduClient* client);
+  MetaCache(KuduClient* client, ReplicaController::Visibility replica_visibility);
   ~MetaCache();
 
   // Look up which tablet hosts the given partition key for a table. When it is
@@ -211,17 +383,25 @@ class MetaCache : public RefCountedThreadSafe<MetaCache> {
   // NOTE: the memory referenced by 'table' must remain valid until 'callback'
   // is invoked.
   void LookupTabletByKey(const KuduTable* table,
-                         const std::string& partition_key,
+                         std::string partition_key,
                          const MonoTime& deadline,
                          scoped_refptr<RemoteTablet>* remote_tablet,
                          const StatusCallback& callback);
 
-  // Look up the RemoteTablet object for the given tablet ID. Will die if not
-  // found.
-  //
-  // This is always a local operation (no network round trips or DNS resolution, etc).
-  void LookupTabletByID(const std::string& tablet_id,
-                        scoped_refptr<RemoteTablet>* remote_tablet);
+  // Look up which tablet hosts the given partition key, or the next tablet if
+  // the key falls in a non-covered range partition.
+  void LookupTabletByKeyOrNext(const KuduTable* table,
+                               std::string partition_key,
+                               const MonoTime& deadline,
+                               scoped_refptr<RemoteTablet>* remote_tablet,
+                               const StatusCallback& callback,
+                               int max_returned_locations = kFetchTabletsPerPointLookup);
+
+  // Clears the non-covered range entries from a table's meta cache.
+  void ClearNonCoveredRangeEntries(const std::string& table_id);
+
+  // Clears the meta cache.
+  void ClearCache();
 
   // Mark any replicas of any tablets hosted by 'ts' as failed. They will
   // not be returned in future cache lookups.
@@ -238,16 +418,19 @@ class MetaCache : public RefCountedThreadSafe<MetaCache> {
   friend class LookupRpc;
 
   FRIEND_TEST(client::ClientTest, TestMasterLookupPermits);
+  FRIEND_TEST(client::ClientTest, TestMetaCacheExpiry);
 
   // Called on the slow LookupTablet path when the master responds. Populates
   // the tablet caches and returns a reference to the first one.
-  const scoped_refptr<RemoteTablet>& ProcessLookupResponse(const LookupRpc& rpc);
+  Status ProcessLookupResponse(const LookupRpc& rpc,
+                               MetaCacheEntry* cache_entry,
+                               int max_returned_locations);
 
   // Lookup the given tablet by key, only consulting local information.
   // Returns true and sets *remote_tablet if successful.
   bool LookupTabletByKeyFastPath(const KuduTable* table,
                                  const std::string& partition_key,
-                                 scoped_refptr<RemoteTablet>* remote_tablet);
+                                 MetaCacheEntry* entry);
 
   // Update our information about the given tablet server.
   //
@@ -261,29 +444,36 @@ class MetaCache : public RefCountedThreadSafe<MetaCache> {
 
   rw_spinlock lock_;
 
-  // Cache of tablet servers, by UUID.
+  // Cache of Tablet Server locations: TS UUID -> RemoteTabletServer*.
   //
   // Given that the set of tablet servers is bounded by physical machines, we never
   // evict entries from this map until the MetaCache is destructed. So, no need to use
   // shared_ptr, etc.
   //
-  // Protected by lock_
+  // Protected by lock_.
   TabletServerMap ts_cache_;
 
-  // Cache of tablets, keyed by table ID, then by start partition key.
+  // Cache of tablets, keyed by partition key.
   //
   // Protected by lock_.
-  typedef std::map<std::string, scoped_refptr<RemoteTablet> > TabletMap;
+  typedef std::map<std::string, MetaCacheEntry> TabletMap;
+
+  // Cache of tablets and non-covered ranges, keyed by table id.
+  //
+  // Protected by lock_.
   std::unordered_map<std::string, TabletMap> tablets_by_table_and_key_;
 
   // Cache of tablets, keyed by tablet ID.
   //
   // Protected by lock_
-  std::unordered_map<std::string, scoped_refptr<RemoteTablet> > tablets_by_id_;
+  std::unordered_map<std::string, scoped_refptr<RemoteTablet>> tablets_by_id_;
 
   // Prevents master lookup "storms" by delaying master lookups when all
   // permits have been acquired.
   Semaphore master_lookup_sem_;
+
+  // Policy on tablet replica visibility: what type of replicas to expose.
+  const ReplicaController::Visibility replica_visibility_;
 
   DISALLOW_COPY_AND_ASSIGN(MetaCache);
 };

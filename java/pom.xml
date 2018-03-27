@@ -22,10 +22,18 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>org.kududb</groupId>
+    <groupId>org.apache.kudu</groupId>
     <artifactId>kudu-parent</artifactId>
-    <version>0.7.0-SNAPSHOT</version>
+    <version>1.8.0-SNAPSHOT</version>
     <packaging>pom</packaging>
+
+    <!-- inherit from the ASF POM for distribution management -->
+    <parent>
+        <groupId>org.apache</groupId>
+        <artifactId>apache</artifactId>
+        <version>18</version>
+        <relativePath/>
+    </parent>
 
     <name>Kudu</name>
 
@@ -40,43 +48,74 @@
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
         <!-- Maven plugins -->
-        <maven-antrun-plugin.version>1.7</maven-antrun-plugin.version>
-        <maven-assembly-plugin.version>2.2.1</maven-assembly-plugin.version>
-        <maven-enforcer-plugin.version>1.4</maven-enforcer-plugin.version>
-        <maven-protoc-plugin.version>0.1.10</maven-protoc-plugin.version>
-        <maven-surefire-plugin.version>2.18</maven-surefire-plugin.version>
+        <clojure-maven-plugin.version>1.7.1</clojure-maven-plugin.version>
+        <maven-antrun-plugin.version>1.8</maven-antrun-plugin.version>
+        <maven-assembly-plugin.version>3.0.0</maven-assembly-plugin.version>
+        <maven-checkstyle-plugin.version>2.17</maven-checkstyle-plugin.version>
+        <maven-compiler-plugin.version>3.6.2</maven-compiler-plugin.version>
+        <maven-enforcer-plugin.version>1.4.1</maven-enforcer-plugin.version>
+        <!-- Note: Bumping maven-failsafe-plugin to 2.19+ breaks the integration tests due to shading issues -->
         <maven-failsafe-plugin.version>2.18</maven-failsafe-plugin.version>
-        <schema-validator-maven-plugin.version>5.5.0-SNAPSHOT</schema-validator-maven-plugin.version>
+        <maven-os-plugin.version>1.5.0.Final</maven-os-plugin.version>
+        <maven-jar-plugin.version>3.0.2</maven-jar-plugin.version>
+        <maven-javadoc-plugin.version>2.10.4</maven-javadoc-plugin.version>
+        <maven-protoc-plugin.version>0.5.0</maven-protoc-plugin.version>
+        <maven-shade-plugin.version>3.0.0</maven-shade-plugin.version>
+        <maven-surefire-plugin.version>2.20</maven-surefire-plugin.version>
+        <scala-maven-plugin.version>3.2.2</scala-maven-plugin.version>
 
         <!-- Library dependencies -->
         <async.version>1.4.1</async.version>
-        <guava.version>12.0.1</guava.version>
-        <hadoop.version>2.6.0-cdh5.4.7</hadoop.version>
-        <junit.version>4.11</junit.version>
+        <avro.version>1.8.2</avro.version>
+        <clojure.tools.version>0.3.5</clojure.tools.version>
+        <clojure.version>1.8.0</clojure.version>
+        <commons-io.version>2.6</commons-io.version>
+        <flume.version>1.7.0</flume.version>
+        <guava.version>20.0</guava.version>
+        <hadoop.version>2.9.0</hadoop.version>
+        <hamcrest-core.version>1.3</hamcrest-core.version>
+        <hive.version>2.3.2</hive.version>
+        <jepsen.version>0.1.5</jepsen.version>
+        <jsr305.version>3.0.2</jsr305.version>
+        <junit.version>4.12</junit.version>
         <log4j.version>1.2.17</log4j.version>
-        <mockito-all.version>1.9.0</mockito-all.version>
-        <netty.version>3.8.0.Final</netty.version>
-        <protobuf.version>2.6.1</protobuf.version>
-        <slf4j.version>1.7.12</slf4j.version>
-        <commons-io.version>2.4</commons-io.version>
+        <mockito-core.version>2.15.0</mockito-core.version>
         <murmur.version>1.0.0</murmur.version>
+        <netty.version>3.10.6.Final</netty.version>
+        <parquet.version>1.9.0</parquet.version>
+        <!-- Upgrading protobuf breaks el6 compatibility
+             https://github.com/google/protobuf/issues/4109 -->
+        <protobuf.version>3.4.0</protobuf.version>
+        <slf4j.version>1.7.25</slf4j.version>
+        <sparkavro.version>3.2.0</sparkavro.version>
+        <yetus.version>0.7.0</yetus.version>
+
+        <!-- Scala Library dependencies -->
+        <scala.binary.version>2.11</scala.binary.version>
+        <scala.version>2.11.12</scala.version>
+        <scalatest.version>3.0.5</scalatest.version>
+        <spark.version>2.2.1</spark.version>
+        <spark.version.label>spark2</spark.version.label>
 
         <!-- Misc variables -->
-        <testdata.dir>target/testdata</testdata.dir>
-        <testArgLine>-enableassertions -Xmx1900m -XX:MaxPermSize=100m
-        -Djava.security.egd=file:/dev/./urandom -Djava.net.preferIPv4Stack=true
-        -Djava.awt.headless=true</testArgLine>
+        <testdata.dir>${project.build.directory}/testdata</testdata.dir>
+        <testArgLine>-enableassertions -Xmx1900m
+            -Djava.security.egd=file:/dev/urandom -Djava.net.preferIPv4Stack=true
+            -Djava.awt.headless=true
+        </testArgLine>
     </properties>
 
     <modules>
-        <module>interface-annotations</module>
-        <module>kudu-client</module>
         <module>kudu-client-tools</module>
+        <module>kudu-client</module>
+        <module>kudu-flume-sink</module>
+        <module>kudu-hive</module>
         <module>kudu-mapreduce</module>
+        <module>kudu-spark-tools</module>
+        <module>kudu-spark</module>
     </modules>
 
     <build>
-
         <pluginManagement>
             <plugins>
                 <plugin>
@@ -124,6 +163,22 @@
                         <argLine>${testArgLine}</argLine>
                     </configuration>
                 </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-shade-plugin</artifactId>
+                    <version>${maven-shade-plugin.version}</version>
+                    <configuration>
+                        <shadeTestJar>true</shadeTestJar>
+                    </configuration>
+                    <executions>
+                        <execution>
+                            <phase>package</phase>
+                            <goals>
+                                <goal>shade</goal>
+                            </goals>
+                        </execution>
+                    </executions>
+                </plugin>
             </plugins>
         </pluginManagement>
 
@@ -159,7 +214,7 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
-                <version>2.3.2</version>
+                <version>${maven-compiler-plugin.version}</version>
                 <configuration>
                     <source>1.7</source>
                     <target>1.7</target>
@@ -168,7 +223,7 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-jar-plugin</artifactId>
-                <version>2.3.2</version>
+                <version>${maven-jar-plugin.version}</version>
                 <executions>
                     <execution>
                         <phase>prepare-package</phase>
@@ -200,91 +255,91 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-javadoc-plugin</artifactId>
-                <version>2.10.3</version>
+                <version>${maven-javadoc-plugin.version}</version>
                 <configuration>
                     <maxmemory>2048m</maxmemory>
                     <notimestamp>true</notimestamp>
                     <doclet>
-                        org.kududb.annotations.tools.IncludePublicAnnotationsStandardDoclet
+                        org.apache.yetus.audience.tools.IncludePublicAnnotationsStandardDoclet
                     </doclet>
                     <docletArtifact>
-                        <groupId>org.kududb</groupId>
-                        <artifactId>interface-annotations</artifactId>
-                        <version>${project.version}</version>
+                        <groupId>org.apache.yetus</groupId>
+                        <artifactId>audience-annotations-jdiff</artifactId>
+                        <version>${yetus.version}</version>
                     </docletArtifact>
                     <name>User API</name>
                     <description>The Kudu Application Programmer's API</description>
                     <excludePackageNames>
-                        com.google:org.kududb.cfile:org.kududb.consensus:org.kududb.log:org.kududb.master:org.kududb.rpc:org.kududb.server:org.kududb.tablet:org.kududb.tserver
+                      com.google:org.apache.kudu.cfile:org.apache.kudu.consensus:org.apache.kudu.log:org.apache.kudu.master:org.apache.kudu.rpc:org.apache.kudu.server:org.apache.kudu.tablet:org.apache.kudu.tserver:org.apache.kudu.hive
                     </excludePackageNames>
                     <includeDependencySources>false</includeDependencySources>
-
-                    <dependencySourceIncludes>
-                        <dependencySourceInclude>
-                            org.kududb:interface-annotations
-                        </dependencySourceInclude>
-                    </dependencySourceIncludes>
                 </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-checkstyle-plugin</artifactId>
+                <version>${maven-checkstyle-plugin.version}</version>
+                <dependencies>
+                    <dependency>
+                        <groupId>com.puppycrawl.tools</groupId>
+                        <artifactId>checkstyle</artifactId>
+                        <version>6.19</version>
+                    </dependency>
+                </dependencies>
+                <executions>
+                    <execution>
+                        <id>validate</id>
+                        <phase>validate</phase>
+                        <configuration>
+                            <configLocation>kudu_style.xml</configLocation>
+                            <suppressionsLocation>checkstyle_suppressions.xml</suppressionsLocation>
+                            <suppressionsFileExpression>checkstyle.suppressions.file</suppressionsFileExpression>
+                            <encoding>UTF-8</encoding>
+                            <consoleOutput>true</consoleOutput>
+                            <failsOnError>false</failsOnError>
+                        </configuration>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <!-- Enforce that all of our code uses Java 7 and not Java 8 APIs. -->
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>animal-sniffer-maven-plugin</artifactId>
+                <version>1.16</version>
+                <configuration>
+                    <signature>
+                        <groupId>org.codehaus.mojo.signature</groupId>
+                        <artifactId>java17</artifactId>
+                        <version>1.0</version>
+                    </signature>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>check-java7-apis</id>
+                        <phase>process-classes</phase>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>
 
-    <pluginRepositories>
-      <!-- For maven-protoc-plugin -->
-      <pluginRepository>
-        <id>protoc-plugin</id>
-        <url>http://maven.davidtrott.com/repository</url>
-      </pluginRepository>
-    </pluginRepositories>
+    <profiles>
+        <!-- Build the jepsen test for Kudu.
 
-  <repositories>
-    <repository>
-      <id>cdh.repo</id>
-      <url>https://repository.cloudera.com/artifactory/cloudera-repos</url>
-      <name>Cloudera Repositories</name>
-      <snapshots>
-        <enabled>false</enabled>
-      </snapshots>
-    </repository>
- </repositories>
-
-  <distributionManagement>
-    <repository>
-      <id>cdh.releases.repo</id>
-      <url>${deploy.maven}</url>
-      <name>Releases Repository</name>
-    </repository>
-    <snapshotRepository>
-      <id>cdh.snapshots.repo</id>
-      <url>http://maven.jenkins.cloudera.com:8081/artifactory/libs-snapshot-local</url>
-      <name>Snapshots Repository</name>
-    </snapshotRepository>
-  </distributionManagement>
-
-  <profiles>
-    <!-- Build the CSD.
-
-         Disabled by default; add -PbuildCSD to the maven command line. -->
-    <profile>
-      <id>buildCSD</id>
-      <modules>
-        <module>kudu-csd</module>
-      </modules>
-    </profile>
-    <profile>
-      <id>deploy-local</id>
-      <activation>
-        <activeByDefault>true</activeByDefault>
-      </activation>
-      <properties>
-         <deploy.maven>http://maven.jenkins.cloudera.com:8081/artifactory/libs-release-local</deploy.maven>
-       </properties>
-    </profile>
-    <profile>
-      <id>deploy-remote</id>
-      <properties>
-         <deploy.maven>https://repository.cloudera.com/cloudera/libs-release-local</deploy.maven>
-      </properties>
-    </profile>
-  </profiles>
+             Disabled by default since Java 8 and maven >= 3.3.6 is required to
+             build the kudu-jepsen artifact.  To enable, add '-Pjepsen'
+             to the maven command line. -->
+        <profile>
+            <id>jepsen</id>
+            <modules>
+                <module>kudu-jepsen</module>
+            </modules>
+        </profile>
+    </profiles>
 </project>

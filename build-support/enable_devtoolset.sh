@@ -16,17 +16,20 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-
-set -e
-
+#
 # Enables the Red Hat devtoolset on RHEL 6 based systems and executes the
 # arguments. On non-RHEL 6 systems, the arguments are executed without changes
 # to the environment.
 # USAGE: ./enable_devtoolset.sh <command> <args>...
 
+set -e
+
 if [[ "$OSTYPE" =~ ^linux ]] && \
    [[ "$(lsb_release -irs)" =~ (CentOS|RedHatEnterpriseServer)[[:space:]]+6\.[[:digit:]]+ ]]; then
-  scl enable devtoolset-3 "$*"
+  # Invoke the inner script, which may do some additional customization within
+  # the devtoolset.
+  ROOT=$(cd $(dirname "$BASH_SOURCE") ; pwd)
+  scl enable devtoolset-3 "$ROOT/enable_devtoolset_inner.sh $*"
 else
   $@
 fi

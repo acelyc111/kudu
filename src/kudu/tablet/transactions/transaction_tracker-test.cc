@@ -15,17 +15,32 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <gtest/gtest.h>
+#include <cstdint>
 #include <memory>
+#include <ostream>
+#include <string>
 #include <vector>
 
+#include <gflags/gflags_declare.h>
+#include <glog/logging.h>
+#include <google/protobuf/message.h>  // IWYU pragma: keep
+#include <gtest/gtest.h>
+
+#include "kudu/consensus/consensus.pb.h"
+#include "kudu/gutil/casts.h"
+#include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/move.h"
+#include "kudu/gutil/port.h"
 #include "kudu/gutil/ref_counted.h"
+#include "kudu/tablet/transactions/transaction.h"
 #include "kudu/tablet/transactions/transaction_driver.h"
 #include "kudu/tablet/transactions/transaction_tracker.h"
-#include "kudu/tablet/transactions/transaction.h"
-#include "kudu/tablet/transactions/write_transaction.h"
+#include "kudu/util/countdown_latch.h"
 #include "kudu/util/mem_tracker.h"
 #include "kudu/util/metrics.h"
+#include "kudu/util/monotime.h"
+#include "kudu/util/status.h"
+#include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
 #include "kudu/util/thread.h"
 
@@ -88,12 +103,13 @@ class TransactionTrackerTest : public KuduTest {
                     vector<scoped_refptr<TransactionDriver> >* drivers) {
     vector<scoped_refptr<TransactionDriver> > local_drivers;
     for (int i = 0; i < num_drivers; i++) {
-      scoped_refptr<TransactionDriver> driver(new TransactionDriver(&tracker_,
-                                                                    nullptr,
-                                                                    nullptr,
-                                                                    nullptr,
-                                                                    nullptr,
-                                                                    nullptr));
+      scoped_refptr<TransactionDriver> driver(
+          new TransactionDriver(&tracker_,
+                                nullptr,
+                                nullptr,
+                                nullptr,
+                                nullptr,
+                                nullptr));
       gscoped_ptr<NoOpTransaction> tx(new NoOpTransaction(new NoOpTransactionState));
       RETURN_NOT_OK(driver->Init(tx.PassAs<Transaction>(), consensus::LEADER));
       local_drivers.push_back(driver);

@@ -15,23 +15,50 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <gtest/gtest.h>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <ostream>
 #include <string>
+#include <thread>
+#include <vector>
 
+#include <gflags/gflags_declare.h>
+#include <glog/logging.h>
+#include <gtest/gtest.h>
+
+#include "kudu/clock/clock.h"
+#include "kudu/clock/hybrid_clock.h"
+#include "kudu/common/schema.h"
 #include "kudu/common/wire_protocol-test-util.h"
 #include "kudu/consensus/consensus-test-util.h"
+#include "kudu/consensus/consensus.pb.h"
 #include "kudu/consensus/log.h"
 #include "kudu/consensus/log_cache.h"
+#include "kudu/consensus/log_util.h"
+#include "kudu/consensus/opid.pb.h"
+#include "kudu/consensus/opid_util.h"
+#include "kudu/consensus/ref_counted_replicate.h"
 #include "kudu/fs/fs_manager.h"
-#include "kudu/gutil/bind_helpers.h"
-#include "kudu/gutil/stl_util.h"
-#include "kudu/server/hybrid_clock.h"
+#include "kudu/gutil/bind.h"
+#include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/port.h"
+#include "kudu/gutil/ref_counted.h"
+#include "kudu/gutil/strings/substitute.h"
 #include "kudu/util/mem_tracker.h"
 #include "kudu/util/metrics.h"
+#include "kudu/util/monotime.h"
+#include "kudu/util/scoped_cleanup.h"
+#include "kudu/util/status.h"
+#include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
 
+using std::atomic;
 using std::shared_ptr;
+using std::thread;
+using std::vector;
+using strings::Substitute;
 
 DECLARE_int32(log_cache_size_limit_mb);
 DECLARE_int32(global_log_cache_size_limit_mb);
@@ -53,7 +80,7 @@ class LogCacheTest : public KuduTest {
 
   virtual void SetUp() OVERRIDE {
     KuduTest::SetUp();
-    fs_manager_.reset(new FsManager(env_.get(), GetTestPath("fs_root")));
+    fs_manager_.reset(new FsManager(env_, GetTestPath("fs_root")));
     ASSERT_OK(fs_manager_->CreateInitialFileSystemLayout());
     ASSERT_OK(fs_manager_->Open());
     CHECK_OK(log::Log::Open(log::LogOptions(),
@@ -61,11 +88,11 @@ class LogCacheTest : public KuduTest {
                             kTestTablet,
                             schema_,
                             0, // schema_version
-                            NULL,
+                            nullptr,
                             &log_));
 
     CloseAndReopenCache(MinimumOpId());
-    clock_.reset(new server::HybridClock());
+    clock_.reset(new clock::HybridClock());
     ASSERT_OK(clock_->Init());
   }
 
@@ -74,9 +101,6 @@ class LogCacheTest : public KuduTest {
   }
 
   void CloseAndReopenCache(const OpId& preceding_id) {
-    // Blow away the memtrackers before creating the new cache.
-    cache_.reset();
-
     cache_.reset(new LogCache(metric_entity_,
                               log_.get(),
                               kPeerUuid,
@@ -89,14 +113,12 @@ class LogCacheTest : public KuduTest {
     CHECK_OK(s);
   }
 
-  Status AppendReplicateMessagesToCache(
-    int first,
-    int count,
-    int payload_size = 0) {
+  Status AppendReplicateMessagesToCache(int64_t first, int64_t count,
+                                        size_t payload_size = 0) {
 
-    for (int i = first; i < first + count; i++) {
-      int term = i / 7;
-      int index = i;
+    for (int64_t cur_index = first; cur_index < first + count; cur_index++) {
+      int64_t term = cur_index / 7;
+      int64_t index = cur_index;
       vector<ReplicateRefPtr> msgs;
       msgs.push_back(make_scoped_refptr_replicate(
                        CreateDummyReplicate(term, index, clock_->Now(), payload_size).release()));
@@ -111,7 +133,7 @@ class LogCacheTest : public KuduTest {
   gscoped_ptr<FsManager> fs_manager_;
   gscoped_ptr<LogCache> cache_;
   scoped_refptr<log::Log> log_;
-  scoped_refptr<server::Clock> clock_;
+  scoped_refptr<clock::Clock> clock_;
 };
 
 
@@ -170,6 +192,12 @@ TEST_F(LogCacheTest, TestAlwaysYieldsAtLeastOneMessage) {
   // We should get one of them, even though we only ask for 100 bytes
   vector<ReplicateRefPtr> messages;
   OpId preceding;
+  ASSERT_OK(cache_->ReadOps(0, 100, &messages, &preceding));
+  ASSERT_EQ(1, messages.size());
+
+  // Should yield one op also in the 'cache miss' case.
+  messages.clear();
+  cache_->EvictThroughOp(50);
   ASSERT_OK(cache_->ReadOps(0, 100, &messages, &preceding));
   ASSERT_EQ(1, messages.size());
 }
@@ -265,6 +293,11 @@ TEST_F(LogCacheTest, TestMemoryLimit) {
 }
 
 TEST_F(LogCacheTest, TestGlobalMemoryLimit) {
+  // Need to force the global cache memtracker to be destroyed before calling
+  // CloseAndreopenCache(), otherwise it'll just be reused instead of recreated
+  // with a new limit.
+  cache_.reset();
+
   FLAGS_global_log_cache_size_limit_mb = 4;
   CloseAndReopenCache(MinimumOpId());
 
@@ -286,7 +319,7 @@ TEST_F(LogCacheTest, TestGlobalMemoryLimit) {
 // consumption wasn't properly managed when messages were replaced.
 TEST_F(LogCacheTest, TestReplaceMessages) {
   const int kPayloadSize = 128 * 1024;
-  shared_ptr<MemTracker> tracker = cache_->tracker_;;
+  shared_ptr<MemTracker> tracker = cache_->tracker_;
   ASSERT_EQ(0, tracker->consumption());
 
   ASSERT_OK(AppendReplicateMessagesToCache(1, 1, kPayloadSize));
@@ -302,6 +335,79 @@ TEST_F(LogCacheTest, TestReplaceMessages) {
   EXPECT_EQ(Substitute("Pinned index: 2, LogCacheStats(num_ops=1, bytes=$0)",
                        size_with_one_msg),
             cache_->ToString());
+}
+
+// Test that the cache truncates any future messages when either explicitly
+// truncated or replacing any earlier message.
+TEST_F(LogCacheTest, TestTruncation) {
+  enum {
+    TRUNCATE_BY_APPEND,
+    TRUNCATE_EXPLICITLY
+  };
+
+  // Append 1 through 3.
+  AppendReplicateMessagesToCache(1, 3, 100);
+
+  for (auto mode : {TRUNCATE_BY_APPEND, TRUNCATE_EXPLICITLY}) {
+    SCOPED_TRACE(mode == TRUNCATE_BY_APPEND ? "by append" : "explicitly");
+    // Append messages 4 through 10.
+    AppendReplicateMessagesToCache(4, 7, 100);
+    ASSERT_EQ(10, cache_->metrics_.log_cache_num_ops->value());
+
+    switch (mode) {
+      case TRUNCATE_BY_APPEND:
+        AppendReplicateMessagesToCache(3, 1, 100);
+        break;
+      case TRUNCATE_EXPLICITLY:
+        cache_->TruncateOpsAfter(3);
+        break;
+    }
+
+    ASSERT_EQ(3, cache_->metrics_.log_cache_num_ops->value());
+
+    // Op 3 should still be in the cache.
+    OpId op;
+    ASSERT_OK(cache_->LookupOpId(3, &op));
+    ASSERT_TRUE(cache_->HasOpBeenWritten(3));
+
+    // Op 4 should have been removed.
+    Status s = cache_->LookupOpId(4, &op);
+    ASSERT_TRUE(s.IsIncomplete()) << "should be truncated, but got: " << s.ToString();
+    ASSERT_FALSE(cache_->HasOpBeenWritten(4));
+  }
+}
+
+TEST_F(LogCacheTest, TestMTReadAndWrite) {
+  atomic<bool> stop { false };
+  vector<thread> threads;
+  SCOPED_CLEANUP({
+      stop = true;
+      for (auto& t : threads) {
+        t.join();
+      }
+    });
+
+  // Add a writer thread.
+  threads.emplace_back([&] {
+      const int kBatch = 10;
+      int64_t index = 1;
+      while (!stop) {
+        CHECK_OK(AppendReplicateMessagesToCache(index, kBatch));
+        index += kBatch;
+      }
+    });
+  // Add a reader thread.
+  threads.emplace_back([&] {
+      int64_t index = 0;
+      while (!stop) {
+        vector<ReplicateRefPtr> messages;
+        OpId preceding;
+        CHECK_OK(cache_->ReadOps(index, 1024 * 1024, &messages, &preceding));
+        index += messages.size();
+      }
+    });
+
+  SleepFor(MonoDelta::FromSeconds(AllowSlowTests() ? 10 : 2));
 }
 
 } // namespace consensus

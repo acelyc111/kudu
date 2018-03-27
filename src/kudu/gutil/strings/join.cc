@@ -2,11 +2,19 @@
 
 #include "kudu/gutil/strings/join.h"
 
+#include <cstring>  // IWYU pragma: keep
+#include <ostream>
+
 #include <glog/logging.h>
-#include "kudu/gutil/logging-inl.h"
+
 #include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/strings/ascii_ctype.h"
 #include "kudu/gutil/strings/escaping.h"
+
+using std::map;
+using std::pair;
+using std::string;
+using std::vector;
 
 // ----------------------------------------------------------------------
 // JoinUsing()
@@ -188,11 +196,11 @@ void JoinCSVLineWithDelimiter(const vector<string>& cols, char delimiter,
       CHECK_GE(size, escaped_size + 3)
         << "Buffer should have one space at the beginning for a "
         << "double-quote, one at the end for a double-quote, and "
-        << "one at the end for a closing '\0'";
+        << "one at the end for a closing '\\0'";
       *buf.get() = '"';
       *((buf.get() + 1) + escaped_size) = '"';
       *((buf.get() + 1) + escaped_size + 1) = '\0';
-      quoted_cols.push_back(string(buf.get(), buf.get() + escaped_size + 2));
+      quoted_cols.emplace_back(buf.get(), buf.get() + escaped_size + 2);
     } else {
       quoted_cols.push_back(col);
     }

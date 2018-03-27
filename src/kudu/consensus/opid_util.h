@@ -18,11 +18,10 @@
 #ifndef KUDU_CONSENSUS_OPID_UTIL_H_
 #define KUDU_CONSENSUS_OPID_UTIL_H_
 
-#include <stdint.h>
-
+#include <cstddef>
+#include <cstdint>
 #include <iosfwd>
 #include <string>
-#include <utility>
 
 namespace kudu {
 namespace consensus {
@@ -89,7 +88,7 @@ struct OpIdCompareFunctor {
 };
 
 // OpId comparison functor that returns true iff left > right. Suitable for use
-// td::sort and std::map to sort keys in increasing order.]
+// with std::sort and std::map to sort keys in increasing order.
 struct OpIdBiggerThanFunctor {
   bool operator() (const OpId& left, const OpId& right) const;
 };
@@ -106,7 +105,7 @@ std::string OpIdToString(const OpId& id);
 
 std::string OpsRangeString(const ConsensusRequestPB& req);
 
-OpId MakeOpId(int term, int index);
+OpId MakeOpId(int64_t term, int64_t index);
 
 }  // namespace consensus
 }  // namespace kudu

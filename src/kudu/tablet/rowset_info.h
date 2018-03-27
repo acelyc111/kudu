@@ -17,8 +17,11 @@
 #ifndef KUDU_TABLET_ROWSET_INFO_H_
 #define KUDU_TABLET_ROWSET_INFO_H_
 
+#include <cstdint>
 #include <string>
 #include <vector>
+
+#include "kudu/gutil/ref_counted.h"
 
 namespace kudu {
 namespace tablet {
@@ -41,12 +44,17 @@ class RowSetInfo {
                              std::vector<RowSetInfo>* min_key,
                              std::vector<RowSetInfo>* max_key);
 
+  uint64_t size_bytes() const { return extra_->size_bytes; }
   int size_mb() const { return size_mb_; }
 
   // Return the value of the CDF at the minimum key of this candidate.
   double cdf_min_key() const { return cdf_min_key_; }
   // Return the value of the CDF at the maximum key of this candidate.
   double cdf_max_key() const { return cdf_max_key_; }
+
+  bool has_bounds() const { return extra_->has_bounds;  }
+  const std::string& min_key() const { return extra_->min_key; }
+  const std::string& max_key() const { return extra_->max_key; }
 
   // Return the "width" of the candidate rowset.
   //
@@ -59,7 +67,7 @@ class RowSetInfo {
 
   double density() const { return density_; }
 
-  RowSet* rowset() const { return rowset_; }
+  RowSet* rowset() const { return extra_->rowset; }
 
   std::string ToString() const;
 
@@ -76,10 +84,32 @@ class RowSetInfo {
   static void FinalizeCDFVector(std::vector<RowSetInfo>* vec,
                                 double quot);
 
-  RowSet* rowset_;
+  // The size in MB, already clamped so that all rowsets have size at least
+  // 1MB. This is cached to avoid the branch during the selection hot path.
   int size_mb_;
+
   double cdf_min_key_, cdf_max_key_;
   double density_;
+
+  // We move these out of the RowSetInfo object because the std::strings are relatively
+  // large objects, and we'd like the RowSetInfos to be as small as possible so that
+  // the algorithm can fit mostly in CPU cache. The string bounds themselves are rarely
+  // accessed in the hot part of the algorithm so it's worth out-of-lining them.
+  //
+  // These are ref-counted so that RowSetInfo is copyable.
+  struct ExtraData : public RefCounted<ExtraData> {
+    // Cached version of rowset_->OnDiskBaseDataSizeWithRedos().
+    uint64_t size_bytes;
+
+    // True if the RowSet has known bounds.
+    // MemRowSets in particular do not.
+    bool has_bounds;
+    std::string min_key, max_key;
+
+    // The original RowSet that this RowSetInfo was constructed from.
+    RowSet* rowset;
+  };
+  const scoped_refptr<ExtraData> extra_;
 };
 
 } // namespace tablet

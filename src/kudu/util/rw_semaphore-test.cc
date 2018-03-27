@@ -15,15 +15,19 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <gtest/gtest.h>
-#include <boost/thread/thread.hpp>
-#include <boost/thread/locks.hpp>
+#include <cstdint>
+#include <mutex>
+#include <thread>
 #include <vector>
 
+#include <glog/logging.h>
+#include <gtest/gtest.h>
+
+#include "kudu/util/locks.h"
 #include "kudu/util/monotime.h"
 #include "kudu/util/rw_semaphore.h"
 
-using boost::thread;
+using std::thread;
 using std::vector;
 
 namespace kudu {
@@ -39,7 +43,7 @@ struct SharedState {
 void Writer(SharedState* state) {
   int i = 0;
   while (true) {
-    boost::lock_guard<rw_semaphore> l(state->sem);
+    std::lock_guard<rw_semaphore> l(state->sem);
     state->int_var += (i++);
     if (state->done) {
       break;
@@ -51,7 +55,7 @@ void Writer(SharedState* state) {
 void Reader(SharedState* state) {
   int prev_val = 0;
   while (true) {
-    boost::shared_lock<rw_semaphore> l(state->sem);
+    shared_lock<rw_semaphore> l(state->sem);
     // The int var should only be seen to increase.
     CHECK_GE(state->int_var, prev_val);
     prev_val = state->int_var;
@@ -77,7 +81,7 @@ TEST(RWSemaphoreTest, TestBasicOperation) {
 
   // Signal them to stop.
   {
-    boost::lock_guard<rw_semaphore> l(s.sem);
+    std::lock_guard<rw_semaphore> l(s.sem);
     s.done = true;
   }
 

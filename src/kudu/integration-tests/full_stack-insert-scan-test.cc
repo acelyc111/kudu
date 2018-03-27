@@ -15,46 +15,56 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <cmath>
-#include <cstdlib>
-#include <gflags/gflags.h>
-#include <glog/logging.h>
+#include <unistd.h>
+
+#include <csignal>
+#include <cstdint>
 #include <memory>
-#include <signal.h>
+#include <ostream>
 #include <string>
 #include <vector>
 
+#include <gflags/gflags.h>
+#include <gflags/gflags_declare.h>
+#include <glog/logging.h>
+#include <gtest/gtest.h>
+
 #include "kudu/client/callbacks.h"
-#include "kudu/client/client.h"
 #include "kudu/client/client-test-util.h"
+#include "kudu/client/client.h"
 #include "kudu/client/row_result.h"
+#include "kudu/client/schema.h"
+#include "kudu/client/shared_ptr.h"
 #include "kudu/client/write_op.h"
 #include "kudu/codegen/compilation_manager.h"
+#include "kudu/common/partial_row.h"
 #include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/port.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/strings/split.h"
 #include "kudu/gutil/strings/strcat.h"
 #include "kudu/gutil/strings/substitute.h"
-#include "kudu/integration-tests/mini_cluster.h"
 #include "kudu/master/mini_master.h"
-#include "kudu/tablet/maintenance_manager.h"
+#include "kudu/mini-cluster/internal_mini_cluster.h"
 #include "kudu/tablet/tablet.h"
-#include "kudu/tablet/tablet_metrics.h"
-#include "kudu/tablet/tablet_peer.h"
+#include "kudu/tablet/tablet_replica.h"
 #include "kudu/tserver/mini_tablet_server.h"
 #include "kudu/tserver/tablet_server.h"
 #include "kudu/tserver/ts_tablet_manager.h"
 #include "kudu/util/async_util.h"
 #include "kudu/util/countdown_latch.h"
-#include "kudu/util/errno.h"
-#include "kudu/util/stopwatch.h"
-#include "kudu/util/test_macros.h"
-#include "kudu/util/test_util.h"
-#include "kudu/util/status.h"
-#include "kudu/util/subprocess.h"
-#include "kudu/util/thread.h"
+#include "kudu/util/maintenance_manager.h"
+#include "kudu/util/monotime.h"
 #include "kudu/util/random.h"
 #include "kudu/util/random_util.h"
+#include "kudu/util/status.h"
+#include "kudu/util/stopwatch.h"
+#include "kudu/util/subprocess.h"
+#include "kudu/util/test_macros.h"
+#include "kudu/util/test_util.h"
+#include "kudu/util/thread.h"
+
+DEFINE_bool(skip_scans, false, "Whether to skip the scan part of the test.");
 
 // Test size parameters
 DEFINE_int32(concurrent_inserts, -1, "Number of inserting clients to launch");
@@ -65,13 +75,15 @@ DEFINE_int32(rows_per_batch, -1, "Number of rows per client batch");
 // Perf-related FLAGS_perf_stat
 DEFINE_bool(perf_record_scan, false, "Call \"perf record --call-graph\" "
             "for the duration of the scan, disabled by default");
-DEFINE_bool(perf_stat_scan, false, "Print \"perf stat\" results during"
+DEFINE_bool(perf_record_scan_callgraph, false,
+            "Only applicable with --perf_record_scan, provides argument "
+            "\"--call-graph fp\"");
+DEFINE_bool(perf_stat_scan, false, "Print \"perf stat\" results during "
             "scan to stdout, disabled by default");
-DEFINE_bool(perf_fp_flag, false, "Only applicable with --perf_record_scan,"
-            " provides argument \"fp\" to the --call-graph flag");
 DECLARE_bool(enable_maintenance_manager);
 
 using std::string;
+using std::unique_ptr;
 using std::vector;
 
 namespace kudu {
@@ -89,6 +101,8 @@ using client::KuduSession;
 using client::KuduStatusMemberCallback;
 using client::KuduTable;
 using client::KuduTableCreator;
+using cluster::InternalMiniCluster;
+using cluster::InternalMiniClusterOptions;
 using strings::Split;
 using strings::Substitute;
 
@@ -99,7 +113,7 @@ class FullStackInsertScanTest : public KuduTest {
     kNumInsertClients(DefaultFlag(FLAGS_concurrent_inserts, 3, 10)),
     kNumInsertsPerClient(DefaultFlag(FLAGS_inserts_per_client, 500, 50000)),
     kNumRows(kNumInsertClients * kNumInsertsPerClient),
-    kFlushEveryN(DefaultFlag(FLAGS_rows_per_batch, 125, 5000)),
+    flush_every_n_(DefaultFlag(FLAGS_rows_per_batch, 125, 5000)),
     random_(SeedRandom()),
     sessions_(kNumInsertClients),
     tables_(kNumInsertClients) {
@@ -134,15 +148,10 @@ class FullStackInsertScanTest : public KuduTest {
     gscoped_ptr<KuduTableCreator> table_creator(client_->NewTableCreator());
     ASSERT_OK(table_creator->table_name(kTableName)
              .schema(&schema_)
+             .set_range_partition_columns({ "key" })
+             .num_replicas(1)
              .Create());
     ASSERT_OK(client_->OpenTable(kTableName, &reader_table_));
-  }
-
-  virtual void TearDown() OVERRIDE {
-    if (cluster_) {
-      cluster_->Shutdown();
-    }
-    KuduTest::TearDown();
   }
 
   void DoConcurrentClientInserts();
@@ -162,7 +171,7 @@ class FullStackInsertScanTest : public KuduTest {
 
   void InitCluster() {
     // Start mini-cluster with 1 tserver, config client options
-    cluster_.reset(new MiniCluster(env_.get(), MiniClusterOptions()));
+    cluster_.reset(new InternalMiniCluster(env_, InternalMiniClusterOptions()));
     ASSERT_OK(cluster_->Start());
     KuduClientBuilder builder;
     builder.add_master_server_addr(
@@ -203,12 +212,12 @@ class FullStackInsertScanTest : public KuduTest {
     kInt32ColBase,
     kInt64ColBase = kInt32ColBase + kNumIntCols
   };
-  const int kFlushEveryN;
+  const int flush_every_n_;
 
   Random random_;
 
   KuduSchema schema_;
-  std::shared_ptr<MiniCluster> cluster_;
+  std::shared_ptr<InternalMiniCluster> cluster_;
   client::sp::shared_ptr<KuduClient> client_;
   client::sp::shared_ptr<KuduTable> reader_table_;
   // Concurrent client insertion test variables
@@ -218,31 +227,20 @@ class FullStackInsertScanTest : public KuduTest {
 
 namespace {
 
-gscoped_ptr<Subprocess> MakePerfStat() {
-  if (!FLAGS_perf_stat_scan) return gscoped_ptr<Subprocess>();
+unique_ptr<Subprocess> MakePerfStat() {
+  if (!FLAGS_perf_stat_scan) return unique_ptr<Subprocess>(nullptr);
   // No output flag for perf-stat 2.x, just print to output
   string cmd = Substitute("perf stat --pid=$0", getpid());
   LOG(INFO) << "Calling: \"" << cmd << "\"";
-  return gscoped_ptr<Subprocess>(new Subprocess("perf", Split(cmd, " ")));
+  return unique_ptr<Subprocess>(new Subprocess(Split(cmd, " "), SIGINT));
 }
 
-gscoped_ptr<Subprocess> MakePerfRecord() {
-  if (!FLAGS_perf_record_scan) return gscoped_ptr<Subprocess>();
-  string cmd = Substitute("perf record --pid=$0 --call-graph", getpid());
-  if (FLAGS_perf_fp_flag) cmd += " fp";
+unique_ptr<Subprocess> MakePerfRecord() {
+  if (!FLAGS_perf_record_scan) return unique_ptr<Subprocess>(nullptr);
+  string cmd = Substitute("perf record --pid=$0", getpid());
+  if (FLAGS_perf_record_scan_callgraph) cmd += " --call-graph fp";
   LOG(INFO) << "Calling: \"" << cmd << "\"";
-  return gscoped_ptr<Subprocess>(new Subprocess("perf", Split(cmd, " ")));
-}
-
-void InterruptNotNull(gscoped_ptr<Subprocess> sub) {
-  if (!sub) return;
-  ASSERT_OK(sub->Kill(SIGINT));
-  int exit_status = 0;
-  ASSERT_OK(sub->Wait(&exit_status));
-  if (!exit_status) {
-    LOG(WARNING) << "Subprocess returned " << exit_status
-                 << ": " << ErrnoToString(exit_status);
-  }
+  return unique_ptr<Subprocess>(new Subprocess(Split(cmd, " "), SIGINT));
 }
 
 // If key is approximately at an even multiple of 1/10 of the way between
@@ -307,22 +305,27 @@ void FullStackInsertScanTest::DoConcurrentClientInserts() {
 }
 
 void FullStackInsertScanTest::DoTestScans() {
+  if (FLAGS_skip_scans) {
+    LOG(INFO) << "Skipped scan part of the test.";
+    return;
+  }
   LOG(INFO) << "Doing test scans on table of " << kNumRows << " rows.";
 
-  gscoped_ptr<Subprocess> stat = MakePerfStat();
-  gscoped_ptr<Subprocess> record = MakePerfRecord();
-  if (stat) stat->Start();
-  if (record) record->Start();
+  unique_ptr<Subprocess> stat = MakePerfRecord();
+  if (stat) {
+    ASSERT_OK(stat->Start());
+  }
+  unique_ptr<Subprocess> record = MakePerfStat();
+  if (record) {
+    ASSERT_OK(record->Start());
+  }
 
-  NO_FATALS(ScanProjection(vector<string>(), "empty projection, 0 col"));
+  NO_FATALS(ScanProjection({}, "empty projection, 0 col"));
   NO_FATALS(ScanProjection({ "key" }, "key scan, 1 col"));
   NO_FATALS(ScanProjection(AllColumnNames(), "full schema scan, 10 col"));
   NO_FATALS(ScanProjection(StringColumnNames(), "String projection, 1 col"));
   NO_FATALS(ScanProjection(Int32ColumnNames(), "Int32 projection, 4 col"));
   NO_FATALS(ScanProjection(Int64ColumnNames(), "Int64 projection, 4 col"));
-
-  NO_FATALS(InterruptNotNull(record.Pass()));
-  NO_FATALS(InterruptNotNull(stat.Pass()));
 }
 
 void FullStackInsertScanTest::FlushToDisk() {
@@ -330,10 +333,10 @@ void FullStackInsertScanTest::FlushToDisk() {
     tserver::TabletServer* ts = cluster_->mini_tablet_server(i)->server();
     ts->maintenance_manager()->Shutdown();
     tserver::TSTabletManager* tm = ts->tablet_manager();
-    vector<scoped_refptr<TabletPeer> > peers;
-    tm->GetTabletPeers(&peers);
-    for (const scoped_refptr<TabletPeer>& peer : peers) {
-      Tablet* tablet = peer->tablet();
+    vector<scoped_refptr<TabletReplica> > replicas;
+    tm->GetTabletReplicas(&replicas);
+    for (const scoped_refptr<TabletReplica>& replica : replicas) {
+      Tablet* tablet = replica->tablet();
       if (!tablet->MemRowSetEmpty()) {
         ASSERT_OK(tablet->Flush());
       }
@@ -370,7 +373,7 @@ void FullStackInsertScanTest::InsertRows(CountDownLatch* start_latch, int id,
 
     // Report updates or flush every so often, using the synchronizer to always
     // start filling up the next batch while previous one is sent out.
-    if (key % kFlushEveryN == 0) {
+    if (key % flush_every_n_ == 0) {
       Status s = sync.Wait();
       if (!s.ok()) {
         LogSessionErrorsAndDie(session, s);

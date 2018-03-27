@@ -4,8 +4,10 @@
 
 #include "kudu/util/status.h"
 
-#include <stdio.h>
-#include <stdint.h>
+#include <cstdio>
+#include <cstring>
+
+#include <glog/logging.h>
 
 #include "kudu/gutil/strings/fastmem.h"
 #include "kudu/util/malloc.h"
@@ -22,7 +24,7 @@ const char* Status::CopyState(const char* state) {
 
 Status::Status(Code code, const Slice& msg, const Slice& msg2,
                int16_t posix_code) {
-  assert(code != kOk);
+  DCHECK(code != kOk);
   const uint32_t len1 = msg.size();
   const uint32_t len2 = msg2.size();
   const uint32_t size = len1 + (len2 ? (2 + len2) : 0);
@@ -145,10 +147,16 @@ int16_t Status::posix_code() const {
 }
 
 Status Status::CloneAndPrepend(const Slice& msg) const {
+  if (ok()) {
+    return *this;
+  }
   return Status(code(), msg, message(), posix_code());
 }
 
 Status Status::CloneAndAppend(const Slice& msg) const {
+  if (ok()) {
+    return *this;
+  }
   return Status(code(), message(), msg, posix_code());
 }
 

@@ -14,25 +14,17 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-#ifndef KUDU_TABLET_TABLET_BOOTSTRAP_H_
-#define KUDU_TABLET_TABLET_BOOTSTRAP_H_
+#pragma once
 
-#include <boost/thread/shared_mutex.hpp>
 #include <memory>
-#include <string>
-#include <vector>
 
-#include "kudu/common/schema.h"
-#include "kudu/consensus/log.pb.h"
-#include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/util/status.h"
 
 namespace kudu {
 
+class MemTracker;
 class MetricRegistry;
-class Partition;
-class PartitionSchema;
 
 namespace log {
 class Log;
@@ -40,48 +32,22 @@ class LogAnchorRegistry;
 }
 
 namespace consensus {
+class RaftConfigPB;
 struct ConsensusBootstrapInfo;
 } // namespace consensus
 
-namespace server {
+namespace rpc {
+class ResultTracker;
+} // namespace rpc
+
+namespace clock {
 class Clock;
 }
 
 namespace tablet {
 class Tablet;
 class TabletMetadata;
-
-// A listener for logging the tablet related statuses as well as
-// piping it into the web UI.
-class TabletStatusListener {
- public:
-  explicit TabletStatusListener(const scoped_refptr<TabletMetadata>& meta);
-
-  ~TabletStatusListener();
-
-  void StatusMessage(const std::string& status);
-
-  const std::string tablet_id() const;
-
-  const std::string table_name() const;
-
-  const Partition& partition() const;
-
-  const Schema& schema() const;
-
-  std::string last_status() const {
-    boost::shared_lock<boost::shared_mutex> l(lock_);
-    return last_status_;
-  }
-
- private:
-  mutable boost::shared_mutex lock_;
-
-  scoped_refptr<TabletMetadata> meta_;
-  std::string last_status_;
-
-  DISALLOW_COPY_AND_ASSIGN(TabletStatusListener);
-};
+class TabletReplica;
 
 extern const char* kLogRecoveryDir;
 
@@ -91,11 +57,13 @@ extern const char* kLogRecoveryDir;
 //
 // This is a synchronous method, but is typically called within a thread pool by
 // TSTabletManager.
-Status BootstrapTablet(const scoped_refptr<TabletMetadata>& meta,
-                       const scoped_refptr<server::Clock>& clock,
+Status BootstrapTablet(const scoped_refptr<TabletMetadata>& tablet_meta,
+                       consensus::RaftConfigPB committed_raft_config,
+                       const scoped_refptr<clock::Clock>& clock,
                        const std::shared_ptr<MemTracker>& mem_tracker,
+                       const scoped_refptr<rpc::ResultTracker>& result_tracker,
                        MetricRegistry* metric_registry,
-                       TabletStatusListener* status_listener,
+                       const scoped_refptr<TabletReplica>& tablet_replica,
                        std::shared_ptr<Tablet>* rebuilt_tablet,
                        scoped_refptr<log::Log>* rebuilt_log,
                        const scoped_refptr<log::LogAnchorRegistry>& log_anchor_registry,
@@ -103,5 +71,3 @@ Status BootstrapTablet(const scoped_refptr<TabletMetadata>& meta,
 
 }  // namespace tablet
 }  // namespace kudu
-
-#endif /* KUDU_TABLET_TABLET_BOOTSTRAP_H_ */

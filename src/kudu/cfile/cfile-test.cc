@@ -15,27 +15,68 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <gtest/gtest.h>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <functional>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <gflags/gflags.h>
+#include <gflags/gflags_declare.h>
 #include <glog/logging.h>
-#include <stdlib.h>
-#include <list>
+#include <gtest/gtest.h>
 
+#include "kudu/cfile/block_cache.h"
+#include "kudu/cfile/block_handle.h"
+#include "kudu/cfile/block_pointer.h"
 #include "kudu/cfile/cfile-test-base.h"
-#include "kudu/cfile/cfile_reader.h"
-#include "kudu/cfile/cfile_writer.h"
 #include "kudu/cfile/cfile.pb.h"
-#include "kudu/cfile/index_block.h"
+#include "kudu/cfile/cfile_reader.h"
+#include "kudu/cfile/cfile_util.h"
+#include "kudu/cfile/cfile_writer.h"
 #include "kudu/cfile/index_btree.h"
+#include "kudu/cfile/type_encodings.h"
+#include "kudu/common/column_materialization_context.h"
 #include "kudu/common/columnblock.h"
+#include "kudu/common/common.pb.h"
+#include "kudu/common/encoded_key.h"
+#include "kudu/common/rowblock.h"
+#include "kudu/common/rowid.h"
+#include "kudu/common/schema.h"
+#include "kudu/common/types.h"
+#include "kudu/fs/block_id.h"
+#include "kudu/fs/block_manager.h"
 #include "kudu/fs/fs-test-util.h"
+#include "kudu/fs/fs_manager.h"
+#include "kudu/gutil/casts.h"
 #include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/port.h"
+#include "kudu/gutil/ref_counted.h"
+#include "kudu/gutil/singleton.h"
 #include "kudu/gutil/stringprintf.h"
+#include "kudu/gutil/strings/substitute.h"
+#include "kudu/util/bitmap.h"
+#include "kudu/util/cache.h"
+#include "kudu/util/compression/compression.pb.h"
+#include "kudu/util/env.h"
+#include "kudu/util/int128.h"
+#include "kudu/util/int128_util.h"
+#include "kudu/util/mem_tracker.h"
+#include "kudu/util/memory/arena.h"
 #include "kudu/util/metrics.h"
-#include "kudu/util/test_macros.h"
+#include "kudu/util/slice.h"
+#include "kudu/util/status.h"
 #include "kudu/util/stopwatch.h"
+#include "kudu/util/test_macros.h"
+#include "kudu/util/test_util.h"
 
-DECLARE_string(block_cache_type);
-DECLARE_string(cfile_do_on_finish);
+DECLARE_bool(cfile_write_checksums);
+DECLARE_bool(cfile_verify_checksums);
 
 #if defined(__linux__)
 DECLARE_string(nvm_cache_path);
@@ -47,11 +88,17 @@ METRIC_DECLARE_counter(block_cache_hits_caching);
 METRIC_DECLARE_entity(server);
 
 using std::shared_ptr;
+using std::string;
+using std::unique_ptr;
+using std::vector;
+using strings::Substitute;
 
 namespace kudu {
 namespace cfile {
 
+using fs::BlockManager;
 using fs::CountingReadableBlock;
+using fs::CreateCorruptBlock;
 using fs::ReadableBlock;
 using fs::WritableBlock;
 
@@ -64,20 +111,19 @@ class TestCFile : public CFileTestBase {
 
     WriteTestFile(&generator, encoding, NO_COMPRESSION, 10000, SMALL_BLOCKSIZE, &block_id);
 
-    gscoped_ptr<ReadableBlock> block;
+    unique_ptr<ReadableBlock> block;
     ASSERT_OK(fs_manager_->OpenBlock(block_id, &block));
-    gscoped_ptr<CFileReader> reader;
-    ASSERT_OK(CFileReader::Open(block.Pass(), ReaderOptions(), &reader));
+    unique_ptr<CFileReader> reader;
+    ASSERT_OK(CFileReader::Open(std::move(block), ReaderOptions(), &reader));
 
     BlockPointer ptr;
-
     gscoped_ptr<CFileIterator> iter;
     ASSERT_OK(reader->NewIterator(&iter, CFileReader::CACHE_BLOCK));
 
     ASSERT_OK(iter->SeekToOrdinal(5000));
     ASSERT_EQ(5000u, iter->GetCurrentOrdinal());
 
-    // Seek to last key exactly, should succeed
+    // Seek to last key exactly, should succeed.
     ASSERT_OK(iter->SeekToOrdinal(9999));
     ASSERT_EQ(9999u, iter->GetCurrentOrdinal());
 
@@ -91,7 +137,9 @@ class TestCFile : public CFileTestBase {
     // Fetch all data.
     ScopedColumnBlock<DataGeneratorType::kDataType> out(10000);
     size_t n = 10000;
-    ASSERT_OK(iter->CopyNextValues(&n, &out));
+    SelectionVector sel(10000);
+    ColumnMaterializationContext out_ctx = CreateNonDecoderEvalContext(&out, &sel);
+    ASSERT_OK(iter->CopyNextValues(&n, &out_ctx));
     ASSERT_EQ(10000, n);
 
     DataGeneratorType data_generator_pre;
@@ -117,10 +165,11 @@ class TestCFile : public CFileTestBase {
       ColumnBlock advancing_block(out.type_info(), nullptr,
                                   out.data() + (fetched * out.stride()),
                                   out.nrows() - fetched, out.arena());
+      ColumnMaterializationContext adv_ctx = CreateNonDecoderEvalContext(&advancing_block, &sel);
       ASSERT_TRUE(iter->HasNext());
       size_t batch_size = random() % 5 + 1;
       size_t n = batch_size;
-      ASSERT_OK(iter->CopyNextValues(&n, &advancing_block));
+      ASSERT_OK(iter->CopyNextValues(&n, &adv_ctx));
       ASSERT_LE(n, batch_size);
       fetched += n;
     }
@@ -145,18 +194,20 @@ class TestCFile : public CFileTestBase {
   template <class DataGeneratorType>
   void TimeSeekAndReadFileWithNulls(DataGeneratorType* generator,
                                     const BlockId& block_id, size_t num_entries) {
-    gscoped_ptr<ReadableBlock> block;
+    unique_ptr<ReadableBlock> block;
     ASSERT_OK(fs_manager_->OpenBlock(block_id, &block));
-    gscoped_ptr<CFileReader> reader;
-    ASSERT_OK(CFileReader::Open(block.Pass(), ReaderOptions(), &reader));
+    unique_ptr<CFileReader> reader;
+    ASSERT_OK(CFileReader::Open(std::move(block), ReaderOptions(), &reader));
     ASSERT_EQ(DataGeneratorType::kDataType, reader->type_info()->type());
 
     gscoped_ptr<CFileIterator> iter;
     ASSERT_OK(reader->NewIterator(&iter, CFileReader::CACHE_BLOCK));
 
-    Arena arena(8192, 8*1024*1024);
+    Arena arena(8192);
     ScopedColumnBlock<DataGeneratorType::kDataType> cb(10);
 
+    SelectionVector sel(10);
+    ColumnMaterializationContext ctx = CreateNonDecoderEvalContext(&cb, &sel);
     const int kNumLoops = AllowSlowTests() ? num_entries : 10;
     for (int loop = 0; loop < kNumLoops; loop++) {
       // Seek to a random point in the file,
@@ -169,15 +220,13 @@ class TestCFile : public CFileTestBase {
       // Read and verify several ColumnBlocks from this point in the file.
       int read_offset = target;
       for (int block = 0; block < 3 && iter->HasNext(); block++) {
-        SCOPED_TRACE(block);
         size_t n = cb.nrows();
-        ASSERT_OK_FAST(iter->CopyNextValues(&n, &cb));
+        ASSERT_OK_FAST(iter->CopyNextValues(&n, &ctx));
         ASSERT_EQ(n, std::min(num_entries - read_offset, cb.nrows()));
 
         // Verify that the block data is correct.
         generator->Build(read_offset, n);
         for (size_t j = 0; j < n; ++j) {
-          SCOPED_TRACE(j);
           bool expected_null = generator->TestValueShouldBeNull(read_offset + j);
           ASSERT_EQ(expected_null, cb.is_null(j));
           if (!expected_null) {
@@ -204,34 +253,41 @@ class TestCFile : public CFileTestBase {
     TimeSeekAndReadFileWithNulls(generator, block_id, n);
   }
 
-
   void TestReadWriteRawBlocks(CompressionType compression, int num_entries) {
     // Test Write
-    gscoped_ptr<WritableBlock> sink;
-    ASSERT_OK(fs_manager_->CreateNewBlock(&sink));
+    unique_ptr<WritableBlock> sink;
+    ASSERT_OK(fs_manager_->CreateNewBlock({}, &sink));
     BlockId id = sink->id();
     WriterOptions opts;
     opts.write_posidx = true;
     opts.write_validx = false;
     opts.storage_attributes.cfile_block_size = FLAGS_cfile_test_block_size;
+    opts.storage_attributes.compression = compression;
     opts.storage_attributes.encoding = PLAIN_ENCODING;
-    CFileWriter w(opts, GetTypeInfo(STRING), false, sink.Pass());
+    CFileWriter w(opts, GetTypeInfo(STRING), false, std::move(sink));
     ASSERT_OK(w.Start());
     for (uint32_t i = 0; i < num_entries; i++) {
       vector<Slice> slices;
-      slices.push_back(Slice("Head"));
-      slices.push_back(Slice("Body"));
-      slices.push_back(Slice("Tail"));
-      slices.push_back(Slice(reinterpret_cast<uint8_t *>(&i), 4));
-      ASSERT_OK(w.AppendRawBlock(slices, i, nullptr, "raw-data"));
+      slices.emplace_back("Head");
+      slices.emplace_back("Body");
+      slices.emplace_back("Tail");
+      slices.emplace_back(reinterpret_cast<uint8_t *>(&i), 4);
+      ASSERT_OK(w.AppendRawBlock(slices, i, nullptr, Slice(), "raw-data"));
     }
     ASSERT_OK(w.Finish());
 
     // Test Read
-    gscoped_ptr<ReadableBlock> source;
+    unique_ptr<ReadableBlock> source;
     ASSERT_OK(fs_manager_->OpenBlock(id, &source));
-    gscoped_ptr<CFileReader> reader;
-    ASSERT_OK(CFileReader::Open(source.Pass(), ReaderOptions(), &reader));
+    unique_ptr<CFileReader> reader;
+    ASSERT_OK(CFileReader::Open(std::move(source), ReaderOptions(), &reader));
+
+    ASSERT_EQ(reader->footer().compression(), compression);
+    if (FLAGS_cfile_write_checksums) {
+      ASSERT_TRUE(reader->footer().incompatible_features() & IncompatibleFeatures::CHECKSUM);
+    } else {
+      ASSERT_FALSE(reader->footer().incompatible_features() & IncompatibleFeatures::CHECKSUM);
+    }
 
     gscoped_ptr<IndexTreeIterator> iter;
     iter.reset(IndexTreeIterator::Create(reader.get(), reader->posidx_root()));
@@ -255,14 +311,25 @@ class TestCFile : public CFileTestBase {
     ASSERT_EQ(num_entries, count);
   }
 
-  void TestReadWriteStrings(EncodingType encoding);
+  void TestReadWriteStrings(EncodingType encoding) {
+    TestReadWriteStrings(encoding, [](size_t val) {
+        return StringPrintf("hello %04zd", val);
+      });
+  }
+
+  void TestReadWriteStrings(EncodingType encoding,
+                            std::function<string(size_t)> formatter);
 
 #ifdef NDEBUG
   void TestWrite100MFileStrings(EncodingType encoding) {
     BlockId block_id;
     LOG_TIMING(INFO, "writing 100M strings") {
       LOG(INFO) << "Starting writefile";
-      StringDataGenerator<false> generator("hello %zu");
+      StringDataGenerator<false> generator([](size_t idx) {
+          char buf[kFastToBufferSize];
+          FastHex64ToBuffer(idx, buf);
+          return string(buf);
+        });
       WriteTestFile(&generator, encoding, NO_COMPRESSION, 100000000, NO_FLAGS, &block_id);
       LOG(INFO) << "Done writing";
     }
@@ -277,6 +344,48 @@ class TestCFile : public CFileTestBase {
   }
 #endif
 
+  void TestWriteDictEncodingLowCardinalityStrings(int64_t num_rows) {
+    BlockId block_id;
+    LOG_TIMING(INFO, Substitute("writing $0 strings with dupes", num_rows)) {
+      LOG(INFO) << "Starting writefile";
+      // The second parameter specify how many distinct strings are there
+      DuplicateStringDataGenerator<false> generator("hello %zu", 256);
+      WriteTestFile(&generator, DICT_ENCODING, NO_COMPRESSION, num_rows, NO_FLAGS, &block_id);
+      LOG(INFO) << "Done writing";
+    }
+
+    LOG_TIMING(INFO, Substitute("reading $0 strings with dupes", num_rows)) {
+      LOG(INFO) << "Starting readfile";
+      size_t n;
+      TimeReadFile(fs_manager_.get(), block_id, &n);
+      ASSERT_EQ(num_rows, n);
+      LOG(INFO) << "End readfile";
+    }
+  }
+
+  Status CorruptAndReadBlock(const BlockId block_id, const uint64_t corrupt_offset,
+                             uint8_t flip_bit) {
+    BlockId new_id;
+    RETURN_NOT_OK(CreateCorruptBlock(
+        fs_manager_.get(), block_id, corrupt_offset, flip_bit, &new_id));
+
+    // Open and read the corrupt block with the CFileReader
+    unique_ptr<ReadableBlock> corrupt_source;
+    RETURN_NOT_OK(fs_manager_->OpenBlock(new_id, &corrupt_source));
+    unique_ptr<CFileReader> reader;
+    RETURN_NOT_OK(CFileReader::Open(std::move(corrupt_source), ReaderOptions(), &reader));
+    gscoped_ptr<IndexTreeIterator> iter;
+    iter.reset(IndexTreeIterator::Create(reader.get(), reader->posidx_root()));
+    RETURN_NOT_OK(iter->SeekToFirst());
+
+    do {
+      BlockHandle dblk_data;
+      BlockPointer blk_ptr = iter->GetCurrentBlockPointer();
+      RETURN_NOT_OK(reader->ReadBlock(blk_ptr, CFileReader::DONT_CACHE_BLOCK, &dblk_data));
+    } while (iter->Next().ok());
+
+    return Status::OK();
+  }
 };
 
 // Subclass of TestCFile which is parameterized on the block cache type.
@@ -327,8 +436,11 @@ void CopyOne(CFileIterator *it,
              typename TypeTraits<type>::cpp_type *ret,
              Arena *arena) {
   ColumnBlock cb(GetTypeInfo(type), nullptr, ret, 1, arena);
+  SelectionVector sel(1);
+  ColumnMaterializationContext ctx(0, nullptr, &cb, &sel);
+  ctx.SetDecoderEvalNotSupported();
   size_t n = 1;
-  ASSERT_OK(it->CopyNextValues(&n, &cb));
+  ASSERT_OK(it->CopyNextValues(&n, &ctx));
   ASSERT_EQ(1, n);
 }
 
@@ -340,8 +452,8 @@ TEST_P(TestCFileBothCacheTypes, TestWrite100MFileInts) {
   BlockId block_id;
   LOG_TIMING(INFO, "writing 100m ints") {
     LOG(INFO) << "Starting writefile";
-    UInt32DataGenerator<false> generator;
-    WriteTestFile(&generator, GROUP_VARINT, NO_COMPRESSION, 100000000, NO_FLAGS, &block_id);
+    Int32DataGenerator<false> generator;
+    WriteTestFile(&generator, BIT_SHUFFLE, NO_COMPRESSION, 100000000, NO_FLAGS, &block_id);
     LOG(INFO) << "Done writing";
   }
 
@@ -358,7 +470,7 @@ TEST_P(TestCFileBothCacheTypes, TestWrite100MFileNullableInts) {
   BlockId block_id;
   LOG_TIMING(INFO, "writing 100m nullable ints") {
     LOG(INFO) << "Starting writefile";
-    UInt32DataGenerator<true> generator;
+    Int32DataGenerator<true> generator;
     WriteTestFile(&generator, PLAIN_ENCODING, NO_COMPRESSION, 100000000, NO_FLAGS, &block_id);
     LOG(INFO) << "Done writing";
   }
@@ -376,8 +488,12 @@ TEST_P(TestCFileBothCacheTypes, TestWrite100MFileStringsPrefixEncoding) {
   TestWrite100MFileStrings(PREFIX_ENCODING);
 }
 
-TEST_P(TestCFileBothCacheTypes, TestWrite100MFileStringsDictEncoding) {
+TEST_P(TestCFileBothCacheTypes, TestWrite100MUniqueStringsDictEncoding) {
   TestWrite100MFileStrings(DICT_ENCODING);
+}
+
+TEST_P(TestCFileBothCacheTypes, TestWrite100MLowCardinalityStringsDictEncoding) {
+  TestWriteDictEncodingLowCardinalityStrings(100 * 1e6);
 }
 
 TEST_P(TestCFileBothCacheTypes, TestWrite100MFileStringsPlainEncoding) {
@@ -406,43 +522,47 @@ TEST_P(TestCFileBothCacheTypes, TestWrite1MUniqueFileStringsDictEncoding) {
 }
 
 // Write and Read 1 million strings, which contains duplicates with dictionary encoding
-TEST_P(TestCFileBothCacheTypes, TestWrite1MDuplicateFileStringsDictEncoding) {
-  BlockId block_id;
-  LOG_TIMING(INFO, "writing 1M duplicate strings") {
-    LOG(INFO) << "Starting writefile";
+TEST_P(TestCFileBothCacheTypes, TestWrite1MLowCardinalityStringsDictEncoding) {
+  TestWriteDictEncodingLowCardinalityStrings(1000000);
+}
 
-    // The second parameter specify how many distinct strings are there
-    DuplicateStringDataGenerator<false> generator("hello %zu", 256);
-    WriteTestFile(&generator, DICT_ENCODING, NO_COMPRESSION, 1000000, NO_FLAGS, &block_id);
-    LOG(INFO) << "Done writing";
-  }
-
-  LOG_TIMING(INFO, "reading 1M strings") {
-    LOG(INFO) << "Starting readfile";
-    size_t n;
-    TimeReadFile(fs_manager_.get(), block_id, &n);
-    ASSERT_EQ(1000000, n);
-    LOG(INFO) << "End readfile";
+TEST_P(TestCFileBothCacheTypes, TestReadWriteUInt32) {
+  for (auto enc : { PLAIN_ENCODING, RLE }) {
+    TestReadWriteFixedSizeTypes<UInt32DataGenerator<false>>(enc);
   }
 }
 
-TEST_P(TestCFileBothCacheTypes, TestFixedSizeReadWritePlainEncodingUInt32) {
-  TestReadWriteFixedSizeTypes<UInt32DataGenerator<false> >(GROUP_VARINT);
-  TestReadWriteFixedSizeTypes<UInt32DataGenerator<false> >(PLAIN_ENCODING);
+TEST_P(TestCFileBothCacheTypes, TestReadWriteInt32) {
+  for (auto enc : { PLAIN_ENCODING, RLE }) {
+    TestReadWriteFixedSizeTypes<Int32DataGenerator<false>>(enc);
+  }
 }
 
-TEST_P(TestCFileBothCacheTypes, TestFixedSizeReadWritePlainEncodingInt32) {
-  TestReadWriteFixedSizeTypes<Int32DataGenerator<false> >(PLAIN_ENCODING);
+TEST_P(TestCFileBothCacheTypes, TestReadWriteUInt64) {
+  for (auto enc : { PLAIN_ENCODING, RLE, BIT_SHUFFLE }) {
+    TestReadWriteFixedSizeTypes<UInt64DataGenerator<false>>(enc);
+  }
+}
+
+TEST_P(TestCFileBothCacheTypes, TestReadWriteInt64) {
+  for (auto enc : { PLAIN_ENCODING, RLE, BIT_SHUFFLE }) {
+    TestReadWriteFixedSizeTypes<Int64DataGenerator<false>>(enc);
+  }
+}
+
+TEST_P(TestCFileBothCacheTypes, TestReadWriteInt128) {
+  TestReadWriteFixedSizeTypes<Int128DataGenerator<false>>(PLAIN_ENCODING);
 }
 
 TEST_P(TestCFileBothCacheTypes, TestFixedSizeReadWritePlainEncodingFloat) {
-  TestReadWriteFixedSizeTypes<FPDataGenerator<FLOAT, false> >(PLAIN_ENCODING);
+  TestReadWriteFixedSizeTypes<FPDataGenerator<FLOAT, false>>(PLAIN_ENCODING);
 }
 TEST_P(TestCFileBothCacheTypes, TestFixedSizeReadWritePlainEncodingDouble) {
-  TestReadWriteFixedSizeTypes<FPDataGenerator<DOUBLE, false> >(PLAIN_ENCODING);
+  TestReadWriteFixedSizeTypes<FPDataGenerator<DOUBLE, false>>(PLAIN_ENCODING);
 }
 
-// Test for BitShuffle builder for UINT8, INT8, UINT16, INT16, UINT32, INT32, FLOAT, DOUBLE
+// Test for BitShuffle builder for UINT8, INT8, UINT16, INT16, UINT32, INT32,
+// UINT64, INT64, INT128, FLOAT, DOUBLE
 template <typename T>
 class BitShuffleTest : public TestCFile {
   public:
@@ -456,6 +576,9 @@ typedef ::testing::Types<UInt8DataGenerator<false>,
                          Int16DataGenerator<false>,
                          UInt32DataGenerator<false>,
                          Int32DataGenerator<false>,
+                         UInt64DataGenerator<false>,
+                         Int64DataGenerator<false>,
+                         Int128DataGenerator<false>,
                          FPDataGenerator<FLOAT, false>,
                          FPDataGenerator<DOUBLE, false> > MyTypes;
 TYPED_TEST_CASE(BitShuffleTest, MyTypes);
@@ -470,19 +593,20 @@ void EncodeStringKey(const Schema &schema, const Slice& key,
   encoded_key->reset(kb.BuildEncodedKey());
 }
 
-void TestCFile::TestReadWriteStrings(EncodingType encoding) {
+void TestCFile::TestReadWriteStrings(EncodingType encoding,
+                                     std::function<string(size_t)> formatter) {
   Schema schema({ ColumnSchema("key", STRING) }, 1);
 
   const int nrows = 10000;
   BlockId block_id;
-  StringDataGenerator<false> generator("hello %04d");
+  StringDataGenerator<false> generator(formatter);
   WriteTestFile(&generator, encoding, NO_COMPRESSION, nrows,
                 SMALL_BLOCKSIZE | WRITE_VALIDX, &block_id);
 
-  gscoped_ptr<ReadableBlock> block;
+  unique_ptr<ReadableBlock> block;
   ASSERT_OK(fs_manager_->OpenBlock(block_id, &block));
-  gscoped_ptr<CFileReader> reader;
-  ASSERT_OK(CFileReader::Open(block.Pass(), ReaderOptions(), &reader));
+  unique_ptr<CFileReader> reader;
+  ASSERT_OK(CFileReader::Open(std::move(block), ReaderOptions(), &reader));
 
   rowid_t reader_nrows;
   ASSERT_OK(reader->CountRows(&reader_nrows));
@@ -493,14 +617,14 @@ void TestCFile::TestReadWriteStrings(EncodingType encoding) {
   gscoped_ptr<CFileIterator> iter;
   ASSERT_OK(reader->NewIterator(&iter, CFileReader::CACHE_BLOCK));
 
-  Arena arena(1024, 1024*1024);
+  Arena arena(1024);
 
   ASSERT_OK(iter->SeekToOrdinal(5000));
   ASSERT_EQ(5000u, iter->GetCurrentOrdinal());
   Slice s;
 
   CopyOne<STRING>(iter.get(), &s, &arena);
-  ASSERT_EQ(string("hello 5000"), s.ToString());
+  ASSERT_EQ(formatter(5000), s.ToString());
 
   // Seek to last key exactly, should succeed
   ASSERT_OK(iter->SeekToOrdinal(9999));
@@ -517,25 +641,27 @@ void TestCFile::TestReadWriteStrings(EncodingType encoding) {
   gscoped_ptr<EncodedKey> encoded_key;
   bool exact;
 
-  // Seek in between each key
+  // Seek in between each key.
+  // (seek to "hello 0000.5" through "hello 9999.5")
+  string buf;
   for (int i = 1; i < 10000; i++) {
-    SCOPED_TRACE(i);
-    char buf[100];
-    snprintf(buf, sizeof(buf), "hello %04d.5", i - 1);
+    arena.Reset();
+    buf = formatter(i - 1);
+    buf.append(".5");
     s = Slice(buf);
     EncodeStringKey(schema, s, &encoded_key);
     ASSERT_OK(iter->SeekAtOrAfter(*encoded_key, &exact));
     ASSERT_FALSE(exact);
     ASSERT_EQ(i, iter->GetCurrentOrdinal());
     CopyOne<STRING>(iter.get(), &s, &arena);
-    ASSERT_EQ(StringPrintf("hello %04d", i), s.ToString());
+    ASSERT_EQ(formatter(i), s.ToString());
   }
 
   // Seek exactly to each key
+  // (seek to "hello 0000" through "hello 9999")
   for (int i = 0; i < 9999; i++) {
-    SCOPED_TRACE(i);
-    char buf[100];
-    snprintf(buf, sizeof(buf), "hello %04d", i);
+    arena.Reset();
+    buf = formatter(i);
     s = Slice(buf);
     EncodeStringKey(schema, s, &encoded_key);
     ASSERT_OK(iter->SeekAtOrAfter(*encoded_key, &exact));
@@ -547,32 +673,42 @@ void TestCFile::TestReadWriteStrings(EncodingType encoding) {
   }
 
   // after last entry
-  s = "hello 9999x";
+  // (seek to "hello 9999.x")
+  buf = formatter(9999) + ".x";
+  s = Slice(buf);
   EncodeStringKey(schema, s, &encoded_key);
   EXPECT_TRUE(iter->SeekAtOrAfter(*encoded_key, &exact).IsNotFound());
 
   // before first entry
-  s = "hello";
+  // (seek to "hello 000", which falls before "hello 0000")
+  buf = formatter(0);
+  buf.resize(buf.size() - 1);
+  s = Slice(buf);
   EncodeStringKey(schema, s, &encoded_key);
   ASSERT_OK(iter->SeekAtOrAfter(*encoded_key, &exact));
-  ASSERT_FALSE(exact);
-  ASSERT_EQ(0u, iter->GetCurrentOrdinal());
+  EXPECT_FALSE(exact);
+  EXPECT_EQ(0u, iter->GetCurrentOrdinal());
   CopyOne<STRING>(iter.get(), &s, &arena);
-  ASSERT_EQ(string("hello 0000"), s.ToString());
+  EXPECT_EQ(formatter(0), s.ToString());
 
   // Seek to start of file by ordinal
   ASSERT_OK(iter->SeekToFirst());
   ASSERT_EQ(0u, iter->GetCurrentOrdinal());
   CopyOne<STRING>(iter.get(), &s, &arena);
-  ASSERT_EQ(string("hello 0000"), s.ToString());
+  ASSERT_EQ(formatter(0), s.ToString());
 
   // Reseek to start and fetch all data.
+  // We fetch in 10 smaller chunks to avoid using too much RAM for the
+  // case where the values are large.
+  SelectionVector sel(10000);
   ASSERT_OK(iter->SeekToFirst());
-
-  ScopedColumnBlock<STRING> cb(10000);
-  size_t n = 10000;
-  ASSERT_OK(iter->CopyNextValues(&n, &cb));
-  ASSERT_EQ(10000, n);
+  for (int i = 0; i < 10; i++) {
+    ScopedColumnBlock<STRING> cb(10000);
+    ColumnMaterializationContext cb_ctx = CreateNonDecoderEvalContext(&cb, &sel);
+    size_t n = 1000;
+    ASSERT_OK(iter->CopyNextValues(&n, &cb_ctx));
+    ASSERT_EQ(1000, n);
+  }
 }
 
 
@@ -585,17 +721,40 @@ TEST_P(TestCFileBothCacheTypes, TestReadWriteStringsDictEncoding) {
   TestReadWriteStrings(DICT_ENCODING);
 }
 
+// Regression test for properly handling cells that are larger
+// than the index block and/or data block size.
+//
+// This test is disabled in TSAN because it's single-threaded anyway
+// and runs extremely slowly with TSAN enabled.
+#ifndef THREAD_SANITIZER
+TEST_P(TestCFileBothCacheTypes, TestReadWriteLargeStrings) {
+  // Pad the values out to a length of ~65KB.
+  // We use this method instead of just a longer sprintf format since
+  // this is much more CPU-efficient (speeds up the test).
+  auto formatter = [](size_t val) {
+    string ret(66000, '0');
+    StringAppendF(&ret, "%010zd", val);
+    return ret;
+  };
+  TestReadWriteStrings(PLAIN_ENCODING, formatter);
+  if (AllowSlowTests()) {
+    TestReadWriteStrings(DICT_ENCODING, formatter);
+    TestReadWriteStrings(PREFIX_ENCODING, formatter);
+  }
+}
+#endif
+
 // Test that metadata entries stored in the cfile are persisted.
 TEST_P(TestCFileBothCacheTypes, TestMetadata) {
   BlockId block_id;
 
   // Write the file.
   {
-    gscoped_ptr<WritableBlock> sink;
-    ASSERT_OK(fs_manager_->CreateNewBlock(&sink));
+    unique_ptr<WritableBlock> sink;
+    ASSERT_OK(fs_manager_->CreateNewBlock({}, &sink));
     block_id = sink->id();
     WriterOptions opts;
-    CFileWriter w(opts, GetTypeInfo(INT32), false, sink.Pass());
+    CFileWriter w(opts, GetTypeInfo(INT32), false, std::move(sink));
 
     w.AddMetadataPair("key_in_header", "header value");
     ASSERT_OK(w.Start());
@@ -609,10 +768,10 @@ TEST_P(TestCFileBothCacheTypes, TestMetadata) {
 
   // Read the file and ensure metadata is present.
   {
-    gscoped_ptr<ReadableBlock> source;
+    unique_ptr<ReadableBlock> source;
     ASSERT_OK(fs_manager_->OpenBlock(block_id, &source));
-    gscoped_ptr<CFileReader> reader;
-    ASSERT_OK(CFileReader::Open(source.Pass(), ReaderOptions(), &reader));
+    unique_ptr<CFileReader> reader;
+    ASSERT_OK(CFileReader::Open(std::move(source), ReaderOptions(), &reader));
     string val;
     ASSERT_TRUE(reader->GetMetadataEntry("key_in_header", &val));
     ASSERT_EQ(val, "header value");
@@ -622,7 +781,7 @@ TEST_P(TestCFileBothCacheTypes, TestMetadata) {
 
     // Test that, even though we didn't specify an encoding or compression, the
     // resulting file has them explicitly set.
-    ASSERT_EQ(PLAIN_ENCODING, reader->type_encoding_info()->encoding_type());
+    ASSERT_EQ(BIT_SHUFFLE, reader->type_encoding_info()->encoding_type());
     ASSERT_EQ(NO_COMPRESSION, reader->footer().compression());
   }
 }
@@ -636,7 +795,9 @@ TEST_P(TestCFileBothCacheTypes, TestDefaultColumnIter) {
   uint32_t int_value = 15;
   DefaultColumnValueIterator iter(GetTypeInfo(UINT32), &int_value);
   ColumnBlock int_col(GetTypeInfo(UINT32), nullptr, data, kNumItems, nullptr);
-  ASSERT_OK(iter.Scan(&int_col));
+  SelectionVector sel(kNumItems);
+  ColumnMaterializationContext int_ctx = CreateNonDecoderEvalContext(&int_col, &sel);
+  ASSERT_OK(iter.Scan(&int_ctx));
   for (size_t i = 0; i < int_col.nrows(); ++i) {
     ASSERT_EQ(int_value, *reinterpret_cast<const uint32_t *>(int_col.cell_ptr(i)));
   }
@@ -645,7 +806,8 @@ TEST_P(TestCFileBothCacheTypes, TestDefaultColumnIter) {
   int_value = 321;
   DefaultColumnValueIterator nullable_iter(GetTypeInfo(UINT32), &int_value);
   ColumnBlock nullable_col(GetTypeInfo(UINT32), null_bitmap, data, kNumItems, nullptr);
-  ASSERT_OK(nullable_iter.Scan(&nullable_col));
+  ColumnMaterializationContext nullable_ctx = CreateNonDecoderEvalContext(&nullable_col, &sel);
+  ASSERT_OK(nullable_iter.Scan(&nullable_ctx));
   for (size_t i = 0; i < nullable_col.nrows(); ++i) {
     ASSERT_FALSE(nullable_col.is_null(i));
     ASSERT_EQ(int_value, *reinterpret_cast<const uint32_t *>(nullable_col.cell_ptr(i)));
@@ -654,7 +816,8 @@ TEST_P(TestCFileBothCacheTypes, TestDefaultColumnIter) {
   // Test NULL Default Value
   DefaultColumnValueIterator null_iter(GetTypeInfo(UINT32),  nullptr);
   ColumnBlock null_col(GetTypeInfo(UINT32), null_bitmap, data, kNumItems, nullptr);
-  ASSERT_OK(null_iter.Scan(&null_col));
+  ColumnMaterializationContext null_ctx = CreateNonDecoderEvalContext(&null_col, &sel);
+  ASSERT_OK(null_iter.Scan(&null_ctx));
   for (size_t i = 0; i < null_col.nrows(); ++i) {
     ASSERT_TRUE(null_col.is_null(i));
   }
@@ -662,10 +825,11 @@ TEST_P(TestCFileBothCacheTypes, TestDefaultColumnIter) {
   // Test String Default Value
   Slice str_data[kNumItems];
   Slice str_value("Hello");
-  Arena arena(32*1024, 256*1024);
+  Arena arena(32*1024);
   DefaultColumnValueIterator str_iter(GetTypeInfo(STRING), &str_value);
   ColumnBlock str_col(GetTypeInfo(STRING), nullptr, str_data, kNumItems, &arena);
-  ASSERT_OK(str_iter.Scan(&str_col));
+  ColumnMaterializationContext str_ctx = CreateNonDecoderEvalContext(&str_col, &sel);
+  ASSERT_OK(str_iter.Scan(&str_ctx));
   for (size_t i = 0; i < str_col.nrows(); ++i) {
     ASSERT_EQ(str_value, *reinterpret_cast<const Slice *>(str_col.cell_ptr(i)));
   }
@@ -678,15 +842,68 @@ TEST_P(TestCFileBothCacheTypes, TestAppendRaw) {
   TestReadWriteRawBlocks(ZLIB, 1000);
 }
 
+TEST_P(TestCFileBothCacheTypes, TestChecksumFlags) {
+  for (bool write_checksums : {false, true}) {
+    for (bool verify_checksums : {false, true}) {
+      FLAGS_cfile_write_checksums = write_checksums;
+      FLAGS_cfile_verify_checksums = verify_checksums;
+      TestReadWriteRawBlocks(NO_COMPRESSION, 1000);
+      TestReadWriteRawBlocks(SNAPPY, 1000);
+    }
+  }
+}
+
+TEST_P(TestCFileBothCacheTypes, TestDataCorruption) {
+  FLAGS_cfile_write_checksums = true;
+  FLAGS_cfile_verify_checksums = true;
+
+  // Write some data
+  unique_ptr<WritableBlock> sink;
+  ASSERT_OK(fs_manager_->CreateNewBlock({}, &sink));
+  BlockId id = sink->id();
+  WriterOptions opts;
+  opts.write_posidx = true;
+  opts.write_validx = false;
+  opts.storage_attributes.cfile_block_size = FLAGS_cfile_test_block_size;
+  opts.storage_attributes.encoding = PLAIN_ENCODING;
+  CFileWriter w(opts, GetTypeInfo(STRING), false, std::move(sink));
+  w.AddMetadataPair("header_key", "header_value");
+  ASSERT_OK(w.Start());
+  vector<Slice> slices;
+  slices.emplace_back("HelloWorld");
+  ASSERT_OK(w.AppendRawBlock(slices, 1, nullptr, Slice(), "raw-data"));
+  ASSERT_OK(w.Finish());
+
+  // Get the final size of the data
+  unique_ptr<ReadableBlock> source;
+  ASSERT_OK(fs_manager_->OpenBlock(id, &source));
+  uint64_t file_size;
+  ASSERT_OK(source->Size(&file_size));
+
+  // Corrupt each bit and verify a corruption status is returned
+  for (size_t i = 0; i < file_size; i++) {
+    for (uint8_t flip = 0; flip < 8; flip++) {
+      Status s = CorruptAndReadBlock(id, i, flip);
+      ASSERT_TRUE(s.IsCorruption());
+      ASSERT_STR_MATCHES(s.ToString(), "block [0-9]+");
+    }
+  }
+}
+
 TEST_P(TestCFileBothCacheTypes, TestNullInts) {
   UInt32DataGenerator<true> generator;
-  TestNullTypes(&generator, GROUP_VARINT, NO_COMPRESSION);
-  TestNullTypes(&generator, GROUP_VARINT, LZ4);
+  TestNullTypes(&generator, PLAIN_ENCODING, NO_COMPRESSION);
+  TestNullTypes(&generator, PLAIN_ENCODING, LZ4);
+  TestNullTypes(&generator, BIT_SHUFFLE, NO_COMPRESSION);
+  TestNullTypes(&generator, BIT_SHUFFLE, LZ4);
+  TestNullTypes(&generator, RLE, NO_COMPRESSION);
+  TestNullTypes(&generator, RLE, LZ4);
 }
 
 TEST_P(TestCFileBothCacheTypes, TestNullFloats) {
   FPDataGenerator<FLOAT, true> generator;
   TestNullTypes(&generator, PLAIN_ENCODING, NO_COMPRESSION);
+  TestNullTypes(&generator, BIT_SHUFFLE, NO_COMPRESSION);
 }
 
 TEST_P(TestCFileBothCacheTypes, TestNullPrefixStrings) {
@@ -709,28 +926,16 @@ TEST_P(TestCFileBothCacheTypes, TestNullDictStrings) {
 }
 
 TEST_P(TestCFileBothCacheTypes, TestReleaseBlock) {
-  gscoped_ptr<WritableBlock> sink;
-  ASSERT_OK(fs_manager_->CreateNewBlock(&sink));
+  unique_ptr<WritableBlock> sink;
+  ASSERT_OK(fs_manager_->CreateNewBlock({}, &sink));
   ASSERT_EQ(WritableBlock::CLEAN, sink->state());
   WriterOptions opts;
-  CFileWriter w(opts, GetTypeInfo(STRING), false, sink.Pass());
+  CFileWriter w(opts, GetTypeInfo(STRING), false, std::move(sink));
   ASSERT_OK(w.Start());
-  fs::ScopedWritableBlockCloser closer;
-  ASSERT_OK(w.FinishAndReleaseBlock(&closer));
-  if (FLAGS_cfile_do_on_finish == "flush") {
-    ASSERT_EQ(1, closer.blocks().size());
-    ASSERT_EQ(WritableBlock::FLUSHING, closer.blocks()[0]->state());
-  } else if (FLAGS_cfile_do_on_finish == "close") {
-    ASSERT_EQ(0, closer.blocks().size());
-  } else if (FLAGS_cfile_do_on_finish == "nothing") {
-    ASSERT_EQ(1, closer.blocks().size());
-    ASSERT_EQ(WritableBlock::DIRTY, closer.blocks()[0]->state());
-  } else {
-    LOG(FATAL) << "Unknown value for cfile_do_on_finish: "
-               << FLAGS_cfile_do_on_finish;
-  }
-  ASSERT_OK(closer.CloseBlocks());
-  ASSERT_EQ(0, closer.blocks().size());
+  BlockManager* bm = fs_manager_->block_manager();
+  unique_ptr<fs::BlockCreationTransaction> transaction = bm->NewCreationTransaction();
+  ASSERT_OK(w.FinishAndReleaseBlock(transaction.get()));
+  ASSERT_OK(transaction->CommitCreatedBlocks());
 }
 
 TEST_P(TestCFileBothCacheTypes, TestLazyInit) {
@@ -747,18 +952,18 @@ TEST_P(TestCFileBothCacheTypes, TestLazyInit) {
   int64_t initial_mem_usage = tracker->consumption();
 
   // Open it using a "counting" readable block.
-  gscoped_ptr<ReadableBlock> block;
+  unique_ptr<ReadableBlock> block;
   ASSERT_OK(fs_manager_->OpenBlock(block_id, &block));
   size_t bytes_read = 0;
-  gscoped_ptr<ReadableBlock> count_block(
-      new CountingReadableBlock(block.Pass(), &bytes_read));
+  unique_ptr<ReadableBlock> count_block(
+      new CountingReadableBlock(std::move(block), &bytes_read));
   ASSERT_EQ(initial_mem_usage, tracker->consumption());
 
   // Lazily opening the cfile should not trigger any reads.
   ReaderOptions opts;
   opts.parent_mem_tracker = tracker;
-  gscoped_ptr<CFileReader> reader;
-  ASSERT_OK(CFileReader::OpenNoInit(count_block.Pass(), opts, &reader));
+  unique_ptr<CFileReader> reader;
+  ASSERT_OK(CFileReader::OpenNoInit(std::move(count_block), opts, &reader));
   ASSERT_EQ(0, bytes_read);
   int64_t lazy_mem_usage = tracker->consumption();
   ASSERT_GT(lazy_mem_usage, initial_mem_usage);
@@ -776,8 +981,8 @@ TEST_P(TestCFileBothCacheTypes, TestLazyInit) {
   // same number of bytes read.
   ASSERT_OK(fs_manager_->OpenBlock(block_id, &block));
   bytes_read = 0;
-  count_block.reset(new CountingReadableBlock(block.Pass(), &bytes_read));
-  ASSERT_OK(CFileReader::Open(count_block.Pass(), ReaderOptions(), &reader));
+  count_block.reset(new CountingReadableBlock(std::move(block), &bytes_read));
+  ASSERT_OK(CFileReader::Open(std::move(count_block), ReaderOptions(), &reader));
   ASSERT_EQ(bytes_read_after_init, bytes_read);
 }
 
@@ -802,10 +1007,10 @@ TEST_P(TestCFileBothCacheTypes, TestCacheKeysAreStable) {
 
   // Open and read from it twice, checking the block cache statistics.
   for (int i = 0; i < 2; i++) {
-    gscoped_ptr<ReadableBlock> source;
+    unique_ptr<ReadableBlock> source;
     ASSERT_OK(fs_manager_->OpenBlock(block_id, &source));
-    gscoped_ptr<CFileReader> reader;
-    ASSERT_OK(CFileReader::Open(source.Pass(), ReaderOptions(), &reader));
+    unique_ptr<CFileReader> reader;
+    ASSERT_OK(CFileReader::Open(std::move(source), ReaderOptions(), &reader));
 
     gscoped_ptr<IndexTreeIterator> iter;
     iter.reset(IndexTreeIterator::Create(reader.get(), reader->posidx_root()));
@@ -832,6 +1037,32 @@ TEST_P(TestCFileBothCacheTypes, TestNvmAllocationFailure) {
   TestReadWriteFixedSizeTypes<UInt32DataGenerator<false> >(PLAIN_ENCODING);
 }
 #endif
+
+class TestCFileDifferentCodecs : public TestCFile,
+                                 public testing::WithParamInterface<CompressionType> {
+};
+
+INSTANTIATE_TEST_CASE_P(Codecs, TestCFileDifferentCodecs,
+                        ::testing::Values(NO_COMPRESSION, SNAPPY, LZ4, ZLIB));
+
+// Read/write a file with uncompressible data (random int32s)
+TEST_P(TestCFileDifferentCodecs, TestUncompressible) {
+  auto codec = GetParam();
+  const size_t nrows = 1000000;
+  BlockId block_id;
+  size_t rdrows;
+
+  // Generate a plain-encoded file with random (uncompressible) data.
+  // This exercises the code path which short-circuits compression
+  // when the codec is not able to be effective on the input data.
+  {
+    RandomInt32DataGenerator int_gen;
+    WriteTestFile(&int_gen, PLAIN_ENCODING, codec, nrows,
+                  NO_FLAGS, &block_id);
+    TimeReadFile(fs_manager_.get(), block_id, &rdrows);
+    ASSERT_EQ(nrows, rdrows);
+  }
+}
 
 } // namespace cfile
 } // namespace kudu

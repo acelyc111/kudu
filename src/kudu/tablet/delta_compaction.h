@@ -17,27 +17,29 @@
 #ifndef KUDU_TABLET_DELTA_COMPACTION_H
 #define KUDU_TABLET_DELTA_COMPACTION_H
 
+#include <cstddef>
 #include <memory>
 #include <string>
-#include <unordered_map>
-#include <utility>
 #include <vector>
 
-#include "kudu/cfile/cfile_writer.h"
-#include "kudu/tablet/deltafile.h"
+#include "kudu/common/schema.h"
+#include "kudu/fs/block_id.h"
+#include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/tablet/compaction.h"
+#include "kudu/tablet/delta_store.h"
+#include "kudu/util/status.h"
 
 namespace kudu {
 
-namespace metadata {
-class RowSetMetadata;
-} // namespace metadata
+class FsManager;
 
 namespace tablet {
 
 class CFileSet;
-class DeltaMemStore;
-class DeltaKey;
+class DeltaFileWriter;
+class DeltaTracker;
 class MultiColumnWriter;
+class RowSetMetadataUpdate;
 
 // Handles major delta compaction: applying deltas to specific columns
 // of a DiskRowSet, writing out an updated DiskRowSet without re-writing the
@@ -54,9 +56,11 @@ class MajorDeltaCompaction {
   // in an ALTER scenario?
   MajorDeltaCompaction(
       FsManager* fs_manager, const Schema& base_schema, CFileSet* base_data,
-      std::shared_ptr<DeltaIterator> delta_iter,
+      std::unique_ptr<DeltaIterator> delta_iter,
       std::vector<std::shared_ptr<DeltaStore> > included_stores,
-      const std::vector<ColumnId>& col_ids);
+      std::vector<ColumnId> col_ids,
+      HistoryGcOpts history_gc_opts,
+      std::string tablet_id);
   ~MajorDeltaCompaction();
 
   // Executes the compaction.
@@ -67,7 +71,7 @@ class MajorDeltaCompaction {
   // 1) swaps out the old columns for the new ones
   // 2) removes the compacted deltas
   // 3) adds the new REDO delta which contains any uncompacted deltas
-  Status CreateMetadataUpdate(RowSetMetadataUpdate* update);
+  void CreateMetadataUpdate(RowSetMetadataUpdate* update);
 
   // Apply the changes to the given delta tracker.
   Status UpdateDeltaTracker(DeltaTracker* tracker);
@@ -103,6 +107,8 @@ class MajorDeltaCompaction {
   // The column ids to compact.
   const std::vector<ColumnId> column_ids_;
 
+  const HistoryGcOpts history_gc_opts_;
+
   // Inputs:
   //-----------------
 
@@ -113,7 +119,10 @@ class MajorDeltaCompaction {
   const SharedDeltaStoreVector included_stores_;
 
   // The merged view of the deltas from included_stores_.
-  const std::shared_ptr<DeltaIterator> delta_iter_;
+  const std::unique_ptr<DeltaIterator> delta_iter_;
+
+  // The ID of the tablet being compacted.
+  const std::string tablet_id_;
 
   // Outputs:
   gscoped_ptr<MultiColumnWriter> base_data_writer_;

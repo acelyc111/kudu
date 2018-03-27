@@ -18,13 +18,14 @@
 #define KUDU_TABLET_TABLET_TEST_BASE_H
 
 #include <algorithm>
-#include <boost/thread/thread.hpp>
-#include <glog/logging.h>
-#include <gtest/gtest.h>
 #include <limits>
 #include <string>
 #include <unordered_set>
 #include <vector>
+
+#include <boost/optional/optional.hpp>
+#include <glog/logging.h>
+#include <gtest/gtest.h>
 
 #include "kudu/common/partial_row.h"
 #include "kudu/common/row.h"
@@ -43,9 +44,6 @@
 #include "kudu/tablet/tablet.h"
 #include "kudu/tablet/tablet-test-util.h"
 #include "kudu/gutil/strings/numbers.h"
-
-using std::unordered_set;
-using strings::Substitute;
 
 namespace kudu {
 namespace tablet {
@@ -85,13 +83,13 @@ struct StringKeyTestSetup {
     snprintf(buf, buf_size, "hello %" PRId64, key_idx);
   }
 
-  string FormatDebugRow(int64_t key_idx, int32_t val, bool updated) {
+  std::string FormatDebugRow(int64_t key_idx, int32_t val, bool updated) {
     char buf[256];
     FormatKey(buf, sizeof(buf), key_idx);
 
-    return Substitute(
-      "(string key=$0, int32 key_idx=$1, int32 val=$2)",
-      buf, key_idx, val);
+    return strings::Substitute(
+        R"((string key="$0", int32 key_idx=$1, int32 val=$2))",
+        buf, key_idx, val);
   }
 
   // Slices can be arbitrarily large
@@ -121,10 +119,10 @@ struct CompositeKeyTestSetup {
     snprintf(buf, buf_size, "hello %" PRId64, key_idx);
   }
 
-  string FormatDebugRow(int64_t key_idx, int32_t val, bool updated) {
+  std::string FormatDebugRow(int64_t key_idx, int32_t val, bool updated) {
     char buf[256];
     FormatKey(buf, sizeof(buf), key_idx);
-    return Substitute(
+    return strings::Substitute(
       "(string key1=$0, int32 key2=$1, int32 val=$2, int32 val=$3)",
       buf, key_idx, key_idx, val);
   }
@@ -162,7 +160,7 @@ struct IntKeyTestSetup {
     CHECK_OK(row->SetInt32(2, val));
   }
 
-  string FormatDebugRow(int64_t key_idx, int32_t val, bool updated) {
+  std::string FormatDebugRow(int64_t key_idx, int32_t val, bool updated) {
     CHECK(false) << "Unsupported type";
     return "";
   }
@@ -216,29 +214,29 @@ void IntKeyTestSetup<INT64>::BuildRowKeyFromExistingRow(KuduPartialRow *row,
 }
 
 template<>
-string IntKeyTestSetup<INT8>::FormatDebugRow(int64_t key_idx, int32_t val, bool updated) {
-  return Substitute(
+std::string IntKeyTestSetup<INT8>::FormatDebugRow(int64_t key_idx, int32_t val, bool updated) {
+  return strings::Substitute(
     "(int8 key=$0, int32 key_idx=$1, int32 val=$2)",
     (key_idx % 2 == 0) ? -key_idx : key_idx, key_idx, val);
 }
 
 template<>
-string IntKeyTestSetup<INT16>::FormatDebugRow(int64_t key_idx, int32_t val, bool updated) {
-  return Substitute(
+std::string IntKeyTestSetup<INT16>::FormatDebugRow(int64_t key_idx, int32_t val, bool updated) {
+  return strings::Substitute(
     "(int16 key=$0, int32 key_idx=$1, int32 val=$2)",
     (key_idx % 2 == 0) ? -key_idx : key_idx, key_idx, val);
 }
 
 template<>
-string IntKeyTestSetup<INT32>::FormatDebugRow(int64_t key_idx, int32_t val, bool updated) {
-  return Substitute(
+std::string IntKeyTestSetup<INT32>::FormatDebugRow(int64_t key_idx, int32_t val, bool updated) {
+  return strings::Substitute(
     "(int32 key=$0, int32 key_idx=$1, int32 val=$2)",
     (key_idx % 2 == 0) ? -key_idx : key_idx, key_idx, val);
 }
 
 template<>
-string IntKeyTestSetup<INT64>::FormatDebugRow(int64_t key_idx, int32_t val, bool updated) {
-  return Substitute(
+std::string IntKeyTestSetup<INT64>::FormatDebugRow(int64_t key_idx, int32_t val, bool updated) {
+  return strings::Substitute(
     "(int64 key=$0, int32 key_idx=$1, int32 val=$2)",
     (key_idx % 2 == 0) ? -key_idx : key_idx, key_idx, val);
 }
@@ -271,14 +269,14 @@ struct NullableValueTestSetup {
     }
   }
 
-  string FormatDebugRow(int64_t key_idx, int64_t val, bool updated) {
+  std::string FormatDebugRow(int64_t key_idx, int64_t val, bool updated) {
     if (!updated && ShouldInsertAsNull(key_idx)) {
-      return Substitute(
+      return strings::Substitute(
       "(int32 key=$0, int32 key_idx=$1, int32 val=NULL)",
         (int32_t)key_idx, key_idx);
     }
 
-    return Substitute(
+    return strings::Substitute(
       "(int32 key=$0, int32 key_idx=$1, int32 val=$2)",
       (int32_t)key_idx, key_idx, val);
   }
@@ -305,11 +303,14 @@ typedef ::testing::Types<
 template<class TESTSETUP>
 class TabletTestBase : public KuduTabletTest {
  public:
-  TabletTestBase() :
-    KuduTabletTest(TESTSETUP::CreateSchema()),
+  typedef std::function<bool(int32_t, int32_t)> TestRowVerifier;
+
+  TabletTestBase(TabletHarness::Options::ClockType clock_type =
+                 TabletHarness::Options::ClockType::LOGICAL_CLOCK) :
+    KuduTabletTest(TESTSETUP::CreateSchema(), clock_type),
     setup_(),
     max_rows_(setup_.GetMaxRows()),
-    arena_(1024, 4*1024*1024)
+    arena_(1024)
   {}
 
   // Inserts "count" rows.
@@ -317,14 +318,35 @@ class TabletTestBase : public KuduTabletTest {
                       int64_t count,
                       int32_t val,
                       TimeSeries *ts = NULL) {
+    InsertOrUpsertTestRows(RowOperationsPB::INSERT, first_row, count, val, ts);
+  }
 
+  // Upserts "count" rows.
+  void UpsertTestRows(int64_t first_row,
+                      int64_t count,
+                      int32_t val,
+                      TimeSeries *ts = NULL) {
+    InsertOrUpsertTestRows(RowOperationsPB::UPSERT, first_row, count, val, ts);
+  }
+
+  void InsertOrUpsertTestRows(RowOperationsPB::Type type,
+                              int64_t first_row,
+                              int64_t count,
+                              int32_t val,
+                              TimeSeries *ts = NULL) {
     LocalTabletWriter writer(tablet().get(), &client_schema_);
     KuduPartialRow row(&client_schema_);
 
     uint64_t inserted_since_last_report = 0;
     for (int64_t i = first_row; i < first_row + count; i++) {
       setup_.BuildRow(&row, i, val);
-      CHECK_OK(writer.Insert(row));
+      if (type == RowOperationsPB::INSERT) {
+        CHECK_OK(writer.Insert(row));
+      } else if (type == RowOperationsPB::UPSERT) {
+        CHECK_OK(writer.Upsert(row));
+      } else {
+        LOG(FATAL) << "bad type: " << type;
+      }
 
       if ((inserted_since_last_report++ > 100) && ts) {
         ts->AddValue(static_cast<double>(inserted_since_last_report));
@@ -378,65 +400,95 @@ class TabletTestBase : public KuduTabletTest {
   }
 
   template <class RowType>
-  void VerifyRow(const RowType& row, int64_t key_idx, int32_t val) {
+  void VerifyRow(const RowType& row, int32_t key_idx, int32_t val) {
     ASSERT_EQ(setup_.FormatDebugRow(key_idx, val, false), schema_.DebugRow(row));
   }
 
-  void VerifyTestRows(int64_t first_row, uint64_t expected_count) {
+  void VerifyTestRows(int32_t first_row, uint64_t expected_count) {
+    VerifyTestRowsWithVerifier(first_row, expected_count, boost::none);
+  }
+
+  void VerifyTestRowsWithVerifier(int32_t first_row, uint64_t expected_count,
+                                  const boost::optional<TestRowVerifier>& verifier) {
     gscoped_ptr<RowwiseIterator> iter;
     ASSERT_OK(tablet()->NewRowIterator(client_schema_, &iter));
+    VerifyTestRowsWithRowIteratorAndVerifier(first_row, expected_count, std::move(iter), verifier);
+  }
+
+  void VerifyTestRowsWithTimestampAndVerifier(int32_t first_row, uint64_t expected_count,
+                                              Timestamp timestamp,
+                                              const boost::optional<TestRowVerifier>& verifier) {
+    gscoped_ptr<RowwiseIterator> iter;
+    ASSERT_OK(tablet()->NewRowIterator(client_schema_, MvccSnapshot(timestamp), UNORDERED, &iter));
+    VerifyTestRowsWithRowIteratorAndVerifier(first_row, expected_count, std::move(iter), verifier);
+  }
+
+  void VerifyTestRowsWithRowIteratorAndVerifier(int32_t first_row, uint64_t expected_row_count,
+                                                gscoped_ptr<RowwiseIterator> iter,
+                                                const boost::optional<TestRowVerifier>& verifier) {
     ASSERT_OK(iter->Init(NULL));
-    int batch_size = std::max(
-      (size_t)1, std::min((size_t)(expected_count / 10),
-                          4*1024*1024 / schema_.byte_size()));
-    Arena arena(32*1024, 256*1024);
+    int batch_size = std::max<size_t>(1, std::min<size_t>(expected_row_count / 10,
+                                                          4L * 1024 * 1024 / schema_.byte_size()));
+    Arena arena(32*1024);
     RowBlock block(schema_, batch_size, &arena);
 
-    if (expected_count > INT_MAX) {
-      LOG(INFO) << "Not checking rows for duplicates -- duplicates expected since "
-                << "there were more than " << INT_MAX << " rows inserted.";
-      return;
+    bool check_for_dups = true;
+    if (expected_row_count > INT_MAX) {
+      check_for_dups = false;
+      LOG(WARNING) << "Not checking rows for duplicates -- duplicates expected since "
+                   << "there were more than " << INT_MAX << " rows inserted.";
     }
 
     // Keep a bitmap of which rows have been seen from the requested
     // range.
     std::vector<bool> seen_rows;
-    seen_rows.resize(expected_count);
+    seen_rows.resize(expected_row_count);
 
+    uint64_t actual_row_count = 0;
     while (iter->HasNext()) {
       ASSERT_OK_FAST(iter->NextBlock(&block));
 
       RowBlockRow rb_row = block.row(0);
       if (VLOG_IS_ON(2)) {
         VLOG(2) << "Fetched batch of " << block.nrows() << "\n"
-            << "First row: " << schema_.DebugRow(rb_row);
+                << "First row: " << schema_.DebugRow(rb_row);
       }
 
       for (int i = 0; i < block.nrows(); i++) {
         rb_row.Reset(&block, i);
         int32_t key_idx = *schema_.ExtractColumnFromRow<INT32>(rb_row, 1);
-        if (key_idx >= first_row && key_idx < first_row + expected_count) {
-          size_t rel_idx = key_idx - first_row;
-          if (seen_rows[rel_idx]) {
-            FAIL() << "Saw row " << key_idx << " twice!\n"
-                   << "Row: " << schema_.DebugRow(rb_row);
+        if (key_idx >= first_row && block.selection_vector()->IsRowSelected(i)) {
+          actual_row_count++;
+          if (key_idx < first_row + expected_row_count) {
+            size_t rel_idx = key_idx - first_row;
+            if (check_for_dups && seen_rows[rel_idx]) {
+              FAIL() << "Saw row " << key_idx << " twice!\n"
+                    << "Row: " << schema_.DebugRow(rb_row);
+            }
+            seen_rows[rel_idx] = true;
+            if (verifier) {
+              int32_t val = *schema_.ExtractColumnFromRow<INT32>(rb_row, 2);
+              ASSERT_TRUE((*verifier)(key_idx, val))
+                  << "Key index: " << key_idx << ", value: " << val;
+            }
           }
-          seen_rows[rel_idx] = true;
         }
       }
     }
 
     // Verify that all the rows were seen.
-    for (int i = 0; i < expected_count; i++) {
-      ASSERT_EQ(true, seen_rows[i]) << "Never saw row: " << (i + first_row);
+    for (int i = 0; i < expected_row_count; i++) {
+      ASSERT_EQ(true, seen_rows[i]) << "Never saw row " << (i + first_row);
     }
-    LOG(INFO) << "Successfully verified " << expected_count << "rows";
+    ASSERT_EQ(expected_row_count, actual_row_count)
+        << "Expected row count didn't match actual row count";
+    LOG(INFO) << "Successfully verified " << expected_row_count << "rows";
   }
 
   // Iterate through the full table, stringifying the resulting rows
   // into the given vector. This is only useful in tests which insert
   // a very small number of rows.
-  Status IterateToStringList(vector<string> *out) {
+  Status IterateToStringList(std::vector<std::string> *out) {
     gscoped_ptr<RowwiseIterator> iter;
     RETURN_NOT_OK(this->tablet()->NewRowIterator(this->client_schema_, &iter));
     RETURN_NOT_OK(iter->Init(NULL));
@@ -454,7 +506,7 @@ class TabletTestBase : public KuduTabletTest {
   // make sure that we don't overflow the type on inserts
   // or else we get errors because the key already exists
   uint64_t ClampRowCount(uint64_t proposal) const {
-    uint64_t num_rows = min(max_rows_, proposal);
+    uint64_t num_rows = std::min(max_rows_, proposal);
     if (num_rows < proposal) {
       LOG(WARNING) << "Clamping max rows to " << num_rows << " to prevent overflow";
     }

@@ -17,21 +17,22 @@
 
 #include "kudu/common/schema.h"
 
-#include <set>
 #include <algorithm>
+#include <unordered_set>
 
-#include "kudu/gutil/stringprintf.h"
+#include "kudu/gutil/map-util.h"
 #include "kudu/gutil/strings/join.h"
 #include "kudu/gutil/strings/strcat.h"
 #include "kudu/util/malloc.h"
+#include "kudu/util/memory/arena.h"
 #include "kudu/util/status.h"
 #include "kudu/common/row.h"
 
-namespace kudu {
-
-using std::set;
-using std::unordered_map;
+using std::string;
 using std::unordered_set;
+using std::vector;
+
+namespace kudu {
 
 // In a new schema, we typically would start assigning column IDs at 0. However, this
 // makes it likely that in many test cases, the column IDs and the column indexes are
@@ -45,6 +46,29 @@ static const ColumnId kFirstColumnId(0);
 static const ColumnId  kFirstColumnId(10);
 #endif
 
+bool ColumnTypeAttributes::EqualsForType(ColumnTypeAttributes other,
+                                         DataType type) const {
+  switch (type) {
+    case DECIMAL32:
+    case DECIMAL64:
+    case DECIMAL128:
+      return precision == other.precision && scale == other.scale;
+    default:
+      return true; // true because unhandled types don't use ColumnTypeAttributes.
+  }
+}
+
+string ColumnTypeAttributes::ToStringForType(DataType type) const {
+  switch (type) {
+    case DECIMAL32:
+    case DECIMAL64:
+    case DECIMAL128:
+      return strings::Substitute("($0, $1)", precision, scale);
+    default:
+      return "";
+  }
+}
+
 string ColumnStorageAttributes::ToString() const {
   return strings::Substitute("encoding=$0, compression=$1, cfile_block_size=$2",
                              EncodingType_Name(encoding),
@@ -52,7 +76,44 @@ string ColumnStorageAttributes::ToString() const {
                              cfile_block_size);
 }
 
-// TODO: include attributes_.ToString() -- need to fix unit tests
+Status ColumnSchema::ApplyDelta(const ColumnSchemaDelta& col_delta) {
+  // This method does all validation up-front before making any changes to
+  // the schema, so that if we return an error then we are guaranteed to
+  // have had no effect
+  if (type_info()->physical_type() != BINARY) {
+    if (col_delta.default_value && col_delta.default_value->size() < type_info()->size()) {
+      return Status::InvalidArgument("wrong size for default value");
+    }
+  }
+
+  if (col_delta.new_name) {
+    name_ = *col_delta.new_name;
+  }
+
+  if (col_delta.default_value) {
+    const void* value = type_info()->physical_type() == BINARY ?
+                        reinterpret_cast<const void *>(&col_delta.default_value.get()) :
+                        reinterpret_cast<const void *>(col_delta.default_value->data());
+    write_default_ = std::make_shared<Variant>(type_info()->type(), value);
+  }
+
+  if (col_delta.remove_default) {
+    write_default_ = nullptr;
+  }
+
+  if (col_delta.encoding) {
+    attributes_.encoding = *col_delta.encoding;
+  }
+  if (col_delta.compression) {
+    attributes_.compression = *col_delta.compression;
+  }
+  if (col_delta.cfile_block_size) {
+    attributes_.cfile_block_size = *col_delta.cfile_block_size;
+  }
+  return Status::OK();
+}
+
+// TODO(wdb): include attributes_.ToString() -- need to fix unit tests
 // first
 string ColumnSchema::ToString() const {
   return strings::Substitute("$0[$1]",
@@ -61,8 +122,9 @@ string ColumnSchema::ToString() const {
 }
 
 string ColumnSchema::TypeToString() const {
-  return strings::Substitute("$0 $1",
+  return strings::Substitute("$0$1 $2",
                              type_info_->name(),
+                             type_attributes().ToStringForType(type_info()->type()),
                              is_nullable_ ? "NULLABLE" : "NOT NULL");
 }
 
@@ -119,6 +181,7 @@ void Schema::swap(Schema& other) {
   name_to_index_.swap(other.name_to_index_);
   id_to_index_.swap(other.id_to_index_);
   std::swap(has_nullables_, other.has_nullables_);
+  std::swap(name_to_index_bytes_, other.name_to_index_bytes_);
 }
 
 Status Schema::Reset(const vector<ColumnSchema>& cols,
@@ -229,7 +292,7 @@ Schema Schema::CopyWithColumnIds() const {
   CHECK(!has_column_ids());
   vector<ColumnId> ids;
   for (int32_t i = 0; i < num_columns(); i++) {
-    ids.push_back(ColumnId(kFirstColumnId + i));
+    ids.emplace_back(kFirstColumnId + i);
   }
   return Schema(cols_, ids, num_key_columns_);
 }
@@ -295,6 +358,13 @@ Status Schema::GetMappedReadProjection(const Schema& projection,
 }
 
 string Schema::ToString() const {
+  if (cols_.empty()) return "Schema []";
+
+  vector<string> pk_strs;
+  for (int i = 0; i < num_key_columns_; i++) {
+    pk_strs.push_back(cols_[i].name());
+  }
+
   vector<string> col_strs;
   if (has_column_ids()) {
     for (int i = 0; i < cols_.size(); ++i) {
@@ -306,7 +376,9 @@ string Schema::ToString() const {
     }
   }
 
-  return StrCat("Schema [\n\t",
+  return StrCat("Schema [\n\tprimary key (",
+                JoinStrings(pk_strs, ", "),
+                "),\n\t",
                 JoinStrings(col_strs, ",\n\t"),
                 "\n]");
 }
@@ -338,7 +410,7 @@ string Schema::DebugEncodedRowKey(Slice encoded_key, StartOrEnd start_or_end) co
     }
   }
 
-  Arena arena(1024, 128 * 1024);
+  Arena arena(256);
   uint8_t* buf = reinterpret_cast<uint8_t*>(arena.AllocateBytes(key_byte_size()));
   Status s = DecodeRowKey(encoded_key, buf, &arena);
   if (!s.ok()) {
@@ -394,7 +466,7 @@ void SchemaBuilder::Reset(const Schema& schema) {
 
   if (col_ids_.empty()) {
     for (int32_t i = 0; i < cols_.size(); ++i) {
-      col_ids_.push_back(ColumnId(kFirstColumnId + i));
+      col_ids_.emplace_back(kFirstColumnId + i);
     }
   }
   if (col_ids_.empty()) {
@@ -417,8 +489,8 @@ Status SchemaBuilder::AddColumn(const string& name,
 }
 
 Status SchemaBuilder::RemoveColumn(const string& name) {
-  unordered_set<string>::const_iterator it_names;
-  if ((it_names = col_names_.find(name)) == col_names_.end()) {
+  unordered_set<string>::const_iterator it_names = col_names_.find(name);
+  if (it_names == col_names_.end()) {
     return Status::NotFound("The specified column does not exist", name);
   }
 
@@ -439,19 +511,18 @@ Status SchemaBuilder::RemoveColumn(const string& name) {
 }
 
 Status SchemaBuilder::RenameColumn(const string& old_name, const string& new_name) {
-  unordered_set<string>::const_iterator it_names;
-
   // check if 'new_name' is already in use
-  if ((it_names = col_names_.find(new_name)) != col_names_.end()) {
+  if (col_names_.find(new_name) != col_names_.end()) {
     return Status::AlreadyPresent("The column already exists", new_name);
   }
 
   // check if the 'old_name' column exists
-  if ((it_names = col_names_.find(old_name)) == col_names_.end()) {
+  unordered_set<string>::const_iterator it_names = col_names_.find(old_name);
+  if (it_names == col_names_.end()) {
     return Status::NotFound("The specified column does not exist", old_name);
   }
 
-  col_names_.erase(it_names);   // TODO: Should this one stay and marked as alias?
+  col_names_.erase(it_names);   // TODO(wdb): Should this one stay and marked as alias?
   col_names_.insert(new_name);
 
   for (ColumnSchema& col_schema : cols_) {
@@ -482,6 +553,33 @@ Status SchemaBuilder::AddColumn(const ColumnSchema& column, bool is_key) {
 
   next_id_ = ColumnId(next_id_ + 1);
   return Status::OK();
+}
+
+Status SchemaBuilder::ApplyColumnSchemaDelta(const ColumnSchemaDelta& col_delta) {
+  // if the column will be renamed, check if 'new_name' is already in use
+  if (col_delta.new_name && ContainsKey(col_names_, *col_delta.new_name)) {
+    return Status::AlreadyPresent("The column already exists", *col_delta.new_name);
+  }
+
+  // check if the column exists
+  unordered_set<string>::const_iterator it_names = col_names_.find(col_delta.name);
+  if (it_names == col_names_.end()) {
+    return Status::NotFound("The specified column does not exist", col_delta.name);
+  }
+
+  for (ColumnSchema& col_schema : cols_) {
+    if (col_delta.name == col_schema.name()) {
+      RETURN_NOT_OK(col_schema.ApplyDelta(col_delta));
+      if (col_delta.new_name) {
+        // TODO(wdb): Should the old one stay, marked as an alias?
+        col_names_.erase(it_names);
+        col_names_.insert(*col_delta.new_name);
+      }
+      return Status::OK();
+    }
+  }
+
+  LOG(FATAL) << "Should not reach here";
 }
 
 } // namespace kudu

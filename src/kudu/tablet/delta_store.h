@@ -17,28 +17,33 @@
 #ifndef KUDU_TABLET_DELTA_STORE_H
 #define KUDU_TABLET_DELTA_STORE_H
 
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "kudu/common/columnblock.h"
-#include "kudu/common/schema.h"
-#include "kudu/util/status.h"
-#include "kudu/tablet/mutation.h"
-#include "kudu/tablet/mvcc.h"
+#include "kudu/common/rowid.h"
 #include "kudu/tablet/delta_key.h"
-#include "kudu/tablet/delta_stats.h"
-#include "kudu/tablet/tablet_metadata.h"
+#include "kudu/util/slice.h"
+#include "kudu/util/status.h"
 
 namespace kudu {
 
+class Arena;
+class ColumnBlock;
 class ScanSpec;
+class Schema;
 class SelectionVector;
+struct ColumnId;
 
 namespace tablet {
 
-class DeltaIterator;
 class DeltaFileWriter;
+class DeltaIterator;
+class DeltaStats;
+class Mutation;
+class MvccSnapshot;
 
 // Interface for the pieces of the system that track deltas/updates.
 // This is implemented by DeltaMemStore and by DeltaFileReader.
@@ -108,7 +113,12 @@ struct DeltaKeyAndUpdate {
   DeltaKey key;
   Slice cell;
 
-  std::string Stringify(DeltaType type, const Schema& schema) const;
+  // Stringifies this DeltaKeyAndUpdate, according to 'schema'.
+  //
+  // If 'pad' is true, pads the delta row ids and txn ids in the output so that we can
+  // compare two stringified representations and obtain the same result as comparing the DeltaKey
+  // itself. That is, if 'pad' is true, then DeltaKey a < DeltaKey b => Stringify(a) < Stringify(b).
+  std::string Stringify(DeltaType type, const Schema& schema, bool pad_key = false) const;
 };
 
 class DeltaIterator {
@@ -153,12 +163,12 @@ class DeltaIterator {
   //
   // Each entry in the vector will be treated as a singly linked list of Mutation
   // objects. If there are no mutations for that row, the entry will be unmodified.
-  // If there are mutations, they will be appended at the tail of the linked list
-  // (i.e in ascending timestamp order)
+  // If there are mutations, they will be prepended at the head of the linked list
+  // (i.e the resulting list will be in descending timestamp order)
   //
   // The Mutation objects will be allocated out of the provided Arena, which must be non-NULL.
   // Must have called PrepareBatch() with flag = PREPARE_FOR_COLLECT.
-  virtual Status CollectMutations(vector<Mutation *> *dst, Arena *arena) = 0;
+  virtual Status CollectMutations(std::vector<Mutation *> *dst, Arena *arena) = 0;
 
   // Iterate through all deltas, adding deltas for columns not
   // specified in 'col_ids' to 'out'.
@@ -167,11 +177,17 @@ class DeltaIterator {
   // must be non-NULL.
   // Must have called PrepareBatch() with flag = PREPARE_FOR_COLLECT.
   virtual Status FilterColumnIdsAndCollectDeltas(const std::vector<ColumnId>& col_ids,
-                                                 vector<DeltaKeyAndUpdate>* out,
+                                                 std::vector<DeltaKeyAndUpdate>* out,
                                                  Arena* arena) = 0;
 
   // Returns true if there are any more rows left in this iterator.
   virtual bool HasNext() = 0;
+
+  // Returns true if there might exist deltas to be applied. It is safe to
+  // conservatively return true, but this would force a skip over decoder-level
+  // evaluation.
+  // Must have called PrepareBatch() with flag = PREPARE_FOR_APPLY.
+  virtual bool MayHaveDeltas() = 0;
 
   // Return a string representation suitable for debug printouts.
   virtual std::string ToString() const = 0;
@@ -191,7 +207,7 @@ Status DebugDumpDeltaIterator(DeltaType type,
                               DeltaIterator* iter,
                               const Schema& schema,
                               size_t nrows,
-                              vector<std::string>* out);
+                              std::vector<std::string>* out);
 
 // Writes the contents of 'iter' to 'out', block by block.  Used by
 // minor delta compaction.

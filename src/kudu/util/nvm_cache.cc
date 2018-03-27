@@ -1,23 +1,8 @@
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// This file is derived from cache.cc in the LevelDB project:
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
-//
-// Some portions copyright (c) 2011 The LevelDB Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file. See the AUTHORS file for names of contributors.
+//   Some portions copyright (c) 2011 The LevelDB Authors. All rights reserved.
+//   Use of this source code is governed by a BSD-style license that can be
+//   found in the LICENSE file.
 //
 // ------------------------------------------------------------
 // This file implements a cache based on the NVML library (http://pmem.io),
@@ -35,26 +20,33 @@
 
 #include "kudu/util/nvm_cache.h"
 
-#include <gflags/gflags.h>
-#include <glog/logging.h>
+#include <cstdint>
+#include <cstring>
 #include <iostream>
-#include <libvmem.h>
 #include <memory>
-#include <stdlib.h>
+#include <mutex>
 #include <string>
 #include <vector>
 
+#include <gflags/gflags.h>
+#include <glog/logging.h>
+#include <libvmem.h>
+
+#include "kudu/gutil/atomicops.h"
 #include "kudu/gutil/atomic_refcount.h"
+#include "kudu/gutil/dynamic_annotations.h"
+#include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/hash/city.h"
+#include "kudu/gutil/macros.h"
+#include "kudu/gutil/port.h"
+#include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/stl_util.h"
-#include "kudu/gutil/strings/substitute.h"
-#include "kudu/util/atomic.h"
 #include "kudu/util/cache.h"
 #include "kudu/util/cache_metrics.h"
-#include "kudu/util/flags.h"
 #include "kudu/util/flag_tags.h"
 #include "kudu/util/locks.h"
 #include "kudu/util/metrics.h"
+#include "kudu/util/slice.h"
 
 DEFINE_string(nvm_cache_path, "/vmem",
               "The path at which the NVM cache will try to allocate its memory. "
@@ -76,11 +68,10 @@ TAG_FLAG(nvm_cache_simulate_allocation_failure, unsafe);
 
 namespace kudu {
 
-class MetricEntity;
-
 namespace {
 
 using std::shared_ptr;
+using std::string;
 using std::vector;
 
 typedef simple_spinlock MutexType;
@@ -90,25 +81,27 @@ typedef simple_spinlock MutexType;
 // An entry is a variable length heap-allocated structure.  Entries
 // are kept in a circular doubly linked list ordered by access time.
 struct LRUHandle {
-  void* value;
-  CacheDeleter* deleter;
+  Cache::EvictionCallback* eviction_callback;
   LRUHandle* next_hash;
   LRUHandle* next;
   LRUHandle* prev;
   size_t charge;      // TODO(opt): Only allow uint32_t?
-  size_t key_length;
+  uint32_t key_length;
+  uint32_t val_length;
   Atomic32 refs;
   uint32_t hash;      // Hash of key(); used for fast sharding and comparisons
-  uint8_t key_data[1];   // Beginning of key
+  uint8_t* kv_data;
 
   Slice key() const {
-    // For cheaper lookups, we allow a temporary Handle object
-    // to store a pointer to a key in "value".
-    if (next == this) {
-      return *(reinterpret_cast<Slice*>(value));
-    } else {
-      return Slice(key_data, key_length);
-    }
+    return Slice(kv_data, key_length);
+  }
+
+  Slice value() const {
+    return Slice(&kv_data[key_length], val_length);
+  }
+
+  uint8_t* val_ptr() {
+    return &kv_data[key_length];
   }
 };
 
@@ -209,10 +202,9 @@ class NvmLRUCache {
 
   void SetMetrics(CacheMetrics* metrics) { metrics_ = metrics; }
 
-  // Like Cache methods, but with an extra "hash" parameter.
-  Cache::Handle* Insert(const Slice& key, uint32_t hash,
-                        void* value, size_t charge,
-                        CacheDeleter* deleter);
+  Cache::Handle* Insert(LRUHandle* h, Cache::EvictionCallback* eviction_callback);
+
+  // Like Cache::Lookup, but with an extra "hash" parameter.
   Cache::Handle* Lookup(const Slice& key, uint32_t hash, bool caching);
   void Release(Cache::Handle* handle);
   void Erase(const Slice& key, uint32_t hash);
@@ -289,7 +281,9 @@ bool NvmLRUCache::Unref(LRUHandle* e) {
 
 void NvmLRUCache::FreeEntry(LRUHandle* e) {
   DCHECK_EQ(ANNOTATE_UNPROTECTED_READ(e->refs), 0);
-  e->deleter->Delete(e->key(), e->value);
+  if (e->eviction_callback) {
+    e->eviction_callback->EvictedEntry(e->key(), e->value());
+  }
   if (PREDICT_TRUE(metrics_)) {
     metrics_->cache_usage->DecrementBy(e->charge);
     metrics_->evictions->Increment();
@@ -311,7 +305,7 @@ void *NvmLRUCache::AllocateAndRetry(size_t size) {
   tmp = VmemMalloc(size);
 
   if (tmp == NULL) {
-    unique_lock<MutexType> l(&mutex_);
+    std::unique_lock<MutexType> l(mutex_);
 
     int retries_remaining = FLAGS_nvm_cache_allocation_retry_count;
     while (tmp == NULL && retries_remaining-- > 0 && lru_.next != &lru_) {
@@ -348,7 +342,7 @@ void NvmLRUCache::NvmLRU_Append(LRUHandle* e) {
 Cache::Handle* NvmLRUCache::Lookup(const Slice& key, uint32_t hash, bool caching) {
  LRUHandle* e;
   {
-    lock_guard<MutexType> l(&mutex_);
+    std::lock_guard<MutexType> l(mutex_);
     e = table_.Lookup(key, hash);
     if (e != NULL) {
       // If an entry exists, remove the old entry from the cache
@@ -407,36 +401,20 @@ void NvmLRUCache::FreeLRUEntries(LRUHandle* to_free_head) {
   }
 }
 
-Cache::Handle* NvmLRUCache::Insert(const Slice& key, uint32_t hash,
-                                   void* value, size_t charge,
-                                   CacheDeleter* deleter) {
-  // Account for nvm key memory.
-  LRUHandle* e = reinterpret_cast<LRUHandle*>(
-      AllocateAndRetry(sizeof(LRUHandle) - 1 /* sizeof(LRUHandle::key_data) */ + key.size()));
+Cache::Handle* NvmLRUCache::Insert(LRUHandle* e,
+                                   Cache::EvictionCallback* eviction_callback) {
+  DCHECK(e);
   LRUHandle* to_remove_head = NULL;
 
-  if (!e) {
-    return NULL;
-  }
-
-  e->value = value;
-  memcpy(e->key_data, key.data(), key.size());
-
-  // Modify the charge to the nvm cache to account for all allocations
-  // done from the nvm address space. In this case we allocated the value
-  // slice object, the key slice and the key_data structure from nvm.
-  e->charge = charge + key.size();
-  e->hash = hash;
   e->refs = 2;  // One from LRUCache, one for the returned handle
-  e->key_length = key.size();
-  e->deleter = deleter;
+  e->eviction_callback = eviction_callback;
   if (PREDICT_TRUE(metrics_)) {
     metrics_->cache_usage->IncrementBy(e->charge);
     metrics_->inserts->Increment();
   }
 
   {
-    lock_guard<MutexType> l(&mutex_);
+    std::lock_guard<MutexType> l(mutex_);
 
     NvmLRU_Append(e);
 
@@ -465,7 +443,7 @@ void NvmLRUCache::Erase(const Slice& key, uint32_t hash) {
   LRUHandle* e;
   bool last_reference = false;
   {
-    lock_guard<MutexType> l(&mutex_);
+    std::lock_guard<MutexType> l(mutex_);
     e = table_.Remove(key, hash);
     if (e != NULL) {
       NvmLRU_Remove(e);
@@ -485,8 +463,6 @@ class ShardedLRUCache : public Cache {
  private:
   gscoped_ptr<CacheMetrics> metrics_;
   vector<NvmLRUCache*> shards_;
-  MutexType id_mutex_;
-  uint64_t last_id_;
   VMEM* vmp_;
 
   static inline uint32_t HashSlice(const Slice& s) {
@@ -499,9 +475,8 @@ class ShardedLRUCache : public Cache {
   }
 
  public:
-  explicit ShardedLRUCache(size_t capacity, const string& id, VMEM* vmp)
-        : last_id_(0),
-          vmp_(vmp) {
+  explicit ShardedLRUCache(size_t capacity, const string& /*id*/, VMEM* vmp)
+        : vmp_(vmp) {
 
     const size_t per_shard = (capacity + (kNumShards - 1)) / kNumShards;
     for (int s = 0; s < kNumShards; s++) {
@@ -519,10 +494,10 @@ class ShardedLRUCache : public Cache {
     vmem_delete(vmp_);
   }
 
-  virtual Handle* Insert(const Slice& key, void* value, size_t charge,
-                         CacheDeleter* deleter) OVERRIDE {
-    const uint32_t hash = HashSlice(key);
-    return shards_[Shard(hash)]->Insert(key, hash, value, charge, deleter);
+  virtual Handle* Insert(PendingHandle* handle,
+                         Cache::EvictionCallback* eviction_callback) OVERRIDE {
+    LRUHandle* h = reinterpret_cast<LRUHandle*>(DCHECK_NOTNULL(handle));
+    return shards_[Shard(h->hash)]->Insert(h, eviction_callback);
   }
   virtual Handle* Lookup(const Slice& key, CacheBehavior caching) OVERRIDE {
     const uint32_t hash = HashSlice(key);
@@ -536,40 +511,50 @@ class ShardedLRUCache : public Cache {
     const uint32_t hash = HashSlice(key);
     shards_[Shard(hash)]->Erase(key, hash);
   }
-  virtual void* Value(Handle* handle) OVERRIDE {
-    return reinterpret_cast<LRUHandle*>(handle)->value;
+  virtual Slice Value(Handle* handle) OVERRIDE {
+    return reinterpret_cast<LRUHandle*>(handle)->value();
   }
-  virtual uint64_t NewId() OVERRIDE {
-    lock_guard<MutexType> l(&id_mutex_);
-    return ++(last_id_);
+  virtual uint8_t* MutableValue(PendingHandle* handle) OVERRIDE {
+    return reinterpret_cast<LRUHandle*>(handle)->val_ptr();
   }
+
   virtual void SetMetrics(const scoped_refptr<MetricEntity>& entity) OVERRIDE {
     metrics_.reset(new CacheMetrics(entity));
     for (NvmLRUCache* cache : shards_) {
       cache->SetMetrics(metrics_.get());
     }
   }
-  virtual uint8_t* Allocate(int size) OVERRIDE {
+  virtual PendingHandle* Allocate(Slice key, int val_len, int charge) OVERRIDE {
+    int key_len = key.size();
+    DCHECK_GE(key_len, 0);
+    DCHECK_GE(val_len, 0);
+    LRUHandle* handle = nullptr;
+
     // Try allocating from each of the shards -- if vmem is tight,
     // this can cause eviction, so we might have better luck in different
     // shards.
     for (NvmLRUCache* cache : shards_) {
-      uint8_t* ptr = reinterpret_cast<uint8_t*>(cache->AllocateAndRetry(size));
-      if (ptr) return ptr;
+      uint8_t* buf = static_cast<uint8_t*>(cache->AllocateAndRetry(
+          sizeof(LRUHandle) + key_len + val_len));
+      if (buf) {
+        handle = reinterpret_cast<LRUHandle*>(buf);
+        handle->kv_data = &buf[sizeof(LRUHandle)];
+        handle->val_length = val_len;
+        handle->key_length = key_len;
+        handle->charge = (charge == kAutomaticCharge) ?
+            vmem_malloc_usable_size(vmp_, buf) : charge;
+        handle->hash = HashSlice(key);
+        memcpy(handle->kv_data, key.data(), key.size());
+        return reinterpret_cast<PendingHandle*>(handle);
+      }
     }
     // TODO: increment a metric here on allocation failure.
-    return NULL;
-  }
-  virtual void Free(uint8_t *ptr) OVERRIDE {
-    vmem_free(vmp_, ptr);
-  }
-  virtual uint8_t* MoveToHeap(uint8_t* ptr, int size) OVERRIDE {
-    uint8_t* ret = new uint8_t[size];
-    memcpy(ret, ptr, size);
-    vmem_free(vmp_, ptr);
-    return ret;
+    return nullptr;
   }
 
+  virtual void Free(PendingHandle* ph) OVERRIDE {
+    vmem_free(vmp_, ph);
+  }
 };
 
 } // end anonymous namespace

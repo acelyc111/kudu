@@ -17,20 +17,19 @@
 #ifndef KUDU_TABLET_DELTA_STATS_H
 #define KUDU_TABLET_DELTA_STATS_H
 
-#include <glog/logging.h>
-#include <boost/function.hpp>
-
+#include <cstdint>
 #include <set>
-#include <stdint.h>
 #include <string>
 #include <unordered_map>
 
-#include "kudu/gutil/atomicops.h"
+#include "kudu/common/schema.h" // IWYU pragma: keep
+#include "kudu/common/timestamp.h"
 #include "kudu/gutil/map-util.h"
-#include "kudu/common/row_changelist.h"
-#include "kudu/tablet/mvcc.h"
+#include "kudu/util/status.h"
 
 namespace kudu {
+
+class RowChangeList;
 
 namespace tablet {
 
@@ -47,6 +46,9 @@ class DeltaStats {
   // Increment the per-store delete count by 'delete_count'.
   void IncrDeleteCount(int64_t delete_count);
 
+  // Increment the per-store reinsert count by 'reinsert_count'.
+  void IncrReinsertCount(int64_t reinsert_count);
+
   // Increment delete and update counts based on changes contained in
   // 'update'.
   Status UpdateStats(const Timestamp& timestamp,
@@ -55,8 +57,11 @@ class DeltaStats {
   // Return the number of deletes in the current delta store.
   int64_t delete_count() const { return delete_count_; }
 
+  // Return the number of reinserts in the current delta store.
+  int64_t reinsert_count() const { return reinsert_count_; }
+
   // Returns number of updates for a given column.
-  int64_t update_count_for_col_id(ColumnId col_id) const {
+  int64_t update_count_for_col_id(const ColumnId& col_id) const {
     return FindWithDefault(update_counts_by_col_id_, col_id, 0);
   }
 
@@ -95,6 +100,7 @@ class DeltaStats {
  private:
   std::unordered_map<ColumnId, int64_t> update_counts_by_col_id_;
   uint64_t delete_count_;
+  uint64_t reinsert_count_;
   Timestamp max_timestamp_;
   Timestamp min_timestamp_;
 };

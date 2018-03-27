@@ -17,22 +17,45 @@
 
 #include "kudu/rpc/rpc-test-base.h"
 
+#include <cstddef>
+#include <memory>
+#include <ostream>
 #include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
-#include <boost/bind.hpp>
+#include <glog/logging.h>
 #include <gtest/gtest.h>
 
-#include "kudu/gutil/stl_util.h"
+#include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/move.h"
+#include "kudu/gutil/port.h"
+#include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/strings/substitute.h"
+#include "kudu/rpc/acceptor_pool.h"
+#include "kudu/rpc/messenger.h"
+#include "kudu/rpc/proxy.h"
+#include "kudu/rpc/rpc_service.h"
+#include "kudu/rpc/service_if.h"
+#include "kudu/rpc/service_pool.h"
 #include "kudu/util/countdown_latch.h"
 #include "kudu/util/metrics.h"
-#include "kudu/util/test_util.h"
+#include "kudu/util/monotime.h"
+#include "kudu/util/net/sockaddr.h"
+#include "kudu/util/net/socket.h"
+#include "kudu/util/status.h"
+#include "kudu/util/stopwatch.h"
+#include "kudu/util/test_macros.h"
+#include "kudu/util/thread.h"
+
 
 METRIC_DECLARE_counter(rpc_connections_accepted);
 METRIC_DECLARE_counter(rpcs_queue_overflow);
 
 using std::string;
 using std::shared_ptr;
+using std::vector;
 using strings::Substitute;
 
 namespace kudu {
@@ -44,8 +67,10 @@ class MultiThreadedRpcTest : public RpcTestBase {
   void SingleCall(Sockaddr server_addr, const char* method_name,
                   Status* result, CountDownLatch* latch) {
     LOG(INFO) << "Connecting to " << server_addr.ToString();
-    shared_ptr<Messenger> client_messenger(CreateMessenger("ClientSC"));
-    Proxy p(client_messenger, server_addr, GenericCalculatorService::static_service_name());
+    shared_ptr<Messenger> client_messenger;
+    CHECK_OK(CreateMessenger("ClientSC", &client_messenger));
+    Proxy p(client_messenger, server_addr, server_addr.host(),
+            GenericCalculatorService::static_service_name());
     *result = DoTestSyncCall(p, method_name);
     latch->CountDown();
   }
@@ -53,7 +78,8 @@ class MultiThreadedRpcTest : public RpcTestBase {
   // Make RPC calls until we see a failure.
   void HammerServer(Sockaddr server_addr, const char* method_name,
                     Status* last_result) {
-    shared_ptr<Messenger> client_messenger(CreateMessenger("ClientHS"));
+    shared_ptr<Messenger> client_messenger;
+    CHECK_OK(CreateMessenger("ClientHS", &client_messenger));
     HammerServerWithMessenger(server_addr, method_name, last_result, client_messenger);
   }
 
@@ -61,7 +87,8 @@ class MultiThreadedRpcTest : public RpcTestBase {
       Sockaddr server_addr, const char* method_name, Status* last_result,
       const shared_ptr<Messenger>& messenger) {
     LOG(INFO) << "Connecting to " << server_addr.ToString();
-    Proxy p(messenger, server_addr, GenericCalculatorService::static_service_name());
+    Proxy p(messenger, server_addr, server_addr.host(),
+            GenericCalculatorService::static_service_name());
 
     int i = 0;
     while (true) {
@@ -91,7 +118,7 @@ static void AssertShutdown(kudu::Thread* thread, const Status* status) {
 TEST_F(MultiThreadedRpcTest, TestShutdownDuringService) {
   // Set up server.
   Sockaddr server_addr;
-  StartTestServer(&server_addr);
+  ASSERT_OK(StartTestServer(&server_addr));
 
   const int kNumThreads = 4;
   scoped_refptr<kudu::Thread> threads[kNumThreads];
@@ -119,9 +146,10 @@ TEST_F(MultiThreadedRpcTest, TestShutdownDuringService) {
 TEST_F(MultiThreadedRpcTest, TestShutdownClientWhileCallsPending) {
   // Set up server.
   Sockaddr server_addr;
-  StartTestServer(&server_addr);
+  ASSERT_OK(StartTestServer(&server_addr));
 
-  shared_ptr<Messenger> client_messenger(CreateMessenger("Client"));
+  shared_ptr<Messenger> client_messenger;
+  ASSERT_OK(CreateMessenger("Client", &client_messenger));
 
   scoped_refptr<kudu::Thread> thread;
   Status status;
@@ -154,7 +182,7 @@ class BogusServicePool : public ServicePool {
   BogusServicePool(gscoped_ptr<ServiceIf> service,
                    const scoped_refptr<MetricEntity>& metric_entity,
                    size_t service_queue_length)
-    : ServicePool(service.Pass(), metric_entity, service_queue_length) {
+    : ServicePool(std::move(service), metric_entity, service_queue_length) {
   }
   virtual Status Init(int num_threads) OVERRIDE {
     // Do nothing
@@ -191,7 +219,7 @@ TEST_F(MultiThreadedRpcTest, TestBlowOutServiceQueue) {
 
   gscoped_ptr<ServiceIf> service(new GenericCalculatorService());
   service_name_ = service->service_name();
-  service_pool_ = new BogusServicePool(service.Pass(),
+  service_pool_ = new BogusServicePool(std::move(service),
                                       server_messenger_->metric_entity(),
                                       kMaxConcurrency);
   ASSERT_OK(service_pool_->Init(n_worker_threads_));
@@ -257,7 +285,7 @@ static void HammerServerWithTCPConns(const Sockaddr& addr) {
 TEST_F(MultiThreadedRpcTest, TestShutdownWithIncomingConnections) {
   // Set up server.
   Sockaddr server_addr;
-  StartTestServer(&server_addr);
+  ASSERT_OK(StartTestServer(&server_addr));
 
   // Start a number of threads which just hammer the server with TCP connections.
   vector<scoped_refptr<kudu::Thread> > threads;

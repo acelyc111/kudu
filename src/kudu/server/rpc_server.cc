@@ -15,17 +15,26 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <list>
+#include <functional>
+#include <memory>
+#include <ostream>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <gflags/gflags.h>
+#include <glog/logging.h>
 
 #include "kudu/gutil/casts.h"
 #include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/macros.h"
+#include "kudu/gutil/move.h"
+#include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/rpc/acceptor_pool.h"
 #include "kudu/rpc/messenger.h"
+#include "kudu/rpc/rpc_service.h"
 #include "kudu/rpc/service_if.h"
 #include "kudu/rpc/service_pool.h"
 #include "kudu/server/rpc_server.h"
@@ -46,6 +55,14 @@ DEFINE_string(rpc_bind_addresses, "0.0.0.0",
               "Comma-separated list of addresses to bind to for RPC connections. "
               "Currently, ephemeral ports (i.e. port 0) are not allowed.");
 TAG_FLAG(rpc_bind_addresses, stable);
+
+DEFINE_string(rpc_advertised_addresses, "",
+              "Comma-separated list of addresses to advertise externally for RPC "
+              "connections. Ephemeral ports (i.e. port 0) are not allowed. This "
+              "should be configured when the locally bound RPC addresses "
+              "specified in --rpc_bind_addresses are not externally resolvable, "
+              "for example, if Kudu is deployed in a container.");
+TAG_FLAG(rpc_advertised_addresses, advanced);
 
 DEFINE_int32(rpc_num_acceptors_per_address, 1,
              "Number of RPC acceptor threads for each bound address");
@@ -68,6 +85,7 @@ namespace kudu {
 
 RpcServerOptions::RpcServerOptions()
   : rpc_bind_addresses(FLAGS_rpc_bind_addresses),
+    rpc_advertised_addresses(FLAGS_rpc_advertised_addresses),
     num_acceptors_per_address(FLAGS_rpc_num_acceptors_per_address),
     num_service_threads(FLAGS_rpc_num_service_threads),
     default_port(0),
@@ -108,6 +126,19 @@ Status RpcServer::Init(const shared_ptr<Messenger>& messenger) {
     }
   }
 
+  if (!options_.rpc_advertised_addresses.empty()) {
+    RETURN_NOT_OK(ParseAddressList(options_.rpc_advertised_addresses,
+                                   options_.default_port,
+                                   &rpc_advertised_addresses_));
+
+    for (const Sockaddr& addr : rpc_advertised_addresses_) {
+      if (addr.port() == 0) {
+        LOG(FATAL) << "Advertising an ephemeral port is not supported (RPC advertised address "
+                   << "configured to " << addr.ToString() << ")";
+      }
+    }
+  }
+
   server_state_ = INITIALIZED;
   return Status::OK();
 }
@@ -115,11 +146,17 @@ Status RpcServer::Init(const shared_ptr<Messenger>& messenger) {
 Status RpcServer::RegisterService(gscoped_ptr<rpc::ServiceIf> service) {
   CHECK(server_state_ == INITIALIZED ||
         server_state_ == BOUND) << "bad state: " << server_state_;
-  const scoped_refptr<MetricEntity>& metric_entity = messenger_->metric_entity();
   string service_name = service->service_name();
   scoped_refptr<rpc::ServicePool> service_pool =
-    new rpc::ServicePool(service.Pass(), metric_entity, options_.service_queue_length);
+    new rpc::ServicePool(std::move(service), messenger_->metric_entity(),
+                         options_.service_queue_length);
   RETURN_NOT_OK(service_pool->Init(options_.num_service_threads));
+  auto* service_pool_raw_ptr = service_pool.get();
+  service_pool->set_too_busy_hook([this, service_pool_raw_ptr]() {
+      if (too_busy_hook_) {
+        too_busy_hook_(service_pool_raw_ptr);
+      }
+    });
   RETURN_NOT_OK(messenger_->RegisterService(service_name, service_pool));
   return Status::OK();
 }
@@ -173,19 +210,33 @@ void RpcServer::Shutdown() {
   acceptor_pools_.clear();
 
   if (messenger_) {
-    WARN_NOT_OK(messenger_->UnregisterAllServices(), "Unable to unregister our services");
+    messenger_->UnregisterAllServices();
   }
 }
 
 Status RpcServer::GetBoundAddresses(vector<Sockaddr>* addresses) const {
-  CHECK(server_state_ == BOUND ||
-        server_state_ == STARTED) << "bad state: " << server_state_;
+  if (server_state_ != BOUND &&
+      server_state_ != STARTED) {
+    return Status::ServiceUnavailable(Substitute("bad state: $0", server_state_));
+  }
   for (const shared_ptr<AcceptorPool>& pool : acceptor_pools_) {
     Sockaddr bound_addr;
     RETURN_NOT_OK_PREPEND(pool->GetBoundAddress(&bound_addr),
                           "Unable to get bound address from AcceptorPool");
     addresses->push_back(bound_addr);
   }
+  return Status::OK();
+}
+
+Status RpcServer::GetAdvertisedAddresses(vector<Sockaddr>* addresses) const {
+  if (server_state_ != BOUND &&
+      server_state_ != STARTED) {
+    return Status::ServiceUnavailable(Substitute("bad state: $0", server_state_));
+  }
+  if (rpc_advertised_addresses_.empty()) {
+    return GetBoundAddresses(addresses);
+  }
+  *addresses = rpc_advertised_addresses_;
   return Status::OK();
 }
 

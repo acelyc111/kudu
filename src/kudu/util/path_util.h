@@ -20,13 +20,30 @@
 #define KUDU_UTIL_PATH_UTIL_H
 
 #include <string>
+#include <vector>
+
+#include "kudu/gutil/port.h"
 
 namespace kudu {
 
+class Status;
+
+// Common tmp infix
+extern const char kTmpInfix[];
+// Infix from versions of Kudu prior to 1.2.
+extern const char kOldTmpInfix[];
+
 // Join two path segments with the appropriate path separator,
 // if necessary.
-std::string JoinPathSegments(const std::string &a,
-                             const std::string &b);
+std::string JoinPathSegments(const std::string& a,
+                             const std::string& b);
+
+// Join each path segment in a list with a common suffix segment.
+std::vector<std::string> JoinPathSegmentsV(const std::vector<std::string>& v,
+                                           const std::string& s);
+
+// Split a path into segments with the appropriate path separator.
+std::vector<std::string> SplitPath(const std::string& path);
 
 // Return the enclosing directory of path.
 // This is like dirname(3) but for C++ strings.
@@ -35,6 +52,12 @@ std::string DirName(const std::string& path);
 // Return the terminal component of a path.
 // This is like basename(3) but for C++ strings.
 std::string BaseName(const std::string& path);
+
+// Attempts to find the path to the executable, searching the provided locations
+// as well as the $PATH environment variable.
+Status FindExecutable(const std::string& binary,
+                      const std::vector<std::string>& search,
+                      std::string* path) WARN_UNUSED_RESULT;
 
 } // namespace kudu
 #endif /* KUDU_UTIL_PATH_UTIL_H */

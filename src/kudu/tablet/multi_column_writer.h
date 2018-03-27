@@ -17,35 +17,41 @@
 #ifndef KUDU_TABLET_MULTI_COLUMN_WRITER_H
 #define KUDU_TABLET_MULTI_COLUMN_WRITER_H
 
-#include <glog/logging.h>
+#include <cstddef>
 #include <map>
+#include <string>
 #include <vector>
 
-#include "kudu/common/schema.h"
-#include "kudu/fs/fs_manager.h"
+#include <glog/logging.h>
+
+#include "kudu/fs/block_id.h"
 #include "kudu/gutil/macros.h"
+#include "kudu/util/status.h"
 
 namespace kudu {
 
+class FsManager;
 class RowBlock;
 class Schema;
+struct ColumnId;
 
 namespace cfile {
 class CFileWriter;
 } // namespace cfile
 
 namespace fs {
-class ScopedWritableBlockCloser;
+class BlockCreationTransaction;
 } // namespace fs
 
 namespace tablet {
 
 // Wrapper which writes several columns in parallel corresponding to some
-// Schema.
+// Schema. Written blocks will fall in the tablet_id's data dir group.
 class MultiColumnWriter {
  public:
   MultiColumnWriter(FsManager* fs,
-                    const Schema* schema);
+                    const Schema* schema,
+                    std::string tablet_id);
 
   virtual ~MultiColumnWriter();
 
@@ -57,14 +63,9 @@ class MultiColumnWriter {
   // Note that the selection vector here is ignored.
   Status AppendBlock(const RowBlock& block);
 
-  // Close the in-progress files.
-  //
-  // The file's blocks may be retrieved using FlushedBlocks().
-  Status Finish();
-
-  // Close the in-progress CFiles, releasing the underlying writable blocks
-  // to 'closer'.
-  Status FinishAndReleaseBlocks(fs::ScopedWritableBlockCloser* closer);
+  // Close the in-progress CFiles, finalizing the underlying writable
+  // blocks and releasing them to 'transaction'.
+  Status FinishAndReleaseBlocks(fs::BlockCreationTransaction* transaction);
 
   // Return the number of bytes written so far.
   size_t written_size() const;
@@ -84,6 +85,8 @@ class MultiColumnWriter {
   const Schema* const schema_;
 
   bool finished_;
+
+  const std::string tablet_id_;
 
   std::vector<cfile::CFileWriter *> cfile_writers_;
   std::vector<BlockId> block_ids_;

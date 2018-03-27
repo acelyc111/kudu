@@ -17,8 +17,18 @@
 
 #include "kudu/cfile/bloomfile-test-base.h"
 
-#include <boost/bind.hpp>
+#include <cstdint>
+#include <vector>
 
+#include <boost/bind.hpp> // IWYU pragma: keep
+#include <gflags/gflags.h>
+#include <glog/logging.h>
+#include <gtest/gtest.h>
+
+#include "kudu/gutil/ref_counted.h"
+#include "kudu/gutil/strings/substitute.h"
+#include "kudu/util/status.h"
+#include "kudu/util/test_macros.h"
 #include "kudu/util/thread.h"
 
 DEFINE_int32(benchmark_num_threads, 8, "Number of threads to use for the benchmark");
@@ -29,12 +39,11 @@ namespace cfile {
 class MTBloomFileTest : public BloomFileTestBase {
 };
 
-#ifdef NDEBUG
 TEST_F(MTBloomFileTest, Benchmark) {
   ASSERT_NO_FATAL_FAILURE(WriteTestBloomFile());
   ASSERT_OK(OpenBloomFile());
 
-  vector<scoped_refptr<kudu::Thread> > threads;
+  std::vector<scoped_refptr<kudu::Thread> > threads;
 
   for (int i = 0; i < FLAGS_benchmark_num_threads; i++) {
     scoped_refptr<kudu::Thread> new_thread;
@@ -47,7 +56,6 @@ TEST_F(MTBloomFileTest, Benchmark) {
     t->Join();
   }
 }
-#endif
 
 } // namespace cfile
 } // namespace kudu

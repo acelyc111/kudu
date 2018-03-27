@@ -50,13 +50,13 @@ llvm_map_components_to_libnames(llvm_LIBRARIES "${LLVM_REQ_COMPONENTS}")
 # Precompiling to LLVM bytecode
 #######################################
 
-## Create .ll file for precompiled functions (and their dependencies)
-set(CLANG_EXEC ${THIRDPARTY_PREFIX}/bin/clang++)
+## Create .ll file for precompiled functions (and their dependencies).
+set(CLANG_EXEC ${THIRDPARTY_DIR}/clang-toolchain/bin/clang++)
 set(IR_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/precompiled.cc)
-set(IR_OUTPUT ${BUILD_OUTPUT_ROOT_DIRECTORY}/precompiled.ll)
+set(IR_OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/precompiled.ll)
 set(IR_OUTPUT_CC ${IR_OUTPUT}.cc)
 
-# Retrieve all includes directories needed for precompilation
+# Retrieve all includes directories needed for precompilation.
 get_directory_property(IR_INCLUDES
   DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   INCLUDE_DIRECTORIES)
@@ -72,7 +72,7 @@ if (APPLE)
     -cxx-isystem "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/include/c++/v1")
 endif()
 
-# Get preprocessing definitions, which enable directives for glog and gtest
+# Get preprocessing definitions, which enable directives for glog and gtest.
 get_directory_property(IR_PP_DEFINITIONS
   DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   COMPILE_DEFINITIONS)
@@ -80,13 +80,21 @@ foreach(noprefix ${IR_PP_DEFINITIONS})
     set(PREFIXED_IR_PP_DEFS ${PREFIXED_IR_PP_DEFS} -D${noprefix})
 endforeach()
 
-# Get flags related to actually compiling the source
+# Get flags related to actually compiling the source.
 set(IR_FLAGS
-  -S -emit-llvm
+  -S
+  -emit-llvm
   -DIR_BUILD
   ${CMAKE_CXX_FLAGS}
   ${PREFIXED_IR_PP_DEFS}
   ${PREFIXED_IR_INCLUDES})
+
+# Provide clang with any explicitly defined system prefix path. If there isn't
+# one, clang will search for it on its own.
+if(COMPILER_SYSTEM_PREFIX_PATH)
+  set(IR_FLAGS ${IR_FLAGS} --gcc-toolchain=${COMPILER_SYSTEM_PREFIX_PATH})
+endif()
+
 separate_arguments(IR_FLAGS)
 
 # Avoid enabling ASAN in the precompiled IR.
@@ -116,6 +124,15 @@ list(REMOVE_ITEM IR_FLAGS "-fsanitize=thread" "-DTHREAD_SANITIZER")
 # Optimizing during the precompilation limits the ability to optimize
 # again at runtime.
 list(REMOVE_ITEM IR_FLAGS "-O3" "-O2" "-O1" "-Os")
+
+# Disable built-in LLVM passes which would add 'noinline' attributes to all
+# standalone functions.
+#
+# This is per the advice in https://reviews.llvm.org/D28053#629914 which says:
+#
+#   "This will generate a frontend-optimized but backend pristine bitcode file that
+#    can be processed more or less depending on the desire of the user..."
+list(APPEND IR_FLAGS "-O" "-mllvm" "-disable-llvm-optzns")
 
 # We need a library which depends on the IR source, because CMake+Ninja
 # doesn't support IMPLICIT_DEPENDS in ADD_CUSTOM_COMMAND.

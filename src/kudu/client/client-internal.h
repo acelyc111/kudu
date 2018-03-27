@@ -17,43 +17,73 @@
 #ifndef KUDU_CLIENT_CLIENT_INTERNAL_H
 #define KUDU_CLIENT_CLIENT_INTERNAL_H
 
-#include <boost/function.hpp>
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <memory>
 #include <set>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "kudu/client/client.h"
+#include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/macros.h"
+#include "kudu/gutil/ref_counted.h"
+#include "kudu/rpc/rpc_controller.h"
+#include "kudu/rpc/user_credentials.h"
 #include "kudu/util/atomic.h"
 #include "kudu/util/locks.h"
 #include "kudu/util/monotime.h"
 #include "kudu/util/net/net_util.h"
+#include "kudu/util/status.h"
+#include "kudu/util/status_callback.h"
+
+namespace boost {
+template <typename Signature>
+class function;
+} // namespace boost
 
 namespace kudu {
 
 class DnsResolver;
-class HostPort;
+class PartitionSchema;
+class Sockaddr;
 
 namespace master {
 class AlterTableRequestPB;
+class AlterTableResponsePB;
+class ConnectToMasterResponsePB;
 class CreateTableRequestPB;
-class GetLeaderMasterRpc;
+class CreateTableResponsePB;
 class MasterServiceProxy;
+class TableIdentifierPB;
 } // namespace master
 
 namespace rpc {
 class Messenger;
-class RpcController;
+class RequestTracker;
 } // namespace rpc
 
 namespace client {
+
+class KuduSchema;
+
+namespace internal {
+class ConnectToClusterRpc;
+class MetaCache;
+class RemoteTablet;
+class RemoteTabletServer;
+} // namespace internal
 
 class KuduClient::Data {
  public:
   Data();
   ~Data();
 
-  // Returns a ts that hosts a tablet with the given tablet ID, subject
+  // Selects a TS replica from the given RemoteTablet subject
   // to liveness and the provided selection criteria and blacklist.
   //
   // If no appropriate replica can be found, a non-OK status is returned and 'ts' is untouched.
@@ -62,7 +92,7 @@ class KuduClient::Data {
   // criteria, but are possibly filtered by the blacklist. This is useful for implementing
   // retry logic.
   Status GetTabletServer(KuduClient* client,
-                         const std::string& tablet_id,
+                         const scoped_refptr<internal::RemoteTablet>& rt,
                          ReplicaSelection selection,
                          const std::set<std::string>& blacklist,
                          std::vector<internal::RemoteTabletServer*>* candidates,
@@ -70,16 +100,17 @@ class KuduClient::Data {
 
   Status CreateTable(KuduClient* client,
                      const master::CreateTableRequestPB& req,
-                     const KuduSchema& schema,
-                     const MonoTime& deadline);
+                     master::CreateTableResponsePB* resp,
+                     const MonoTime& deadline,
+                     bool has_range_partition_bounds);
 
   Status IsCreateTableInProgress(KuduClient* client,
-                                 const std::string& table_name,
+                                 master::TableIdentifierPB table,
                                  const MonoTime& deadline,
-                                 bool *create_in_progress);
+                                 bool* create_in_progress);
 
   Status WaitForCreateTableToFinish(KuduClient* client,
-                                    const std::string& table_name,
+                                    master::TableIdentifierPB table,
                                     const MonoTime& deadline);
 
   Status DeleteTable(KuduClient* client,
@@ -88,15 +119,17 @@ class KuduClient::Data {
 
   Status AlterTable(KuduClient* client,
                     const master::AlterTableRequestPB& req,
-                    const MonoTime& deadline);
+                    master::AlterTableResponsePB* resp,
+                    const MonoTime& deadline,
+                    bool has_add_drop_partition);
 
   Status IsAlterTableInProgress(KuduClient* client,
-                                const std::string& table_name,
+                                master::TableIdentifierPB table,
                                 const MonoTime& deadline,
-                                bool *alter_in_progress);
+                                bool* alter_in_progress);
 
   Status WaitForAlterTableToFinish(KuduClient* client,
-                                   const std::string& alter_name,
+                                   master::TableIdentifierPB table,
                                    const MonoTime& deadline);
 
   Status GetTableSchema(KuduClient* client,
@@ -104,7 +137,8 @@ class KuduClient::Data {
                         const MonoTime& deadline,
                         KuduSchema* schema,
                         PartitionSchema* partition_schema,
-                        std::string* table_id);
+                        std::string* table_id,
+                        int* num_replicas);
 
   Status InitLocalHostNames();
 
@@ -122,13 +156,14 @@ class KuduClient::Data {
       const std::set<std::string>& blacklist,
       std::vector<internal::RemoteTabletServer*>* candidates) const;
 
-  // Sets 'master_proxy_' from the address specified by
-  // 'leader_master_hostport_'.  Called by
-  // GetLeaderMasterRpc::SendRpcCb() upon successful completion.
+  // Sets 'master_proxy_' from the address specified by 'leader_addr'.
+  // Called by ConnectToClusterRpc::SendRpcCb() upon successful completion.
   //
-  // See also: SetMasterServerProxyAsync.
-  void LeaderMasterDetermined(const Status& status,
-                              const HostPort& host_port);
+  // See also: ConnectToClusterAsync.
+  void ConnectedToClusterCb(const Status& status,
+                            const std::pair<Sockaddr, std::string>& leader_addr_and_name,
+                            const master::ConnectToMasterResponsePB& connect_response,
+                            rpc::CredentialsPolicy cred_policy);
 
   // Asynchronously sets 'master_proxy_' to the leader master by
   // cycling through servers listed in 'master_server_addrs_' until
@@ -138,19 +173,19 @@ class KuduClient::Data {
   // Invokes 'cb' with the appropriate status when finished.
   //
   // Works with both a distributed and non-distributed configuration.
-  void SetMasterServerProxyAsync(KuduClient* client,
-                                 const MonoTime& deadline,
-                                 const StatusCallback& cb);
+  void ConnectToClusterAsync(KuduClient* client,
+                             const MonoTime& deadline,
+                             const StatusCallback& cb,
+                             rpc::CredentialsPolicy creds_policy);
 
-  // Synchronous version of SetMasterServerProxyAsync method above.
+  // Synchronous version of ConnectToClusterAsync method above.
   //
   // NOTE: since this uses a Synchronizer, this may not be invoked by
   // a method that's on a reactor thread.
-  //
-  // TODO (KUDU-492): Get rid of this method and re-factor the client
-  // to lazily initialize 'master_proxy_'.
-  Status SetMasterServerProxy(KuduClient* client,
-                              const MonoTime& deadline);
+  Status ConnectToCluster(
+      KuduClient* client,
+      const MonoTime& deadline,
+      rpc::CredentialsPolicy creds_policy = rpc::CredentialsPolicy::ANY_CREDENTIALS);
 
   std::shared_ptr<master::MasterServiceProxy> master_proxy() const;
 
@@ -167,22 +202,39 @@ class KuduClient::Data {
   //    errors, timeouts, or leadership issues.
   // 3) 'deadline' (if initialized) elapses.
   //
-  // If 'num_attempts' is not NULL, it will be incremented on every
-  // attempt (successful or not) to call 'func'.
-  //
   // NOTE: 'rpc_timeout' is a per-call timeout, while 'deadline' is a
   // per operation deadline. If 'deadline' is not initialized, 'func' is
-  // retried forever.
+  // retried forever. If 'deadline' expires, 'func_name' is included in
+  // the resulting Status.
   template<class ReqClass, class RespClass>
   Status SyncLeaderMasterRpc(
       const MonoTime& deadline,
       KuduClient* client,
       const ReqClass& req,
       RespClass* resp,
-      int* num_attempts,
+      const char* func_name,
       const boost::function<Status(master::MasterServiceProxy*,
                                    const ReqClass&, RespClass*,
-                                   rpc::RpcController*)>& func);
+                                   rpc::RpcController*)>& func,
+      std::vector<uint32_t> required_feature_flags);
+
+  // Exponential backoff with jitter anchored between 10ms and 20ms, and an
+  // upper bound between 2.5s and 5s.
+  static MonoDelta ComputeExponentialBackoff(int num_attempts) {
+    return MonoDelta::FromMilliseconds(
+        (10 + rand() % 10) * static_cast<int>(
+            std::pow(2.0, std::min(8, num_attempts - 1))));
+  }
+
+  // The unique id of this client.
+  std::string client_id_;
+
+  // The user credentials of the client. This field is constant after the client
+  // is built.
+  rpc::UserCredentials user_credentials_;
+
+  // The request tracker for this client.
+  scoped_refptr<rpc::RequestTracker> request_tracker_;
 
   std::shared_ptr<rpc::Messenger> messenger_;
   gscoped_ptr<DnsResolver> dns_resolver_;
@@ -198,28 +250,31 @@ class KuduClient::Data {
   MonoDelta default_rpc_timeout_;
 
   // The host port of the leader master. This is set in
-  // LeaderMasterDetermined, which is invoked as a callback by
-  // SetMasterServerProxyAsync.
+  // ConnectedToClusterCb, which is invoked as a callback by
+  // ConnectToClusterAsync.
   HostPort leader_master_hostport_;
 
   // Proxy to the leader master.
   std::shared_ptr<master::MasterServiceProxy> master_proxy_;
 
-  // Ref-counted RPC instance: since 'SetMasterServerProxyAsync' call
+  // Ref-counted RPC instance: since 'ConnectToClusterAsync' call
   // is asynchronous, we need to hold a reference in this class
   // itself, as to avoid a "use-after-free" scenario.
-  scoped_refptr<master::GetLeaderMasterRpc> leader_master_rpc_;
-  std::vector<StatusCallback> leader_master_callbacks_;
+  scoped_refptr<internal::ConnectToClusterRpc> leader_master_rpc_any_creds_;
+  std::vector<StatusCallback> leader_master_callbacks_any_creds_;
+  scoped_refptr<internal::ConnectToClusterRpc> leader_master_rpc_primary_creds_;
+  std::vector<StatusCallback> leader_master_callbacks_primary_creds_;
 
-  // Protects 'leader_master_rpc_', 'leader_master_hostport_',
-  // and master_proxy_
+  // Protects 'leader_master_rpc_{any,primary}_creds_',
+  // 'leader_master_hostport_', and 'master_proxy_'.
   //
-  // See: KuduClient::Data::SetMasterServerProxyAsync for a more
+  // See: KuduClient::Data::ConnectToClusterAsync for a more
   // in-depth explanation of why this is needed and how it works.
   mutable simple_spinlock leader_master_lock_;
 
   AtomicInt<uint64_t> latest_observed_timestamp_;
 
+ private:
   DISALLOW_COPY_AND_ASSIGN(Data);
 };
 
@@ -232,6 +287,10 @@ Status RetryFunc(const MonoTime& deadline,
                  const std::string& retry_msg,
                  const std::string& timeout_msg,
                  const boost::function<Status(const MonoTime&, bool*)>& func);
+
+// Set logging verbose level through environment variable.
+void SetVerboseLevelFromEnvVar();
+extern const char* kVerboseEnvVar;
 
 } // namespace client
 } // namespace kudu

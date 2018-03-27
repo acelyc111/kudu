@@ -17,32 +17,53 @@
 
 #include "kudu/rpc/transfer.h"
 
-#include <stdint.h>
+#include <sys/uio.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <iostream>
-#include <sstream>
+#include <limits>
+#include <set>
 
+#include <gflags/gflags.h>
 #include <glog/logging.h>
 
 #include "kudu/gutil/endian.h"
-#include "kudu/gutil/stringprintf.h"
+#include "kudu/gutil/port.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/rpc/constants.h"
-#include "kudu/rpc/messenger.h"
 #include "kudu/util/flag_tags.h"
-#include "kudu/util/net/sockaddr.h"
+#include "kudu/util/logging.h"
 #include "kudu/util/net/socket.h"
 
-DEFINE_int32(rpc_max_message_size, (8 * 1024 * 1024),
-             "The maximum size of a message that any RPC that the server will accept.");
+DEFINE_int64(rpc_max_message_size, (50 * 1024 * 1024),
+             "The maximum size of a message that any RPC that the server will accept. "
+             "Must be at least 1MB.");
 TAG_FLAG(rpc_max_message_size, advanced);
 TAG_FLAG(rpc_max_message_size, runtime);
+
+static bool ValidateMaxMessageSize(const char* flagname, int64_t value) {
+  if (value < 1 * 1024 * 1024) {
+    LOG(ERROR) << flagname << " must be at least 1MB.";
+    return false;
+  }
+  if (value > std::numeric_limits<int32_t>::max()) {
+    LOG(ERROR) << flagname << " must be less than "
+               << std::numeric_limits<int32_t>::max() << " bytes.";
+  }
+
+  return true;
+}
+static bool dummy = google::RegisterFlagValidator(
+    &FLAGS_rpc_max_message_size, &ValidateMaxMessageSize);
 
 namespace kudu {
 namespace rpc {
 
 using std::ostringstream;
+using std::set;
 using std::string;
+using strings::Substitute;
 
 #define RETURN_ON_ERROR_OR_SOCKET_NOT_READY(status) \
   if (PREDICT_FALSE(!status.ok())) {                            \
@@ -63,7 +84,7 @@ InboundTransfer::InboundTransfer()
 
 Status InboundTransfer::ReceiveBuffer(Socket &socket) {
   if (cur_offset_ < kMsgLengthPrefixLength) {
-    // receive int32 length prefix
+    // receive uint32 length prefix
     int32_t rem = kMsgLengthPrefixLength - cur_offset_;
     int32_t nread;
     Status status = socket.Recv(&buf_[cur_offset_], rem, &nread);
@@ -86,13 +107,13 @@ Status InboundTransfer::ReceiveBuffer(Socket &socket) {
     // add that back in.
     total_length_ = NetworkByteOrder::Load32(&buf_[0]) + kMsgLengthPrefixLength;
     if (total_length_ > FLAGS_rpc_max_message_size) {
-      return Status::NetworkError(StringPrintf("the frame had a "
-               "length of %d, but we only support messages up to %d bytes "
-               "long.", total_length_, FLAGS_rpc_max_message_size));
+      return Status::NetworkError(Substitute(
+          "RPC frame had a length of $0, but we only support messages up to $1 bytes "
+          "long.", total_length_, FLAGS_rpc_max_message_size));
     }
     if (total_length_ <= kMsgLengthPrefixLength) {
-      return Status::NetworkError(StringPrintf("the frame had a "
-               "length of %d, which is invalid", total_length_));
+      return Status::NetworkError(Substitute("RPC frame had invalid length of $0",
+                                             total_length_));
     }
     buf_.resize(total_length_);
 
@@ -102,7 +123,13 @@ Status InboundTransfer::ReceiveBuffer(Socket &socket) {
 
   // receive message body
   int32_t nread;
-  int32_t rem = total_length_ - cur_offset_;
+
+  // Socket::Recv() handles at most INT_MAX at a time, so cap the remainder at
+  // INT_MAX. The message will be split across multiple Recv() calls.
+  // Note that this is only needed when rpc_max_message_size > INT_MAX, which is
+  // currently only used for unit tests.
+  int32_t rem = std::min(total_length_ - cur_offset_,
+      static_cast<uint32_t>(std::numeric_limits<int32_t>::max()));
   Status status = socket.Recv(&buf_[cur_offset_], rem, &nread);
   RETURN_ON_ERROR_OR_SOCKET_NOT_READY(status);
   cur_offset_ += nread;
@@ -119,20 +146,36 @@ bool InboundTransfer::TransferFinished() const {
 }
 
 string InboundTransfer::StatusAsString() const {
-  return strings::Substitute("$0/$1 bytes received", cur_offset_, total_length_);
+  return Substitute("$0/$1 bytes received", cur_offset_, total_length_);
 }
 
-OutboundTransfer::OutboundTransfer(const std::vector<Slice> &payload,
+OutboundTransfer* OutboundTransfer::CreateForCallRequest(int32_t call_id,
+                                                         const TransferPayload &payload,
+                                                         size_t n_payload_slices,
+                                                         TransferCallbacks *callbacks) {
+  return new OutboundTransfer(call_id, payload, n_payload_slices, callbacks);
+}
+
+OutboundTransfer* OutboundTransfer::CreateForCallResponse(const TransferPayload &payload,
+                                                          size_t n_payload_slices,
+                                                          TransferCallbacks *callbacks) {
+  return new OutboundTransfer(kInvalidCallId, payload, n_payload_slices, callbacks);
+}
+
+OutboundTransfer::OutboundTransfer(int32_t call_id,
+                                   const TransferPayload &payload,
+                                   size_t n_payload_slices,
                                    TransferCallbacks *callbacks)
   : cur_slice_idx_(0),
     cur_offset_in_slice_(0),
     callbacks_(callbacks),
+    call_id_(call_id),
+    started_(false),
     aborted_(false) {
-  CHECK(!payload.empty());
 
-  n_payload_slices_ = payload.size();
-  CHECK_LE(n_payload_slices_, arraysize(payload_slices_));
-  for (int i = 0; i < payload.size(); i++) {
+  n_payload_slices_ = n_payload_slices;
+  CHECK_LE(n_payload_slices_, payload_slices_.size());
+  for (int i = 0; i < n_payload_slices; i++) {
     payload_slices_[i] = payload[i];
   }
 }
@@ -154,6 +197,7 @@ void OutboundTransfer::Abort(const Status &status) {
 Status OutboundTransfer::SendBuffer(Socket &socket) {
   CHECK_LT(cur_slice_idx_, n_payload_slices_);
 
+  started_ = true;
   int n_iovecs = n_payload_slices_ - cur_slice_idx_;
   struct iovec iovec[n_iovecs];
   {
@@ -167,7 +211,7 @@ Status OutboundTransfer::SendBuffer(Socket &socket) {
     }
   }
 
-  int32_t written;
+  int64_t written;
   Status status = socket.Writev(iovec, n_iovecs, &written);
   RETURN_ON_ERROR_OR_SOCKET_NOT_READY(status);
 
@@ -201,7 +245,7 @@ Status OutboundTransfer::SendBuffer(Socket &socket) {
 }
 
 bool OutboundTransfer::TransferStarted() const {
-  return cur_offset_in_slice_ != 0 || cur_slice_idx_ != 0;
+  return started_;
 }
 
 bool OutboundTransfer::TransferFinished() const {
@@ -213,6 +257,10 @@ bool OutboundTransfer::TransferFinished() const {
 }
 
 string OutboundTransfer::HexDump() const {
+  if (KUDU_SHOULD_REDACT()) {
+    return kRedactionMessage;
+  }
+
   string ret;
   for (int i = 0; i < n_payload_slices_; i++) {
     ret.append(payload_slices_[i].ToDebugString());

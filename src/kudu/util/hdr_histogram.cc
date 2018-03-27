@@ -14,11 +14,22 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+//
+// Portions of these classes were ported from Java to C++ from the sources
+// available at https://github.com/HdrHistogram/HdrHistogram .
+//
+//   The code in this repository code was Written by Gil Tene, Michael Barker,
+//   and Matt Warren, and released to the public domain, as explained at
+//   http://creativecommons.org/publicdomain/zero/1.0/
 #include "kudu/util/hdr_histogram.h"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <ostream>
+#include <string>
+
+#include <glog/logging.h>
 
 #include "kudu/gutil/atomicops.h"
 #include "kudu/gutil/bits.h"
