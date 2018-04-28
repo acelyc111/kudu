@@ -49,8 +49,16 @@ static constexpr int kHmsStartTimeoutMs = 60000;
 namespace kudu {
 namespace hms {
 
+MiniHms::MiniHms() {
+}
+
 MiniHms::~MiniHms() {
   WARN_NOT_OK(Stop(), "Failed to stop MiniHms");
+}
+
+void MiniHms::SetNotificationLogTtl(MonoDelta ttl) {
+  CHECK(hms_process_);
+  notification_log_ttl_ = ttl;
 }
 
 void MiniHms::EnableKerberos(string krb5_conf,
@@ -167,6 +175,10 @@ Status MiniHms::Resume() {
   return Status::OK();
 }
 
+string MiniHms::uris() const {
+  return Substitute("thrift://127.0.0.1:$0", port_);
+}
+
 Status MiniHms::CreateHiveSite(const string& tmp_dir) const {
 
   // - datanucleus.schema.autoCreateAll
@@ -181,6 +193,9 @@ Status MiniHms::CreateHiveSite(const string& tmp_dir) const {
   // - hive.metastore.kerberos.keytab.file
   // - hive.metastore.kerberos.principal
   //     Configures the HMS to use Kerberos for its Thrift RPC interface.
+  //
+  // - hive.metastore.disallow.incompatible.col.type.changes
+  //     Configures the HMS to allow altering and dropping columns.
   static const string kFileTemplate = R"(
 <configuration>
   <property>
@@ -208,7 +223,7 @@ Status MiniHms::CreateHiveSite(const string& tmp_dir) const {
 
   <property>
     <name>javax.jdo.option.ConnectionURL</name>
-    <value>jdbc:derby:memory:$1/metadb;create=true</value>
+    <value>jdbc:derby:$1/metadb;create=true</value>
   </property>
 
   <property>
@@ -234,6 +249,11 @@ Status MiniHms::CreateHiveSite(const string& tmp_dir) const {
   <property>
     <name>hadoop.rpc.protection</name>
     <value>$5</value>
+  </property>
+
+  <property>
+    <name>hive.metastore.disallow.incompatible.col.type.changes</name>
+    <value>false</value>
   </property>
 </configuration>
   )";

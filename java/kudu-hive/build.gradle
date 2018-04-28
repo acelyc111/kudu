@@ -16,9 +16,15 @@
 // under the License.
 
 dependencies {
-  compile libs.yetusAnnotations
-  compile libs.slf4jApi
-  compile libs.hiveMetastore
+  // NOTE: The build currently expects all dependencies will be available
+  // via the hive-metastore classpath. Therefore, all dependencies should
+  // be provided scope.
+  provided libs.hiveMetastore
+  provided libs.slf4jApi
+  // Transitively required through hive-metastore,
+  // which has marked it as an optional dependency.
+  provided libs.hadoopCommon
+  provided libs.hadoopMRClientCommon
 
   testCompile libs.hiveMetastoreTest
   testCompile libs.junit
@@ -32,3 +38,11 @@ test {
   // Configure the derby log file location.
   systemProperty "derby.stream.error.file", "$temporaryDir/derby.log"
 }
+
+// kudu-hive has no public Javadoc.
+javadoc {
+  enabled = false
+}
+
+// Skip publishing kudu-hive until it's ready to be supported long-term.
+uploadArchives.enabled = false

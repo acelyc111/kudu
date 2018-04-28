@@ -155,6 +155,7 @@ public class KuduTableMapReduceUtil {
     /**
      * {@inheritDoc}
      */
+    @Override
     public void configure() throws IOException {
       job.setOutputFormatClass(KuduTableOutputFormat.class);
       job.setOutputKeyClass(NullWritable.class);
@@ -225,6 +226,7 @@ public class KuduTableMapReduceUtil {
      * @throws IOException If addDependencies is enabled and a problem is encountered reading
      * files on the filesystem
      */
+    @Override
     public void configure() throws IOException {
       job.setInputFormatClass(KuduTableInputFormat.class);
 
@@ -305,9 +307,6 @@ public class KuduTableMapReduceUtil {
   public static class TableOutputFormatConfiguratorWithCommandLineParser extends
       AbstractTableOutputFormatConfigurator<TableOutputFormatConfiguratorWithCommandLineParser> {
 
-    /**
-     * {@inheritDoc}
-     */
     public TableOutputFormatConfiguratorWithCommandLineParser(Job job, String table) {
       super(job, table);
       CommandLineParser parser = new CommandLineParser(job.getConfiguration());
@@ -382,9 +381,6 @@ public class KuduTableMapReduceUtil {
   public static class TableInputFormatConfiguratorWithCommandLineParser extends
       AbstractTableInputFormatConfigurator<TableInputFormatConfiguratorWithCommandLineParser> {
 
-    /**
-     * {@inheritDoc}
-     */
     public TableInputFormatConfiguratorWithCommandLineParser(Job job,
                                                              String table,
                                                              String columnProjection) {

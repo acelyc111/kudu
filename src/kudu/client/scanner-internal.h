@@ -32,13 +32,12 @@
 #include "kudu/client/row_result.h"
 #include "kudu/client/scan_batch.h"
 #include "kudu/client/scan_configuration.h"
-#include "kudu/client/shared_ptr.h"
 #include "kudu/client/schema.h"
+#include "kudu/client/shared_ptr.h"
 #include "kudu/common/partition_pruner.h"
 #include "kudu/common/scan_spec.h"
 #include "kudu/common/schema.h"
 #include "kudu/common/wire_protocol.pb.h"
-#include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/macros.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/strings/substitute.h"
@@ -130,14 +129,18 @@ class KuduScanner::Data {
   // Called when KuduScanner::NextBatch or KuduScanner::Data::OpenTablet result in an RPC or
   // server error.
   //
-  // If the provided 'status' indicates the error was retryable, then returns Status::OK()
+  // If the provided 'err' indicates the error was retryable, then returns Status::OK()
   // and potentially inserts the current server into 'blacklist' if the retry should be
-  // made on a different replica.
+  // made on a different replica. If the current server seems healthy, but the scanner expired,
+  // sets 'needs_reopen' to true to indicate that the client should re-open a new scanner.
+  //
+  // If 'needs_reopen' is nullptr, then it is not set.
   //
   // This function may also sleep in case the error suggests that backoff is necessary.
-  Status HandleError(const ScanRpcStatus& status,
+  Status HandleError(const ScanRpcStatus& err,
                      const MonoTime& deadline,
-                     std::set<std::string>* blacklist);
+                     std::set<std::string>* blacklist,
+                     bool* needs_reopen);
 
   // Opens the next tablet in the scan, or returns Status::NotFound if there are
   // no more tablets to scan.
@@ -235,6 +238,9 @@ class KuduScanner::Data {
   // Number of attempts since the last successful scan.
   int scan_attempts_;
 
+  // Number of rows already returned.
+  int64_t num_rows_returned_;
+
   // The deprecated "NextBatch(vector<KuduRowResult>*) API requires some local
   // storage for the actual row data. If that API is used, this member keeps the
   // actual storage for the batch that is returned.
@@ -292,7 +298,7 @@ class KuduScanBatch::Data {
                const Schema* projection,
                const KuduSchema* client_projection,
                uint64_t row_format_flags,
-               gscoped_ptr<RowwiseRowBlockPB> resp_data);
+               std::unique_ptr<RowwiseRowBlockPB> resp_data);
 
   int num_rows() const {
     return resp_data_.num_rows();

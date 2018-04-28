@@ -123,7 +123,7 @@ public final class Slice implements Comparable<Slice> {
   public short getShort(int index) {
     Preconditions.checkPositionIndexes(index, index + Shorts.BYTES, this.length);
     index += offset;
-    return (short) (data[index] & 0xFF | data[index + 1] << 8);
+    return (short) ((data[index] & 0xFF) | (data[index + 1] << 8));
   }
 
   /**
@@ -607,6 +607,7 @@ public final class Slice implements Comparable<Slice> {
    * buffer.  This comparison is performed byte by byte using an unsigned
    * comparison.
    */
+  @Override
   public int compareTo(Slice that) {
     if (this == that) {
       return 0;
@@ -646,6 +647,7 @@ public final class Slice implements Comparable<Slice> {
     return Slices.decodeString(toByteBuffer(index, length), charset);
   }
 
+  @Override
   public String toString() {
     return getClass().getSimpleName() + '(' +
         "length=" + length() +

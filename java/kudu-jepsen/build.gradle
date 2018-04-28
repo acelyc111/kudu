@@ -36,7 +36,8 @@ dependencies {
   compile libs.clojure
   compile libs.clojureToolsCli
   compile libs.jepsen
-  compile libs.yetusAnnotations
+
+  optional libs.yetusAnnotations
 }
 
 compileClojure {
@@ -64,3 +65,6 @@ task runJepsen(type: JavaExec) {
       "--iter-num=${iterNum}"
   ]
 }
+
+// We don't publish kudu-jepsen
+uploadArchives.enabled = false

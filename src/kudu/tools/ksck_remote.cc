@@ -20,26 +20,30 @@
 #include <cstdint>
 #include <ostream>
 #include <unordered_map>
-#include <utility>
 
 #include <boost/bind.hpp> // IWYU pragma: keep
+#include <boost/optional/optional.hpp>
 #include <gflags/gflags.h>
 #include <gflags/gflags_declare.h>
 #include <glog/logging.h>
 
 #include "kudu/client/client.h"
-#include "kudu/client/replica_controller-internal.h"
 #include "kudu/client/schema.h"
+#include "kudu/client/replica_controller-internal.h"
 #include "kudu/common/common.pb.h"
 #include "kudu/common/schema.h"
 #include "kudu/common/wire_protocol.h"
+#include "kudu/common/wire_protocol.pb.h"
 #include "kudu/consensus/consensus.pb.h"
 #include "kudu/consensus/consensus.proxy.h"
+#include "kudu/consensus/metadata.pb.h"
 #include "kudu/gutil/basictypes.h"
 #include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/map-util.h"
 #include "kudu/gutil/stl_util.h"
 #include "kudu/gutil/strings/substitute.h"
+#include "kudu/master/master.h"
+#include "kudu/master/sys_catalog.h"
 #include "kudu/rpc/messenger.h"
 #include "kudu/rpc/response_callback.h"
 #include "kudu/rpc/rpc_controller.h"
@@ -78,8 +82,59 @@ using std::string;
 using std::vector;
 using strings::Substitute;
 
+namespace {
 MonoDelta GetDefaultTimeout() {
   return MonoDelta::FromMilliseconds(FLAGS_timeout_ms);
+}
+} // anonymous namespace
+
+Status RemoteKsckMaster::Init() {
+  vector<Sockaddr> addresses;
+  RETURN_NOT_OK(ParseAddressList(address_,
+      master::Master::kDefaultPort,
+      &addresses));
+  const auto& addr = addresses[0];
+  HostPort hp;
+  RETURN_NOT_OK(hp.ParseString(address_, master::Master::kDefaultPort));
+  const auto& host = hp.host();
+  generic_proxy_.reset(new server::GenericServiceProxy(messenger_, addr, host));
+  consensus_proxy_.reset(new consensus::ConsensusServiceProxy(messenger_, addr, host));
+  return Status::OK();
+}
+
+Status RemoteKsckMaster::FetchInfo() {
+  state_ = KsckFetchState::FETCH_FAILED;
+  server::GetStatusRequestPB req;
+  server::GetStatusResponsePB resp;
+  RpcController rpc;
+  rpc.set_timeout(GetDefaultTimeout());
+  RETURN_NOT_OK(generic_proxy_->GetStatus(req, &resp, &rpc));
+  uuid_ = resp.status().node_instance().permanent_uuid();
+  state_ = KsckFetchState::FETCHED;
+  return Status::OK();
+}
+
+Status RemoteKsckMaster::FetchConsensusState() {
+  CHECK_EQ(state_, KsckFetchState::FETCHED);
+  consensus::GetConsensusStateRequestPB req;
+  consensus::GetConsensusStateResponsePB resp;
+  RpcController rpc;
+  rpc.set_timeout(GetDefaultTimeout());
+  req.set_dest_uuid(uuid_);
+  RETURN_NOT_OK_PREPEND(consensus_proxy_->GetConsensusState(req, &resp, &rpc),
+                        "could not fetch consensus info from master");
+  if (resp.tablets_size() != 1) {
+    return Status::IllegalState(Substitute("expected 1 master tablet, but found $0",
+                                           resp.tablets_size()));
+  }
+  const auto& tablet = resp.tablets(0);
+  if (tablet.tablet_id() != master::SysCatalogTable::kSysCatalogTabletId) {
+    return Status::IllegalState(Substitute("expected master tablet with id $0, but found $1",
+                                           master::SysCatalogTable::kSysCatalogTabletId,
+                                           tablet.tablet_id()));
+  }
+  cstate_ = tablet.cstate();
+  return Status::OK();
 }
 
 Status RemoteKsckTabletServer::Init() {
@@ -96,15 +151,21 @@ Status RemoteKsckTabletServer::Init() {
 }
 
 Status RemoteKsckTabletServer::FetchInfo() {
-  state_ = kFetchFailed;
+  state_ = KsckFetchState::FETCH_FAILED;
 
   {
-    tserver::PingRequestPB req;
-    tserver::PingResponsePB resp;
+    server::GetStatusRequestPB req;
+    server::GetStatusResponsePB resp;
     RpcController rpc;
     rpc.set_timeout(GetDefaultTimeout());
-    RETURN_NOT_OK_PREPEND(ts_proxy_->Ping(req, &resp, &rpc),
-                          "could not send Ping RPC to server");
+    RETURN_NOT_OK_PREPEND(generic_proxy_->GetStatus(req, &resp, &rpc),
+                          "could not get status from server");
+    string response_uuid = resp.status().node_instance().permanent_uuid();
+    if (response_uuid != uuid()) {
+      return Status::RemoteError(Substitute("ID reported by tablet server ($0) doesn't "
+                                 "match the expected ID: $1",
+                                 response_uuid, uuid()));
+    }
   }
 
   {
@@ -115,6 +176,9 @@ Status RemoteKsckTabletServer::FetchInfo() {
     req.set_need_schema_info(false);
     RETURN_NOT_OK_PREPEND(ts_proxy_->ListTablets(req, &resp, &rpc),
                           "could not list tablets");
+    if (resp.has_error()) {
+      return StatusFromPB(resp.error().status());
+    }
     tablet_status_map_.clear();
     for (auto& status : *resp.mutable_status_and_schema()) {
       tablet_status_map_[status.tablet_status().tablet_id()].Swap(status.mutable_tablet_status());
@@ -132,7 +196,7 @@ Status RemoteKsckTabletServer::FetchInfo() {
     timestamp_ = resp.timestamp();
   }
 
-  state_ = kFetched;
+  state_ = KsckFetchState::FETCHED;
   return Status::OK();
 }
 
@@ -312,43 +376,48 @@ void RemoteKsckTabletServer::RunTabletChecksumScanAsync(
   ignore_result(stepper.release()); // Deletes self on callback.
 }
 
-Status RemoteKsckMaster::Connect() {
+Status RemoteKsckCluster::Connect() {
   KuduClientBuilder builder;
   builder.default_rpc_timeout(GetDefaultTimeout());
   builder.master_server_addrs(master_addresses_);
   ReplicaController::SetVisibility(&builder, ReplicaController::Visibility::ALL);
-  client::sp::shared_ptr<KuduClient> client;
   return builder.Build(&client_);
 }
 
-Status RemoteKsckMaster::Build(const vector<string>& master_addresses,
-                               shared_ptr<KsckMaster>* master) {
+Status RemoteKsckCluster::Build(const vector<string>& master_addresses,
+                               shared_ptr<KsckCluster>* cluster) {
   CHECK(!master_addresses.empty());
   shared_ptr<Messenger> messenger;
   MessengerBuilder builder(kMessengerName);
   RETURN_NOT_OK(builder.Build(&messenger));
-  master->reset(new RemoteKsckMaster(master_addresses, messenger));
+  auto* cl = new RemoteKsckCluster(master_addresses, messenger);
+  for (const auto& master : cl->masters()) {
+    RETURN_NOT_OK_PREPEND(master->Init(),
+                          Substitute("unable to initialize master at $0", master->address()));
+  }
+  cluster->reset(cl);
   return Status::OK();
 }
 
-Status RemoteKsckMaster::RetrieveTabletServers(TSMap* tablet_servers) {
+Status RemoteKsckCluster::RetrieveTabletServers() {
   vector<KuduTabletServer*> servers;
   ElementDeleter deleter(&servers);
   RETURN_NOT_OK(client_->ListTabletServers(&servers));
 
-  tablet_servers->clear();
+  TSMap tablet_servers;
   for (const auto* s : servers) {
     shared_ptr<RemoteKsckTabletServer> ts(
         new RemoteKsckTabletServer(s->uuid(),
                                    HostPort(s->hostname(), s->port()),
                                    messenger_));
     RETURN_NOT_OK(ts->Init());
-    InsertOrDie(tablet_servers, ts->uuid(), ts);
+    InsertOrDie(&tablet_servers, ts->uuid(), ts);
   }
+  tablet_servers_.swap(tablet_servers);
   return Status::OK();
 }
 
-Status RemoteKsckMaster::RetrieveTablesList(vector<shared_ptr<KsckTable>>* tables) {
+Status RemoteKsckCluster::RetrieveTablesList() {
   vector<string> table_names;
   RETURN_NOT_OK(client_->ListTables(&table_names));
 
@@ -362,11 +431,11 @@ Status RemoteKsckMaster::RetrieveTablesList(vector<shared_ptr<KsckTable>>* table
                                               t->num_replicas()));
     tables_temp.push_back(table);
   }
-  tables->assign(tables_temp.begin(), tables_temp.end());
+  tables_.swap(tables_temp);
   return Status::OK();
 }
 
-Status RemoteKsckMaster::RetrieveTabletsList(const shared_ptr<KsckTable>& table) {
+Status RemoteKsckCluster::RetrieveTabletsList(const shared_ptr<KsckTable>& table) {
   vector<shared_ptr<KsckTablet>> tablets;
 
   client::sp::shared_ptr<KuduTable> client_table;

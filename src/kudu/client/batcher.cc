@@ -50,7 +50,6 @@
 #include "kudu/gutil/bind_helpers.h"
 #include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/map-util.h"
-#include "kudu/gutil/move.h"
 #include "kudu/gutil/stl_util.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/rpc/connection.h"
@@ -601,6 +600,7 @@ Status Batcher::Add(KuduWriteOperation* write_op) {
       op->write_op->table(),
       std::move(partition_key),
       deadline,
+      MetaCache::LookupType::kPoint,
       &op->tablet,
       Bind(&Batcher::TabletLookupFinished, this, op.get()));
   IgnoreResult(op.release());

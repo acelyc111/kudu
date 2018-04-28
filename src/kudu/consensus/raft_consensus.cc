@@ -48,7 +48,6 @@
 #include "kudu/consensus/quorum_util.h"
 #include "kudu/gutil/bind.h"
 #include "kudu/gutil/map-util.h"
-#include "kudu/gutil/move.h"
 #include "kudu/gutil/port.h"
 #include "kudu/gutil/stl_util.h"
 #include "kudu/gutil/stringprintf.h"
@@ -201,10 +200,10 @@ Status RaftConsensus::Create(ConsensusOptions options,
                              scoped_refptr<ConsensusMetadataManager> cmeta_manager,
                              ThreadPool* raft_pool,
                              shared_ptr<RaftConsensus>* consensus_out) {
-  shared_ptr<RaftConsensus> consensus(std::make_shared<RaftConsensus>(std::move(options),
-                                                                      std::move(local_peer_pb),
-                                                                      std::move(cmeta_manager),
-                                                                      raft_pool));
+  shared_ptr<RaftConsensus> consensus(RaftConsensus::make_shared(std::move(options),
+                                                                 std::move(local_peer_pb),
+                                                                 std::move(cmeta_manager),
+                                                                 raft_pool));
   RETURN_NOT_OK_PREPEND(consensus->Init(), "Unable to initialize Raft consensus");
   *consensus_out = std::move(consensus);
   return Status::OK();
@@ -215,7 +214,7 @@ Status RaftConsensus::Start(const ConsensusBootstrapInfo& info,
                             scoped_refptr<log::Log> log,
                             scoped_refptr<TimeManager> time_manager,
                             ReplicaTransactionFactory* txn_factory,
-                            scoped_refptr<MetricEntity> metric_entity,
+                            const scoped_refptr<MetricEntity>& metric_entity,
                             Callback<void(const std::string& reason)> mark_dirty_clbk) {
   DCHECK(metric_entity);
 
@@ -245,7 +244,7 @@ Status RaftConsensus::Start(const ConsensusBootstrapInfo& info,
   // TODO(adar): the token is SERIAL to match the previous single-thread
   // observer pool behavior, but CONCURRENT may be safe here.
   unique_ptr<PeerMessageQueue> queue(new PeerMessageQueue(
-      std::move(metric_entity),
+      metric_entity,
       log_,
       time_manager_,
       local_peer_pb_,
@@ -1845,7 +1844,7 @@ Status RaftConsensus::BulkChangeConfig(const BulkChangeConfigRequestPB& req,
     new_config.clear_opid_index();
 
     RETURN_NOT_OK(ReplicateConfigChangeUnlocked(
-        std::move(committed_config), std::move(new_config), std::bind(
+        committed_config, std::move(new_config), std::bind(
             &RaftConsensus::MarkDirtyOnSuccess,
             this,
             string("Config change replication complete"),
@@ -2992,9 +2991,9 @@ ConsensusRound::ConsensusRound(RaftConsensus* consensus,
       bound_term_(-1) {}
 
 ConsensusRound::ConsensusRound(RaftConsensus* consensus,
-                               const ReplicateRefPtr& replicate_msg)
+                               ReplicateRefPtr replicate_msg)
     : consensus_(consensus),
-      replicate_msg_(replicate_msg),
+      replicate_msg_(std::move(replicate_msg)),
       bound_term_(-1) {
   DCHECK(replicate_msg_);
 }

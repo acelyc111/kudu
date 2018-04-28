@@ -34,11 +34,6 @@
     <dependencies>
         <dependency>
             <groupId>org.apache.kudu</groupId>
-            <artifactId>kudu-client</artifactId>
-            <version>${project.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.kudu</groupId>
             <artifactId>kudu-client-tools</artifactId>
             <version>${project.version}</version>
         </dependency>
@@ -47,20 +42,13 @@
             <artifactId>kudu-${spark.version.label}_${scala.binary.version}</artifactId>
             <version>${project.version}</version>
         </dependency>
-        <dependency>
-            <groupId>org.slf4j</groupId>
-            <artifactId>slf4j-api</artifactId>
-            <version>${slf4j.version}</version>
-        </dependency>
 
-        <!-- This artifact is in compile scope for convenience, as it is typically
-             not included in the Spark submit classpath by Spark platform providers. -->
         <dependency>
             <groupId>com.databricks</groupId>
             <artifactId>spark-avro_${scala.binary.version}</artifactId>
             <version>${sparkavro.version}</version>
+            <scope>provided</scope>
         </dependency>
-
         <dependency>
             <groupId>org.apache.spark</groupId>
             <artifactId>spark-core_${scala.binary.version}</artifactId>
@@ -90,6 +78,19 @@
             <artifactId>scala-library</artifactId>
             <version>${scala.version}</version>
             <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>${slf4j.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.yetus</groupId>
+            <artifactId>audience-annotations</artifactId>
+            <version>${yetus.version}</version>
+            <optional>true</optional>
         </dependency>
 
         <dependency>
@@ -182,8 +183,6 @@
                             <include>org.apache.kudu:kudu-client</include>
                             <include>org.apache.kudu:kudu-client-tools</include>
                             <include>org.apache.kudu:kudu-${spark.version.label}_${scala.binary.version}</include>
-                            <include>org.apache.yetus:audience-annotations</include>
-                            <include>com.databricks:spark-avro_${scala.binary.version}</include>
                         </includes>
                     </artifactSet>
                 </configuration>

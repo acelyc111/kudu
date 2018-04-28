@@ -30,7 +30,6 @@
 
 #include "kudu/gutil/basictypes.h"
 #include "kudu/gutil/gscoped_ptr.h"
-#include "kudu/gutil/move.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/strings/join.h"
 #include "kudu/gutil/strings/substitute.h"
@@ -200,7 +199,7 @@ void ServicePool::RunThread() {
       return;
     }
 
-    incoming->RecordHandlingStarted(incoming_queue_time_);
+    incoming->RecordHandlingStarted(incoming_queue_time_.get());
     ADOPT_TRACE(incoming->trace());
 
     if (PREDICT_FALSE(incoming->ClientTimedOut())) {

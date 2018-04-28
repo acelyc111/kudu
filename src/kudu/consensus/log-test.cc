@@ -46,15 +46,12 @@
 #include "kudu/consensus/opid_util.h"
 #include "kudu/fs/fs_manager.h"
 #include "kudu/gutil/gscoped_ptr.h"
-#include "kudu/gutil/move.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/stl_util.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/util/async_util.h"
 #include "kudu/util/compression/compression.pb.h"
-#include "kudu/util/debug/sanitizer_scopes.h"
 #include "kudu/util/env.h"
-#include "kudu/util/faststring.h"
 #include "kudu/util/metrics.h"
 #include "kudu/util/random.h"
 #include "kudu/util/status.h"
@@ -1141,19 +1138,11 @@ TEST_F(LogTest, TestAutoStopIdleAppendThread) {
   ASSERT_EVENTUALLY([&]() {
       AppendNoOpsToLogSync(clock_, log_.get(), &opid, 2);
       ASSERT_TRUE(log_->append_thread_active_for_tests());
-      debug::ScopedTSANIgnoreReadsAndWrites ignore_tsan;
-      ASSERT_GT(log_->active_segment_->compress_buf_.capacity(), faststring::kInitialCapacity);
     });
   // After some time, the append thread should shut itself down.
   ASSERT_EVENTUALLY([&]() {
       ASSERT_FALSE(log_->append_thread_active_for_tests());
     });
-
-  // The log should free its buffer once it is idle.
-  {
-    debug::ScopedTSANIgnoreReadsAndWrites ignore_tsan;
-    ASSERT_EQ(faststring::kInitialCapacity, log_->active_segment_->compress_buf_.capacity());
-  }
 }
 
 // Test that Log::TotalSize() captures creation, addition, and deletion of log segments.

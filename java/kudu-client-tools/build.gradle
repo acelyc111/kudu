@@ -19,18 +19,18 @@ apply from: "$rootDir/gradle/shadow.gradle"
 
 dependencies {
   compile project(":kudu-mapreduce")
+  compile libs.guava
 
-  // This artifact is in compile scope for convenience, as it is typically
-  // not included in the job classpath by MapReduce platform providers.
-  compile libs.parquetHadoop
+  provided libs.hadoopMRClientCommon
+  provided libs.hadoopCommon
+  provided libs.parquetHadoop
+  provided libs.slf4jApi
 
-  compile libs.yetusAnnotations
-  compile libs.slf4jApi
-
-  provided libs.hadoopClient
+  optional libs.yetusAnnotations
 
   testCompile project(path: ":kudu-client", configuration: "shadowTest")
   testCompile project(path: ":kudu-mapreduce", configuration: "test")
+  testCompile libs.commonsIo
   testCompile libs.junit
   testCompile libs.log4j
   testCompile libs.slf4jLog4j12

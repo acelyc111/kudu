@@ -58,7 +58,7 @@ class NodeInstancePB;
 class PartitionPB;
 class PartitionSchema;
 class Schema;
-class ThreadPool;
+class ThreadPool; // IWYU pragma: keep
 struct ColumnId;
 
 // Working around FRIEND_TEST() ugliness.
@@ -73,21 +73,25 @@ class RpcContext;
 namespace security {
 class Cert;
 class PrivateKey;
-class TokenSigningPublicKeyPB;
+class TokenSigningPublicKeyPB; // IWYU pragma: keep
 } // namespace security
 
 namespace consensus {
 class RaftConsensus;
 class StartTabletCopyRequestPB;
-}
+} // namespace consensus
 
 namespace tablet {
 class TabletReplica;
-}
+} // namespace tablet
+
+namespace hms {
+class HmsCatalog;
+} // namespace hms
 
 namespace master {
 
-class CatalogManagerBgTasks;
+class CatalogManagerBgTasks; // IWYU pragma: keep
 class Master;
 class SysCatalogTable;
 class TSDescriptor;
@@ -144,7 +148,7 @@ class TabletInfo : public RefCountedThreadSafe<TabletInfo> {
     NOT_YET_REPORTED = -1L
   };
 
-  TabletInfo(const scoped_refptr<TableInfo>& table, std::string tablet_id);
+  TabletInfo(scoped_refptr<TableInfo> table, std::string tablet_id);
 
   const std::string& id() const { return tablet_id_; }
   const scoped_refptr<TableInfo>& table() const { return table_; }
@@ -576,6 +580,10 @@ class CatalogManager : public tserver::TabletReplicaLookupIf {
                             master::ReplicaTypeFilter filter,
                             TabletLocationsPB* locs_pb);
 
+  // Replace the given tablet with a new, empty one. The replaced tablet is
+  // deleted and its data is permanently lost.
+  Status ReplaceTablet(const std::string& tablet_id, master::ReplaceTabletResponsePB* resp);
+
   // Handle a tablet report from the given tablet server.
   //
   // The RPC context is provided for logging/tracing purposes,
@@ -916,6 +924,8 @@ class CatalogManager : public tserver::TabletReplicaLookupIf {
   // like the assignment and cleaner
   friend class CatalogManagerBgTasks;
   gscoped_ptr<CatalogManagerBgTasks> background_tasks_;
+
+  std::unique_ptr<hms::HmsCatalog> hms_catalog_;
 
   enum State {
     kConstructed,

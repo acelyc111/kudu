@@ -64,7 +64,6 @@
 #include "kudu/client/schema.h"
 #include "kudu/common/partial_row.h"
 #include "kudu/gutil/gscoped_ptr.h"
-#include "kudu/gutil/move.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/stl_util.h"
 #include "kudu/gutil/stringprintf.h"
@@ -433,7 +432,7 @@ Status TpchRealWorld::Run() {
 
   stop_threads_.Store(true);
 
-  for (scoped_refptr<kudu::Thread> thr : threads) {
+  for (const auto& thr : threads) {
     RETURN_NOT_OK(ThreadJoiner(thr.get()).Join());
   }
   return Status::OK();

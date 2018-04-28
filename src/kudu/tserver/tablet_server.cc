@@ -29,7 +29,6 @@
 #include "kudu/fs/fs_manager.h"
 #include "kudu/gutil/bind.h"
 #include "kudu/gutil/bind_helpers.h"
-#include "kudu/gutil/move.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/rpc/service_if.h"
 #include "kudu/tserver/heartbeater.h"
@@ -56,8 +55,7 @@ TabletServer::TabletServer(const TabletServerOptions& opts)
     opts_(opts),
     tablet_manager_(new TSTabletManager(this)),
     scanner_manager_(new ScannerManager(metric_entity())),
-    path_handlers_(new TabletServerPathHandlers(this)),
-    maintenance_manager_(new MaintenanceManager(MaintenanceManager::kDefaultOptions)) {
+    path_handlers_(new TabletServerPathHandlers(this)) {
 }
 
 TabletServer::~TabletServer() {
@@ -95,6 +93,9 @@ Status TabletServer::Init() {
     RETURN_NOT_OK(path_handlers_->Register(web_server_.get()));
   }
 
+  maintenance_manager_.reset(new MaintenanceManager(
+      MaintenanceManager::kDefaultOptions, fs_manager_->uuid()));
+
   heartbeater_.reset(new Heartbeater(opts_, this));
 
   RETURN_NOT_OK_PREPEND(tablet_manager_->Init(),
@@ -130,7 +131,7 @@ Status TabletServer::Start() {
   RETURN_NOT_OK(KuduServer::Start());
 
   RETURN_NOT_OK(heartbeater_->Start());
-  RETURN_NOT_OK(maintenance_manager_->Init(fs_manager_->uuid()));
+  RETURN_NOT_OK(maintenance_manager_->Start());
 
   google::FlushLogFiles(google::INFO); // Flush the startup messages.
 

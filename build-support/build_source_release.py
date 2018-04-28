@@ -31,10 +31,8 @@ try:
 except ImportError:
   import urllib
 
-from kudu_util import check_output, confirm_prompt, Colors, get_my_email
-
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-GET_UPSTREAM_COMMIT_SCRIPT = os.path.join(ROOT, "build-support", "get-upstream-commit.sh")
+from kudu_util import check_output, confirm_prompt, Colors, get_my_email, get_upstream_commit, \
+  init_logging, ROOT
 
 
 def check_repo_not_dirty():
@@ -54,7 +52,7 @@ def check_no_local_commits():
   Check that there are no local commits which haven't been pushed to the upstream
   repo via Jenkins.
   """
-  upstream_commit = check_output(GET_UPSTREAM_COMMIT_SCRIPT).strip().decode('utf-8')
+  upstream_commit = get_upstream_commit()
   cur_commit = check_output(["git", "rev-parse", "HEAD"]).strip().decode('utf-8')
 
   if upstream_commit == cur_commit:
@@ -193,5 +191,5 @@ def main():
 
 
 if __name__ == "__main__":
-  logging.basicConfig(level=logging.INFO)
+  init_logging()
   main()

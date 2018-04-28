@@ -22,15 +22,40 @@
 
 from __future__ import print_function
 
+import logging
 import os
 import subprocess
 import sys
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+_GET_UPSTREAM_COMMIT_SCRIPT = os.path.join(ROOT, "build-support", "get-upstream-commit.sh")
+
 
 # Alias raw_input() to input() in Python 2.
 try:
   input = raw_input
 except NameError:
   pass
+
+
+def get_upstream_commit():
+  """ Return the last commit hash that appears to have been committed by gerrit. """
+  return check_output(_GET_UPSTREAM_COMMIT_SCRIPT).strip().decode('utf-8')
+
+def init_logging():
+  logging.basicConfig(level=logging.INFO,
+                      format='%(asctime)s %(levelname)s: %(message)s')
+  logging.getLogger().addFilter(ColorFilter())
+
+class ColorFilter(logging.Filter):
+  """ logging.Filter implementation which colorizes the output to console. """
+  def filter(self, record):
+    if record.levelno >= logging.ERROR:
+      record.msg = Colors.RED + record.msg + Colors.RESET
+    elif record.levelno >= logging.WARNING:
+      record.msg = Colors.YELLOW + record.msg + Colors.RESET
+    return True
 
 class Colors(object):
   """ ANSI color codes. """

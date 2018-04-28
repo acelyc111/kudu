@@ -52,6 +52,7 @@ using google::protobuf::FieldDescriptor;
 using google::protobuf::Reflection;
 using std::set;
 using std::string;
+using std::unique_ptr;
 using std::vector;
 
 namespace kudu {
@@ -72,7 +73,8 @@ KuduScanner::Data::Data(KuduTable* table)
     data_in_open_(false),
     short_circuit_(false),
     table_(DCHECK_NOTNULL(table)->shared_from_this()),
-    scan_attempts_(0) {
+    scan_attempts_(0),
+    num_rows_returned_(0) {
 }
 
 KuduScanner::Data::~Data() {
@@ -80,7 +82,12 @@ KuduScanner::Data::~Data() {
 
 Status KuduScanner::Data::HandleError(const ScanRpcStatus& err,
                                       const MonoTime& deadline,
-                                      set<string>* blacklist) {
+                                      set<string>* blacklist,
+                                      bool* needs_reopen) {
+  if (needs_reopen != nullptr) {
+    *needs_reopen = false;
+  }
+
   // If we timed out because of the overall deadline, we're done.
   // We didn't wait a full RPC timeout, though, so don't mark the tserver as failed.
   if (err.result == ScanRpcStatus::OVERALL_DEADLINE_EXCEEDED) {
@@ -108,6 +115,11 @@ Status KuduScanner::Data::HandleError(const ScanRpcStatus& err,
       mark_ts_failed = true;
       break;
     case ScanRpcStatus::SCANNER_EXPIRED:
+      // It's safe to retry on the same server, but the scanner needs to be
+      // re-opened.
+      if (needs_reopen != nullptr) {
+        *needs_reopen = true;
+      }
       break;
     case ScanRpcStatus::RPC_INVALID_AUTHENTICATION_TOKEN:
       // Usually this happens if doing an RPC call with an expired auth token.
@@ -298,6 +310,7 @@ ScanRpcStatus KuduScanner::Data::SendScanRpc(const MonoTime& overall_deadline,
       rpc_deadline, overall_deadline);
   if (scan_status.result == ScanRpcStatus::OK) {
     UpdateResourceMetrics();
+    num_rows_returned_ += last_response_.data().num_rows();
   }
   return scan_status;
 }
@@ -348,6 +361,14 @@ Status KuduScanner::Data::OpenTablet(const string& partition_key,
     scan->set_last_primary_key(last_primary_key_);
   }
 
+  if (configuration_.spec().has_limit()) {
+    // Set the limit based on the number of rows we've already returned.
+    int64_t new_limit = std::max(configuration_.spec().limit() - num_rows_returned_,
+                                 static_cast<int64_t>(0));
+    VLOG(2) << "Setting NewScanRequestPB limit " << new_limit;
+    scan->set_limit(new_limit);
+  }
+
   scan->set_cache_blocks(configuration_.spec().cache_blocks());
 
   // For consistent operations, propagate the timestamp among all operations
@@ -390,11 +411,13 @@ Status KuduScanner::Data::OpenTablet(const string& partition_key,
 
   for (int attempt = 1;; attempt++) {
     Synchronizer sync;
-    table_->client()->data_->meta_cache_->LookupTabletByKeyOrNext(table_.get(),
-                                                                  partition_key,
-                                                                  deadline,
-                                                                  &remote_,
-                                                                  sync.AsStatusCallback());
+    table_->client()->data_->meta_cache_->LookupTabletByKey(
+        table_.get(),
+        partition_key,
+        deadline,
+        internal::MetaCache::LookupType::kLowerBound,
+        &remote_,
+        sync.AsStatusCallback());
     Status s = sync.Wait();
     if (s.IsNotFound()) {
       // No more tablets in the table.
@@ -453,7 +476,7 @@ Status KuduScanner::Data::OpenTablet(const string& partition_key,
       break;
     }
     scan_attempts_++;
-    RETURN_NOT_OK(HandleError(scan_status, deadline, blacklist));
+    RETURN_NOT_OK(HandleError(scan_status, deadline, blacklist, /* needs_reopen=*/ nullptr));
   }
 
   partition_pruner_.RemovePartitionKeyRange(remote_->partition().partition_key_end());
@@ -568,7 +591,7 @@ Status KuduScanBatch::Data::Reset(RpcController* controller,
                                   const Schema* projection,
                                   const KuduSchema* client_projection,
                                   uint64_t row_format_flags,
-                                  gscoped_ptr<RowwiseRowBlockPB> resp_data) {
+                                  unique_ptr<RowwiseRowBlockPB> resp_data) {
   CHECK(controller->finished());
   controller_.Swap(controller);
   projection_ = projection;
@@ -583,6 +606,7 @@ Status KuduScanBatch::Data::Reset(RpcController* controller,
 
   // There's new data. Swap it in and process it.
   resp_data_.Swap(resp_data.get());
+  resp_data.reset(); // no longer valid.
 
   // First, rewrite the relative addresses into absolute ones.
   if (PREDICT_FALSE(!resp_data_.has_rows_sidecar())) {

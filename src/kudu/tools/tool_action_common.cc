@@ -24,6 +24,7 @@
 #include <cstddef>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <numeric>
 #include <string>
@@ -50,6 +51,7 @@
 #include "kudu/gutil/endian.h"
 #include "kudu/gutil/map-util.h"
 #include "kudu/gutil/ref_counted.h"
+#include "kudu/gutil/strings/join.h"
 #include "kudu/gutil/strings/numbers.h"
 #include "kudu/gutil/strings/split.h"
 #include "kudu/gutil/strings/substitute.h"
@@ -94,6 +96,11 @@ DEFINE_string(format, "pretty",
               "Format to use for printing list output tables.\n"
               "Possible values: pretty, space, tsv, csv, and json");
 
+DEFINE_string(flag_tags, "", "Comma-separated list of tags used to restrict which "
+                             "flags are returned. An empty value matches all tags");
+DEFINE_bool(all_flags, false, "Whether to return all flags, or only flags that "
+                              "were explicitly set.");
+
 namespace boost {
 template <typename Signature>
 class function;
@@ -106,21 +113,26 @@ class ListMastersRequestPB;
 class ListMastersResponsePB;
 class ListTabletServersRequestPB;
 class ListTabletServersResponsePB;
+class ReplaceTabletRequestPB;
+class ReplaceTabletResponsePB;
 } // namespace master
 
 namespace tools {
 
+using client::KuduClient;
 using client::KuduClientBuilder;
 using consensus::ConsensusServiceProxy;
 using consensus::ReplicateMsg;
 using log::LogEntryPB;
 using log::LogEntryReader;
 using log::ReadableLogSegment;
-using master::ListTabletServersRequestPB;
-using master::ListTabletServersResponsePB;
 using master::ListMastersRequestPB;
 using master::ListMastersResponsePB;
+using master::ListTabletServersRequestPB;
+using master::ListTabletServersResponsePB;
 using master::MasterServiceProxy;
+using master::ReplaceTabletRequestPB;
+using master::ReplaceTabletResponsePB;
 using pb_util::SecureDebugString;
 using pb_util::SecureShortDebugString;
 using rpc::Messenger;
@@ -128,6 +140,8 @@ using rpc::MessengerBuilder;
 using rpc::RequestIdPB;
 using rpc::RpcController;
 using server::GenericServiceProxy;
+using server::GetFlagsRequestPB;
+using server::GetFlagsResponsePB;
 using server::GetStatusRequestPB;
 using server::GetStatusResponsePB;
 using server::ServerClockRequestPB;
@@ -349,6 +363,41 @@ Status PrintSegment(const scoped_refptr<ReadableLogSegment>& segment) {
   return Status::OK();
 }
 
+Status PrintServerFlags(const string& address, uint16_t default_port) {
+  unique_ptr<GenericServiceProxy> proxy;
+  RETURN_NOT_OK(BuildProxy(address, default_port, &proxy));
+
+  GetFlagsRequestPB req;
+  GetFlagsResponsePB resp;
+  RpcController rpc;
+  rpc.set_timeout(MonoDelta::FromMilliseconds(FLAGS_timeout_ms));
+
+  req.set_all_flags(FLAGS_all_flags);
+  vector<string> tags = strings::Split(FLAGS_flag_tags, ",", strings::SkipEmpty());
+  for (const auto& tag : tags) {
+    req.add_tags(tag);
+  }
+  RETURN_NOT_OK(proxy->GetFlags(req, &resp, &rpc));
+
+  vector<GetFlagsResponsePB::Flag> flags(resp.flags().begin(), resp.flags().end());
+  std::sort(flags.begin(), flags.end(),
+      [](const GetFlagsResponsePB::Flag& left,
+         const GetFlagsResponsePB::Flag& right) -> bool {
+        return left.name() < right.name();
+      });
+  DataTable table({ "flag", "value", "default value?", "tags" });
+  for (const auto& flag : flags) {
+    tags.clear();
+    std::copy(flag.tags().begin(), flag.tags().end(), std::back_inserter(tags));
+    std::sort(tags.begin(), tags.end());
+    table.AddRow({ flag.name(),
+                   flag.value(),
+                   Substitute("$0", flag.is_default_value()),
+                   JoinStrings(tags, ",") });
+  }
+  return table.PrintTo(cout);
+}
+
 Status SetServerFlag(const string& address, uint16_t default_port,
                      const string& flag, const string& value) {
   unique_ptr<GenericServiceProxy> proxy;
@@ -546,15 +595,20 @@ Status DataTable::PrintTo(ostream& out) const {
   return Status::OK();
 }
 
-Status LeaderMasterProxy::Init(const RunnerContext& context) {
-  const string& master_addrs_str = FindOrDie(context.required_args, kMasterAddressesArg);
-  auto master_addrs = strings::Split(master_addrs_str, ",");
-  auto timeout = MonoDelta::FromMilliseconds(FLAGS_timeout_ms);
+LeaderMasterProxy::LeaderMasterProxy(client::sp::shared_ptr<KuduClient> client) :
+  client_(std::move(client)) {
+}
 
+Status LeaderMasterProxy::Init(const vector<string>& master_addrs, const MonoDelta& timeout) {
   return KuduClientBuilder().master_server_addrs(master_addrs)
                             .default_rpc_timeout(timeout)
                             .default_admin_operation_timeout(timeout)
                             .Build(&client_);
+}
+
+Status LeaderMasterProxy::Init(const RunnerContext& context) {
+  const string& master_addrs = FindOrDie(context.required_args, kMasterAddressesArg);
+  return Init(strings::Split(master_addrs, ","), MonoDelta::FromMilliseconds(FLAGS_timeout_ms));
 }
 
 template<typename Req, typename Resp>
@@ -569,7 +623,7 @@ Status LeaderMasterProxy::SyncRpc(const Req& req,
                                              func_name, func, {});
 }
 
-// Explicit specialization for callers outside this compilation unit.
+// Explicit specializations for callers outside this compilation unit.
 template
 Status LeaderMasterProxy::SyncRpc(const ListTabletServersRequestPB& req,
                                   ListTabletServersResponsePB* resp,
@@ -585,6 +639,14 @@ Status LeaderMasterProxy::SyncRpc(const ListMastersRequestPB& req,
                                   const boost::function<Status(MasterServiceProxy*,
                                                                const ListMastersRequestPB&,
                                                                ListMastersResponsePB*,
+                                                               RpcController*)>& func);
+template
+Status LeaderMasterProxy::SyncRpc(const ReplaceTabletRequestPB& req,
+                                  ReplaceTabletResponsePB* resp,
+                                  const char* func_name,
+                                  const boost::function<Status(MasterServiceProxy*,
+                                                               const ReplaceTabletRequestPB&,
+                                                               ReplaceTabletResponsePB*,
                                                                RpcController*)>& func);
 
 const int ControlShellProtocol::kMaxMessageBytes = 1024 * 1024;

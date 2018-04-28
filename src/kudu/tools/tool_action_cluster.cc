@@ -38,7 +38,7 @@
 #define PUSH_PREPEND_NOT_OK(s, statuses, msg) do { \
   ::kudu::Status _s = (s); \
   if (PREDICT_FALSE(!_s.ok())) { \
-    statuses.push_back(string(msg) + ": " + _s.message().ToString()); \
+    (statuses).push_back(string((msg)) + ": " + _s.message().ToString()); \
   } \
 } while (0);
 
@@ -71,11 +71,9 @@ Status RunKsck(const RunnerContext& context) {
   const string& master_addresses_str = FindOrDie(context.required_args,
                                                  kMasterAddressesArg);
   vector<string> master_addresses = strings::Split(master_addresses_str, ",");
-  shared_ptr<KsckMaster> master;
-  RETURN_NOT_OK_PREPEND(RemoteKsckMaster::Build(master_addresses, &master),
-                        "unable to build KsckMaster");
-
-  shared_ptr<KsckCluster> cluster(new KsckCluster(master));
+  shared_ptr<KsckCluster> cluster;
+  RETURN_NOT_OK_PREPEND(RemoteKsckCluster::Build(master_addresses, &cluster),
+                        "unable to build KsckCluster");
   shared_ptr<Ksck> ksck(new Ksck(cluster));
 
   ksck->set_table_filters(strings::Split(
@@ -83,16 +81,20 @@ Status RunKsck(const RunnerContext& context) {
   ksck->set_tablet_id_filters(strings::Split(
       FLAGS_tablets, ",", strings::SkipEmpty()));
 
-  RETURN_NOT_OK_PREPEND(ksck->CheckMasterRunning(),
-                        "master liveness check error");
-  RETURN_NOT_OK_PREPEND(ksck->FetchTableAndTabletInfo(),
-                        "error fetching the cluster metadata from the Master server");
-
   vector<string> error_messages;
+  PUSH_PREPEND_NOT_OK(ksck->CheckMasterHealth(), error_messages,
+                      "error fetching info from masters");
+  PUSH_PREPEND_NOT_OK(ksck->CheckMasterConsensus(), error_messages,
+                      "master consensus errors");
+
+  RETURN_NOT_OK_PREPEND(ksck->CheckClusterRunning(),
+                        "leader master liveness check error");
+  RETURN_NOT_OK_PREPEND(ksck->FetchTableAndTabletInfo(),
+                        "error fetching the cluster metadata from the leader master");
+
   PUSH_PREPEND_NOT_OK(ksck->FetchInfoFromTabletServers(), error_messages,
                       "error fetching info from tablet servers");
 
-  // TODO: Add support for tables / tablets filter in the consistency check.
   PUSH_PREPEND_NOT_OK(ksck->CheckTablesConsistency(), error_messages,
                       "table consistency check error");
 

@@ -36,7 +36,7 @@
 #include "kudu/consensus/log_util.h"
 #include "kudu/consensus/opid.pb.h"
 #include "kudu/consensus/ref_counted_replicate.h"
-#include "kudu/gutil/callback.h"
+#include "kudu/gutil/callback.h"  // IWYU pragma: keep
 #include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/macros.h"
 #include "kudu/gutil/ref_counted.h"
@@ -242,7 +242,6 @@ class Log : public RefCountedThreadSafe<Log> {
   FRIEND_TEST(LogTestOptionalCompression, TestMultipleEntriesInABatch);
   FRIEND_TEST(LogTestOptionalCompression, TestReadLogWithReplacedReplicates);
   FRIEND_TEST(LogTest, TestWriteAndReadToAndFromInProgressSegment);
-  FRIEND_TEST(LogTest, TestAutoStopIdleAppendThread);
 
   class AppendThread;
 
@@ -262,7 +261,7 @@ class Log : public RefCountedThreadSafe<Log> {
 
   Log(LogOptions options, FsManager* fs_manager, std::string log_path,
       std::string tablet_id, const Schema& schema, uint32_t schema_version,
-      const scoped_refptr<MetricEntity>& metric_entity);
+      scoped_refptr<MetricEntity> metric_entity);
 
   // Initializes a new one or continues an existing log.
   Status Init();

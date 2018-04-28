@@ -21,7 +21,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Executor;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.stumbleupon.async.Deferred;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
@@ -41,10 +40,10 @@ import org.apache.kudu.master.Master.TableIdentifierPB;
 @InterfaceStability.Evolving
 public class KuduClient implements AutoCloseable {
 
-  public static final Logger LOG = LoggerFactory.getLogger(AsyncKuduClient.class);
+  private static final Logger LOG = LoggerFactory.getLogger(AsyncKuduClient.class);
   public static final long NO_TIMESTAMP = -1;
 
-  @VisibleForTesting
+  @InterfaceAudience.LimitedPrivate("Test")
   final AsyncKuduClient asyncClient;
 
   KuduClient(AsyncKuduClient asyncClient) {

@@ -19,14 +19,21 @@
 
 #include <cstdint>
 #include <string>
-#include <vector> // IWYU pragma: keep
+#include <vector>
 
 #include "kudu/gutil/port.h"
 #include "kudu/hms/ThriftHiveMetastore.h"
-#include "kudu/hms/hive_metastore_types.h"
 #include "kudu/util/monotime.h"
 #include "kudu/util/slice.h"
 #include "kudu/util/status.h"
+
+namespace hive {
+class Database;
+class EnvironmentContext;
+class NotificationEvent;
+class Partition;
+class Table;
+}
 
 namespace kudu {
 
@@ -82,11 +89,18 @@ class HmsClient {
 
   static const char* const kKuduTableIdKey;
   static const char* const kKuduMasterAddrsKey;
+  static const char* const kStorageHandlerKey;
   static const char* const kKuduStorageHandler;
 
   static const char* const kTransactionalEventListeners;
+  static const char* const kDisallowIncompatibleColTypeChanges;
   static const char* const kDbNotificationListener;
   static const char* const kKuduMetastorePlugin;
+
+  // See org.apache.hadoop.hive.metastore.TableType.
+  static const char* const kManagedTable;
+
+  static const uint16_t kDefaultHmsPort;
 
   // Create an HmsClient connection to the proided HMS Thrift RPC address.
   //
@@ -108,6 +122,9 @@ class HmsClient {
   //
   // This is optional; if not called the destructor will stop the client.
   Status Stop() WARN_UNUSED_RESULT;
+
+  // Returns 'true' if the client is connected to the remote server.
+  bool IsConnected() WARN_UNUSED_RESULT;
 
   // Creates a new database in the HMS.
   //

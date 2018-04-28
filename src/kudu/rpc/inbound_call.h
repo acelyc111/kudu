@@ -175,7 +175,7 @@ class InboundCall {
   // Updates the Histogram with time elapsed since the call was received,
   // and should only be called once on a given instance.
   // Not thread-safe. Should only be called by the current "owner" thread.
-  void RecordHandlingStarted(scoped_refptr<Histogram> incoming_queue_time);
+  void RecordHandlingStarted(Histogram* incoming_queue_time);
 
   // Return true if the deadline set by the client has already elapsed.
   // In this case, the server may stop processing the call, since the
@@ -185,7 +185,9 @@ class InboundCall {
   // Return an upper bound on the client timeout deadline. This does not
   // account for transmission delays between the client and the server.
   // If the client did not specify a deadline, returns MonoTime::Max().
-  MonoTime GetClientDeadline() const;
+  MonoTime GetClientDeadline() const {
+    return deadline_;
+  }
 
   // Return the time when this call was received.
   MonoTime GetTimeReceived() const;
@@ -270,6 +272,10 @@ class InboundCall {
   // to point to the information about this method. Acts as a pointer back to
   // per-method info such as tracing.
   scoped_refptr<RpcMethodInfo> method_info_;
+
+  // A time at which the client will time out, or MonoTime::Max if the
+  // client did not pass a timeout.
+  MonoTime deadline_;
 
   DISALLOW_COPY_AND_ASSIGN(InboundCall);
 };

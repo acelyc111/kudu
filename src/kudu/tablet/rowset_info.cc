@@ -23,7 +23,6 @@
 #include <memory>
 #include <ostream>
 #include <string>
-#include <type_traits>
 #include <unordered_map>
 #include <utility>
 
@@ -204,7 +203,7 @@ void RowSetInfo::CollectOrdered(const RowSetTree& tree,
   // else there's a race since we see endpoints twice and a delta compaction might finish in
   // between.
   RowSetVector available_rowsets;
-  for (const shared_ptr<RowSet> rs : tree.all_rowsets()) {
+  for (const auto& rs : tree.all_rowsets()) {
     if (rs->IsAvailableForCompaction()) {
       available_rowsets.push_back(rs);
     }

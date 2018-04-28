@@ -24,7 +24,6 @@
 #include "kudu/gutil/dynamic_annotations.h"
 #include "kudu/gutil/map-util.h"
 #include "kudu/gutil/mathlimits.h"
-#include "kudu/gutil/move.h"
 #include "kudu/gutil/port.h"
 #include "kudu/gutil/ref_counted_memory.h"
 #include "kudu/gutil/singleton.h"
@@ -116,7 +115,7 @@ static void NOTIMPLEMENTED() {
 
 class TraceBufferRingBuffer : public TraceBuffer {
  public:
-  TraceBufferRingBuffer(size_t max_chunks)
+  explicit TraceBufferRingBuffer(size_t max_chunks)
       : max_chunks_(max_chunks),
         recyclable_chunks_queue_(new size_t[queue_capacity()]),
         queue_head_(0),
@@ -452,7 +451,7 @@ gscoped_ptr<TraceBufferChunk> TraceBufferChunk::Clone() const {
 // and unlocks at the end of scope if locked.
 class TraceLog::OptionalAutoLock {
  public:
-  explicit OptionalAutoLock(base::SpinLock& lock)
+  explicit OptionalAutoLock(base::SpinLock& lock) // NOLINT(google-runtime-references)
       : lock_(lock),
         locked_(false) {
   }
@@ -1030,7 +1029,7 @@ TraceBucketData::~TraceBucketData() {
 
 class TraceLog::ThreadLocalEventBuffer {
  public:
-  ThreadLocalEventBuffer(TraceLog* trace_log);
+  explicit ThreadLocalEventBuffer(TraceLog* trace_log);
   virtual ~ThreadLocalEventBuffer();
 
   TraceEvent* AddTraceEvent(TraceEventHandle* handle);
@@ -1643,6 +1642,7 @@ void TraceLog::ConvertTraceEventsToTraceFormat(
 
     flush_output_callback.Run(json_events_str_ptr, has_more_events);
   } while (has_more_events);
+  logged_events.reset();
 }
 
 void TraceLog::FinishFlush(int generation,

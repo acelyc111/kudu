@@ -20,11 +20,13 @@ apply from: "$rootDir/gradle/shadow.gradle"
 
 dependencies {
   compile project(path: ":kudu-client", configuration: "shadow")
-  compile libs.yetusAnnotations
 
   provided libs.scalaLibrary
   provided libs.sparkCore
   provided libs.sparkSql
+  provided libs.slf4jApi
+
+  optional libs.yetusAnnotations
 
   testCompile project(path: ":kudu-client", configuration: "shadowTest")
   testCompile libs.junit

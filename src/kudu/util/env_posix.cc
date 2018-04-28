@@ -46,6 +46,7 @@
 #include "kudu/gutil/stringprintf.h"
 #include "kudu/gutil/strings/split.h"
 #include "kudu/gutil/strings/substitute.h"
+#include "kudu/gutil/strings/util.h"
 #include "kudu/util/array_view.h"
 #include "kudu/util/debug/trace_event.h"
 #include "kudu/util/env.h"
@@ -131,10 +132,20 @@ typedef struct xfs_flock64 {
 #define MAYBE_RETURN_EIO(filename_expr, error_expr) do { \
   const string& f_ = (filename_expr); \
   MAYBE_RETURN_FAILURE(FLAGS_env_inject_eio, \
-      StringMatchesGlob(f_, FLAGS_env_inject_eio_globs) ? (error_expr) : Status::OK()) \
+      ShouldInject(f_, FLAGS_env_inject_eio_globs) ? (error_expr) : Status::OK()) \
 } while (0);
 
-bool StringMatchesGlob(const string& candidate, const string& glob_patterns) {
+bool ShouldInject(const string& candidate, const string& glob_patterns) {
+  // Never inject on /proc/ file accesses regardless of the configured flag,
+  // since it's not possible for /proc to "go bad".
+  //
+  // NB: it's important that this is done here _before_ consulting glob_patterns
+  // since some background threads read /proc/ after gflags have already been
+  // destructed.
+  if (HasPrefixString(candidate, "/proc/")) {
+    return false;
+  }
+
   vector<string> globs = strings::Split(glob_patterns, ",", strings::SkipEmpty());
   for (const auto& glob : globs) {
     if (fnmatch(glob.c_str(), candidate.c_str(), 0) == 0) {
@@ -1295,9 +1306,9 @@ class PosixEnv : public Env {
       return IOError(fname, errno);
     }
 #ifdef __APPLE__
-    *timestamp = s.st_mtimespec.tv_sec * 1e6 + s.st_mtimespec.tv_nsec / 1e3;
+    *timestamp = s.st_mtimespec.tv_sec * 1000000 + s.st_mtimespec.tv_nsec / 1000;
 #else
-    *timestamp = s.st_mtim.tv_sec * 1e6 + s.st_mtim.tv_nsec / 1e3;
+    *timestamp = s.st_mtim.tv_sec * 1000000 + s.st_mtim.tv_nsec / 1000;
 #endif
     return Status::OK();
   }
@@ -1338,7 +1349,7 @@ class PosixEnv : public Env {
   virtual Status LockFile(const std::string& fname, FileLock** lock) OVERRIDE {
     TRACE_EVENT1("io", "PosixEnv::LockFile", "path", fname);
     MAYBE_RETURN_EIO(fname, IOError(Env::kInjectedFailureStatusMsg, EIO));
-    if (StringMatchesGlob(fname, FLAGS_env_inject_lock_failure_globs)) {
+    if (ShouldInject(fname, FLAGS_env_inject_lock_failure_globs)) {
       return IOError("lock " + fname, EAGAIN);
     }
     ThreadRestrictions::AssertIOAllowed();
@@ -1584,7 +1595,10 @@ class PosixEnv : public Env {
     return Status::OK();
   }
 
-  virtual int64_t GetResourceLimit(ResourceLimitType t) OVERRIDE {
+  virtual uint64_t GetResourceLimit(ResourceLimitType t) OVERRIDE {
+    static_assert(std::is_unsigned<rlim_t>::value, "rlim_t must be unsigned");
+    static_assert(RLIM_INFINITY > 0, "RLIM_INFINITY must be positive");
+
     // There's no reason for this to ever fail.
     struct rlimit l;
     PCHECK(getrlimit(ResourceLimitTypeToUnixRlimit(t), &l) == 0);

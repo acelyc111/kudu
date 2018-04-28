@@ -926,6 +926,7 @@ public class PartialRow {
   }
 
   /** {@inheritDoc} */
+  @Override
   public String toString() {
     int numCols = schema.getColumnCount();
     StringBuilder sb = new StringBuilder();
@@ -1107,7 +1108,7 @@ public class PartialRow {
         break;
       case INT64:
       case UNIXTIME_MICROS:
-        addLong(index, Integer.MIN_VALUE);
+        addLong(index, Long.MIN_VALUE);
         break;
       case FLOAT:
         addFloat(index, -Float.MAX_VALUE);
@@ -1119,6 +1120,7 @@ public class PartialRow {
         ColumnTypeAttributes typeAttributes = column.getTypeAttributes();
         addDecimal(index,
             DecimalUtil.minValue(typeAttributes.getPrecision(), typeAttributes.getScale()));
+        break;
       case STRING:
         addStringUtf8(index, AsyncKuduClient.EMPTY_ARRAY);
         break;

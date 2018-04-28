@@ -25,6 +25,7 @@
 #include <vector>
 
 #include <gflags/gflags.h>
+#include <gflags/gflags_declare.h>
 #include <glog/logging.h>
 
 #include "kudu/cfile/block_cache.h"
@@ -36,7 +37,6 @@
 #include "kudu/fs/fs_manager.h"
 #include "kudu/gutil/bind.h"
 #include "kudu/gutil/bind_helpers.h"
-#include "kudu/gutil/move.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/master/catalog_manager.h"
 #include "kudu/master/master.pb.h"
@@ -54,6 +54,7 @@
 #include "kudu/tserver/tablet_copy_service.h"
 #include "kudu/tserver/tablet_service.h"
 #include "kudu/util/flag_tags.h"
+#include "kudu/util/flag_validators.h"
 #include "kudu/util/maintenance_manager.h"
 #include "kudu/util/monotime.h"
 #include "kudu/util/net/net_util.h"
@@ -78,6 +79,9 @@ DEFINE_int64(authn_token_validity_seconds, 60 * 60 * 24 * 7,
              "validity period expires.");
 TAG_FLAG(authn_token_validity_seconds, experimental);
 
+DECLARE_bool(hive_metastore_sasl_enabled);
+DECLARE_string(keytab_file);
+
 using std::min;
 using std::shared_ptr;
 using std::string;
@@ -93,6 +97,24 @@ using strings::Substitute;
 namespace kudu {
 namespace master {
 
+namespace {
+// Validates that if the HMS is configured with SASL enabled, the server has a
+// keytab available. This is located in master.cc because the HMS module (where
+// --hive_metastore_sasl_enabled is defined) doesn't link to the server module
+// (where --keytab_file is defined), and vice-versa. The master module is the
+// first module which links to both.
+bool ValidateHiveMetastoreSaslEnabled() {
+  if (FLAGS_hive_metastore_sasl_enabled && FLAGS_keytab_file.empty()) {
+    LOG(ERROR) << "When the Hive Metastore has SASL enabled "
+                  "(--hive_metastore_sasl_enabled), Kudu must be configured with "
+                  "a keytab (--keytab_file).";
+    return false;
+  }
+  return true;
+}
+GROUP_FLAG_VALIDATOR(hive_metastore_sasl_enabled, ValidateHiveMetastoreSaslEnabled);
+} // anonymous namespace
+
 Master::Master(const MasterOptions& opts)
   : KuduServer("Master", opts, "kudu.master"),
     state_(kStopped),
@@ -100,8 +122,7 @@ Master::Master(const MasterOptions& opts)
     catalog_manager_(new CatalogManager(this)),
     path_handlers_(new MasterPathHandlers(this)),
     opts_(opts),
-    registration_initialized_(false),
-    maintenance_manager_(new MaintenanceManager(MaintenanceManager::kDefaultOptions)) {
+    registration_initialized_(false) {
 }
 
 Master::~Master() {
@@ -128,6 +149,9 @@ Status Master::Init() {
     RETURN_NOT_OK(path_handlers_->Register(web_server_.get()));
   }
 
+  maintenance_manager_.reset(new MaintenanceManager(
+      MaintenanceManager::kDefaultOptions, fs_manager_->uuid()));
+
   // The certificate authority object is initialized upon loading
   // CA private key and certificate from the system table when the server
   // becomes a leader.
@@ -152,7 +176,7 @@ Status Master::Start() {
 Status Master::StartAsync() {
   CHECK_EQ(kInitialized, state_);
 
-  RETURN_NOT_OK(maintenance_manager_->Init(fs_manager_->uuid()));
+  RETURN_NOT_OK(maintenance_manager_->Start());
 
   gscoped_ptr<ServiceIf> impl(new MasterServiceImpl(this));
   gscoped_ptr<ServiceIf> consensus_service(new ConsensusServiceImpl(

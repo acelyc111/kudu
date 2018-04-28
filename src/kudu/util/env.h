@@ -15,6 +15,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <iosfwd>
 #include <map>
 #include <memory>
 #include <string>
@@ -322,7 +323,7 @@ class Env {
   // Gets the process' current limit for the given resource type.
   //
   // On UNIX platforms, this is equivalent to the resource's soft limit.
-  virtual int64_t GetResourceLimit(ResourceLimitType t) = 0;
+  virtual uint64_t GetResourceLimit(ResourceLimitType t) = 0;
 
   // Increases the resource limit by as much as possible.
   //

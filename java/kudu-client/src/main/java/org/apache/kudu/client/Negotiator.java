@@ -51,7 +51,6 @@ import javax.security.sasl.Sasl;
 import javax.security.sasl.SaslClient;
 import javax.security.sasl.SaslException;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSet;
@@ -93,7 +92,7 @@ public class Negotiator extends SimpleChannelUpstreamHandler {
   private static final Logger LOG = LoggerFactory.getLogger(Negotiator.class);
 
   private final SaslClientCallbackHandler SASL_CALLBACK = new SaslClientCallbackHandler();
-  private static final Set<RpcHeader.RpcFeatureFlag> SUPPORTED_RPC_FEATURES =
+  private static final ImmutableSet<RpcHeader.RpcFeatureFlag> SUPPORTED_RPC_FEATURES =
       ImmutableSet.of(
           RpcHeader.RpcFeatureFlag.APPLICATION_FEATURE_FLAGS,
           RpcHeader.RpcFeatureFlag.TLS);
@@ -204,7 +203,7 @@ public class Negotiator extends SimpleChannelUpstreamHandler {
 
   private Certificate peerCert;
 
-  @VisibleForTesting
+  @InterfaceAudience.LimitedPrivate("Test")
   boolean overrideLoopbackForTests;
 
   public Negotiator(String remoteHostname,
@@ -827,6 +826,7 @@ public class Negotiator extends SimpleChannelUpstreamHandler {
   }
 
   private class SaslClientCallbackHandler implements CallbackHandler {
+    @Override
     public void handle(Callback[] callbacks) throws UnsupportedCallbackException {
       for (Callback callback : callbacks) {
         if (callback instanceof NameCallback) {

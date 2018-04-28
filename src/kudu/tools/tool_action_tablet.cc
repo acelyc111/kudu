@@ -44,6 +44,8 @@
 #include "kudu/gutil/stl_util.h"
 #include "kudu/gutil/strings/split.h"
 #include "kudu/gutil/strings/substitute.h"
+#include "kudu/master/master.pb.h"
+#include "kudu/master/master.proxy.h"
 #include "kudu/rpc/rpc_controller.h"
 #include "kudu/tools/ksck.h"
 #include "kudu/tools/ksck_remote.h"
@@ -76,7 +78,11 @@ using kudu::consensus::MODIFY_PEER;
 using kudu::consensus::OpId;
 using kudu::consensus::RaftPeerPB;
 using kudu::consensus::ReplicaManagementInfoPB;
+using kudu::master::MasterServiceProxy;
+using kudu::master::ReplaceTabletRequestPB;
+using kudu::master::ReplaceTabletResponsePB;
 using kudu::rpc::RpcController;
+using std::cerr;
 using std::cout;
 using std::endl;
 using std::shared_ptr;
@@ -136,16 +142,15 @@ Status GetTabletLeader(const client::sp::shared_ptr<KuduClient>& client,
 }
 
 Status DoKsckForTablet(const vector<string>& master_addresses, const string& tablet_id) {
-  shared_ptr<KsckMaster> master;
-  RETURN_NOT_OK(RemoteKsckMaster::Build(master_addresses, &master));
-  shared_ptr<KsckCluster> cluster(new KsckCluster(master));
+  shared_ptr<KsckCluster> cluster;
+  RETURN_NOT_OK(RemoteKsckCluster::Build(master_addresses, &cluster));
 
   // Print to an unopened ofstream to discard ksck output.
   // See https://stackoverflow.com/questions/8243743.
   std::ofstream null_stream;
   Ksck ksck(cluster, &null_stream);
   ksck.set_tablet_id_filters({ tablet_id });
-  RETURN_NOT_OK(ksck.CheckMasterRunning());
+  RETURN_NOT_OK(ksck.CheckClusterRunning());
   RETURN_NOT_OK(ksck.FetchTableAndTabletInfo());
   // The return Status is ignored since a tserver that is not the destination
   // nor a host of a replica might be down, and in that case the move should
@@ -403,7 +408,11 @@ Status MoveReplica(const RunnerContext &context) {
   const string& to_ts_uuid = FindOrDie(context.required_args, kToTsUuidArg);
 
   // Check the tablet is in perfect health first.
-  RETURN_NOT_OK_PREPEND(DoKsckForTablet(master_addresses, tablet_id),
+  // We retry since occasionally ksck returns bad status because of transient
+  // issues like leader elections.
+  RETURN_NOT_OK_PREPEND(WaitForCleanKsck(master_addresses,
+                                         tablet_id,
+                                         MonoDelta::FromSeconds(5)),
                         "ksck pre-move health check failed");
 
   client::sp::shared_ptr<KuduClient> client;
@@ -524,6 +533,27 @@ Status MoveReplica(const RunnerContext &context) {
                                      (MonoTime::Now() - start).ToString()));
 }
 
+Status ReplaceTablet(const RunnerContext& context) {
+  const string& tablet_id = FindOrDie(context.required_args, kTabletIdArg);
+
+  LeaderMasterProxy proxy;
+  RETURN_NOT_OK(proxy.Init(context));
+
+  ReplaceTabletRequestPB req;
+  ReplaceTabletResponsePB resp;
+  req.set_tablet_id(tablet_id);
+  Status s = proxy.SyncRpc<ReplaceTabletRequestPB, ReplaceTabletResponsePB>(
+      req, &resp, "ReplaceTablet", &MasterServiceProxy::ReplaceTablet);
+  RETURN_NOT_OK(s);
+
+  if (resp.has_error()) {
+    s = StatusFromPB(resp.error().status());
+    return s.CloneAndPrepend(Substitute("unable to replace tablet $0", tablet_id));
+  }
+  cerr << "Replaced tablet " << tablet_id << " with tablet ";
+  cout << resp.replacement_tablet_id() << endl;
+  return Status::OK();
+}
 } // anonymous namespace
 
 unique_ptr<Mode> BuildTabletMode() {
@@ -595,10 +625,26 @@ unique_ptr<Mode> BuildTabletMode() {
       .AddAction(std::move(remove_replica))
       .Build();
 
+  unique_ptr<Action> replace_tablet =
+      ActionBuilder("unsafe_replace_tablet", &ReplaceTablet)
+      .Description("Replace a tablet with an empty one, deleting the previous tablet.")
+      .ExtraDescription("Use this tool to repair a table when one of its tablets has permanently "
+                        "lost all of its replicas. It replaces the unrecoverable tablet with a new "
+                        "empty one representing the same partition. Its primary use is to jettison "
+                        "an unrecoverable tablet in order to make the rest of the table "
+                        "available.\n\n"
+                        "NOTE: The original tablet will be deleted. Its data will be permanently "
+                        "lost. Additionally, clients should be restarted before attempting to "
+                        "use the repaired table (see KUDU-2376).")
+      .AddRequiredParameter({ kMasterAddressesArg, kMasterAddressesArgDesc })
+      .AddRequiredParameter({ kTabletIdArg, kTabletIdArgDesc })
+      .Build();
+
   return ModeBuilder("tablet")
       .Description("Operate on remote Kudu tablets")
       .AddMode(std::move(change_config))
       .AddAction(std::move(leader_step_down))
+      .AddAction(std::move(replace_tablet))
       .Build();
 }
 

@@ -19,6 +19,7 @@
 #ifndef KUDU_CLIENT_META_CACHE_H
 #define KUDU_CLIENT_META_CACHE_H
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <set>
@@ -135,9 +136,9 @@ typedef std::unordered_map<std::string, RemoteTabletServer*> TabletServerMap;
 class MetaCacheServerPicker : public rpc::ServerPicker<RemoteTabletServer> {
  public:
   MetaCacheServerPicker(KuduClient* client,
-                        const scoped_refptr<MetaCache>& meta_cache,
+                        scoped_refptr<MetaCache> meta_cache,
                         const KuduTable* table,
-                        RemoteTablet* const tablet);
+                        RemoteTablet* tablet);
 
   virtual ~MetaCacheServerPicker() {}
   void PickLeader(const ServerPickedCallback& callback, const MonoTime& deadline) override;
@@ -257,9 +258,9 @@ class RemoteTablet : public RefCountedThreadSafe<RemoteTablet> {
   const std::string tablet_id_;
   const Partition partition_;
 
-  // All non-const members are protected by 'lock_'.
-  mutable simple_spinlock lock_;
-  bool stale_;
+  std::atomic<bool> stale_;
+
+  mutable simple_spinlock lock_; // Protects replicas_.
   std::vector<RemoteReplica> replicas_;
 
   DISALLOW_COPY_AND_ASSIGN(RemoteTablet);
@@ -373,6 +374,17 @@ class MetaCache : public RefCountedThreadSafe<MetaCache> {
   MetaCache(KuduClient* client, ReplicaController::Visibility replica_visibility);
   ~MetaCache();
 
+  // Determines what type of operation a MetaCache lookup is being done for.
+  enum class LookupType {
+    // The lookup should only return a tablet which actually covers the
+    // requested partition key.
+    kPoint,
+    // The lookup should return the next tablet after the requested
+    // partition key if the requested key does not fall within a covered
+    // range.
+    kLowerBound
+  };
+
   // Look up which tablet hosts the given partition key for a table. When it is
   // available, the tablet is stored in 'remote_tablet' (if not NULL) and the
   // callback is fired. Only tablets with non-failed LEADERs are considered.
@@ -385,17 +397,9 @@ class MetaCache : public RefCountedThreadSafe<MetaCache> {
   void LookupTabletByKey(const KuduTable* table,
                          std::string partition_key,
                          const MonoTime& deadline,
+                         LookupType lookup_type,
                          scoped_refptr<RemoteTablet>* remote_tablet,
                          const StatusCallback& callback);
-
-  // Look up which tablet hosts the given partition key, or the next tablet if
-  // the key falls in a non-covered range partition.
-  void LookupTabletByKeyOrNext(const KuduTable* table,
-                               std::string partition_key,
-                               const MonoTime& deadline,
-                               scoped_refptr<RemoteTablet>* remote_tablet,
-                               const StatusCallback& callback,
-                               int max_returned_locations = kFetchTabletsPerPointLookup);
 
   // Clears the non-covered range entries from a table's meta cache.
   void ClearNonCoveredRangeEntries(const std::string& table_id);
@@ -414,6 +418,10 @@ class MetaCache : public RefCountedThreadSafe<MetaCache> {
   bool AcquireMasterLookupPermit();
   void ReleaseMasterLookupPermit();
 
+  // Return stringified representation of the given partition key, using "<start>" if empty.
+  static std::string DebugLowerBoundPartitionKey(const KuduTable* table,
+                                                 const std::string& partition_key);
+
  private:
   friend class LookupRpc;
 
@@ -427,10 +435,22 @@ class MetaCache : public RefCountedThreadSafe<MetaCache> {
                                int max_returned_locations);
 
   // Lookup the given tablet by key, only consulting local information.
-  // Returns true and sets *remote_tablet if successful.
-  bool LookupTabletByKeyFastPath(const KuduTable* table,
-                                 const std::string& partition_key,
-                                 MetaCacheEntry* entry);
+  // Returns true and sets *entry if successful.
+  bool LookupEntryByKeyFastPath(const KuduTable* table,
+                                const std::string& partition_key,
+                                MetaCacheEntry* entry);
+
+  // Perform the complete fast-path lookup. Returns:
+  //  - NotFound if the lookup hits a non-covering range.
+  //  - Incomplete if the fast path was not possible
+  //  - OK if the lookup was successful.
+  //
+  // If 'lookup_type' is kLowerBound, then 'partition_key' will be updated to indicate the
+  // start of the range for the matched tablet.
+  Status DoFastPathLookup(const KuduTable* table,
+                          std::string* partition_key, // in-out parameter
+                          LookupType lookup_type,
+                          scoped_refptr<RemoteTablet>* remote_tablet);
 
   // Update our information about the given tablet server.
   //
@@ -442,7 +462,7 @@ class MetaCache : public RefCountedThreadSafe<MetaCache> {
 
   KuduClient* client_;
 
-  rw_spinlock lock_;
+  percpu_rwlock lock_;
 
   // Cache of Tablet Server locations: TS UUID -> RemoteTabletServer*.
   //

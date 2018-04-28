@@ -38,7 +38,6 @@
 #include "kudu/common/timestamp.h"
 #include "kudu/fs/block_id.h"
 #include "kudu/gutil/gscoped_ptr.h"
-#include "kudu/gutil/move.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/stringprintf.h"
 #include "kudu/gutil/strings/stringpiece.h"
@@ -223,8 +222,6 @@ TEST_F(TestRowSet, TestErrorDuringUpdate) {
   Status s = rs->MutateRow(timestamp, probe, enc.as_changelist(), op_id_, &stats, &result);
   LOG(INFO) << s.ToString();
   ASSERT_TRUE(s.IsIOError());
-
-  FLAGS_env_inject_eio = 0;
 }
 
 TEST_F(TestRowSet, TestRandomRead) {

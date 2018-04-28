@@ -24,14 +24,9 @@ import org.apache.kudu.client.{KuduTable, Operation}
   */
 private[kudu] sealed trait OperationType {
   def operation(table: KuduTable): Operation
-  def ignoreDuplicateRowErrors: Boolean = false
 }
 private[kudu] case object Insert extends OperationType {
   override def operation(table: KuduTable): Operation = table.newInsert()
-}
-private[kudu] case object InsertIgnore extends OperationType {
-  override def operation(table: KuduTable): Operation = table.newInsert()
-  override def ignoreDuplicateRowErrors: Boolean = true
 }
 private[kudu] case object Update extends OperationType {
   override def operation(table: KuduTable): Operation = table.newUpdate()

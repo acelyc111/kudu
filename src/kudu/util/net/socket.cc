@@ -521,12 +521,18 @@ Status Socket::Recv(uint8_t *buf, int32_t amt, int32_t *nread) {
   int res;
   RETRY_ON_EINTR(res, recv(fd_, buf, amt, 0));
   if (res <= 0) {
+    Sockaddr remote;
+    GetPeerAddress(&remote);
     if (res == 0) {
-      return Status::NetworkError("Recv() got EOF from remote", Slice(), ESHUTDOWN);
+      std::string error_message = strings::Substitute("Recv() got EOF from remote $0",
+                                                      remote.ToString());
+      return Status::NetworkError(error_message, Slice(), ESHUTDOWN);
     }
     int err = errno;
-    return Status::NetworkError(std::string("recv error: ") +
-                                ErrnoToString(err), Slice(), err);
+    std::string error_message = strings::Substitute("recv error from $0: $1",
+                                                    remote.ToString(),
+                                                    ErrnoToString(err));
+    return Status::NetworkError(error_message, Slice(), err);
   }
   *nread = res;
   return Status::OK();
@@ -574,7 +580,7 @@ Status Socket::BlockingRecv(uint8_t *buf, size_t amt, size_t *nread, const MonoT
   return Status::OK();
 }
 
-Status Socket::SetTimeout(int opt, std::string optname, const MonoDelta& timeout) {
+Status Socket::SetTimeout(int opt, const char* optname, const MonoDelta& timeout) {
   if (PREDICT_FALSE(timeout.ToNanoseconds() < 0)) {
     return Status::InvalidArgument("Timeout specified as negative to SetTimeout",
                                    timeout.ToString());
@@ -585,7 +591,7 @@ Status Socket::SetTimeout(int opt, std::string optname, const MonoDelta& timeout
   if (::setsockopt(fd_, SOL_SOCKET, opt, &tv, optlen) == -1) {
     int err = errno;
     return Status::NetworkError(
-        StringPrintf("Failed to set %s to %s", optname.c_str(), timeout.ToString().c_str()),
+        StringPrintf("Failed to set %s to %s", optname, timeout.ToString().c_str()),
         ErrnoToString(err), err);
   }
   return Status::OK();

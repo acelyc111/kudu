@@ -134,7 +134,7 @@ public final class AsyncKuduScanner {
      */
     READ_YOUR_WRITES(Common.ReadMode.READ_YOUR_WRITES);
 
-    private Common.ReadMode pbVersion;
+    private final Common.ReadMode pbVersion;
     ReadMode(Common.ReadMode pbVersion) {
       this.pbVersion = pbVersion;
     }
@@ -208,6 +208,8 @@ public final class AsyncKuduScanner {
   private boolean closed = false;
 
   private boolean hasMore = true;
+
+  private long numRowsReturned = 0;
 
   /**
    * The tabletSlice currently being scanned.
@@ -436,6 +438,8 @@ public final class AsyncKuduScanner {
             lastPrimaryKey = resp.lastPrimaryKey;
           }
 
+          numRowsReturned += resp.data.getNumRows();
+
           if (!resp.more || resp.scannerId == null) {
             scanFinished();
             return Deferred.fromResult(resp.data); // there might be data to return
@@ -449,6 +453,7 @@ public final class AsyncKuduScanner {
           return Deferred.fromResult(resp.data);
         }
 
+        @Override
         public String toString() {
           return "scanner opened";
         }
@@ -479,6 +484,7 @@ public final class AsyncKuduScanner {
           }
         }
 
+        @Override
         public String toString() {
           return "open scanner errback";
         }
@@ -518,7 +524,9 @@ public final class AsyncKuduScanner {
    */
   private final Callback<RowResultIterator, Response> gotNextRow =
       new Callback<RowResultIterator, Response>() {
+        @Override
         public RowResultIterator call(final Response resp) {
+          numRowsReturned += resp.data.getNumRows();
           if (!resp.more) {  // We're done scanning this tablet.
             scanFinished();
             return resp.data;
@@ -529,6 +537,7 @@ public final class AsyncKuduScanner {
           return resp.data;
         }
 
+        @Override
         public String toString() {
           return "get nextRows response";
         }
@@ -557,6 +566,7 @@ public final class AsyncKuduScanner {
         }
       }
 
+      @Override
       public String toString() {
         return "NextRow errback";
       }
@@ -566,8 +576,9 @@ public final class AsyncKuduScanner {
   void scanFinished() {
     Partition partition = tablet.getPartition();
     pruner.removePartitionKeyRange(partition.getPartitionKeyEnd());
-    // Stop scanning if we have scanned until or past the end partition key.
-    if (!pruner.hasMorePartitionKeyRanges()) {
+    // Stop scanning if we have scanned until or past the end partition key, or
+    // if we have fulfilled the limit.
+    if (!pruner.hasMorePartitionKeyRanges() || numRowsReturned >= limit) {
       hasMore = false;
       closed = true; // the scanner is closed on the other side at this point
       return;
@@ -601,6 +612,7 @@ public final class AsyncKuduScanner {
   /** Callback+Errback invoked when the TabletServer closed our scanner.  */
   private Callback<RowResultIterator, Response> closedCallback() {
     return new Callback<RowResultIterator, Response>() {
+      @Override
       public RowResultIterator call(Response response) {
         closed = true;
         if (LOG.isDebugEnabled()) {
@@ -612,12 +624,14 @@ public final class AsyncKuduScanner {
         return response == null ? null : response.data;
       }
 
+      @Override
       public String toString() {
         return "scanner closed";
       }
     };
   }
 
+  @Override
   public String toString() {
     final String tablet = this.tablet == null ? "null" : this.tablet.getTabletId();
     final StringBuilder buf = new StringBuilder();
@@ -754,6 +768,7 @@ public final class AsyncKuduScanner {
       this.lastPrimaryKey = lastPrimaryKey;
     }
 
+    @Override
     public String toString() {
       String ret = "AsyncKuduScanner$Response(scannerId = " + Bytes.pretty(scannerId) +
           ", data = " + data + ", more = " + more;
@@ -819,7 +834,7 @@ public final class AsyncKuduScanner {
           // is the easiest way.
           AsyncKuduScanner.this.tablet = super.getTablet();
           NewScanRequestPB.Builder newBuilder = NewScanRequestPB.newBuilder();
-          newBuilder.setLimit(limit); // currently ignored
+          newBuilder.setLimit(limit - AsyncKuduScanner.this.numRowsReturned);
           newBuilder.addAllProjectedColumns(ProtobufHelper.schemaToListPb(schema));
           newBuilder.setTabletId(UnsafeByteOperations.unsafeWrap(tablet.getTabletIdAsBytes()));
           newBuilder.setOrderMode(AsyncKuduScanner.this.getOrderMode());
@@ -936,6 +951,7 @@ public final class AsyncKuduScanner {
       return new Pair<Response, Object>(response, error);
     }
 
+    @Override
     public String toString() {
       return "ScanRequest(scannerId=" + Bytes.pretty(scannerId) +
           (tablet != null ? ", tablet=" + tablet.getTabletId() : "") +
@@ -966,6 +982,7 @@ public final class AsyncKuduScanner {
      * Builds an {@link AsyncKuduScanner} using the passed configurations.
      * @return a new {@link AsyncKuduScanner}
      */
+    @Override
     public AsyncKuduScanner build() {
       return new AsyncKuduScanner(
           client, table, projectedColumnNames, projectedColumnIndexes, readMode, isFaultTolerant,

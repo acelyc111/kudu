@@ -31,7 +31,6 @@ import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
 import javax.net.ssl.SSLException;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.stumbleupon.async.Callback;
@@ -589,6 +588,7 @@ class Connection extends SimpleChannelUpstreamHandler {
     final ChannelFuture disconnectFuture = disconnect();
     final Deferred<Void> d = new Deferred<>();
     disconnectFuture.addListener(new ChannelFutureListener() {
+      @Override
       public void operationComplete(final ChannelFuture future) {
         if (future.isSuccess()) {
           d.callback(null);
@@ -607,6 +607,7 @@ class Connection extends SimpleChannelUpstreamHandler {
   }
 
   /** @return string representation of this object (suitable for printing into the logs, etc.) */
+  @Override
   public String toString() {
     final StringBuilder buf = new StringBuilder();
     buf.append("Connection@")
@@ -635,7 +636,7 @@ class Connection extends SimpleChannelUpstreamHandler {
    *
    * @return true iff the connection is in the READY state
    */
-  @VisibleForTesting
+  @InterfaceAudience.LimitedPrivate("Test")
   boolean isReady() {
     lock.lock();
     try {

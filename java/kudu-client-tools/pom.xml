@@ -36,30 +36,51 @@
             <artifactId>kudu-mapreduce</artifactId>
             <version>${project.version}</version>
         </dependency>
+
         <dependency>
-            <groupId>org.apache.yetus</groupId>
-            <artifactId>audience-annotations</artifactId>
-            <version>${yetus.version}</version>
+            <groupId>com.google.guava</groupId>
+            <artifactId>guava</artifactId>
+            <version>${guava.version}</version>
+            <exclusions>
+                <!-- Ignore the transitive annotations libraries that are -->
+                <!-- not marked as optional in version 22.0+ -->
+                <exclusion>
+                    <groupId>*</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-common</artifactId>
+            <version>${hadoop.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-mapreduce-client-common</artifactId>
+            <version>${hadoop.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.parquet</groupId>
+            <artifactId>parquet-hadoop</artifactId>
+            <version>${parquet.version}</version>
+            <scope>provided</scope>
         </dependency>
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>
             <version>${slf4j.version}</version>
-        </dependency>
-
-        <!-- This artifact is in compile scope for convenience, as it is typically
-             not included in the job classpath by MapReduce platform providers. -->
-        <dependency>
-            <groupId>org.apache.parquet</groupId>
-            <artifactId>parquet-hadoop</artifactId>
-            <version>${parquet.version}</version>
-        </dependency>
-
-        <dependency>
-            <groupId>org.apache.hadoop</groupId>
-            <artifactId>hadoop-client</artifactId>
-            <version>${hadoop.version}</version>
             <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.yetus</groupId>
+            <artifactId>audience-annotations</artifactId>
+            <version>${yetus.version}</version>
+            <optional>true</optional>
         </dependency>
 
         <dependency>
@@ -74,6 +95,12 @@
             <artifactId>kudu-mapreduce</artifactId>
             <version>${project.version}</version>
             <type>test-jar</type>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>commons-io</groupId>
+            <artifactId>commons-io</artifactId>
+            <version>${commons-io.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -110,12 +137,21 @@
                 <configuration>
                     <artifactSet>
                         <includes>
+                            <include>com.google.guava:guava</include>
                             <include>org.apache.kudu:kudu-client</include>
                             <include>org.apache.kudu:kudu-mapreduce</include>
-                            <include>org.apache.yetus:audience-annotations</include>
-                            <include>org.apache.parquet:parquet-hadoop</include>
                         </includes>
                     </artifactSet>
+                    <relocations>
+                        <relocation>
+                            <pattern>com.google.common</pattern>
+                            <shadedPattern>org.apache.kudu.shaded.com.google.common</shadedPattern>
+                        </relocation>
+                        <relocation>
+                            <pattern>com.google.thirdparty</pattern>
+                            <shadedPattern>org.apache.kudu.shaded.com.google.thirdparty</shadedPattern>
+                        </relocation>
+                    </relocations>
                 </configuration>
             </plugin>
         </plugins>

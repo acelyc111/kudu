@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <set>
@@ -144,6 +145,7 @@ DEFINE_int32(delete_tablet_bench_num_flushes, 200,
 DECLARE_bool(crash_on_eio);
 DECLARE_bool(enable_maintenance_manager);
 DECLARE_bool(fail_dns_resolution);
+DECLARE_bool(rowset_metadata_store_keys);
 DECLARE_double(env_inject_eio);
 DECLARE_int32(flush_threshold_mb);
 DECLARE_int32(flush_threshold_secs);
@@ -156,6 +158,7 @@ DECLARE_string(block_manager);
 DECLARE_string(env_inject_eio_globs);
 
 // Declare these metrics prototypes for simpler unit testing of their behavior.
+METRIC_DECLARE_counter(block_manager_total_bytes_read);
 METRIC_DECLARE_counter(rows_inserted);
 METRIC_DECLARE_counter(rows_updated);
 METRIC_DECLARE_counter(rows_deleted);
@@ -251,6 +254,74 @@ TEST_F(TabletServerTest, TestServerClock) {
 
   ASSERT_OK(generic_proxy_->ServerClock(req, &resp, &controller));
   ASSERT_GT(mini_server_->server()->clock()->Now().ToUint64(), resp.timestamp());
+}
+
+TEST_F(TabletServerTest, TestGetFlags) {
+  server::GenericServiceProxy proxy(
+      client_messenger_, mini_server_->bound_rpc_addr(),
+      mini_server_->bound_rpc_addr().host());
+
+  server::GetFlagsRequestPB req;
+  server::GetFlagsResponsePB resp;
+
+  // Check that a default request returns flags set to a non-default value and
+  // does not return flags set to a default value.
+  // Throughout, we make the reasonable assumption that the -fs_wal_dir flag
+  // will have a non-default value, and the -help and unsafe -logemaillevel
+  // flags will have default values.
+  {
+    RpcController controller;
+    ASSERT_OK(proxy.GetFlags(req, &resp, &controller));
+    SCOPED_TRACE(SecureDebugString(resp));
+    EXPECT_TRUE(std::any_of(resp.flags().begin(), resp.flags().end(),
+          [](const server::GetFlagsResponsePB::Flag& flag) -> bool {
+            return flag.name() == "log_dir";
+          }));
+    EXPECT_TRUE(std::none_of(resp.flags().begin(), resp.flags().end(),
+          [](const server::GetFlagsResponsePB::Flag& flag) -> bool {
+            return flag.name() == "help";
+          }));
+  }
+
+  // Check that specifying all flags returns even flags with default values.
+  {
+    RpcController controller;
+    req.set_all_flags(true);
+    ASSERT_OK(proxy.GetFlags(req, &resp, &controller));
+    SCOPED_TRACE(SecureDebugString(resp));
+    EXPECT_TRUE(std::any_of(resp.flags().begin(), resp.flags().end(),
+          [](const server::GetFlagsResponsePB::Flag& flag) -> bool {
+            return flag.name() == "log_dir";
+          }));
+    EXPECT_TRUE(std::any_of(resp.flags().begin(), resp.flags().end(),
+          [](const server::GetFlagsResponsePB::Flag& flag) -> bool {
+            return flag.name() == "help";
+          }));
+    EXPECT_TRUE(std::any_of(resp.flags().begin(), resp.flags().end(),
+          [](const server::GetFlagsResponsePB::Flag& flag) -> bool {
+            return flag.name() == "logemaillevel";
+          }));
+  }
+
+  // Check that filtering on tags excludes flags with no matching tag.
+  {
+    RpcController controller;
+    req.add_tags("stable");
+    ASSERT_OK(proxy.GetFlags(req, &resp, &controller));
+    SCOPED_TRACE(SecureDebugString(resp));
+    EXPECT_TRUE(std::any_of(resp.flags().begin(), resp.flags().end(),
+          [](const server::GetFlagsResponsePB::Flag& flag) -> bool {
+            return flag.name() == "log_dir";
+          }));
+    EXPECT_TRUE(std::any_of(resp.flags().begin(), resp.flags().end(),
+          [](const server::GetFlagsResponsePB::Flag& flag) -> bool {
+            return flag.name() == "help";
+          }));
+    EXPECT_TRUE(std::none_of(resp.flags().begin(), resp.flags().end(),
+          [](const server::GetFlagsResponsePB::Flag& flag) -> bool {
+            return flag.name() == "logemaillevel";
+          }));
+  }
 }
 
 TEST_F(TabletServerTest, TestSetFlags) {
@@ -2061,11 +2132,76 @@ TEST_F(TabletServerTest, TestScanWithStringPredicates) {
   ASSERT_EQ(R"((int32 key=59, int32 int_val=118, string string_val="hello 59"))", results[9]);
 }
 
-TEST_F(TabletServerTest, TestScanWithPredicates) {
-  // TODO: need to test adding a predicate on a column which isn't part of the
-  // projection! I don't think we implemented this at the tablet layer yet,
-  // but should do so.
+TEST_F(TabletServerTest, TestNonPositiveLimitsShortCircuit) {
+  InsertTestRowsDirect(0, 10);
+  for (int limit : { -1, 0 }) {
+    ScanRequestPB req;
+    ScanResponsePB resp;
+    RpcController rpc;
 
+    // Set up a new scan request with non-positive limits.
+    NewScanRequestPB* scan = req.mutable_new_scan_request();
+    scan->set_tablet_id(kTabletId);
+    scan->set_limit(limit);
+    ASSERT_OK(SchemaToColumnPBs(schema_, scan->mutable_projected_columns()));
+    {
+      // Send the request and make sure we get no rows back.
+      SCOPED_TRACE(SecureDebugString(req));
+      ASSERT_OK(proxy_->Scan(req, &resp, &rpc));
+      SCOPED_TRACE(SecureDebugString(resp));
+      ASSERT_FALSE(resp.has_error());
+
+      // We're expecting the scan to have short circuited and for no scanner to
+      // exist for the scan, so we need to "drain" it a bit differently.
+      ASSERT_FALSE(resp.has_scanner_id());
+      unique_ptr<RowwiseRowBlockPB> data(resp.release_data());
+      ASSERT_EQ(0, data->num_rows());
+    }
+  }
+}
+
+// Randomized test that runs a few scans with varying limits.
+TEST_F(TabletServerTest, TestRandomizedScanLimits) {
+  // Set a relatively small batch size...
+  const int64_t kBatchSizeRows = rand() % 1000;
+  // ...and decent number of rows, such that we can get a good mix of
+  // multiple-batch and single-batch scans.
+  const int64_t kNumRows = rand() % 2000;
+  FLAGS_scanner_batch_size_rows = kBatchSizeRows;
+  InsertTestRowsDirect(0, kNumRows);
+  LOG(INFO) << Substitute("Rows inserted: $0, batch size: $1", kNumRows, kBatchSizeRows);
+
+  for (int64_t i = 1; i < 100; i++) {
+    // To broaden a range of coverage, gradiate the max limit that we can set.
+    const int64_t kMaxLimit = kNumRows * static_cast<double>(0.01 * i);
+
+    // Get a random limit, capped by the max, inclusive.
+    const int64_t kLimit = rand() % kMaxLimit + 1;
+    LOG(INFO) << "Scanning with a limit of " << kLimit;
+
+    ScanRequestPB req;
+    ScanResponsePB resp;
+    RpcController rpc;
+    NewScanRequestPB* scan = req.mutable_new_scan_request();
+    scan->set_tablet_id(kTabletId);
+    scan->set_limit(kLimit);
+    req.set_batch_size_bytes(0); // so it won't return data right away
+    ASSERT_OK(SchemaToColumnPBs(schema_, scan->mutable_projected_columns()));
+    // Send the scan.
+    {
+      SCOPED_TRACE(SecureDebugString(req));
+      ASSERT_OK(proxy_->Scan(req, &resp, &rpc));
+      SCOPED_TRACE(SecureDebugString(resp));
+      ASSERT_FALSE(resp.has_error());
+    }
+    // Drain all the rows from the scanner.
+    vector<string> results;
+    NO_FATALS(DrainScannerToStrings(resp.scanner_id(), schema_, &results));
+    ASSERT_EQ(results.size(), std::min({ kLimit, kNumRows }));
+  }
+}
+
+TEST_F(TabletServerTest, TestScanWithPredicates) {
   int num_rows = AllowSlowTests() ? 10000 : 1000;
   InsertTestRowsDirect(0, num_rows);
 
@@ -3156,6 +3292,47 @@ TEST_F(TabletServerTest, TestNoMetricsForTombstonedTablet) {
       ASSERT_STR_NOT_CONTAINS(buf.ToString(), "\"type\": \"tablet\"");
     }
   }
+}
+
+// Test ensuring that when rowset min/max keys are stored with and read from
+// the rowset metadata, the tablet server doesn't read any blocks when
+// bootstrapping.
+TEST_F(TabletServerTest, TestKeysInRowsetMetadataPreventStartupSeeks) {
+  // Write the min/max keys to the rowset metadata. This gives us the option to
+  // read from the CFile vs from the rowset metadata.
+  FLAGS_rowset_metadata_store_keys = true;
+  InsertTestRowsDirect(0, 100);
+  ASSERT_OK(tablet_replica_->tablet()->Flush());
+  // Disable the maintenance manager so we don't get any seeks from
+  // maintenance operations when we restart.
+  FLAGS_enable_maintenance_manager = false;
+
+  const auto restart_server_and_check_bytes_read = [&] (bool keys_in_rowset_meta) {
+    FLAGS_rowset_metadata_store_keys = keys_in_rowset_meta;
+    // Reset the replica to avoid any lingering references.
+    // Restart the server and wait for the tablet to bootstrap.
+    tablet_replica_.reset();
+    mini_server_->Shutdown();
+
+    ASSERT_OK(mini_server_->Restart());
+    ASSERT_OK(mini_server_->WaitStarted());
+
+    scoped_refptr<Counter> bytes_read_metric =
+        METRIC_block_manager_total_bytes_read.Instantiate(
+            mini_server_->server()->metric_entity());
+    int64_t bm_bytes_read = bytes_read_metric->value();
+    if (keys_in_rowset_meta) {
+      ASSERT_EQ(0, bm_bytes_read);
+    } else {
+      ASSERT_LT(0, bm_bytes_read);
+    }
+  };
+
+  // Test both reading and not reading the keys from the rowset metadata,
+  // making sure we read bytes in the block manager only when expected (no
+  // bytes should be read by the BM if storing keys in the rowset metadata).
+  restart_server_and_check_bytes_read(/*keys_in_rowset_meta=*/ false);
+  restart_server_and_check_bytes_read(/*keys_in_rowset_meta=*/ true);
 }
 
 } // namespace tserver

@@ -46,7 +46,6 @@
 #include "kudu/gutil/bind.h"
 #include "kudu/gutil/bind_helpers.h"
 #include "kudu/gutil/gscoped_ptr.h"
-#include "kudu/gutil/move.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/strings/fastmem.h"
 #include "kudu/gutil/strings/substitute.h"
@@ -275,7 +274,7 @@ TEST_F(TabletCopyTest, TestSuperBlocksEqual) {
     int size = session_superblock.ByteSize();
     session_buf.resize(size);
     uint8_t* session_dst = session_buf.data();
-    session_dst = session_superblock.SerializeWithCachedSizesToArray(session_dst);
+    session_superblock.SerializeWithCachedSizesToArray(session_dst);
   }
 
   {
@@ -284,7 +283,7 @@ TEST_F(TabletCopyTest, TestSuperBlocksEqual) {
     int size = tablet_superblock.ByteSize();
     tablet_buf.resize(size);
     uint8_t* tablet_dst = tablet_buf.data();
-    tablet_dst = tablet_superblock.SerializeWithCachedSizesToArray(tablet_dst);
+    tablet_superblock.SerializeWithCachedSizesToArray(tablet_dst);
   }
 
   ASSERT_EQ(session_buf.size(), tablet_buf.size());

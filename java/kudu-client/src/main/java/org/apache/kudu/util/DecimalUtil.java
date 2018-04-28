@@ -19,15 +19,16 @@ package org.apache.kudu.util;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
-import java.math.MathContext;
 import java.math.RoundingMode;
 
 import com.google.common.base.Strings;
 
 import org.apache.kudu.ColumnTypeAttributes;
+import org.apache.yetus.audience.InterfaceAudience;
 
 import static org.apache.kudu.Common.DataType;
 
+@InterfaceAudience.Private
 public class DecimalUtil {
   public static final int MAX_DECIMAL32_PRECISION = 9;
   public static final int MAX_UNSCALED_DECIMAL32 = 999999999;
@@ -123,7 +124,7 @@ public class DecimalUtil {
   public static BigDecimal coerce(BigDecimal val, int targetPrecision, int targetScale) {
     if (val.scale() != targetScale) {
       try {
-        val = val.setScale(targetScale, BigDecimal.ROUND_UNNECESSARY);
+        val = val.setScale(targetScale, RoundingMode.UNNECESSARY);
       } catch (ArithmeticException ex) {
         throw new IllegalArgumentException("Value scale " + val.scale() +
             " can't be coerced to target scale " +  targetScale + ". ");

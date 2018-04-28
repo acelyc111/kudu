@@ -67,7 +67,6 @@
 #include "kudu/gutil/bind_helpers.h"
 #include "kudu/gutil/casts.h"
 #include "kudu/gutil/gscoped_ptr.h"
-#include "kudu/gutil/move.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/stl_util.h"
 #include "kudu/gutil/strings/numbers.h"
@@ -285,6 +284,11 @@ KuduClientBuilder& KuduClientBuilder::import_authentication_credentials(string a
   return *this;
 }
 
+KuduClientBuilder& KuduClientBuilder::num_reactors(int num_reactors) {
+  data_->num_reactors_ = num_reactors;
+  return *this;
+}
+
 namespace {
 Status ImportAuthnCreds(const string& authn_creds,
                         Messenger* messenger,
@@ -321,6 +325,9 @@ Status KuduClientBuilder::Build(shared_ptr<KuduClient>* client) {
 
   // Init messenger.
   MessengerBuilder builder("client");
+  if (data_->num_reactors_) {
+    builder.set_num_reactors(data_->num_reactors_.get());
+  }
   std::shared_ptr<Messenger> messenger;
   RETURN_NOT_OK(builder.Build(&messenger));
   UserCredentials user_credentials;
@@ -913,7 +920,7 @@ bool KuduError::was_possibly_successful() const {
 
 KuduError::KuduError(KuduWriteOperation* failed_op,
                      const Status& status)
-  : data_(new KuduError::Data(gscoped_ptr<KuduWriteOperation>(failed_op),
+  : data_(new KuduError::Data(unique_ptr<KuduWriteOperation>(failed_op),
                               status)) {
 }
 
@@ -1332,6 +1339,13 @@ Status KuduScanner::SetRowFormatFlags(uint64_t flags) {
   return data_->mutable_configuration()->SetRowFormatFlags(flags);
 }
 
+Status KuduScanner::SetLimit(int64_t limit) {
+  if (data_->open_) {
+    return Status::IllegalState("Limit must be set before Open()");
+  }
+  return data_->mutable_configuration()->SetLimit(limit);
+}
+
 const ResourceMetrics& KuduScanner::GetResourceMetrics() const {
   return data_->resource_metrics_;
 }
@@ -1474,7 +1488,8 @@ Status KuduScanner::NextBatch(KuduScanBatch* batch) {
                                data_->configuration().projection(),
                                data_->configuration().client_projection(),
                                data_->configuration().row_format_flags(),
-                               make_gscoped_ptr(data_->last_response_.release_data()));
+                               unique_ptr<RowwiseRowBlockPB>(
+                                   data_->last_response_.release_data()));
   }
 
   if (data_->last_response_.has_more_results()) {
@@ -1498,14 +1513,16 @@ Status KuduScanner::NextBatch(KuduScanBatch* batch) {
                                    data_->configuration().projection(),
                                    data_->configuration().client_projection(),
                                    data_->configuration().row_format_flags(),
-                                   make_gscoped_ptr(data_->last_response_.release_data()));
+                                   unique_ptr<RowwiseRowBlockPB>(
+                                       data_->last_response_.release_data()));
       }
 
       data_->scan_attempts_++;
 
       // Error handling.
       set<string> blacklist;
-      Status s = data_->HandleError(result, batch_deadline, &blacklist);
+      bool needs_reopen = false;
+      Status s = data_->HandleError(result, batch_deadline, &blacklist, &needs_reopen);
       if (!s.ok()) {
         LOG(WARNING) << "Scan at tablet server " << data_->ts_->ToString() << " of tablet "
                      << data_->DebugString() << " failed: " << result.status.ToString();
@@ -1518,7 +1535,7 @@ Status KuduScanner::NextBatch(KuduScanBatch* batch) {
         return data_->ReopenCurrentTablet(batch_deadline, &blacklist);
       }
 
-      if (blacklist.empty()) {
+      if (blacklist.empty() && !needs_reopen) {
         // If we didn't blacklist the current server, we can just retry again.
         continue;
       }

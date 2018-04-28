@@ -87,6 +87,7 @@ typedef int64_t ConsensusTerm;
 typedef StdStatusCallback ConsensusReplicatedCallback;
 
 class RaftConsensus : public std::enable_shared_from_this<RaftConsensus>,
+                      public enable_make_shared<RaftConsensus>,
                       public PeerMessageQueueObserver {
  public:
 
@@ -139,7 +140,7 @@ class RaftConsensus : public std::enable_shared_from_this<RaftConsensus>,
                scoped_refptr<log::Log> log,
                scoped_refptr<TimeManager> time_manager,
                ReplicaTransactionFactory* txn_factory,
-               scoped_refptr<MetricEntity> metric_entity,
+               const scoped_refptr<MetricEntity>& metric_entity,
                Callback<void(const std::string& reason)> mark_dirty_clbk);
 
   // Returns true if RaftConsensus is running.
@@ -348,8 +349,13 @@ class RaftConsensus : public std::enable_shared_from_this<RaftConsensus>,
   // Return the on-disk size of the consensus metadata, in bytes.
   int64_t MetadataOnDiskSize() const;
 
+ protected:
+  RaftConsensus(ConsensusOptions options,
+                RaftPeerPB local_peer_pb,
+                scoped_refptr<ConsensusMetadataManager> cmeta_manager,
+                ThreadPool* raft_pool);
+
  private:
-  ALLOW_MAKE_SHARED(RaftConsensus);
   friend class RaftConsensusQuorumTest;
   FRIEND_TEST(RaftConsensusQuorumTest, TestConsensusContinuesIfAMinorityFallsBehind);
   FRIEND_TEST(RaftConsensusQuorumTest, TestConsensusStopsIfAMajorityFallsBehind);
@@ -414,11 +420,6 @@ class RaftConsensus : public std::enable_shared_from_this<RaftConsensus>,
 
   using LockGuard = std::lock_guard<simple_spinlock>;
   using UniqueLock = std::unique_lock<simple_spinlock>;
-
-  RaftConsensus(ConsensusOptions options,
-                RaftPeerPB local_peer_pb,
-                scoped_refptr<ConsensusMetadataManager> cmeta_manager,
-                ThreadPool* raft_pool);
 
   // Initializes the RaftConsensus object, including loading the consensus
   // metadata.
@@ -926,7 +927,7 @@ class ConsensusRound : public RefCountedThreadSafe<ConsensusRound> {
   // replicate callback and the commit callback is set later, after the transaction
   // is actually started.
   ConsensusRound(RaftConsensus* consensus,
-                 const ReplicateRefPtr& replicate_msg);
+                 ReplicateRefPtr replicate_msg);
 
   ReplicateMsg* replicate_msg() {
     return replicate_msg_->get();

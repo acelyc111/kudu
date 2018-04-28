@@ -50,6 +50,14 @@
             <groupId>com.google.guava</groupId>
             <artifactId>guava</artifactId>
             <version>${guava.version}</version>
+            <exclusions>
+                <!-- Ignore the transitive annotations libraries that are -->
+                <!-- not marked as optional in version 22.0+ -->
+                <exclusion>
+                    <groupId>*</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
         <dependency>
             <groupId>com.google.protobuf</groupId>
@@ -67,11 +75,6 @@
             <version>${netty.version}</version>
         </dependency>
         <dependency>
-            <groupId>org.apache.yetus</groupId>
-            <artifactId>audience-annotations</artifactId>
-            <version>${yetus.version}</version>
-        </dependency>
-        <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>
             <version>${slf4j.version}</version>
@@ -83,13 +86,13 @@
             <version>${jsr305.version}</version>
             <optional>true</optional>
         </dependency>
-
         <dependency>
-            <groupId>commons-io</groupId>
-            <artifactId>commons-io</artifactId>
-            <version>${commons-io.version}</version>
-            <scope>test</scope>
+            <groupId>org.apache.yetus</groupId>
+            <artifactId>audience-annotations</artifactId>
+            <version>${yetus.version}</version>
+            <optional>true</optional>
         </dependency>
+
         <dependency>
             <groupId>junit</groupId>
             <artifactId>junit</artifactId>
@@ -146,7 +149,7 @@
                     <excludes>
                       <exclude>**/*test*.proto</exclude>
                     </excludes>
-                    <protocArtifact>com.google.protobuf:protoc:${protobuf.version}:exe:${os.detected.classifier}</protocArtifact>
+                    <protocArtifact>com.google.protobuf:protoc:${protoc.version}:exe:${os.detected.classifier}</protocArtifact>
                 </configuration>
                 <executions>
                     <execution>

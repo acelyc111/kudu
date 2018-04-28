@@ -37,6 +37,7 @@ class function;
 namespace kudu {
 
 class faststring;
+class MonoDelta;
 
 namespace client {
 class KuduClient;
@@ -104,6 +105,11 @@ Status PrintServerStatus(const std::string& address, uint16_t default_port);
 // If 'address' does not contain a port, 'default_port' is used instead.
 Status PrintServerTimestamp(const std::string& address, uint16_t default_port);
 
+// Prints the values of the gflags set for the Kudu server running at 'address'.
+//
+// If 'address' does not contain a port, 'default_port' is used instead.
+Status PrintServerFlags(const std::string& address, uint16_t default_port);
+
 // Changes the value of the gflag given by 'flag' to the value in 'value' on
 // the Kudu server running at 'address'.
 //
@@ -151,6 +157,12 @@ class DataTable {
 // master.
 class LeaderMasterProxy {
  public:
+  LeaderMasterProxy() = default;
+  explicit LeaderMasterProxy(client::sp::shared_ptr<client::KuduClient> client);
+
+  // Initializes the leader master proxy with the given master addresses and timeout.
+  Status Init(const std::vector<std::string>& master_addrs, const MonoDelta& timeout);
+
   // Initialize the leader master proxy given the provided tool context.
   //
   // Uses the required 'master_addresses' option for the master addresses, and

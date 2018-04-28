@@ -44,7 +44,7 @@ class Schema;
 class Slice;
 
 namespace tools {
-class RemoteKsckMaster;
+class RemoteKsckCluster;
 class ReplicaDumper;
 }
 
@@ -53,6 +53,7 @@ namespace client {
 namespace internal {
 class GetTableSchemaRpc;
 class LookupRpc;
+class MetaCache;
 class MetaCacheEntry;
 class WriteRpc;
 } // namespace internal
@@ -244,18 +245,19 @@ class KUDU_EXPORT KuduColumnSchema {
   friend class KuduSchema;
   friend class KuduSchemaBuilder;
   // KuduTableAlterer::Data needs to be a friend. Friending the parent class
-  // is transitive to nested classes. See http://tiny.cloudera.com/jwtui
+  // is transitive to nested classes. See https://s.apache.org/inner-class-friends
   friend class KuduTableAlterer;
 
   KuduColumnSchema();
 
   /// This constructor is private because clients should use the Builder API.
-  KuduColumnSchema(const std::string &name,
-                   DataType type,
-                   bool is_nullable = false,
-                   const void* default_value = NULL,
-                   KuduColumnStorageAttributes storage_attributes = KuduColumnStorageAttributes(),
-                   KuduColumnTypeAttributes type_attributes = KuduColumnTypeAttributes());
+  KuduColumnSchema(
+      const std::string &name,
+      DataType type,
+      bool is_nullable = false,
+      const void* default_value = NULL, //NOLINT(modernize-use-nullptr)
+      const KuduColumnStorageAttributes& storage_attributes = KuduColumnStorageAttributes(),
+      const KuduColumnTypeAttributes& type_attributes = KuduColumnTypeAttributes());
 
   // Owned.
   ColumnSchema* col_;
@@ -581,9 +583,10 @@ class KUDU_EXPORT KuduSchema {
   friend class ScanConfiguration;
   friend class internal::GetTableSchemaRpc;
   friend class internal::LookupRpc;
+  friend class internal::MetaCache;
   friend class internal::MetaCacheEntry;
   friend class internal::WriteRpc;
-  friend class tools::RemoteKsckMaster;
+  friend class tools::RemoteKsckCluster;
   friend class tools::ReplicaDumper;
 
   friend KuduSchema KuduSchemaFromSchema(const Schema& schema);

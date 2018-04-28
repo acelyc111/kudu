@@ -48,7 +48,6 @@ import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
@@ -166,7 +165,7 @@ import org.apache.kudu.util.Pair;
  * <p>
  * In the context of the Hadoop ecosystem, the {@code UserGroupInformation}
  * class provides utility methods to login from a keytab and then run code as
- * the resulting {@link javax.security.auth.Subject}: <code><pre>
+ * the resulting {@link javax.security.auth.Subject}: <pre>{@code
  *   UserGroupInformation.loginUserFromKeytab("my-app", "/path/to/app.keytab");
  *   KuduClient c = UserGroupInformation.getLoginUser().doAs(
  *     new PrivilegedExceptionAction<KuduClient>() {
@@ -176,7 +175,7 @@ import org.apache.kudu.util.Pair;
  *       }
  *     }
  *   );
- * </pre></code> The {@code UserGroupInformation} class will also automatically
+ * }</pre> The {@code UserGroupInformation} class will also automatically
  * start a thread to periodically re-login from the keytab.
  *
  * <h3>Debugging Kudu's usage of Kerberos credentials</h3>
@@ -221,13 +220,13 @@ import org.apache.kudu.util.Pair;
  * <h1>API Compatibility</h1>
  *
  * Note that some methods in the Kudu client implementation are public but
- * annotated with the {@link InterfaceAudience.Private} annotation. This
+ * annotated with the InterfaceAudience.Private annotation. This
  * annotation indicates that, despite having {@code public} visibility, the
  * method is not part of the public API and there is no guarantee that its
  * existence or behavior will be maintained in subsequent versions of the Kudu
  * client library.
  *
- * Other APIs are annotated with the {@link InterfaceStability.Unstable} annotation.
+ * Other APIs are annotated with the InterfaceStability.Unstable annotation.
  * These APIs are meant for public consumption but may change between minor releases.
  * Note that the asynchronous client is currently considered unstable.
  *
@@ -302,9 +301,17 @@ public class AsyncKuduClient implements AutoCloseable {
   /**
    * Timestamp required for HybridTime external consistency through timestamp
    * propagation.
-   * @see src/kudu/common/common.proto
+   * @see "src/kudu/common/common.proto"
    */
   private long lastPropagatedTimestamp = NO_TIMESTAMP;
+
+  /**
+   * Set to true once we have connected to a master at least once.
+   *
+   * This determines whether exportAuthenticationCredentials() needs to
+   * proactively connect to the cluster to obtain a token.
+   */
+  private volatile boolean hasConnectedToMaster = false;
 
   /**
    * Semaphore used to rate-limit master lookups
@@ -328,7 +335,7 @@ public class AsyncKuduClient implements AutoCloseable {
 
   private final RequestTracker requestTracker;
 
-  @VisibleForTesting
+  @InterfaceAudience.LimitedPrivate("Test")
   final SecurityContext securityContext;
 
   /** A helper to facilitate re-acquiring of authentication token if current one expires. */
@@ -792,9 +799,11 @@ public class AsyncKuduClient implements AutoCloseable {
    */
   @InterfaceStability.Unstable
   public Deferred<byte[]> exportAuthenticationCredentials() {
-    byte[] authnData = securityContext.exportAuthenticationCredentials();
-    if (authnData != null) {
-      return Deferred.fromResult(authnData);
+    // If we've already connected to the master, use the authentication
+    // credentials that we received when we connected.
+    if (hasConnectedToMaster) {
+      return Deferred.fromResult(
+          securityContext.exportAuthenticationCredentials());
     }
     // We have no authn data -- connect to the master, which will fetch
     // new info.
@@ -885,7 +894,7 @@ public class AsyncKuduClient implements AutoCloseable {
     return requestTracker;
   }
 
-  @VisibleForTesting
+  @InterfaceAudience.LimitedPrivate("Test")
   KuduTable getMasterTable() {
     return masterTable;
   }
@@ -1067,11 +1076,13 @@ public class AsyncKuduClient implements AutoCloseable {
       this.request = request;
     }
 
+    @Override
     public Deferred<R> call(final D arg) {
       LOG.debug("Retrying sending RPC {} after lookup", request);
       return sendRpcToTablet(request);  // Retry the RPC.
     }
 
+    @Override
     public String toString() {
       return "retry RPC";
     }
@@ -1332,6 +1343,7 @@ public class AsyncKuduClient implements AutoCloseable {
       final Callback<Deferred<KuduTable>, IsCreateTableDoneResponse> callback,
       final Callback<Exception, Exception> errback) {
     final class RetryTimer implements TimerTask {
+      @Override
       public void run(final Timeout timeout) {
         doIsCreateTableDone(table, rpc).addCallbacks(callback, errback);
       }
@@ -1361,6 +1373,7 @@ public class AsyncKuduClient implements AutoCloseable {
       final Callback<Deferred<AlterTableResponse>, IsAlterTableDoneResponse> callback,
       final Callback<Exception, Exception> errback) {
     final class RetryTimer implements TimerTask {
+      @Override
       public void run(final Timeout timeout) {
         doIsAlterTableDone(table, rpc).addCallbacks(callback, errback);
       }
@@ -1375,11 +1388,13 @@ public class AsyncKuduClient implements AutoCloseable {
   }
 
   private final class ReleaseMasterLookupPermit<T> implements Callback<T, T> {
+    @Override
     public T call(final T arg) {
       releaseMasterLookupPermit();
       return arg;
     }
 
+    @Override
     public String toString() {
       return "release master lookup permit";
     }
@@ -1408,7 +1423,7 @@ public class AsyncKuduClient implements AutoCloseable {
    * @param tableId table for which we remove all cached tablet location and
    *                tablet client entries
    */
-  @VisibleForTesting
+  @InterfaceAudience.LimitedPrivate("Test")
   void emptyTabletsCacheForTable(String tableId) {
     tableLocations.remove(tableId);
   }
@@ -1521,6 +1536,7 @@ public class AsyncKuduClient implements AutoCloseable {
                         e.getMessage());
                   }
                 }
+                hasConnectedToMaster = true;
 
                 // Translate the located master into a TableLocations
                 // since the rest of our locations caching code expects this type.
@@ -1705,6 +1721,7 @@ public class AsyncKuduClient implements AutoCloseable {
     // on hold but we won't be doing this for the moment. Regions in HBase can move a lot,
     // we're not expecting this in Kudu.
     final class RetryTimer implements TimerTask {
+      @Override
       public void run(final Timeout timeout) {
         sendRpcToTablet(rpc);
       }
@@ -1781,6 +1798,7 @@ public class AsyncKuduClient implements AutoCloseable {
       this.requestedBatchSize = requestedBatchSize;
     }
 
+    @Override
     public Object call(final GetTableLocationsResponsePB response) {
       if (response.hasError()) {
         Status status = Status.fromMasterErrorPB(response.getError());
@@ -1799,6 +1817,7 @@ public class AsyncKuduClient implements AutoCloseable {
       return null;
     }
 
+    @Override
     public String toString() {
       return "get tablet locations from the master for table " + table.getName();
     }
@@ -1832,7 +1851,7 @@ public class AsyncKuduClient implements AutoCloseable {
    * @param locations the discovered locations
    * @param ttl the ttl of the locations
    */
-  @VisibleForTesting
+  @InterfaceAudience.LimitedPrivate("Test")
   void discoverTablets(KuduTable table,
                        byte[] requestPartitionKey,
                        int requestedBatchSize,
@@ -2025,6 +2044,7 @@ public class AsyncKuduClient implements AutoCloseable {
 
     // 3. Release all other resources.
     final class ReleaseResourcesCB implements Callback<ArrayList<Void>, ArrayList<Void>> {
+      @Override
       public ArrayList<Void> call(final ArrayList<Void> arg) {
         LOG.debug("Releasing all remaining resources");
         timer.stop();
@@ -2032,6 +2052,7 @@ public class AsyncKuduClient implements AutoCloseable {
         return arg;
       }
 
+      @Override
       public String toString() {
         return "release resources callback";
       }
@@ -2040,10 +2061,12 @@ public class AsyncKuduClient implements AutoCloseable {
     // 2. Terminate all connections.
     final class DisconnectCB implements Callback<Deferred<ArrayList<Void>>,
         ArrayList<List<OperationResponse>>> {
+      @Override
       public Deferred<ArrayList<Void>> call(ArrayList<List<OperationResponse>> ignoredResponses) {
         return connectionCache.disconnectEverything().addCallback(new ReleaseResourcesCB());
       }
 
+      @Override
       public String toString() {
         return "disconnect callback";
       }
@@ -2079,6 +2102,7 @@ public class AsyncKuduClient implements AutoCloseable {
     return Deferred.group(deferreds);
   }
 
+  @SuppressWarnings("ReferenceEquality")
   private static boolean isMasterTable(String tableId) {
     // Checking that it's the same instance so there's absolutely no chance of confusing the master
     // 'table' for a user one.
@@ -2100,7 +2124,7 @@ public class AsyncKuduClient implements AutoCloseable {
   /**
    * @return copy of the current TabletClients list
    */
-  @VisibleForTesting
+  @InterfaceAudience.LimitedPrivate("Test")
   List<Connection> getConnectionListCopy() {
     return connectionCache.getConnectionListCopy();
   }

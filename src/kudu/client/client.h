@@ -246,6 +246,17 @@ class KUDU_EXPORT KuduClientBuilder {
   /// @return Reference to the updated object.
   KuduClientBuilder& import_authentication_credentials(std::string authn_creds);
 
+  /// @brief Set the number of reactors for the RPC messenger.
+  ///
+  /// The reactor threads are used for sending and receiving. If not provided,
+  /// the underlying messenger is created with the default number of reactor
+  /// threads.
+  ///
+  /// @param [in] num_reactors
+  ///   Number of reactors to set.
+  /// @return Reference to the updated object.
+  KuduClientBuilder& num_reactors(int num_reactors);
+
   /// Create a client object.
   ///
   /// @note KuduClients objects are shared amongst multiple threads and,
@@ -2088,6 +2099,13 @@ class KUDU_EXPORT KuduScanner {
   /// @endcode
   Status SetRowFormatFlags(uint64_t flags);
   ///@}
+
+  /// Set the maximum number of rows the scanner should return.
+  ///
+  /// @param [in] rows
+  ///   Limit on the number of rows to return.
+  /// @return Operation result status.
+  Status SetLimit(int64_t limit) WARN_UNUSED_RESULT;
 
   /// @return String representation of this scan.
   ///
