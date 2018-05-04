@@ -2,6 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "kudu/util/cache.h"
+
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -13,12 +16,9 @@
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 
-#include "kudu/gutil/atomicops.h"
-#include "kudu/gutil/atomic_refcount.h"
-#include "kudu/gutil/dynamic_annotations.h"
 #include "kudu/gutil/bits.h"
-#include "kudu/gutil/hash/city.h"
 #include "kudu/gutil/gscoped_ptr.h"
+#include "kudu/gutil/hash/city.h"
 #include "kudu/gutil/macros.h"
 #include "kudu/gutil/port.h"
 #include "kudu/gutil/ref_counted.h"
@@ -26,7 +26,6 @@
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/gutil/sysinfo.h"
 #include "kudu/util/alignment.h"
-#include "kudu/util/cache.h"
 #include "kudu/util/cache_metrics.h"
 #include "kudu/util/flag_tags.h"
 #include "kudu/util/locks.h"
@@ -45,6 +44,12 @@ DEFINE_bool(cache_force_single_shard, false,
             "Override all cache implementations to use just one shard");
 TAG_FLAG(cache_force_single_shard, hidden);
 
+DEFINE_double(cache_memtracker_approximation_ratio, 0.01,
+              "The MemTracker associated with a cache can accumulate error up to "
+              "this ratio to improve performance. For tests.");
+TAG_FLAG(cache_memtracker_approximation_ratio, hidden);
+
+using std::atomic;
 using std::shared_ptr;
 using std::string;
 using std::vector;
@@ -70,7 +75,7 @@ struct LRUHandle {
   size_t charge;      // TODO(opt): Only allow uint32_t?
   uint32_t key_length;
   uint32_t val_length;
-  Atomic32 refs;
+  std::atomic<int32_t> refs;
   uint32_t hash;      // Hash of key(); used for fast sharding and comparisons
 
   // The storage for the key/value pair itself. The data is stored as:
@@ -188,7 +193,10 @@ class LRUCache {
   ~LRUCache();
 
   // Separate from constructor so caller can easily make an array of LRUCache
-  void SetCapacity(size_t capacity) { capacity_ = capacity; }
+  void SetCapacity(size_t capacity) {
+    capacity_ = capacity;
+    max_deferred_consumption_ = capacity * FLAGS_cache_memtracker_approximation_ratio;
+  }
 
   void SetMetrics(CacheMetrics* metrics) { metrics_ = metrics; }
 
@@ -207,6 +215,26 @@ class LRUCache {
   // Call the user's eviction callback, if it exists, and free the entry.
   void FreeEntry(LRUHandle* e);
 
+  // Update the memtracker's consumption by the given amount.
+  //
+  // This "buffers" the updates locally in 'deferred_consumption_' until the amount
+  // of accumulated delta is more than ~1% of the cache capacity. This improves
+  // performance under workloads with high eviction rates for a few reasons:
+  //
+  // 1) once the cache reaches its full capacity, we expect it to remain there
+  // in steady state. Each insertion is usually matched by an eviction, and unless
+  // the total size of the evicted item(s) is much different than the size of the
+  // inserted item, each eviction event is unlikely to change the total cache usage
+  // much. So, we expect that the accumulated error will mostly remain around 0
+  // and we can avoid propagating changes to the MemTracker at all.
+  //
+  // 2) because the cache implementation is sharded, we do this tracking in a bunch
+  // of different locations, avoiding bouncing cache-lines between cores. By contrast
+  // the MemTracker is a simple integer, so it doesn't scale as well under concurrency.
+  //
+  // Positive delta indicates an increased memory consumption.
+  void UpdateMemTracker(int64_t delta);
+
   // Initialized before use.
   size_t capacity_;
 
@@ -221,6 +249,11 @@ class LRUCache {
   HandleTable table_;
 
   MemTracker* mem_tracker_;
+  atomic<int64_t> deferred_consumption_ { 0 };
+
+  // Initialized based on capacity_ to ensure an upper bound on the error on the
+  // MemTracker consumption.
+  int64_t max_deferred_consumption_;
 
   CacheMetrics* metrics_;
 };
@@ -237,30 +270,43 @@ LRUCache::LRUCache(MemTracker* tracker)
 LRUCache::~LRUCache() {
   for (LRUHandle* e = lru_.next; e != &lru_; ) {
     LRUHandle* next = e->next;
-    DCHECK_EQ(e->refs, 1);  // Error if caller has an unreleased handle
+    DCHECK_EQ(e->refs.load(std::memory_order_relaxed), 1)
+        << "caller has an unreleased handle";
     if (Unref(e)) {
       FreeEntry(e);
     }
     e = next;
   }
+  mem_tracker_->Consume(deferred_consumption_);
 }
 
 bool LRUCache::Unref(LRUHandle* e) {
-  DCHECK_GT(ANNOTATE_UNPROTECTED_READ(e->refs), 0);
-  return !base::RefCountDec(&e->refs);
+  DCHECK_GT(e->refs.load(std::memory_order_relaxed), 0);
+  return e->refs.fetch_sub(1) == 1;
 }
 
 void LRUCache::FreeEntry(LRUHandle* e) {
-  DCHECK_EQ(ANNOTATE_UNPROTECTED_READ(e->refs), 0);
+  DCHECK_EQ(e->refs.load(std::memory_order_relaxed), 0);
   if (e->eviction_callback) {
     e->eviction_callback->EvictedEntry(e->key(), e->value());
   }
-  mem_tracker_->Release(e->charge);
+  UpdateMemTracker(-static_cast<int64_t>(e->charge));
   if (PREDICT_TRUE(metrics_)) {
     metrics_->cache_usage->DecrementBy(e->charge);
     metrics_->evictions->Increment();
   }
   delete [] e;
+}
+
+void LRUCache::UpdateMemTracker(int64_t delta) {
+  int64_t old_deferred = deferred_consumption_.fetch_add(delta);
+  int64_t new_deferred = old_deferred + delta;
+
+  if (new_deferred > max_deferred_consumption_ ||
+      new_deferred < -max_deferred_consumption_) {
+    int64_t to_propagate = deferred_consumption_.exchange(0, std::memory_order_relaxed);
+    mem_tracker_->Consume(to_propagate);
+  }
 }
 
 void LRUCache::LRU_Remove(LRUHandle* e) {
@@ -284,7 +330,7 @@ Cache::Handle* LRUCache::Lookup(const Slice& key, uint32_t hash, bool caching) {
     std::lock_guard<MutexType> l(mutex_);
     e = table_.Lookup(key, hash);
     if (e != nullptr) {
-      base::RefCountInc(&e->refs);
+      e->refs.fetch_add(1, std::memory_order_relaxed);
       LRU_Remove(e);
       LRU_Append(e);
     }
@@ -325,8 +371,8 @@ Cache::Handle* LRUCache::Insert(LRUHandle* e, Cache::EvictionCallback *eviction_
   // Set the remaining LRUHandle members which were not already allocated during
   // Allocate().
   e->eviction_callback = eviction_callback;
-  e->refs = 2;  // One from LRUCache, one for the returned handle
-  mem_tracker_->Consume(e->charge);
+  e->refs.store(2, std::memory_order_relaxed);  // One from LRUCache, one for the returned handle
+  UpdateMemTracker(e->charge);
   if (PREDICT_TRUE(metrics_)) {
     metrics_->cache_usage->IncrementBy(e->charge);
     metrics_->inserts->Increment();

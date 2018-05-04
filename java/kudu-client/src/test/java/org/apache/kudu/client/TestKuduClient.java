@@ -16,6 +16,7 @@
 // under the License.
 package org.apache.kudu.client;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.apache.kudu.client.KuduPredicate.ComparisonOp.GREATER;
 import static org.apache.kudu.client.KuduPredicate.ComparisonOp.GREATER_EQUAL;
 import static org.apache.kudu.client.KuduPredicate.ComparisonOp.LESS;
@@ -247,7 +248,7 @@ public class TestKuduClient extends BaseKuduTest {
         "STRING key=r3, STRING c1=NULL, STRING c2=def, STRING c3=c, STRING c4=def");
     for (String row : rows) {
       try {
-        String[] fields = row.split(",");
+        String[] fields = row.split(",", -1);
         Insert insert = table.newInsert();
         for (int i = 0; i < fields.length; i++) {
           if (fields[i].equals("-")) { // leave unset
@@ -372,7 +373,7 @@ public class TestKuduClient extends BaseKuduTest {
     for (int i = 0; i < 100; i++) {
       Insert insert = table.newInsert();
       PartialRow row = insert.getRow();
-      row.addBinary("key", String.format("key_%02d", i).getBytes());
+      row.addBinary("key", String.format("key_%02d", i).getBytes(UTF_8));
       row.addString("c1", "✁✂✃✄✆");
       row.addDouble("c2", i);
       if (i % 2 == 1) {
@@ -524,7 +525,8 @@ public class TestKuduClient extends BaseKuduTest {
       while (scanner.hasMoreRows()) {
         count += scanner.nextRows().getNumRows();
       }
-      assertEquals(Math.min(num_rows, limit), count);
+      assertEquals(String.format("Limit %d returned %d/%d rows", limit, count, num_rows),
+          Math.min(num_rows, limit), count);
     }
 
     // Now test with limits for async scanners.

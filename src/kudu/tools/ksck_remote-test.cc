@@ -90,12 +90,7 @@ class RemoteKsckTest : public KuduTest {
 
     InternalMiniClusterOptions opts;
 
-    // Hard-coded ports for the masters. This is safe, as these tests run under
-    // a resource lock (see CMakeLists.txt in this directory).
-    // TODO we should have a generic method to obtain n free ports.
-    opts.master_rpc_ports = { 11010, 11011, 11012 };
-
-    opts.num_masters = opts.master_rpc_ports.size();
+    opts.num_masters = 3;
     opts.num_tablet_servers = 3;
     mini_cluster_.reset(new InternalMiniCluster(env_, opts));
     ASSERT_OK(mini_cluster_->Start());
@@ -241,6 +236,7 @@ TEST_F(RemoteKsckTest, TestTabletServerMismatchedUUID) {
   string new_uuid = new_tablet_server.uuid();
 
   ASSERT_TRUE(ksck_->FetchInfoFromTabletServers().IsNetworkError());
+  ASSERT_OK(ksck_->PrintResults());
 
   string match_string = "Remote error: ID reported by tablet server "
                         "($0) doesn't match the expected ID: $1";
