@@ -344,7 +344,7 @@ TEST_F(AlterTableTest, TestAddNotNullableColumnWithoutDefaults) {
         cluster_->mini_master()->master()->catalog_manager();
     master::CatalogManager::ScopedLeaderSharedLock l(catalog);
     ASSERT_OK(l.first_failed_status());
-    Status s = catalog->AlterTable(&req, &resp, nullptr);
+    Status s = catalog->AlterTableRpc(req, &resp, nullptr);
     ASSERT_TRUE(s.IsInvalidArgument());
     ASSERT_STR_CONTAINS(s.ToString(), "column `c2`: NOT NULL columns must have a default");
   }
@@ -802,6 +802,12 @@ TEST_F(AlterTableTest, TestRenameTableAndAdd) {
             ->Alter());
 
   ASSERT_OK(AddNewI32Column(new_name, "new", 0xdeadbeef));
+}
+
+TEST_F(AlterTableTest, TestRenameToSameName) {
+  unique_ptr<KuduTableAlterer> table_alterer(client_->NewTableAlterer(kTableName));
+  Status s = table_alterer->RenameTo(kTableName)->Alter();
+  ASSERT_TRUE(s.IsAlreadyPresent()) << s.ToString();
 }
 
 // Test restarting a tablet server several times after various

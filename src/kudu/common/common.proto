@@ -54,6 +54,7 @@ enum DataType {
   DECIMAL32 = 15;
   DECIMAL64 = 16;
   DECIMAL128 = 17;
+  IS_DELETED = 18; // virtual column; not a real data type
 }
 
 enum EncodingType {
@@ -67,6 +68,12 @@ enum EncodingType {
   DICT_ENCODING = 5;
   BIT_SHUFFLE = 6;
 }
+
+enum HmsMode {
+  NONE = 0;
+  ENABLE_HIVE_METASTORE = 1;
+  ENABLE_METASTORE_INTEGRATION = 2;
+};
 
 // Holds detailed attributes for the column. Only certain fields will be set,
 // depending on the type of the column.
@@ -383,4 +390,14 @@ message ColumnPredicatePB {
     InList in_list = 5;
     IsNull is_null = 6;
   }
+}
+
+// The primary key range of a Kudu tablet.
+message KeyRangePB {
+  // Encoded primary key to begin scanning at (inclusive).
+  optional bytes start_primary_key = 1 [(kudu.REDACT) = true];
+  // Encoded primary key to stop scanning at (exclusive).
+  optional bytes stop_primary_key = 2 [(kudu.REDACT) = true];
+  // Number of bytes in chunk.
+  required uint64 size_bytes_estimates = 3;
 }

@@ -16,9 +16,11 @@
 // under the License.
 package org.apache.kudu.client;
 
+import static org.apache.kudu.util.ClientTestUtil.createBasicSchemaInsert;
+import static org.apache.kudu.util.ClientTestUtil.getBasicCreateTableOptions;
 import static org.junit.Assert.assertEquals;
 
-import org.junit.BeforeClass;
+import org.junit.Before;
 import org.junit.Test;
 
 import org.apache.kudu.client.Statistics.Statistic;
@@ -32,9 +34,8 @@ public class TestStatistics extends BaseKuduTest {
       + System.currentTimeMillis();
   private static KuduTable table;
 
-  @BeforeClass
-  public static void setUpBeforeClass() throws Exception {
-    BaseKuduTest.setUpBeforeClass();
+  @Before
+  public void setUp() throws Exception {
     CreateTableOptions options = getBasicCreateTableOptions().setNumReplicas(1);
     table = createTable(TABLE_NAME, basicSchema, options);
   }

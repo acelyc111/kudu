@@ -16,6 +16,8 @@
 // under the License.
 package org.apache.kudu.client;
 
+import static org.apache.kudu.util.ClientTestUtil.createFourTabletsTableWithNineRows;
+import static org.apache.kudu.util.ClientTestUtil.getBasicCreateTableOptions;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -95,7 +97,7 @@ public class ITClientStress extends BaseKuduTest {
     final String TABLE_NAME = "testManyClients";
     final int SECONDS_TO_RUN = 10;
     final int NUM_THREADS = 80;
-    createFourTabletsTableWithNineRows(TABLE_NAME);
+    createFourTabletsTableWithNineRows(client, TABLE_NAME, DEFAULT_SLEEP);
 
     runTasks(NUM_THREADS, SECONDS_TO_RUN, new Supplier<Callable<Void>>() {
       @Override
@@ -104,7 +106,7 @@ public class ITClientStress extends BaseKuduTest {
           @Override
           public Void call() throws Exception {
             try (AsyncKuduClient client =
-                  new AsyncKuduClient.AsyncKuduClientBuilder(masterAddresses)
+                  new AsyncKuduClient.AsyncKuduClientBuilder(getMasterAddressesAsString())
                   .defaultAdminOperationTimeoutMs(DEFAULT_SLEEP)
                   .build()) {
               KuduTable t = client.openTable(TABLE_NAME).join();

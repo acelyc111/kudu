@@ -30,6 +30,10 @@ TP_BUILD_DIR="$TP_DIR/build"
 # http://cloudera-thirdparty-libs.s3.amazonaws.com/
 CLOUDFRONT_URL_PREFIX=http://d3dr9sfxru4sde.cloudfront.net
 
+# Third party dependency downloading URL, default to the CloudFront
+# Distribution URL.
+DEPENDENCY_URL=${DEPENDENCY_URL:-$CLOUDFRONT_URL_PREFIX}
+
 PREFIX_COMMON=$TP_DIR/installed/common
 PREFIX_DEPS=$TP_DIR/installed/uninstrumented
 PREFIX_DEPS_TSAN=$TP_DIR/installed/tsan
@@ -119,7 +123,7 @@ GCOVR_VERSION=3.0
 GCOVR_NAME=gcovr-$GCOVR_VERSION
 GCOVR_SOURCE=$TP_SOURCE_DIR/$GCOVR_NAME
 
-CURL_VERSION=7.32.0
+CURL_VERSION=7.59.0
 CURL_NAME=curl-$CURL_VERSION
 CURL_SOURCE=$TP_SOURCE_DIR/$CURL_NAME
 
@@ -174,7 +178,7 @@ OPENSSL_WORKAROUND_DIR="$TP_DIR/installed/openssl-el6-workaround"
 
 # The breakpad source artifact is created using the script found in
 # scripts/make-breakpad-src-archive.sh
-BREAKPAD_VERSION=f78d953511606348173911ae0b62572ebec1bbc4
+BREAKPAD_VERSION=9eac2058b70615519b2c4d8c6bdbfca1bd079e39
 BREAKPAD_NAME=breakpad-$BREAKPAD_VERSION
 BREAKPAD_SOURCE=$TP_SOURCE_DIR/$BREAKPAD_NAME
 
@@ -208,12 +212,12 @@ BISON_VERSION=3.0.4
 BISON_NAME=bison-$BISON_VERSION
 BISON_SOURCE=$TP_SOURCE_DIR/$BISON_NAME
 
-# TODO(dan): bump to a release version once HIVE-17747 is published. The SHA
-# below is the current head of branch-2.
+# TODO(dan): bump to a release version once HIVE-17747 and HIVE-16886/HIVE-18526
+# are published. The SHA below is the current head of branch-2.
 # Note: The Hive release binary tarball is stripped of unnecessary jars before
 # being uploaded. See thirdparty/package-hive.sh for details.
-HIVE_VERSION=6189dbdea543939e977f97170f9a37389f46eb29
-HIVE_NAME=apache-hive-$HIVE_VERSION-bin
+HIVE_VERSION=498021fa15186aee8b282d3c032fbd2cede6bec4
+HIVE_NAME=hive-$HIVE_VERSION
 HIVE_SOURCE=$TP_SOURCE_DIR/$HIVE_NAME
 
 # Note: The Hadoop release tarball is stripped of unnecessary jars before being
@@ -221,3 +225,7 @@ HIVE_SOURCE=$TP_SOURCE_DIR/$HIVE_NAME
 HADOOP_VERSION=2.8.2
 HADOOP_NAME=hadoop-$HADOOP_VERSION
 HADOOP_SOURCE=$TP_SOURCE_DIR/$HADOOP_NAME
+
+SENTRY_VERSION=2.0.1
+SENTRY_NAME=apache-sentry-$SENTRY_VERSION-bin
+SENTRY_SOURCE=$TP_SOURCE_DIR/$SENTRY_NAME

@@ -17,6 +17,9 @@
 package org.apache.kudu.client;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.apache.kudu.util.ClientTestUtil.countRowsInScan;
+import static org.apache.kudu.util.ClientTestUtil.createBasicSchemaInsert;
+import static org.apache.kudu.util.ClientTestUtil.getBasicCreateTableOptions;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
@@ -29,7 +32,7 @@ import java.util.concurrent.TimeUnit;
 import com.google.common.base.Stopwatch;
 import com.google.protobuf.ByteString;
 import com.stumbleupon.async.Deferred;
-import org.junit.BeforeClass;
+import org.apache.kudu.util.ProtobufUtils;
 import org.junit.Test;
 
 import org.apache.kudu.ColumnSchema;
@@ -40,10 +43,6 @@ import org.apache.kudu.consensus.Metadata;
 import org.apache.kudu.master.Master;
 
 public class TestAsyncKuduClient extends BaseKuduTest {
-  @BeforeClass
-  public static void setUpBeforeClass() throws Exception {
-    BaseKuduTest.setUpBeforeClass();
-  }
 
   @Test(timeout = 100000)
   public void testDisconnect() throws Exception {
@@ -144,7 +143,7 @@ public class TestAsyncKuduClient extends BaseKuduTest {
       partition.setPartitionKeyEnd(ByteString.copyFrom("b" + i, UTF_8.name()));
       tabletPb.setPartition(partition);
       tabletPb.setTabletId(ByteString.copyFromUtf8("some id " + i));
-      tabletPb.addReplicas(TestUtils.getFakeTabletReplicaPB(
+      tabletPb.addReplicas(ProtobufUtils.getFakeTabletReplicaPB(
           "uuid", badHostname + i, i, Metadata.RaftPeerPB.Role.FOLLOWER));
       tabletLocations.add(tabletPb.build());
     }
@@ -152,7 +151,7 @@ public class TestAsyncKuduClient extends BaseKuduTest {
     // Test that a tablet full of unreachable replicas won't make us retry.
     try {
       KuduTable badTable = new KuduTable(client, "Invalid table name",
-          "Invalid table ID", null, null);
+          "Invalid table ID", null, null, 3);
       client.discoverTablets(badTable, null, requestBatchSize, tabletLocations, 1000);
       fail("This should have failed quickly");
     } catch (NonRecoverableException ex) {
@@ -179,9 +178,9 @@ public class TestAsyncKuduClient extends BaseKuduTest {
     // Fake a master lookup that only returns one follower for the tablet.
     List<Master.TabletLocationsPB> tabletLocations = new ArrayList<>();
     Master.TabletLocationsPB.Builder tabletPb = Master.TabletLocationsPB.newBuilder();
-    tabletPb.setPartition(TestUtils.getFakePartitionPB());
+    tabletPb.setPartition(ProtobufUtils.getFakePartitionPB());
     tabletPb.setTabletId(ByteString.copyFrom(tablet.getTabletId()));
-    tabletPb.addReplicas(TestUtils.getFakeTabletReplicaPB(
+    tabletPb.addReplicas(ProtobufUtils.getFakeTabletReplicaPB(
         "master", leader.getRpcHost(), leader.getRpcPort(), Metadata.RaftPeerPB.Role.FOLLOWER));
     tabletLocations.add(tabletPb.build());
     try {
@@ -204,7 +203,7 @@ public class TestAsyncKuduClient extends BaseKuduTest {
     assertEquals(0, countRowsInScan(syncClient.newScannerBuilder(table).build()));
 
     // Make it impossible to use Kudu.
-    killTabletServers();
+    killAllTabletServers();
 
     // Create a scan with a short timeout.
     KuduScanner scanner = syncClient.newScannerBuilder(table).scanRequestTimeout(1000).build();

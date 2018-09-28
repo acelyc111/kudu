@@ -16,6 +16,8 @@
 // under the License.
 package org.apache.kudu.client;
 
+import static org.apache.kudu.util.ClientTestUtil.createBasicSchemaInsert;
+import static org.apache.kudu.util.ClientTestUtil.getBasicCreateTableOptions;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -33,7 +35,7 @@ public class TestTimeouts extends BaseKuduTest {
    */
   @Test(timeout = 100000)
   public void testLowTimeouts() throws Exception {
-    KuduClient lowTimeoutsClient = new KuduClient.KuduClientBuilder(masterAddresses)
+    KuduClient lowTimeoutsClient = new KuduClient.KuduClientBuilder(getMasterAddressesAsString())
         .defaultAdminOperationTimeoutMs(1)
         .defaultOperationTimeoutMs(1)
         .build();

@@ -58,6 +58,7 @@
 #include "kudu/util/memory/arena.h"
 
 using kudu::clock::HybridClock;
+using kudu::fs::IOContext;
 using std::deque;
 using std::shared_ptr;
 using std::string;
@@ -90,9 +91,12 @@ class MemRowSetCompactionInput : public CompactionInput {
   MemRowSetCompactionInput(const MemRowSet& memrowset,
                            const MvccSnapshot& snap,
                            const Schema* projection)
-    : iter_(memrowset.NewIterator(projection, snap)),
-      arena_(32*1024),
+    : arena_(32*1024),
       has_more_blocks_(false) {
+    RowIteratorOptions opts;
+    opts.projection = projection;
+    opts.snap_to_include = snap;
+    iter_.reset(memrowset.NewIterator(opts));
   }
 
   Status Init() override {
@@ -849,22 +853,30 @@ string CompactionInputRowToString(const CompactionInputRow& input_row) {
 Status CompactionInput::Create(const DiskRowSet &rowset,
                                const Schema* projection,
                                const MvccSnapshot &snap,
+                               const IOContext* io_context,
                                gscoped_ptr<CompactionInput>* out) {
   CHECK(projection->has_column_ids());
 
-  shared_ptr<ColumnwiseIterator> base_cwise(rowset.base_data_->NewIterator(projection));
+  shared_ptr<ColumnwiseIterator> base_cwise(rowset.base_data_->NewIterator(projection, io_context));
   gscoped_ptr<RowwiseIterator> base_iter(new MaterializingIterator(base_cwise));
 
   // Creates a DeltaIteratorMerger that will only include the relevant REDO deltas.
+  RowIteratorOptions redo_opts;
+  redo_opts.projection = projection;
+  redo_opts.snap_to_include = snap;
+  redo_opts.io_context = io_context;
   unique_ptr<DeltaIterator> redo_deltas;
   RETURN_NOT_OK_PREPEND(rowset.delta_tracker_->NewDeltaIterator(
-      projection, snap, DeltaTracker::REDOS_ONLY, &redo_deltas), "Could not open REDOs");
+      redo_opts, DeltaTracker::REDOS_ONLY, &redo_deltas), "Could not open REDOs");
   // Creates a DeltaIteratorMerger that will only include UNDO deltas. Using the
   // "empty" snapshot ensures that all deltas are included.
+  RowIteratorOptions undo_opts;
+  undo_opts.projection = projection;
+  undo_opts.snap_to_include = MvccSnapshot::CreateSnapshotIncludingNoTransactions();
+  undo_opts.io_context = io_context;
   unique_ptr<DeltaIterator> undo_deltas;
   RETURN_NOT_OK_PREPEND(rowset.delta_tracker_->NewDeltaIterator(
-      projection, MvccSnapshot::CreateSnapshotIncludingNoTransactions(),
-      DeltaTracker::UNDOS_ONLY, &undo_deltas), "Could not open UNDOs");
+      undo_opts, DeltaTracker::UNDOS_ONLY, &undo_deltas), "Could not open UNDOs");
 
   out->reset(new DiskRowSetCompactionInput(std::move(base_iter),
                                            std::move(redo_deltas),
@@ -888,13 +900,14 @@ CompactionInput *CompactionInput::Merge(const vector<shared_ptr<CompactionInput>
 
 Status RowSetsInCompaction::CreateCompactionInput(const MvccSnapshot &snap,
                                                   const Schema* schema,
+                                                  const IOContext* io_context,
                                                   shared_ptr<CompactionInput> *out) const {
   CHECK(schema->has_column_ids());
 
   vector<shared_ptr<CompactionInput> > inputs;
   for (const shared_ptr<RowSet> &rs : rowsets_) {
     gscoped_ptr<CompactionInput> input;
-    RETURN_NOT_OK_PREPEND(rs->NewCompactionInput(schema, snap, &input),
+    RETURN_NOT_OK_PREPEND(rs->NewCompactionInput(schema, snap, io_context, &input),
                           Substitute("Could not create compaction input for rowset $0",
                                      rs->ToString()));
     inputs.push_back(shared_ptr<CompactionInput>(input.release()));
@@ -1175,7 +1188,7 @@ Status FlushCompactionInput(CompactionInput* input,
   return Status::OK();
 }
 
-Status ReupdateMissedDeltas(const string &tablet_name,
+Status ReupdateMissedDeltas(const IOContext* io_context,
                             CompactionInput *input,
                             const HistoryGcOpts& history_gc_opts,
                             const MvccSnapshot &snap_to_exclude,
@@ -1286,7 +1299,7 @@ Status ReupdateMissedDeltas(const string &tablet_name,
 
         rowid_t num_rows;
         DiskRowSet* cur_drs = diskrowsets.front();
-        RETURN_NOT_OK(cur_drs->CountRows(&num_rows));
+        RETURN_NOT_OK(cur_drs->CountRows(io_context, &num_rows));
 
         // The index on the input side isn't necessarily the index on the output side:
         // we may have output several small DiskRowSets, so we need to find the index
@@ -1302,7 +1315,7 @@ Status ReupdateMissedDeltas(const string &tablet_name,
           DCHECK_GE(idx_in_delta_tracker, 0);
           diskrowsets.pop_front();
           cur_drs = diskrowsets.front();
-          RETURN_NOT_OK(cur_drs->CountRows(&num_rows));
+          RETURN_NOT_OK(cur_drs->CountRows(io_context, &num_rows));
         }
 
         DeltaTracker* cur_tracker = cur_drs->delta_tracker();
@@ -1347,7 +1360,7 @@ Status ReupdateMissedDeltas(const string &tablet_name,
     TRACE_EVENT0("tablet", "Flushing missed deltas");
     for (DeltaTracker* tracker : updated_trackers) {
       VLOG(1) << "Flushing DeltaTracker updated with missed deltas...";
-      RETURN_NOT_OK_PREPEND(tracker->Flush(DeltaTracker::NO_FLUSH_METADATA),
+      RETURN_NOT_OK_PREPEND(tracker->Flush(io_context, DeltaTracker::NO_FLUSH_METADATA),
                             "Could not flush delta tracker after missed delta update");
     }
   }

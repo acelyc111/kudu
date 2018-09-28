@@ -37,6 +37,10 @@ class Schema;
 class SelectionVector;
 struct ColumnId;
 
+namespace fs {
+struct IOContext;
+}  // namespace fs
+
 namespace tablet {
 
 class DeltaFileWriter;
@@ -44,6 +48,7 @@ class DeltaIterator;
 class DeltaStats;
 class Mutation;
 class MvccSnapshot;
+struct RowIteratorOptions;
 
 // Interface for the pieces of the system that track deltas/updates.
 // This is implemented by DeltaMemStore and by DeltaFileReader.
@@ -51,28 +56,28 @@ class DeltaStore {
  public:
   // Performs any post-construction work for the DeltaStore, which may
   // include additional I/O.
-  virtual Status Init() = 0;
+  virtual Status Init(const fs::IOContext* io_context) = 0;
 
   // Whether this delta store was initialized or not.
   virtual bool Initted() = 0;
 
   // Create a DeltaIterator for the given projection.
   //
-  // The projection corresponds to whatever scan is currently ongoing.
+  // The projection in 'opts' corresponds to whatever scan is currently ongoing.
   // All RowBlocks passed to this DeltaIterator must have this same schema.
   //
-  // 'snapshot' is the MVCC state which determines which transactions
+  // The snapshot in 'opts' is the MVCC state which determines which transactions
   // should be considered committed (and thus applied by the iterator).
   //
   // Returns Status::OK and sets 'iterator' to the new DeltaIterator, or
   // returns Status::NotFound if the mutations within this delta store
-  // cannot include 'snap'.
-  virtual Status NewDeltaIterator(const Schema *projection,
-                                  const MvccSnapshot &snap,
+  // cannot include the snapshot.
+  virtual Status NewDeltaIterator(const RowIteratorOptions& opts,
                                   DeltaIterator** iterator) const = 0;
 
   // Set *deleted to true if the latest update for the given row is a deletion.
-  virtual Status CheckRowDeleted(rowid_t row_idx, bool *deleted) const = 0;
+  virtual Status CheckRowDeleted(rowid_t row_idx, const fs::IOContext* io_context,
+                                 bool *deleted) const = 0;
 
   // Get the store's estimated size in bytes.
   virtual uint64_t EstimateSize() const = 0;

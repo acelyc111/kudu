@@ -37,8 +37,8 @@
 #include "kudu/util/slice.h"
 #include "kudu/util/status.h"
 
+using kudu::fs::IOContext;
 using std::vector;
-
 using strings::Substitute;
 
 namespace kudu {
@@ -106,8 +106,7 @@ Status IndexTreeBuilder::Finish(BTreeInfoPB *info) {
   BlockPointer ptr;
   Status s = FinishAndWriteBlock(root_level, &ptr);
   if (!s.ok()) {
-    LOG(ERROR) << "Unable to flush root index block";
-    return s;
+    return s.CloneAndPrepend("Unable to flush root index block");
   }
 
   VLOG(1) << "Flushed root index block: " << ptr.ToString();
@@ -178,10 +177,11 @@ Status IndexTreeBuilder::FinishAndWriteBlock(size_t level, BlockPointer *written
 ////////////////////////////////////////////////////////////
 
 
-IndexTreeIterator::IndexTreeIterator(const CFileReader *reader,
-                                              const BlockPointer &root_blockptr)
+IndexTreeIterator::IndexTreeIterator(const IOContext* io_context, const CFileReader *reader,
+                                     const BlockPointer &root_blockptr)
     : reader_(reader),
-      root_block_(root_blockptr) {
+      root_block_(root_blockptr),
+      io_context_(io_context) {
 }
 
 Status IndexTreeIterator::SeekAtOrBefore(const Slice &search_key) {
@@ -260,7 +260,8 @@ IndexBlockReader *IndexTreeIterator::seeked_reader(int depth) {
   return &seeked_indexes_[depth]->reader;
 }
 
-Status IndexTreeIterator::LoadBlock(const BlockPointer &block, int depth) {
+Status IndexTreeIterator::LoadBlock(const BlockPointer &block,
+                                    int depth) {
 
   SeekedIndex *seeked;
   if (depth < seeked_indexes_.size()) {
@@ -284,7 +285,8 @@ Status IndexTreeIterator::LoadBlock(const BlockPointer &block, int depth) {
     seeked = seeked_indexes_.back().get();
   }
 
-  RETURN_NOT_OK(reader_->ReadBlock(block, CFileReader::CACHE_BLOCK, &seeked->data));
+  RETURN_NOT_OK(reader_->ReadBlock(io_context_, block,
+                                   CFileReader::CACHE_BLOCK, &seeked->data));
   seeked->block_ptr = block;
 
   // Parse the new block.
@@ -297,7 +299,7 @@ Status IndexTreeIterator::LoadBlock(const BlockPointer &block, int depth) {
 }
 
 Status IndexTreeIterator::SeekDownward(const Slice &search_key, const BlockPointer &in_block,
-                    int cur_depth) {
+                                       int cur_depth) {
 
   // Read the block.
   RETURN_NOT_OK(LoadBlock(in_block, cur_depth));
@@ -311,10 +313,8 @@ Status IndexTreeIterator::SeekDownward(const Slice &search_key, const BlockPoint
   if (seeked_reader(cur_depth)->IsLeaf()) {
     seeked_indexes_.resize(cur_depth + 1);
     return Status::OK();
-  } else {
-    return SeekDownward(search_key, iter->GetCurrentBlockPointer(),
-                        cur_depth + 1);
   }
+  return SeekDownward(search_key, iter->GetCurrentBlockPointer(), cur_depth + 1);
 }
 
 Status IndexTreeIterator::SeekToFirstDownward(const BlockPointer &in_block, int cur_depth) {
@@ -336,9 +336,10 @@ Status IndexTreeIterator::SeekToFirstDownward(const BlockPointer &in_block, int 
 }
 
 IndexTreeIterator *IndexTreeIterator::IndexTreeIterator::Create(
+    const IOContext* io_context,
     const CFileReader *reader,
     const BlockPointer &root_blockptr) {
-  return new IndexTreeIterator(reader, root_blockptr);
+  return new IndexTreeIterator(io_context, reader, root_blockptr);
 }
 
 

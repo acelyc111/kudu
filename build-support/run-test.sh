@@ -23,11 +23,11 @@
 # If KUDU_COMPRESS_TEST_OUTPUT is non-empty, then the logs will be
 # gzip-compressed while they are written.
 #
-# If KUDU_FLAKY_TEST_ATTEMPTS is non-zero, and the test being run matches
-# one of the lines in the file KUDU_FLAKY_TEST_LIST, then the test will
-# be retried on failure up to the specified number of times. This can be
-# used in the gerrit workflow to prevent annoying false -1s caused by
-# tests that are known to be flaky in master.
+# If KUDU_FLAKY_TEST_ATTEMPTS is set, and either the test being run matches one
+# of the lines in the file KUDU_FLAKY_TEST_LIST or KUDU_RETRY_ALL_FAILED_TESTS
+# is non-zero, then the test will be retried on failure up to the specified
+# number of times. This can be used in the gerrit workflow to prevent annoying
+# false -1s caused by tests that are known to be flaky in master.
 #
 # If KUDU_REPORT_TEST_RESULTS is non-zero, then tests are reported to the
 # central test server.
@@ -70,21 +70,24 @@ else
   TEST_NAME=${SHORT_TEST_NAME}
 fi
 
-# Determine whether the test is a known flaky by comparing against the user-specified
-# list.
+# Determine whether the user has chosen to retry all failed tests, or whether
+# the test is a known flaky by comparing against the user-specified list.
 TEST_EXECUTION_ATTEMPTS=1
-if [ -n "$KUDU_FLAKY_TEST_LIST" ]; then
-  if [ -f "$KUDU_FLAKY_TEST_LIST" ]; then
-    IS_KNOWN_FLAKY=$(grep --count --line-regexp "$SHORT_TEST_NAME" "$KUDU_FLAKY_TEST_LIST")
+if [ -n "$KUDU_RETRY_ALL_FAILED_TESTS" ]; then
+  echo "Will retry all failed tests"
+  TEST_IS_RETRYABLE=1
+elif [ -n "$KUDU_FLAKY_TEST_LIST" ]; then
+  if [ -f "$KUDU_FLAKY_TEST_LIST" ] && grep -q --count --line-regexp "$SHORT_TEST_NAME" "$KUDU_FLAKY_TEST_LIST"; then
+    TEST_IS_RETRYABLE=1
   else
     echo "Flaky test list file $KUDU_FLAKY_TEST_LIST missing"
-    IS_KNOWN_FLAKY=0
   fi
-  if [ "$IS_KNOWN_FLAKY" -gt 0 ]; then
-    TEST_EXECUTION_ATTEMPTS=${KUDU_FLAKY_TEST_ATTEMPTS:-1}
-    echo $TEST_NAME is a known-flaky test. Will attempt running it
-    echo up to $TEST_EXECUTION_ATTEMPTS times.
-  fi
+fi
+
+if [ -n "$TEST_IS_RETRYABLE" ]; then
+  TEST_EXECUTION_ATTEMPTS=${KUDU_FLAKY_TEST_ATTEMPTS:-1}
+  echo $TEST_NAME is a retryable test. Will attempt running it
+  echo up to $TEST_EXECUTION_ATTEMPTS times.
 fi
 
 
@@ -111,25 +114,6 @@ if [ -n "$KUDU_COMPRESS_TEST_OUTPUT" ] && [ "$KUDU_COMPRESS_TEST_OUTPUT" -ne 0 ]
 else
   pipe_cmd=cat
 fi
-
-# Suppressions require symbolization. We'll default to using the symbolizer in
-# thirdparty.
-if [ -z "$ASAN_SYMBOLIZER_PATH" ]; then
-  export ASAN_SYMBOLIZER_PATH=$SOURCE_ROOT/thirdparty/installed/uninstrumented/bin/llvm-symbolizer
-fi
-
-# Configure TSAN (ignored if this isn't a TSAN build).
-TSAN_OPTIONS="$TSAN_OPTIONS suppressions=$SOURCE_ROOT/build-support/tsan-suppressions.txt"
-TSAN_OPTIONS="$TSAN_OPTIONS history_size=7"
-#   Flush TSAN memory every 10 seconds - this prevents RSS blowup in unit tests
-#   which can cause tests to get killed by the OOM killer.
-TSAN_OPTIONS="$TSAN_OPTIONS flush_memory_ms=10000"
-TSAN_OPTIONS="$TSAN_OPTIONS external_symbolizer_path=$ASAN_SYMBOLIZER_PATH"
-export TSAN_OPTIONS
-
-# Set up suppressions for LeakSanitizer
-LSAN_OPTIONS="$LSAN_OPTIONS suppressions=$SOURCE_ROOT/build-support/lsan-suppressions.txt"
-export LSAN_OPTIONS
 
 # Set a 15-minute timeout for tests run via 'make test'.
 # This keeps our jenkins builds from hanging in the case that there's

@@ -34,6 +34,11 @@
     <dependencies>
         <dependency>
             <groupId>org.apache.kudu</groupId>
+            <artifactId>kudu-client</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.kudu</groupId>
             <artifactId>kudu-client-tools</artifactId>
             <version>${project.version}</version>
         </dependency>
@@ -41,6 +46,12 @@
             <groupId>org.apache.kudu</groupId>
             <artifactId>kudu-${spark.version.label}_${scala.binary.version}</artifactId>
             <version>${project.version}</version>
+        </dependency>
+        <!-- TODO(KUDU-2500): Spark uses reflection which requires the annotations at runtime. -->
+        <dependency>
+            <groupId>org.apache.yetus</groupId>
+            <artifactId>audience-annotations</artifactId>
+            <version>${yetus.version}</version>
         </dependency>
 
         <dependency>
@@ -87,13 +98,6 @@
         </dependency>
 
         <dependency>
-            <groupId>org.apache.yetus</groupId>
-            <artifactId>audience-annotations</artifactId>
-            <version>${yetus.version}</version>
-            <optional>true</optional>
-        </dependency>
-
-        <dependency>
             <groupId>org.apache.kudu</groupId>
             <artifactId>kudu-client</artifactId>
             <version>${project.version}</version>
@@ -134,6 +138,9 @@
     </dependencies>
 
     <build>
+        <!-- set source dirs explicitly for the scalafmt plugin -->
+        <sourceDirectory>src/main/scala</sourceDirectory>
+        <testSourceDirectory>src/test/scala</testSourceDirectory>
         <plugins>
             <plugin>
                 <groupId>net.alchim31.maven</groupId>
@@ -186,6 +193,10 @@
                         </includes>
                     </artifactSet>
                 </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.antipathy</groupId>
+                <artifactId>mvn-scalafmt</artifactId>
             </plugin>
         </plugins>
     </build>

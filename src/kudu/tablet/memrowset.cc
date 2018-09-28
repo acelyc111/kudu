@@ -35,6 +35,7 @@
 #include "kudu/common/row_changelist.h"
 #include "kudu/common/rowblock.h"
 #include "kudu/common/scan_spec.h"
+#include "kudu/common/types.h"
 #include "kudu/consensus/log_anchor_registry.h"
 #include "kudu/consensus/opid.pb.h"
 #include "kudu/gutil/dynamic_annotations.h"
@@ -42,6 +43,7 @@
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/tablet/compaction.h"
 #include "kudu/tablet/mutation.h"
+#include "kudu/tablet/mvcc.h"
 #include "kudu/tablet/tablet.pb.h"
 #include "kudu/util/flag_tags.h"
 #include "kudu/util/mem_tracker.h"
@@ -58,6 +60,7 @@ using std::vector;
 namespace kudu { namespace tablet {
 
 using consensus::OpId;
+using fs::IOContext;
 using log::LogAnchorRegistry;
 using strings::Substitute;
 
@@ -219,6 +222,7 @@ Status MemRowSet::MutateRow(Timestamp timestamp,
                             const RowSetKeyProbe &probe,
                             const RowChangeList &delta,
                             const consensus::OpId& op_id,
+                            const IOContext* /*io_context*/,
                             ProbeStats* stats,
                             OperationResultPB *result) {
   {
@@ -257,8 +261,8 @@ Status MemRowSet::MutateRow(Timestamp timestamp,
   return Status::OK();
 }
 
-Status MemRowSet::CheckRowPresent(const RowSetKeyProbe &probe, bool *present,
-                                  ProbeStats* stats) const {
+Status MemRowSet::CheckRowPresent(const RowSetKeyProbe &probe, const IOContext* /*io_context*/,
+                                  bool* present, ProbeStats* stats) const {
   // Use a PreparedMutation here even though we don't plan to mutate. Even though
   // this takes a lock rather than an optimistic copy, it should be a very short
   // critical section, and this call is only made on updates, which are rare.
@@ -286,27 +290,26 @@ Status MemRowSet::CheckRowPresent(const RowSetKeyProbe &probe, bool *present,
   return Status::OK();
 }
 
-MemRowSet::Iterator *MemRowSet::NewIterator(const Schema *projection,
-                                            const MvccSnapshot &snap) const {
-  return new MemRowSet::Iterator(shared_from_this(), tree_.NewIterator(),
-                                 projection, snap);
+MemRowSet::Iterator *MemRowSet::NewIterator(const RowIteratorOptions& opts) const {
+  return new MemRowSet::Iterator(shared_from_this(), tree_.NewIterator(), opts);
 }
 
 MemRowSet::Iterator *MemRowSet::NewIterator() const {
-  // TODO: can we kill this function? should be only used by tests?
-  return NewIterator(&schema(), MvccSnapshot::CreateSnapshotIncludingAllTransactions());
+  // TODO(todd): can we kill this function? should be only used by tests?
+  RowIteratorOptions opts;
+  opts.projection = &schema();
+  return NewIterator(opts);
 }
 
-Status MemRowSet::NewRowIterator(const Schema *projection,
-                                 const MvccSnapshot &snap,
-                                 OrderMode /*order*/,
+Status MemRowSet::NewRowIterator(const RowIteratorOptions& opts,
                                  gscoped_ptr<RowwiseIterator>* out) const {
-  out->reset(NewIterator(projection, snap));
+  out->reset(NewIterator(opts));
   return Status::OK();
 }
 
 Status MemRowSet::NewCompactionInput(const Schema* projection,
                                      const MvccSnapshot& snap,
+                                     const IOContext* /*io_context*/,
                                      gscoped_ptr<CompactionInput>* out) const  {
   out->reset(CompactionInput::Create(*this, projection, snap));
   return Status::OK();
@@ -386,20 +389,34 @@ gscoped_ptr<MRSRowProjector> GenerateAppropriateProjector(
 
 MemRowSet::Iterator::Iterator(const std::shared_ptr<const MemRowSet>& mrs,
                               MemRowSet::MSBTIter* iter,
-                              const Schema* projection, MvccSnapshot mvcc_snap)
+                              RowIteratorOptions opts)
     : memrowset_(mrs),
       iter_(iter),
-      mvcc_snap_(std::move(mvcc_snap)),
-      projection_(projection),
+      opts_(std::move(opts)),
       projector_(
-          GenerateAppropriateProjector(&mrs->schema_nonvirtual(), projection)),
-      delta_projector_(&mrs->schema_nonvirtual(), projection),
+          GenerateAppropriateProjector(&mrs->schema_nonvirtual(), opts_.projection)),
+      delta_projector_(&mrs->schema_nonvirtual(), opts_.projection),
       state_(kUninitialized) {
-  // TODO: various code assumes that a newly constructed iterator
+  // TODO(todd): various code assumes that a newly constructed iterator
   // is pointed at the beginning of the dataset. This causes a redundant
   // seek. Could make this lazy instead, or change the semantics so that
   // a seek is required (probably the latter)
   iter_->SeekToStart();
+
+  // Find the first IS_DELETED virtual column, if one exists.
+  projection_vc_is_deleted_idx_ = Schema::kColumnNotFound;
+  for (int i = 0; i < opts_.projection->num_columns(); i++) {
+    const auto& col = opts_.projection->column(i);
+    if (col.type_info()->type() == IS_DELETED) {
+      // Enforce some properties on the virtual column that simplify our
+      // implementation.
+      DCHECK(!col.is_nullable());
+      DCHECK(col.has_read_default());
+
+      projection_vc_is_deleted_idx_ = i;
+      break;
+    }
+  }
 }
 
 MemRowSet::Iterator::~Iterator() {}
@@ -499,21 +516,44 @@ Status MemRowSet::Iterator::FetchRows(RowBlock* dst, size_t* fetched) {
     iter_->GetCurrentEntry(&k, &v);
     MRSRow row(memrowset_.get(), v);
 
-    if (mvcc_snap_.IsCommitted(row.insertion_timestamp())) {
-      if (has_upper_bound() && out_of_bounds(k)) {
-        state_ = kFinished;
-        break;
-      } else {
-        RETURN_NOT_OK(projector_->ProjectRowForRead(row, &dst_row, dst->arena()));
+    // Short-circuit if we've exceeded the iteration's upper bound.
+    if (has_upper_bound() && out_of_bounds(k)) {
+      state_ = kFinished;
+      break;
+    }
 
-        Mutation* redo_head = reinterpret_cast<Mutation*>(
-            base::subtle::Acquire_Load(reinterpret_cast<AtomicWord*>(&row.header_->redo_head)));
-        // Roll-forward MVCC for committed updates.
-        RETURN_NOT_OK(ApplyMutationsToProjectedRow(
-            redo_head, &dst_row, dst->arena()));
-      }
+    // The snapshots in 'opts_' represent a time range that this iterator must
+    // respect. There are two possible cases:
+    //
+    // 1. 'snap_to_exclude' is unset but 'snap_to_include' is set. The time
+    //    range is [INF, snap_to_include).
+    // 2. Both 'snap_to exclude' and 'snap_to_include' are set. The time range
+    //    is [snap_to_exclude, snap_to_include).
+    //
+    // If the row's insertion timestamp is committed in 'snap_to_exclude', it
+    // means the insertion was outside this iterator's time range (i.e. the
+    // insert was "excluded"). However, subsequent mutations may be inside the
+    // time range, so we must still project the row and walk its mutation list.
+    bool insert_excluded = opts_.snap_to_exclude &&
+                           opts_.snap_to_exclude->IsCommitted(row.insertion_timestamp());
+    bool unset_in_sel_vector;
+    ApplyStatus apply_status;
+    if (insert_excluded || opts_.snap_to_include.IsCommitted(row.insertion_timestamp())) {
+      RETURN_NOT_OK(projector_->ProjectRowForRead(row, &dst_row, dst->arena()));
+
+      // Roll-forward MVCC for committed updates.
+      Mutation* redo_head = reinterpret_cast<Mutation*>(
+          base::subtle::Acquire_Load(reinterpret_cast<AtomicWord*>(&row.header_->redo_head)));
+      RETURN_NOT_OK(ApplyMutationsToProjectedRow(
+          redo_head, &dst_row, dst->arena(), &apply_status));
+      unset_in_sel_vector = (apply_status == APPLIED_AND_DELETED && !opts_.include_deleted_rows) ||
+                            (apply_status == NONE_APPLIED && insert_excluded);
     } else {
-      // This row was not yet committed in the current MVCC snapshot
+      // The insertion is too new; the entire row should be omitted.
+      unset_in_sel_vector = true;
+    }
+
+    if (unset_in_sel_vector) {
       dst->selection_vector()->SetRowUnselected(*fetched);
 
       // In debug mode, fill the row data for easy debugging
@@ -524,6 +564,9 @@ Status MemRowSet::Iterator::FetchRows(RowBlock* dst, size_t* fetched) {
                                      "MVCCMVCCMVCCMVCCMVCCMVCC");
       }
       #endif
+    } else if (projection_vc_is_deleted_idx_ != Schema::kColumnNotFound) {
+      UnalignedStore(dst_row.mutable_cell_ptr(projection_vc_is_deleted_idx_),
+                     apply_status == APPLIED_AND_DELETED);
     }
 
     ++*fetched;
@@ -533,10 +576,14 @@ Status MemRowSet::Iterator::FetchRows(RowBlock* dst, size_t* fetched) {
 }
 
 Status MemRowSet::Iterator::ApplyMutationsToProjectedRow(
-  const Mutation *mutation_head, RowBlockRow *dst_row, Arena *dst_arena) {
+    const Mutation* mutation_head, RowBlockRow* dst_row, Arena* dst_arena,
+    ApplyStatus* apply_status) {
+  ApplyStatus local_apply_status = NONE_APPLIED;
+
   // Fast short-circuit the likely case of a row which was inserted and never
   // updated.
   if (PREDICT_TRUE(mutation_head == nullptr)) {
+    *apply_status = local_apply_status;
     return Status::OK();
   }
 
@@ -545,9 +592,17 @@ Status MemRowSet::Iterator::ApplyMutationsToProjectedRow(
   for (const Mutation *mut = mutation_head;
        mut != nullptr;
        mut = mut->acquire_next()) {
-    if (!mvcc_snap_.IsCommitted(mut->timestamp_)) {
-      // Transaction which wasn't committed yet in the reader's snapshot.
+    if (!opts_.snap_to_include.IsCommitted(mut->timestamp_)) {
+      // This mutation is too new; it should be omitted.
       continue;
+    }
+
+    // If the mutation is too old, we still need to apply it (so that the column
+    // values are correct if we see a relevant mutation later), but it doesn't
+    // count towards the overall "application status".
+    if (!opts_.snap_to_exclude ||
+        !opts_.snap_to_exclude->IsCommitted(mut->timestamp_)) {
+      local_apply_status = APPLIED_AND_PRESENT;
     }
 
     // Apply the mutation.
@@ -578,10 +633,11 @@ Status MemRowSet::Iterator::ApplyMutationsToProjectedRow(
 
   // If the most recent mutation seen for the row was a DELETE, then set the selection
   // vector bit to 0, so it doesn't show up in the results.
-  if (is_deleted) {
-    dst_row->SetRowUnselected();
+  if (is_deleted && local_apply_status == APPLIED_AND_PRESENT) {
+    local_apply_status = APPLIED_AND_DELETED;
   }
 
+  *apply_status = local_apply_status;
   return Status::OK();
 }
 

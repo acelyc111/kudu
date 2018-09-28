@@ -14,6 +14,7 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+#include "kudu/cfile/bloomfile.h"
 
 #include <cstdint>
 #include <ostream>
@@ -26,7 +27,6 @@
 
 #include "kudu/cfile/block_handle.h"
 #include "kudu/cfile/block_pointer.h"
-#include "kudu/cfile/bloomfile.h"
 #include "kudu/cfile/cfile.pb.h"
 #include "kudu/cfile/cfile_util.h"
 #include "kudu/cfile/cfile_writer.h"
@@ -57,6 +57,7 @@ namespace cfile {
 
 using fs::BlockCreationTransaction;
 using fs::BlockManager;
+using fs::IOContext;
 using fs::ReadableBlock;
 using fs::WritableBlock;
 
@@ -70,8 +71,8 @@ namespace {
 // BloomFileReaders so that we can avoid doing repetitive work.
 class BloomCacheItem {
  public:
-  explicit BloomCacheItem(CFileReader* reader)
-      : index_iter(reader, reader->validx_root()),
+  explicit BloomCacheItem(const IOContext* io_context, CFileReader* reader)
+      : index_iter(io_context, reader, reader->validx_root()),
         cur_block_pointer(0, 0) {
   }
 
@@ -199,9 +200,10 @@ Status BloomFileReader::Open(unique_ptr<ReadableBlock> block,
                              ReaderOptions options,
                              unique_ptr<BloomFileReader> *reader) {
   unique_ptr<BloomFileReader> bf_reader;
+  const IOContext* io_context = options.io_context;
   RETURN_NOT_OK(OpenNoInit(std::move(block),
                            std::move(options), &bf_reader));
-  RETURN_NOT_OK(bf_reader->Init());
+  RETURN_NOT_OK(bf_reader->Init(io_context));
 
   *reader = std::move(bf_reader);
   return Status::OK();
@@ -213,10 +215,11 @@ Status BloomFileReader::OpenNoInit(unique_ptr<ReadableBlock> block,
   unique_ptr<CFileReader> cf_reader;
   RETURN_NOT_OK(CFileReader::OpenNoInit(std::move(block),
                                         options, &cf_reader));
+  const IOContext* io_context = options.io_context;
   unique_ptr<BloomFileReader> bf_reader(new BloomFileReader(
       std::move(cf_reader), std::move(options)));
   if (!FLAGS_cfile_lazy_open) {
-    RETURN_NOT_OK(bf_reader->Init());
+    RETURN_NOT_OK(bf_reader->Init(io_context));
   }
 
   *reader = std::move(bf_reader);
@@ -232,30 +235,30 @@ BloomFileReader::BloomFileReader(unique_ptr<CFileReader> reader,
                        memory_footprint_excluding_reader()) {
 }
 
-Status BloomFileReader::Init() {
-  return init_once_.Init(&BloomFileReader::InitOnce, this);
+Status BloomFileReader::Init(const IOContext* io_context) {
+  return init_once_.Init([this, io_context] { return InitOnce(io_context); });
 }
 
-Status BloomFileReader::InitOnce() {
+Status BloomFileReader::InitOnce(const IOContext* io_context) {
   // Fully open the CFileReader if it was lazily opened earlier.
   //
   // If it's already initialized, this is a no-op.
-  RETURN_NOT_OK(reader_->Init());
+  RETURN_NOT_OK(reader_->Init(io_context));
 
   if (reader_->is_compressed()) {
-    return Status::Corruption("bloom file is compressed (compression not supported)",
+    return Status::NotSupported("bloom file is compressed (compression not supported)",
                               reader_->ToString());
   }
   if (!reader_->has_validx()) {
-    return Status::Corruption("bloom file missing value index",
+    return Status::NotSupported("bloom file missing value index",
                               reader_->ToString());
   }
   return Status::OK();
 }
 
-Status BloomFileReader::ParseBlockHeader(const Slice &block,
-                                         BloomBlockHeaderPB *hdr,
-                                         Slice *bloom_data) const {
+Status BloomFileReader::ParseBlockHeader(const Slice& block,
+                                         BloomBlockHeaderPB* hdr,
+                                         Slice* bloom_data) const {
   Slice data(block);
   if (PREDICT_FALSE(data.size() < 4)) {
     return Status::Corruption("Invalid bloom block header: not enough bytes");
@@ -283,6 +286,7 @@ Status BloomFileReader::ParseBlockHeader(const Slice &block,
 }
 
 Status BloomFileReader::CheckKeyPresent(const BloomKeyProbe &probe,
+                                        const IOContext* io_context,
                                         bool *maybe_present) {
   DCHECK(init_once_.init_succeeded());
 
@@ -296,7 +300,7 @@ Status BloomFileReader::CheckKeyPresent(const BloomKeyProbe &probe,
   BloomCacheItem* bci = tlc->Lookup(instance_nonce_);
   // If we didn't hit in the cache, make a new cache entry and instantiate a reader.
   if (!bci) {
-    bci = tlc->EmplaceNew(instance_nonce_, reader_.get());
+    bci = tlc->EmplaceNew(instance_nonce_, io_context, reader_.get());
   }
   DCHECK_EQ(reader_.get(), bci->index_iter.cfile_reader())
       << "Cached index reader does not match expected instance";
@@ -318,7 +322,8 @@ Status BloomFileReader::CheckKeyPresent(const BloomKeyProbe &probe,
   // BloomFilter instance.
   if (!bci->cur_block_pointer.Equals(bblk_ptr)) {
     BlockHandle dblk_data;
-    RETURN_NOT_OK(reader_->ReadBlock(bblk_ptr, CFileReader::CACHE_BLOCK, &dblk_data));
+    RETURN_NOT_OK(reader_->ReadBlock(io_context, bblk_ptr,
+                                     CFileReader::CACHE_BLOCK, &dblk_data));
 
     // Parse the header in the block.
     BloomBlockHeaderPB hdr;

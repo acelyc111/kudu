@@ -21,10 +21,13 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
+#include <boost/optional/optional.hpp>
 #include <glog/logging.h>
 #include <gtest/gtest_prod.h>
 
+#include "kudu/common/wire_protocol.pb.h"
 #include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/macros.h"
 #include "kudu/util/locks.h"
@@ -34,9 +37,7 @@
 
 namespace kudu {
 
-class NodeInstancePB;
 class Sockaddr;
-class ServerRegistrationPB;
 
 namespace consensus {
 class ConsensusServiceProxy;
@@ -54,7 +55,7 @@ namespace master {
 
 // Master-side view of a single tablet server.
 //
-// Tracks the last heartbeat, status, instance identifier, etc.
+// Tracks the last heartbeat, status, instance identifier, location, etc.
 // This class is thread-safe.
 class TSDescriptor : public enable_make_shared<TSDescriptor> {
  public:
@@ -62,7 +63,7 @@ class TSDescriptor : public enable_make_shared<TSDescriptor> {
                             const ServerRegistrationPB& registration,
                             std::shared_ptr<TSDescriptor>* desc);
 
-  virtual ~TSDescriptor();
+  virtual ~TSDescriptor() = default;
 
   // Set the last-heartbeat time to now.
   void UpdateHeartbeatTime();
@@ -119,6 +120,14 @@ class TSDescriptor : public enable_make_shared<TSDescriptor> {
     return num_live_replicas_;
   }
 
+  // Return the location of the tablet server. This returns a safe copy
+  // since the location could change at any time if the tablet server
+  // re-registers.
+  boost::optional<std::string> location() const {
+    std::lock_guard<simple_spinlock> l(lock_);
+    return location_;
+  }
+
   // Return a string form of this TS, suitable for printing.
   // Includes the UUID as well as last known host/port.
   std::string ToString() const;
@@ -128,6 +137,10 @@ class TSDescriptor : public enable_make_shared<TSDescriptor> {
 
  private:
   FRIEND_TEST(TestTSDescriptor, TestReplicaCreationsDecay);
+  friend class PlacementPolicyTest;
+
+  Status RegisterUnlocked(const NodeInstancePB& instance,
+                          const ServerRegistrationPB& registration);
 
   // Uses DNS to resolve registered hosts to a single Sockaddr.
   // Returns the resolved address as well as the hostname associated with it
@@ -152,6 +165,9 @@ class TSDescriptor : public enable_make_shared<TSDescriptor> {
   // The number of live replicas on this host, from the last heartbeat.
   int num_live_replicas_;
 
+  // The tablet server's location, as determined by the master at registration.
+  boost::optional<std::string> location_;
+
   gscoped_ptr<ServerRegistrationPB> registration_;
 
   std::shared_ptr<tserver::TabletServerAdminServiceProxy> ts_admin_proxy_;
@@ -159,6 +175,9 @@ class TSDescriptor : public enable_make_shared<TSDescriptor> {
 
   DISALLOW_COPY_AND_ASSIGN(TSDescriptor);
 };
+
+// Alias for a vector of tablet server descriptors.
+typedef std::vector<std::shared_ptr<TSDescriptor>> TSDescriptorVector;
 
 } // namespace master
 } // namespace kudu

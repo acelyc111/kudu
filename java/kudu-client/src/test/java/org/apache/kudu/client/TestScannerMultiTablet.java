@@ -17,6 +17,7 @@
 package org.apache.kudu.client;
 
 import static org.apache.kudu.Type.STRING;
+import static org.apache.kudu.util.ClientTestUtil.countRowsInScan;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
@@ -29,7 +30,6 @@ import com.google.common.collect.Lists;
 import com.stumbleupon.async.Deferred;
 
 import org.junit.Before;
-import org.junit.BeforeClass;
 import org.junit.Ignore;
 import org.junit.Test;
 
@@ -46,20 +46,18 @@ public class TestScannerMultiTablet extends BaseKuduTest {
   private static Schema schema = getSchema();
 
   /**
-   * The timestamp after inserting the rows into the test table during
-   * setupBeforeClass().
+   * The timestamp after inserting the rows into the test table during setUp().
    */
-  private static long beforeClassWriteTimestamp;
+  private static long beforeWriteTimestamp;
   private KuduTable table;
 
-  @BeforeClass
-  public static void setUpBeforeClass() throws Exception {
-    BaseKuduTest.setUpBeforeClass();
+  @Before
+  public void setUp() throws Exception {
     // create a 4-tablets table for scanning
     CreateTableOptions builder =
         new CreateTableOptions().setRangePartitionColumns(ImmutableList.of("key1", "key2"));
 
-    for (int i = 1; i < 4; i++){
+    for (int i = 1; i < 4; i++) {
       PartialRow splitRow = schema.newPartialRow();
       splitRow.addString("key1", "" + i);
       splitRow.addString("key2", "");
@@ -68,7 +66,7 @@ public class TestScannerMultiTablet extends BaseKuduTest {
 
     createTable(TABLE_NAME, schema, builder);
 
-    KuduTable table = openTable(TABLE_NAME);
+    KuduTable insertTable = openTable(TABLE_NAME);
     AsyncKuduSession session = client.newSession();
     session.setFlushMode(AsyncKuduSession.FlushMode.AUTO_FLUSH_SYNC);
 
@@ -80,7 +78,7 @@ public class TestScannerMultiTablet extends BaseKuduTest {
     String[] keys = new String[] {"1", "2", "3"};
     for (String key1 : keys) {
       for (String key2 : keys) {
-        Insert insert = table.newInsert();
+        Insert insert = insertTable.newInsert();
         PartialRow row = insert.getRow();
         row.addString(0, key1);
         row.addString(1, key2);
@@ -90,11 +88,8 @@ public class TestScannerMultiTablet extends BaseKuduTest {
       }
     }
 
-    beforeClassWriteTimestamp = client.getLastPropagatedTimestamp();
-  }
+    beforeWriteTimestamp = client.getLastPropagatedTimestamp();
 
-  @Before
-  public void setup() throws Exception {
     // Reset the clients in order to clear the propagated timestamp, which may
     // have been set if other test cases ran before this one. This ensures
     // that all tests set their own state.
@@ -141,8 +136,13 @@ public class TestScannerMultiTablet extends BaseKuduTest {
   // Test mixing start/end row keys with predicates.
   @Test(timeout = 100000)
   public void testKeysAndPredicates() throws Exception {
+    // Value that doesn't exist, predicates has primary column
+    ColumnRangePredicate predicate = new ColumnRangePredicate(schema.getColumnByIndex(1));
+    predicate.setUpperBound("1");
+    assertEquals(0, countRowsInScan(getScanner("1", "2", "1", "3", predicate)));
+
     // First row from the 2nd tablet.
-    ColumnRangePredicate predicate = new ColumnRangePredicate(schema.getColumnByIndex(2));
+    predicate = new ColumnRangePredicate(schema.getColumnByIndex(2));
     predicate.setLowerBound("1");
     predicate.setUpperBound("1");
     assertEquals(1, countRowsInScan(getScanner("1", "", "2", "", predicate)));
@@ -287,7 +287,7 @@ public class TestScannerMultiTablet extends BaseKuduTest {
   // client-local read-your-writes.
   @Test(timeout = 100000)
   public void testReadYourWrites() throws Exception {
-    long preTs = beforeClassWriteTimestamp;
+    long preTs = beforeWriteTimestamp;
 
     // Update the propagated timestamp to ensure we see the rows written
     // in the constructor.

@@ -1387,6 +1387,7 @@ Status TSTabletManager::DeleteTabletData(
   MAYBE_FAULT(FLAGS_fault_crash_after_blocks_deleted);
 
   CHECK_OK(Log::DeleteOnDiskData(meta->fs_manager(), tablet_id));
+  CHECK_OK(Log::RemoveRecoveryDirIfExists(meta->fs_manager(), tablet_id));
   MAYBE_FAULT(FLAGS_fault_crash_after_wal_deleted);
 
   // We do not delete the superblock or the consensus metadata when tombstoning
@@ -1491,6 +1492,21 @@ int TSTabletManager::RefreshTabletStateCacheAndReturnCount(tablet::TabletStatePB
     last_walked_ = MonoTime::Now();
   }
   return FindWithDefault(tablet_state_counts_, st, 0);
+}
+
+Status TSTabletManager::WaitForNoTransitionsForTests(const MonoDelta& timeout) const {
+  const MonoTime start = MonoTime::Now();
+  while (MonoTime::Now() - start < timeout) {
+    {
+      shared_lock<RWMutex> lock(lock_);
+      if (transition_in_progress_.empty()) {
+        return Status::OK();
+      }
+    }
+    SleepFor(MonoDelta::FromMilliseconds(50));
+  }
+  return Status::TimedOut("transitions still in progress after waiting $0",
+                          timeout.ToString());
 }
 
 TransitionInProgressDeleter::TransitionInProgressDeleter(

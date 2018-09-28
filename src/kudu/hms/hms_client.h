@@ -23,21 +23,17 @@
 
 #include "kudu/gutil/port.h"
 #include "kudu/hms/ThriftHiveMetastore.h"
-#include "kudu/util/monotime.h"
+#include "kudu/hms/hive_metastore_types.h"
 #include "kudu/util/slice.h"
 #include "kudu/util/status.h"
-
-namespace hive {
-class Database;
-class EnvironmentContext;
-class NotificationEvent;
-class Partition;
-class Table;
-}
 
 namespace kudu {
 
 class HostPort;
+
+namespace thrift {
+struct ClientOptions;
+}
 
 namespace hms {
 
@@ -47,22 +43,7 @@ enum class Cascade {
   kFalse,
 };
 
-struct HmsClientOptions {
-
-  // Thrift socket send timeout
-  MonoDelta send_timeout = MonoDelta::FromSeconds(60);
-
-  // Thrift socket receive timeout.
-  MonoDelta recv_timeout = MonoDelta::FromSeconds(60);
-
-  // Thrift socket connect timeout.
-  MonoDelta conn_timeout = MonoDelta::FromSeconds(60);
-
-  // Whether to use SASL Kerberos authentication when connecting to the HMS.
-  bool enable_kerberos = false;
-};
-
-// A client for the Hive MetaStore.
+// A client for the Hive Metastore.
 //
 // All operations are synchronous, and may block.
 //
@@ -87,11 +68,16 @@ struct HmsClientOptions {
 class HmsClient {
  public:
 
+  static const char* const kExternalTableKey;
+  static const char* const kLegacyKuduStorageHandler;
+  static const char* const kLegacyKuduTableNameKey;
+  static const char* const kLegacyTablePrefix;
   static const char* const kKuduTableIdKey;
   static const char* const kKuduMasterAddrsKey;
   static const char* const kKuduMasterEventKey;;
   static const char* const kStorageHandlerKey;
   static const char* const kKuduStorageHandler;
+  static const char* const kHiveFilterFieldParams;
 
   static const char* const kTransactionalEventListeners;
   static const char* const kDisallowIncompatibleColTypeChanges;
@@ -100,14 +86,12 @@ class HmsClient {
 
   // See org.apache.hadoop.hive.metastore.TableType.
   static const char* const kManagedTable;
+  static const char* const kExternalTable;
 
   static const uint16_t kDefaultHmsPort;
 
-  // Create an HmsClient connection to the proided HMS Thrift RPC address.
-  //
-  // The individual timeouts may be set to enforce per-operation
-  // (read/write/connect) timeouts.
-  HmsClient(const HostPort& hms_address, const HmsClientOptions& options);
+  // Create an HmsClient connection to the provided HMS Thrift RPC address.
+  HmsClient(const HostPort& address, const thrift::ClientOptions& options);
   ~HmsClient();
 
   // Starts the HMS client.
@@ -170,9 +154,21 @@ class HmsClient {
                   const std::string& table_name,
                   hive::Table* table) WARN_UNUSED_RESULT;
 
-  // Retrieves all tables in an HMS database.
-  Status GetAllTables(const std::string& database_name,
-                      std::vector<std::string>* tables) WARN_UNUSED_RESULT;
+  // Retrieves HMS table metadata for all tables in 'table_names'.
+  Status GetTables(const std::string& database_name,
+                   const std::vector<std::string>& table_names,
+                   std::vector<hive::Table>* tables) WARN_UNUSED_RESULT;
+
+  // Retrieves all table names in an HMS database.
+  Status GetTableNames(const std::string& database_name,
+                       std::vector<std::string>* table_names) WARN_UNUSED_RESULT;
+
+  // Retrieves all table names in an HMS database matching a filter. See the
+  // docs for 'get_table_names_by_filter' in hive_metastore.thrift for filter
+  // syntax examples.
+  Status GetTableNames(const std::string& database_name,
+                       const std::string& filter,
+                       std::vector<std::string>* table_names) WARN_UNUSED_RESULT;
 
   // Retrieves a the current HMS notification event ID.
   Status GetCurrentNotificationEventId(int64_t* event_id) WARN_UNUSED_RESULT;

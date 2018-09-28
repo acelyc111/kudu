@@ -19,6 +19,7 @@
 
 #include <cstdlib>
 #include <memory>
+#include <mutex>
 #include <ostream>
 #include <set>
 #include <string>
@@ -145,6 +146,7 @@ MAKE_ENUM_LIMITS(kudu::client::KuduScanner::OrderMode,
 struct tm;
 
 namespace kudu {
+class simple_spinlock;
 namespace client {
 
 class ResourceMetrics;
@@ -152,23 +154,27 @@ class ResourceMetrics;
 using internal::MetaCache;
 using sp::shared_ptr;
 
-static const char* kProgName = "kudu_client";
 const char* kVerboseEnvVar = "KUDU_CLIENT_VERBOSE";
+
+#if defined(kudu_client_exported_EXPORTS)
+static const char* kProgName = "kudu_client";
 
 // We need to reroute all logging to stderr when the client library is
 // loaded. GoogleOnceInit() can do that, but there are multiple entry
 // points into the client code, and it'd need to be called in each one.
 // So instead, let's use a constructor function.
 //
-// Should this be restricted to just the exported client build? Probably
-// not, as any application using the library probably wants stderr logging
-// more than file logging.
+// This is restricted to the exported client builds only. In case of linking
+// with non-exported kudu client library, logging must be initialized
+// from the main() function of the corresponding binary: usually, that's done
+// by calling InitGoogleLoggingSafe(argv[0]).
 __attribute__((constructor))
 static void InitializeBasicLogging() {
   InitGoogleLoggingSafeBasic(kProgName);
 
   SetVerboseLevelFromEnvVar();
 }
+#endif
 
 // Set Client logging verbose level from environment variable.
 void SetVerboseLevelFromEnvVar() {
@@ -392,12 +398,17 @@ Status KuduClient::IsCreateTableInProgress(const string& table_name,
 }
 
 Status KuduClient::DeleteTable(const string& table_name) {
-  MonoTime deadline = MonoTime::Now() + default_admin_operation_timeout();
-  return data_->DeleteTable(this, table_name, deadline);
+  return DeleteTableInCatalogs(table_name, true);
 }
 
-KuduTableAlterer* KuduClient::NewTableAlterer(const string& name) {
-  return new KuduTableAlterer(this, name);
+Status KuduClient::DeleteTableInCatalogs(const string& table_name,
+                                         bool modify_external_catalogs) {
+  MonoTime deadline = MonoTime::Now() + default_admin_operation_timeout();
+  return data_->DeleteTable(this, table_name, deadline, modify_external_catalogs);
+}
+
+KuduTableAlterer* KuduClient::NewTableAlterer(const string& table_name) {
+  return new KuduTableAlterer(this, table_name);
 }
 
 Status KuduClient::IsAlterTableInProgress(const string& table_name,
@@ -545,6 +556,9 @@ Status KuduClient::GetTablet(const string& tablet_id, KuduTablet** tablet) {
   if (resp.has_error()) {
     return StatusFromPB(resp.error().status());
   }
+  if (resp.tablet_locations_size() == 0) {
+    return Status::NotFound(Substitute("$0: tablet not found", tablet_id));
+  }
   if (resp.tablet_locations_size() != 1) {
     return Status::IllegalState(Substitute(
         "Expected only one tablet, but received $0",
@@ -626,6 +640,21 @@ Status KuduClient::ExportAuthenticationCredentials(string* authn_creds) const {
   }
 
   return Status::OK();
+}
+
+string KuduClient::GetHiveMetastoreUris() const {
+  std::lock_guard<simple_spinlock> l(data_->leader_master_lock_);
+  return data_->hive_metastore_uris_;
+}
+
+bool KuduClient::GetHiveMetastoreSaslEnabled() const {
+  std::lock_guard<simple_spinlock> l(data_->leader_master_lock_);
+  return data_->hive_metastore_sasl_enabled_;
+}
+
+string KuduClient::GetHiveMetastoreUuid() const {
+  std::lock_guard<simple_spinlock> l(data_->leader_master_lock_);
+  return data_->hive_metastore_uuid_;
 }
 
 ////////////////////////////////////////////////////////////
@@ -1134,6 +1163,12 @@ KuduTableAlterer* KuduTableAlterer::timeout(const MonoDelta& timeout) {
 
 KuduTableAlterer* KuduTableAlterer::wait(bool wait) {
   data_->wait_ = wait;
+  return this;
+}
+
+KuduTableAlterer* KuduTableAlterer::modify_external_catalogs(
+    bool modify_external_catalogs) {
+  data_->modify_external_catalogs_ = modify_external_catalogs;
   return this;
 }
 

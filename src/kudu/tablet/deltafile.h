@@ -40,7 +40,7 @@
 #include "kudu/tablet/delta_key.h"
 #include "kudu/tablet/delta_stats.h"
 #include "kudu/tablet/delta_store.h"
-#include "kudu/tablet/mvcc.h"
+#include "kudu/tablet/rowset.h"
 #include "kudu/util/faststring.h"
 #include "kudu/util/once.h"
 #include "kudu/util/slice.h"
@@ -55,9 +55,12 @@ class FsManager;
 class MemTracker;
 class RowChangeList;
 class ScanSpec;
-class Schema;
 class SelectionVector;
 struct ColumnId;
+
+namespace tablet {
+class MvccSnapshot;
+} // namespace tablet
 
 namespace cfile {
 struct ReaderOptions;
@@ -67,6 +70,7 @@ namespace fs {
 class BlockCreationTransaction;
 class ReadableBlock;
 class WritableBlock;
+struct IOContext;
 } // namespace fs
 
 namespace tablet {
@@ -155,19 +159,20 @@ class DeltaFileReader : public DeltaStore,
                            cfile::ReaderOptions options,
                            std::shared_ptr<DeltaFileReader>* reader_out);
 
-  virtual Status Init() OVERRIDE;
+  virtual Status Init(const fs::IOContext* io_context) OVERRIDE;
 
   virtual bool Initted() OVERRIDE {
     return init_once_.init_succeeded();
   }
 
   // See DeltaStore::NewDeltaIterator(...)
-  Status NewDeltaIterator(const Schema *projection,
-                          const MvccSnapshot &snap,
+  Status NewDeltaIterator(const RowIteratorOptions& opts,
                           DeltaIterator** iterator) const OVERRIDE;
 
   // See DeltaStore::CheckRowDeleted
-  virtual Status CheckRowDeleted(rowid_t row_idx, bool *deleted) const OVERRIDE;
+  virtual Status CheckRowDeleted(rowid_t row_idx,
+                                 const fs::IOContext* io_context,
+                                 bool *deleted) const OVERRIDE;
 
   virtual uint64_t EstimateSize() const OVERRIDE;
 
@@ -207,7 +212,7 @@ class DeltaFileReader : public DeltaStore,
                   DeltaType delta_type);
 
   // Callback used in 'init_once_' to initialize this delta file.
-  Status InitOnce();
+  Status InitOnce(const fs::IOContext* io_context);
 
   Status ReadDeltaStats();
 
@@ -217,7 +222,7 @@ class DeltaFileReader : public DeltaStore,
   // The type of this delta, i.e. UNDO or REDO.
   const DeltaType delta_type_;
 
-  KuduOnceDynamic init_once_;
+  KuduOnceLambda init_once_;
 };
 
 // Iterator over the deltas contained in a delta file.
@@ -288,10 +293,9 @@ class DeltaFileIterator : public DeltaIterator {
   };
 
 
-  // The passed 'projection' and 'dfr' must remain valid for the lifetime
-  // of the iterator.
+  // The pointers in 'opts' and 'dfr' must remain valid for the lifetime of the iterator.
   DeltaFileIterator(std::shared_ptr<DeltaFileReader> dfr,
-                    const Schema *projection, MvccSnapshot snap,
+                    RowIteratorOptions opts,
                     DeltaType delta_type);
 
   // Determine the row index of the first update in the block currently
@@ -317,11 +321,7 @@ class DeltaFileIterator : public DeltaIterator {
 
   std::shared_ptr<DeltaFileReader> dfr_;
 
-  // Schema used during projection.
-  const Schema* projection_;
-
-  // The MVCC state which determines which deltas should be applied.
-  const MvccSnapshot mvcc_snap_;
+  const RowIteratorOptions opts_;
 
   gscoped_ptr<cfile::IndexTreeIterator> index_iter_;
 

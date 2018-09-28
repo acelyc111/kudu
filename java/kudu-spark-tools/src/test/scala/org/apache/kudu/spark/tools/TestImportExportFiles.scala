@@ -17,52 +17,63 @@
 
 package org.apache.kudu.spark.tools
 
-import java.io.File
+import java.nio.file.Paths
 
 import org.apache.kudu.ColumnSchema.ColumnSchemaBuilder
-import org.apache.kudu.{Schema, Type}
+import org.apache.kudu.Schema
+import org.apache.kudu.Type
 import org.apache.kudu.client.CreateTableOptions
 import org.apache.kudu.spark.kudu._
 import org.junit.Assert._
-import org.junit.runner.RunWith
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.{FunSuite, Matchers}
+import org.junit.Test
 import org.spark_project.guava.collect.ImmutableList
 
 import scala.collection.JavaConverters._
 
-@RunWith(classOf[JUnitRunner])
-class TestImportExportFiles  extends FunSuite with TestContext with  Matchers {
+class TestImportExportFiles extends KuduTestSuite {
 
   private val TABLE_NAME: String = "TestImportExportFiles"
-  private val TABLE_DATA_PATH: String = "src/test/resources/TestImportExportFiles.csv"
+  private val TABLE_DATA_PATH: String = "/TestImportExportFiles.csv"
 
-  test("Spark Import Export") {
+  @Test
+  def testSparkImportExport() {
     val schema: Schema = {
       val columns = ImmutableList.of(
         new ColumnSchemaBuilder("key", Type.STRING).key(true).build(),
         new ColumnSchemaBuilder("column1_i", Type.STRING).build(),
-        new ColumnSchemaBuilder("column2_d", Type.STRING).nullable(true).build(),
+        new ColumnSchemaBuilder("column2_d", Type.STRING)
+          .nullable(true)
+          .build(),
         new ColumnSchemaBuilder("column3_s", Type.STRING).build(),
-        new ColumnSchemaBuilder("column4_b", Type.STRING).build())
+        new ColumnSchemaBuilder("column4_b", Type.STRING).build()
+      )
       new Schema(columns)
     }
-    val tableOptions = new CreateTableOptions().setRangePartitionColumns(List("key").asJava)
+    val tableOptions = new CreateTableOptions()
+      .setRangePartitionColumns(List("key").asJava)
       .setNumReplicas(1)
     kuduClient.createTable(TABLE_NAME, schema, tableOptions)
 
-    val dataPath = new File(TABLE_DATA_PATH).getAbsolutePath
+    // Get the absolute path of the resource file.
+    val schemaResource =
+      classOf[TestImportExportFiles].getResource(TABLE_DATA_PATH)
+    val dataPath = Paths.get(schemaResource.toURI).toAbsolutePath
 
-    ImportExportFiles.testMain(Array("--operation=import",
-      "--format=csv",
-      s"--master-addrs=${miniCluster.getMasterAddresses}",
-      s"--path=$TABLE_DATA_PATH",
-      s"--table-name=$TABLE_NAME",
-      "--delimiter=,",
-      "--header=true",
-      "--inferschema=true"), ss)
+    ImportExportFiles.testMain(
+      Array(
+        "--operation=import",
+        "--format=csv",
+        s"--master-addrs=${miniCluster.getMasterAddressesAsString}",
+        s"--path=$dataPath",
+        s"--table-name=$TABLE_NAME",
+        "--delimiter=,",
+        "--header=true",
+        "--inferschema=true"
+      ),
+      ss
+    )
     val rdd = kuduContext.kuduRDD(ss.sparkContext, TABLE_NAME, List("key"))
     assert(rdd.collect.length == 4)
-    assertEquals(rdd.collect().mkString(","),"[1],[2],[3],[4]")
+    assertEquals(rdd.collect().mkString(","), "[1],[2],[3],[4]")
   }
 }

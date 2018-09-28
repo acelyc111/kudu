@@ -20,10 +20,12 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
-#include <vector>
 
 #include "kudu/gutil/macros.h"
+#include "kudu/gutil/ref_counted.h"
+#include "kudu/master/ts_descriptor.h"
 #include "kudu/util/locks.h"
+#include "kudu/util/metrics.h"
 #include "kudu/util/status.h"
 
 namespace kudu {
@@ -32,10 +34,6 @@ class NodeInstancePB;
 class ServerRegistrationPB;
 
 namespace master {
-
-class TSDescriptor;
-
-typedef std::vector<std::shared_ptr<TSDescriptor>> TSDescriptorVector;
 
 // Tracks the servers that the master has heard from, along with their
 // last heartbeat, etc.
@@ -49,7 +47,7 @@ typedef std::vector<std::shared_ptr<TSDescriptor>> TSDescriptorVector;
 // This class is thread-safe.
 class TSManager {
  public:
-  TSManager();
+  explicit TSManager(const scoped_refptr<MetricEntity>& metric_entity);
   virtual ~TSManager();
 
   // Lookup the tablet server descriptor for the given instance identifier.
@@ -74,17 +72,21 @@ class TSManager {
 
   // Return all of the currently registered TS descriptors into the provided
   // list.
-  void GetAllDescriptors(std::vector<std::shared_ptr<TSDescriptor>>* descs) const;
+  void GetAllDescriptors(TSDescriptorVector* descs) const;
 
   // Return all of the currently registered TS descriptors that have sent a
   // heartbeat recently, indicating that they're alive and well.
-  void GetAllLiveDescriptors(std::vector<std::shared_ptr<TSDescriptor>>* descs) const;
+  void GetAllLiveDescriptors(TSDescriptorVector* descs) const;
 
   // Get the TS count.
   int GetCount() const;
 
  private:
+  int ClusterSkew() const;
+
   mutable rw_spinlock lock_;
+
+  FunctionGaugeDetacher metric_detacher_;
 
   typedef std::unordered_map<
     std::string, std::shared_ptr<TSDescriptor>> TSDescriptorMap;

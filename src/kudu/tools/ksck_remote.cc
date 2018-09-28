@@ -18,6 +18,7 @@
 #include "kudu/tools/ksck_remote.h"
 
 #include <cstdint>
+#include <map>
 #include <ostream>
 #include <unordered_map>
 
@@ -28,8 +29,8 @@
 #include <glog/logging.h>
 
 #include "kudu/client/client.h"
-#include "kudu/client/schema.h"
 #include "kudu/client/replica_controller-internal.h"
+#include "kudu/client/schema.h"
 #include "kudu/common/common.pb.h"
 #include "kudu/common/schema.h"
 #include "kudu/common/wire_protocol.h"
@@ -50,6 +51,8 @@
 #include "kudu/server/server_base.pb.h"
 #include "kudu/server/server_base.proxy.h"
 #include "kudu/tablet/tablet.pb.h"
+#include "kudu/tools/ksck.h"
+#include "kudu/tools/ksck_results.h"
 #include "kudu/tserver/tablet_server.h"
 #include "kudu/tserver/tserver.pb.h"
 #include "kudu/tserver/tserver_service.pb.h"
@@ -57,6 +60,7 @@
 #include "kudu/util/monotime.h"
 #include "kudu/util/net/net_util.h"
 #include "kudu/util/net/sockaddr.h"
+#include "kudu/util/version_info.pb.h"
 
 DECLARE_int64(timeout_ms); // defined in tool_action_common
 DEFINE_bool(checksum_cache_blocks, false, "Should the checksum scanners cache the read blocks");
@@ -86,6 +90,18 @@ namespace {
 MonoDelta GetDefaultTimeout() {
   return MonoDelta::FromMilliseconds(FLAGS_timeout_ms);
 }
+
+// Common flag-fetching routine for masters and tablet servers.
+Status FetchUnusualFlagsCommon(const shared_ptr<server::GenericServiceProxy>& proxy,
+                               server::GetFlagsResponsePB* resp) {
+  server::GetFlagsRequestPB req;
+  RpcController rpc;
+  rpc.set_timeout(GetDefaultTimeout());
+  for (const string& tag : { "experimental", "hidden", "unsafe" }) {
+    req.add_tags(tag);
+  }
+  return proxy->GetFlags(req, resp, &rpc);
+}
 } // anonymous namespace
 
 Status RemoteKsckMaster::Init() {
@@ -110,6 +126,7 @@ Status RemoteKsckMaster::FetchInfo() {
   rpc.set_timeout(GetDefaultTimeout());
   RETURN_NOT_OK(generic_proxy_->GetStatus(req, &resp, &rpc));
   uuid_ = resp.status().node_instance().permanent_uuid();
+  version_ = resp.status().version_info().version_string();
   state_ = KsckFetchState::FETCHED;
   return Status::OK();
 }
@@ -137,6 +154,18 @@ Status RemoteKsckMaster::FetchConsensusState() {
   return Status::OK();
 }
 
+Status RemoteKsckMaster::FetchUnusualFlags() {
+  server::GetFlagsResponsePB resp;
+  Status s = FetchUnusualFlagsCommon(generic_proxy_, &resp);
+  if (!s.ok()) {
+    flags_state_ = KsckFetchState::FETCH_FAILED;
+  } else {
+    flags_state_ = KsckFetchState::FETCHED;
+    flags_ = resp;
+  }
+  return s;
+}
+
 Status RemoteKsckTabletServer::Init() {
   vector<Sockaddr> addresses;
   RETURN_NOT_OK(ParseAddressList(
@@ -150,9 +179,10 @@ Status RemoteKsckTabletServer::Init() {
   return Status::OK();
 }
 
-Status RemoteKsckTabletServer::FetchInfo() {
+Status RemoteKsckTabletServer::FetchInfo(KsckServerHealth* health) {
+  DCHECK(health);
   state_ = KsckFetchState::FETCH_FAILED;
-
+  *health = KsckServerHealth::UNAVAILABLE;
   {
     server::GetStatusRequestPB req;
     server::GetStatusResponsePB resp;
@@ -160,8 +190,10 @@ Status RemoteKsckTabletServer::FetchInfo() {
     rpc.set_timeout(GetDefaultTimeout());
     RETURN_NOT_OK_PREPEND(generic_proxy_->GetStatus(req, &resp, &rpc),
                           "could not get status from server");
+    version_ = resp.status().version_info().version_string();
     string response_uuid = resp.status().node_instance().permanent_uuid();
     if (response_uuid != uuid()) {
+      *health = KsckServerHealth::WRONG_SERVER_UUID;
       return Status::RemoteError(Substitute("ID reported by tablet server ($0) doesn't "
                                  "match the expected ID: $1",
                                  response_uuid, uuid()));
@@ -197,10 +229,13 @@ Status RemoteKsckTabletServer::FetchInfo() {
   }
 
   state_ = KsckFetchState::FETCHED;
+  *health = KsckServerHealth::HEALTHY;
   return Status::OK();
 }
 
-Status RemoteKsckTabletServer::FetchConsensusState() {
+Status RemoteKsckTabletServer::FetchConsensusState(KsckServerHealth* health) {
+  DCHECK(health);
+  *health = KsckServerHealth::UNAVAILABLE;
   tablet_consensus_state_map_.clear();
   consensus::GetConsensusStateRequestPB req;
   consensus::GetConsensusStateResponsePB resp;
@@ -219,7 +254,20 @@ Status RemoteKsckTabletServer::FetchConsensusState() {
     }
   }
 
+  *health = KsckServerHealth::HEALTHY;
   return Status::OK();
+}
+
+Status RemoteKsckTabletServer::FetchUnusualFlags() {
+  server::GetFlagsResponsePB resp;
+  Status s = FetchUnusualFlagsCommon(generic_proxy_, &resp);
+  if (!s.ok()) {
+    flags_state_ = KsckFetchState::FETCH_FAILED;
+  } else {
+    flags_state_ = KsckFetchState::FETCHED;
+    flags_ = resp;
+  }
+  return s;
 }
 
 class ChecksumStepper;
@@ -426,7 +474,8 @@ Status RemoteKsckCluster::RetrieveTablesList() {
     client::sp::shared_ptr<KuduTable> t;
     RETURN_NOT_OK(client_->OpenTable(n, &t));
 
-    shared_ptr<KsckTable> table(new KsckTable(n,
+    shared_ptr<KsckTable> table(new KsckTable(t->id(),
+                                              n,
                                               *t->schema().schema_,
                                               t->num_replicas()));
     tables_temp.push_back(table);

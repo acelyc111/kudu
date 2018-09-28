@@ -15,20 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-set(LINK_LIBS
-  cfile
-  consensus
-  gutil
-  kudu_client
-  kudu_common
-  kudu_fs
-  kudu_util
-  log
-  tablet
-  tserver
-  ${KUDU_BASE_LIBS}
-)
-
 #######################################
 # tool_proto
 #######################################
@@ -45,6 +31,7 @@ add_library(tool_proto
 target_link_libraries(tool_proto
   kudu_common_proto
   protobuf
+  tablet_proto
   wire_protocol_proto)
 
 #######################################
@@ -54,12 +41,24 @@ target_link_libraries(tool_proto
 add_library(kudu_tools_util
   color.cc
   data_gen_util.cc
+  diagnostics_log_parser.cc
   tool_action.cc
   tool_action_common.cc
 )
 target_link_libraries(kudu_tools_util
+  cfile
+  consensus
+  gutil
+  kudu_client
+  kudu_common
+  kudu_fs
+  kudu_util
+  log
+  server_process
+  tablet
   tool_proto
-  ${LINK_LIBS})
+  ${KUDU_BASE_LIBS}
+)
 
 #######################################
 # ksck
@@ -82,12 +81,29 @@ target_link_libraries(ksck
 )
 
 #######################################
+# kudu_tools_rebalance
+#######################################
+
+add_library(kudu_tools_rebalance
+  rebalancer.cc
+  rebalance_algo.cc
+  tool_replica_util.cc
+)
+target_link_libraries(kudu_tools_rebalance
+  ksck
+  kudu_common
+  ${KUDU_BASE_LIBS}
+)
+
+#######################################
 # kudu
 #######################################
 
 add_executable(kudu
   tool_action_cluster.cc
+  tool_action_diagnose.cc
   tool_action_fs.cc
+  tool_action_hms.cc
   tool_action_local_replica.cc
   tool_action_master.cc
   tool_action_pbc.cc
@@ -101,6 +117,7 @@ add_executable(kudu
   tool_main.cc
 )
 target_link_libraries(kudu
+  ${SANITIZER_OPTIONS_OVERRIDE}
   ${KRB5_REALM_OVERRIDE}
   clock
   consensus
@@ -108,8 +125,10 @@ target_link_libraries(kudu
   krpc
   ksck
   kudu_client
+  kudu_client_test_util
   kudu_common
   kudu_fs
+  kudu_tools_rebalance
   kudu_util
   log
   master
@@ -135,22 +154,30 @@ target_link_libraries(kudu_tools_test_util
 # Unit tests
 #######################################
 
-set(KUDU_TEST_LINK_LIBS
-  ksck
-  kudu_tools_util
-  kudu_tools_test_util
+SET_KUDU_TEST_LINK_LIBS(
   itest_util
-  mini_cluster
-  ${KUDU_MIN_TEST_LIBS})
+  ksck
+  kudu_hms
+  kudu_tools_rebalance
+  kudu_tools_test_util
+  kudu_tools_util
+  mini_cluster)
+ADD_KUDU_TEST(diagnostics_log_parser-test)
 ADD_KUDU_TEST(ksck-test)
 ADD_KUDU_TEST(ksck_remote-test PROCESSORS 3)
-ADD_KUDU_TEST(kudu-admin-test PROCESSORS 3)
+ADD_KUDU_TEST(kudu-admin-test
+  NUM_SHARDS 8 PROCESSORS 3)
 ADD_KUDU_TEST_DEPENDENCIES(kudu-admin-test
   kudu)
-ADD_KUDU_TEST(kudu-tool-test NUM_SHARDS 4 PROCESSORS 3)
+ADD_KUDU_TEST(kudu-tool-test
+  NUM_SHARDS 4 PROCESSORS 3
+  DATA_FILES testdata/sample-diagnostics-log.txt testdata/bad-diagnostics-log.txt
+  DATA_FILES testdata/first_argument.sh)
 ADD_KUDU_TEST_DEPENDENCIES(kudu-tool-test
   kudu)
 ADD_KUDU_TEST(kudu-ts-cli-test)
 ADD_KUDU_TEST_DEPENDENCIES(kudu-ts-cli-test
   kudu)
+ADD_KUDU_TEST(rebalance-test)
+ADD_KUDU_TEST(rebalance_algo-test)
 ADD_KUDU_TEST(tool_action-test)

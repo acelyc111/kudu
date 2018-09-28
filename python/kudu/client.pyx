@@ -46,6 +46,12 @@ IF PYKUDU_INT128_SUPPORTED == 1:
 ELSE:
     CLIENT_SUPPORTS_DECIMAL = False
 
+try:
+    import pandas
+    CLIENT_SUPPORTS_PANDAS = True
+except ImportError:
+    CLIENT_SUPPORTS_PANDAS = False
+
 # Replica selection enums
 LEADER_ONLY = ReplicaSelection_Leader
 CLOSEST_REPLICA = ReplicaSelection_Closest
@@ -109,6 +115,26 @@ def _check_convert_range_bound_type(bound):
         except KeyError:
             invalid_bound_type(bound)
 
+def _correct_pandas_data_type(dtype):
+    """
+    This method returns the correct Pandas data type for some data types that
+    are converted incorrectly by Pandas.
+
+    Returns
+    -------
+    pdtype : type
+    """
+    import numpy as np
+    if dtype == "int8":
+        return np.int8
+    if dtype == "int16":
+        return np.int16
+    if dtype == "int32":
+        return np.int32
+    if dtype == "float":
+        return np.float32
+    else:
+        return None
 
 cdef class TimeDelta:
     """
@@ -525,7 +551,7 @@ cdef class Client:
             result.append(ts._init(tservers[i]))
         return result
 
-    def new_session(self, flush_mode='manual', timeout_ms=5000):
+    def new_session(self, flush_mode='manual', timeout_ms=5000, **kwargs):
         """
         Create a new KuduSession for applying write operations.
 
@@ -535,16 +561,42 @@ cdef class Client:
           See Session.set_flush_mode
         timeout_ms : int, default 5000
           Timeout in milliseconds
+        mutation_buffer_sz : Size in bytes of the buffer space.
+        mutation_buffer_watermark : Watermark level as percentage of the mutation buffer size,
+            this is used to trigger a flush in AUTO_FLUSH_BACKGROUND mode.
+        mutation_buffer_flush_interval : The duration of the interval for the time-based
+            flushing, in milliseconds. In some cases, while running in AUTO_FLUSH_BACKGROUND
+            mode, the size of the mutation buffer for pending operations and the flush
+            watermark for fresh operations may be too high for the rate of incoming data:
+            it would take too long to accumulate enough data in the buffer to trigger
+            flushing. I.e., it makes sense to flush the accumulated operations if the
+            prior flush happened long time ago. This parameter sets the wait interval for
+            the time-based flushing which takes place along with the flushing triggered
+            by the over-the-watermark criterion. By default, the interval is set to
+            1000 ms (i.e. 1 second).
+        mutation_buffer_max_num : The maximum number of mutation buffers per KuduSession
+            object to hold the applied operations. Use 0 to set the maximum number of
+            concurrent mutation buffers to unlimited
 
         Returns
         -------
         session : kudu.Session
         """
+
         cdef Session result = Session()
         result.s = self.cp.NewSession()
 
         result.set_flush_mode(flush_mode)
         result.set_timeout_ms(timeout_ms)
+
+        if "mutation_buffer_sz" in kwargs:
+            result.set_mutation_buffer_space(kwargs["mutation_buffer_sz"])
+        if "mutation_buffer_watermark" in kwargs:
+            result.set_mutation_buffer_flush_watermark(kwargs["mutation_buffer_watermark"])
+        if "mutation_buffer_flush_interval" in kwargs:
+            result.set_mutation_buffer_flush_interval(kwargs["mutation_buffer_flush_interval"])
+        if "mutation_buffer_max_num" in kwargs:
+            result.set_mutation_buffer_max_num(kwargs["mutation_buffer_max_num"])
 
         return result
 
@@ -1245,6 +1297,99 @@ cdef class Session:
         """
         self.s.get().SetTimeoutMillis(ms)
 
+    def set_mutation_buffer_space(self, size_t size_bytes):
+        """
+        Set the amount of buffer space used by this session for outbound writes.
+
+        The effect of the buffer size varies based on the flush mode of the session:
+
+            AUTO_FLUSH_SYNC: since no buffering is done, this has no effect.
+            AUTO_FLUSH_BACKGROUND: if the buffer space is exhausted, then write calls
+                will block until there is space available in the buffer.
+            MANUAL_FLUSH: if the buffer space is exhausted, then write calls will return
+                an error
+
+        By default, the buffer space is set to 7 MiB (i.e. 7 * 1024 * 1024 bytes).
+
+        Parameters
+        ----------
+        size_bytes : Size of the buffer space to set (number of bytes)
+        """
+        status = self.s.get().SetMutationBufferSpace(size_bytes)
+
+        check_status(status)
+
+    def set_mutation_buffer_flush_watermark(self, double watermark_pct):
+        """
+        Set the buffer watermark to trigger flush in AUTO_FLUSH_BACKGROUND mode.
+
+        This method sets the watermark for fresh operations in the buffer when running
+        in AUTO_FLUSH_BACKGROUND mode: once the specified threshold is reached, the
+        session starts sending the accumulated write operations to the appropriate
+        tablet servers. The flush watermark determines how much of the buffer space is
+        taken by newly submitted operations. Setting this level to 100% results in
+        flushing the buffer only when the newly applied operation would overflow the
+        buffer. By default, the buffer flush watermark is set to 50%.
+
+        Parameters
+        ----------
+        watermark_pct : Watermark level as percentage of the mutation buffer size
+        """
+        status = self.s.get().SetMutationBufferFlushWatermark(watermark_pct)
+
+        check_status(status)
+
+    def set_mutation_buffer_flush_interval(self, unsigned int millis):
+        """
+        Set the interval for time-based flushing of the mutation buffer.
+
+        In some cases, while running in AUTO_FLUSH_BACKGROUND mode, the size of the
+        mutation buffer for pending operations and the flush watermark for fresh
+        operations may be too high for the rate of incoming data: it would take too
+        long to accumulate enough data in the buffer to trigger flushing. I.e., it
+        makes sense to flush the accumulated operations if the prior flush happened
+        long time ago. This method sets the wait interval for the time-based flushing
+        which takes place along with the flushing triggered by the over-the-watermark
+        criterion. By default, the interval is set to 1000 ms (i.e. 1 second).
+
+        Parameters
+        ----------
+        millis : The duration of the interval for the time-based flushing, in milliseconds.
+        """
+
+        status = self.s.get().SetMutationBufferFlushInterval(millis)
+
+        check_status(status)
+
+    def set_mutation_buffer_max_num(self, unsigned int max_num):
+        """
+        Set the maximum number of mutation buffers per Session object.
+
+        A Session accumulates write operations submitted via the Apply() method in
+        mutation buffers. A Session always has at least one mutation buffer. The
+        mutation buffer which accumulates new incoming operations is called the current
+        mutation buffer. The current mutation buffer is flushed using the
+        Session.flush() method or it's done by the Session automatically if
+        running in AUTO_FLUSH_BACKGROUND mode. After flushing the current mutation buffer,
+        a new buffer is created upon calling Session.apply(), provided the limit is
+        not exceeded. A call to Session.apply() blocks if it's at the maximum number
+        of buffers allowed; the call unblocks as soon as one of the pending batchers
+        finished flushing and a new batcher can be created.
+
+        The minimum setting for this parameter is 1 (one). The default setting for this
+        parameter is 2 (two).
+
+        Parameters
+        ----------
+        max_num : The maximum number of mutation buffers per Session object to hold
+            the applied operations. Use 0 to set the maximum number of concurrent mutation
+            buffers to unlimited.
+        """
+
+        status = self.s.get().SetMutationBufferMaxNum(max_num)
+
+        check_status(status)
+
     def apply(self, WriteOperation op):
         """
         Apply the indicated write operation
@@ -1851,6 +1996,18 @@ cdef class Scanner:
 
         return tuples
 
+    def xbatches(self):
+        """
+        This method acts as a generator to enable more effective memory management
+        by yielding batches of tuples.
+        """
+
+        self.ensure_open()
+
+        while self.has_more_rows():
+            yield self.next_batch().as_tuples()
+
+
     def read_next_batch_tuples(self):
         return self.next_batch().as_tuples()
 
@@ -1939,6 +2096,57 @@ cdef class Scanner:
         resources on the server.
         """
         self.scanner.Close()
+
+    def to_pandas(self, index=None, coerce_float=False):
+        """
+        Returns the contents of this Scanner to a Pandas DataFrame.
+
+        This is only available if Pandas is installed.
+
+        Note: This should only be used if the results from the scanner are expected
+        to be small, as Pandas will load the entire contents into memory.
+
+        Parameters
+        ----------
+        index : string, list of fields
+            Field or list of fields to use as the index
+        coerce_float : boolean
+            Attempt to convert decimal values to floating point (double precision).
+
+        Returns
+        -------
+        dataframe : DataFrame
+        """
+        import pandas as pd
+
+        self.ensure_open()
+
+        # Here we are using list comprehension with the batch generator to avoid
+        # doubling our memory footprint.
+        dfs = [ pd.DataFrame.from_records(batch,
+                                          index=index,
+                                          coerce_float=coerce_float,
+                                          columns=self.get_projection_schema().names)
+                for batch in self.xbatches()
+                if len(batch) != 0
+                ]
+
+        df = pd.concat(dfs, ignore_index=not(bool(index)))
+
+        types = {}
+        for column in self.get_projection_schema():
+            pandas_type = _correct_pandas_data_type(column.type.name)
+
+            if pandas_type is not None and \
+                not(column.nullable and df[column.name].isnull().any()):
+                types[column.name] = pandas_type
+
+        for col, dtype in types.items():
+            df[col] = df[col].astype(dtype, copy=False)
+
+        return df
+
+
 
 
 cdef class ScanToken:
@@ -2162,9 +2370,9 @@ cdef class ScanTokenBuilder:
 
         return self
 
-    def set_timout_millis(self, millis):
+    def set_timeout_millis(self, millis):
         """
-        Sets the timeout in milliseconds.
+        Sets the scan request timeout in milliseconds.
         Returns a reference to itself to facilitate chaining.
 
         Parameters
@@ -2178,6 +2386,15 @@ cdef class ScanTokenBuilder:
         """
         check_status(self._builder.SetTimeoutMillis(millis))
         return self
+
+    def set_timout_millis(self, millis):
+        """
+        See set_timeout_millis().
+
+        This method is deprecated due to having a typo in the method name and
+        will be removed in a future release.
+        """
+        return self.set_timeout_millis(millis)
 
     def set_fault_tolerant(self):
         """

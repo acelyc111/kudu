@@ -34,12 +34,34 @@ tasks.withType(Test) {
   forkEvery 1
 
   // Enable assertions during tests.
-  jvmArgs "-enableassertions"
+  jvmArgs += "-enableassertions"
+  // Hide the Java 9+ warnings about illegal reflective access
+  if (JavaVersion.current().isJava9Compatible()) {
+    jvmArgs += "--illegal-access=permit"
+    def reflectionModules = [
+        "java.base/java.lang", // java.lang reflection is used by TestUtils
+        "java.base/java.net",  // java.net reflection is used by FakeDNS
+        "java.base/java.nio",  // java.nio reflection is used by Protobuf
+        "java.base/java.util", // java.util reflection is used by Spark
+        "java.base/java.util.concurrent", // java.util.concurrent reflection is used by Spark
+        "java.base/sun.nio.ch", // sun.nio.ch reflection is used by Netty
+        "java.security.jgss/sun.security.krb5" // sun.security.krb5 reflection is used by Hadoop's KerberosUtil
+    ]
+    reflectionModules.forEach { module ->
+      jvmArgs += "--add-opens=$module=ALL-UNNAMED"
+    }
+  }
 
   // Set a few system properties.
   systemProperty "java.awt.headless", true
   systemProperty "java.net.preferIPv4Stack", true
   systemProperty "java.security.egd", "file:/dev/urandom" // Improve RNG generation speed.
+
+  // Set rerunFailingTestsCount for use in BaseKuduTest.java to rerun failing tests.
+  systemProperty "rerunFailingTestsCount", propertyWithDefault("rerunFailingTestsCount", 0)
+
+  // Set kuduBinDir to the binaries to use with the MiniKuduCluster.
+  systemProperty "kuduBinDir", "$project.rootDir/../build/latest/bin"
 
   // Don't fail the build if a --tests filter doesn't match any tests.
   // This is useful for filtering tests from the top of the project where some
@@ -47,53 +69,9 @@ tasks.withType(Test) {
   filter {
     failOnNoMatchingTests = false
   }
-}
 
-// Adds pattern based integration test support.
-// All test files matching the pattern "**/*IT*.java" will be run after the the other tests.
-sourceSets {
-  test {
-    java {
-      exclude "**/*IT*.java"
-    }
-  }
-  integrationTest {
-    java {
-      srcDirs = ["src/test/java"]
-      include "**/*IT*.java"
-    }
-    compileClasspath += main.output + test.output
-    runtimeClasspath += main.output + test.output
+  // Force the tests to be rerun if the rerunTests property is set.
+  if (propertyExists("rerunTests")) {
+    outputs.upToDateWhen { false }
   }
 }
-plugins.withType(ScalaPlugin) {
-  sourceSets {
-    test {
-      scala {
-        exclude "**/*IT*.scala"
-      }
-    }
-    integrationTest {
-      scala {
-        srcDirs = ["src/test/scala"]
-        include "**/*IT*.scala"
-      }
-      compileClasspath += main.output + test.output
-      runtimeClasspath += main.output + test.output
-    }
-  }
-}
-
-configurations {
-  integrationTestCompile.extendsFrom testCompile
-  integrationTestRuntime.extendsFrom testRuntime
-}
-
-task integrationTest(type: Test, group: "Verification") {
-  description = "Runs the integration tests."
-  testClassesDirs = sourceSets.integrationTest.output.classesDirs
-  classpath = sourceSets.integrationTest.runtimeClasspath
-  maxParallelForks = 1
-  mustRunAfter test
-}
-check.dependsOn(integrationTest)

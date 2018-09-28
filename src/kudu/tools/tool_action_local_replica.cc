@@ -185,12 +185,12 @@ Status FindLastLoggedOpId(FsManager* fs, const string& tablet_id,
   for (seg = segs.rbegin(); seg != segs.rend(); ++seg) {
     LogEntryReader reader(seg->get());
     while (true) {
-      LogEntryPB entry;
+      unique_ptr<LogEntryPB> entry;
       Status s = reader.ReadNextEntry(&entry);
       if (s.IsEndOfFile()) break;
       RETURN_NOT_OK_PREPEND(s, "Error in log segment");
-      if (entry.type() != log::REPLICATE) continue;
-      *last_logged_opid = entry.replicate().id();
+      if (entry->type() != log::REPLICATE) continue;
+      *last_logged_opid = entry->replicate().id();
       found = true;
     }
     if (found) return Status::OK();
@@ -632,6 +632,7 @@ Status DumpRowSetInternal(const shared_ptr<RowSetMetadata>& rs_meta,
   RETURN_NOT_OK(DiskRowSet::Open(rs_meta,
                                  log_reg.get(),
                                  tablet::TabletMemTrackers(),
+                                 nullptr,
                                  &rs));
   vector<string> lines;
   RETURN_NOT_OK(rs->DebugDump(&lines));

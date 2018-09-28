@@ -104,6 +104,10 @@ class KuduTabletTest : public KuduTest {
     return harness_->tablet();
   }
 
+  Tablet* mutable_tablet() {
+    return harness_->mutable_tablet();
+  }
+
   TabletHarness* harness() {
     return harness_.get();
   }
@@ -225,18 +229,16 @@ static inline void VerifySnapshotsHaveSameResult(
   }
 }
 
-// Construct a new iterator from the given rowset, and dump
-// all of its results into 'out'. The previous contents
-// of 'out' are cleared.
-static inline Status DumpRowSet(const RowSet &rs,
-                                const Schema &projection,
-                                const MvccSnapshot &snap,
-                                std::vector<std::string> *out,
-                                int limit = INT_MAX) {
+// Constructs a new iterator for 'rs' with 'opts' and dumps all of its rows into 'out'.
+//
+// The previous contents of 'out' are cleared.
+static inline Status DumpRowSet(const RowSet& rs,
+                                const RowIteratorOptions& opts,
+                                std::vector<std::string>* out) {
   gscoped_ptr<RowwiseIterator> iter;
-  RETURN_NOT_OK(rs.NewRowIterator(&projection, snap, UNORDERED, &iter));
-  RETURN_NOT_OK(iter->Init(NULL));
-  RETURN_NOT_OK(IterateToStringList(iter.get(), out, limit));
+  RETURN_NOT_OK(rs.NewRowIterator(opts, &iter));
+  RETURN_NOT_OK(iter->Init(nullptr));
+  RETURN_NOT_OK(IterateToStringList(iter.get(), out));
   return Status::OK();
 }
 

@@ -256,8 +256,7 @@ TEST_F(TabletCopyITest, TestRejectRogueLeader) {
   ASSERT_OK(cluster_->tablet_server(zombie_leader_index)->Resume());
 
   // Loop for a few seconds to ensure that the tablet doesn't transition to READY.
-  MonoTime deadline = MonoTime::Now();
-  deadline.AddDelta(MonoDelta::FromSeconds(5));
+  MonoTime deadline = MonoTime::Now() + MonoDelta::FromSeconds(5);
   while (MonoTime::Now() < deadline) {
     ASSERT_OK(itest::ListTablets(ts, timeout, &tablets));
     ASSERT_EQ(1, tablets.size());
@@ -267,13 +266,9 @@ TEST_F(TabletCopyITest, TestRejectRogueLeader) {
 
   LOG(INFO) << "the rogue leader was not able to tablet copy the tombstoned follower";
 
-  // Force the rogue leader to step down.
-  // Then, send a tablet copy start request from a "fake" leader that
-  // sends an up-to-date term in the RB request but the actual term stored
-  // in the copy source's consensus metadata would still be old.
-  LOG(INFO) << "forcing rogue leader T " << tablet_id << " P " << zombie_leader_uuid
-            << " to step down...";
-  ASSERT_OK(itest::LeaderStepDown(ts_map_[zombie_leader_uuid], tablet_id, timeout));
+  // Send a tablet copy start request from a "fake" leader that
+  // sends an up-to-date term in the tablet copy request but the actual term
+  // stored in the copy source's consensus metadata would still be old.
   ExternalTabletServer* zombie_ets = cluster_->tablet_server(zombie_leader_index);
   // It's not necessarily part of the API but this could return faliure due to
   // rejecting the remote. We intend to make that part async though, so ignoring
@@ -1477,7 +1472,7 @@ TEST_P(BadTabletCopyITest, TestBadCopy) {
   const int kMinRows = 10000;
   const int kMinBlocks = 10;
   const string& failure_flag = GetParam();
-  StartCluster(
+  NO_FATALS(StartCluster(
       {
         // Flush aggressively to create many blocks.
         "--flush_threshold_mb=0",
@@ -1488,7 +1483,7 @@ TEST_P(BadTabletCopyITest, TestBadCopy) {
       }, {
         // Wait only 5 seconds before master decides TS not eligible for a replica.
         "--tserver_unresponsive_timeout_ms=5000",
-      }, kNumTabletServers);
+      }, kNumTabletServers));
 
   // Don't allow TS 3 to get a copy of Table A.
   cluster_->tablet_server(3)->Shutdown();
@@ -1504,7 +1499,7 @@ TEST_P(BadTabletCopyITest, TestBadCopy) {
   ASSERT_OK(cluster_->tablet_server(3)->Restart());
 
   // Load Table A.
-  LoadTable(&workload1, kMinRows, kMinBlocks);
+  NO_FATALS(LoadTable(&workload1, kMinRows, kMinBlocks));
 
   // Don't allow TS 0 to get a copy of Table B.
   cluster_->tablet_server(0)->Shutdown();
@@ -1520,7 +1515,7 @@ TEST_P(BadTabletCopyITest, TestBadCopy) {
   ASSERT_OK(cluster_->tablet_server(0)->Restart());
 
   // Load Table B.
-  LoadTable(&workload2, kMinRows, kMinBlocks);
+  NO_FATALS(LoadTable(&workload2, kMinRows, kMinBlocks));
 
   // Shut down replica with only [A].
   cluster_->tablet_server(0)->Shutdown();
@@ -1551,7 +1546,7 @@ TEST_P(BadTabletCopyITest, TestBadCopy) {
 
   // Wait for TS 3 to tombstone the replica that failed to copy.
   TServerDetails* ts = ts_map_[cluster_->tablet_server(3)->uuid()];
-  AssertEventually([&] {
+  ASSERT_EVENTUALLY([&] {
     vector<tserver::ListTabletsResponsePB_StatusAndSchemaPB> tablets;
     ASSERT_OK(ListTablets(ts, MonoDelta::FromSeconds(10), &tablets));
     ASSERT_EQ(2, tablets.size());
@@ -1563,7 +1558,6 @@ TEST_P(BadTabletCopyITest, TestBadCopy) {
     }
     ASSERT_EQ(1, num_tombstoned);
   });
-  NO_FATALS();
 
   // Restart the whole cluster without failure injection so that it can finish
   // re-replicating.

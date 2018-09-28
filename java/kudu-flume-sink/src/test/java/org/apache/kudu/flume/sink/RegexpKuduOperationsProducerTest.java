@@ -25,6 +25,7 @@ import static org.apache.kudu.flume.sink.KuduSinkConfigurationConstants.PRODUCER
 import static org.apache.kudu.flume.sink.KuduSinkConfigurationConstants.TABLE_NAME;
 import static org.apache.kudu.flume.sink.RegexpKuduOperationsProducer.OPERATION_PROP;
 import static org.apache.kudu.flume.sink.RegexpKuduOperationsProducer.PATTERN_PROP;
+import static org.apache.kudu.util.ClientTestUtil.scanTableToStrings;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -205,7 +206,7 @@ public class RegexpKuduOperationsProducerTest extends BaseKuduTest {
     KuduSink sink = new KuduSink(syncClient);
     HashMap<String, String> parameters = new HashMap<>();
     parameters.put(TABLE_NAME, tableName);
-    parameters.put(MASTER_ADDRESSES, getMasterAddresses());
+    parameters.put(MASTER_ADDRESSES, getMasterAddressesAsString());
     parameters.put(PRODUCER, RegexpKuduOperationsProducer.class.getName());
     parameters.put(PRODUCER_PREFIX + PATTERN_PROP, TEST_REGEXP);
     parameters.put(PRODUCER_PREFIX + OPERATION_PROP, operation);

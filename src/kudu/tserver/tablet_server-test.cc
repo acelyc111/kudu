@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "kudu/tserver/tablet_server-test-base.h"
+#include "kudu/tserver/tablet_server.h"
 
 #include <stdlib.h>
 #include <unistd.h>
@@ -80,7 +80,7 @@
 #include "kudu/tserver/heartbeater.h"
 #include "kudu/tserver/mini_tablet_server.h"
 #include "kudu/tserver/scanners.h"
-#include "kudu/tserver/tablet_server.h"
+#include "kudu/tserver/tablet_server-test-base.h"
 #include "kudu/tserver/tablet_server_options.h"
 #include "kudu/tserver/tablet_server_test_util.h"
 #include "kudu/tserver/ts_tablet_manager.h"
@@ -146,6 +146,7 @@ DECLARE_bool(crash_on_eio);
 DECLARE_bool(enable_maintenance_manager);
 DECLARE_bool(fail_dns_resolution);
 DECLARE_bool(rowset_metadata_store_keys);
+DECLARE_double(cfile_inject_corruption);
 DECLARE_double(env_inject_eio);
 DECLARE_int32(flush_threshold_mb);
 DECLARE_int32(flush_threshold_secs);
@@ -168,6 +169,7 @@ METRIC_DECLARE_gauge_uint64(log_block_manager_containers);
 METRIC_DECLARE_counter(log_block_manager_holes_punched);
 METRIC_DECLARE_gauge_size(active_scanners);
 METRIC_DECLARE_gauge_size(tablet_active_scanners);
+METRIC_DECLARE_gauge_size(num_rowsets_on_disk);
 
 namespace kudu {
 
@@ -232,6 +234,7 @@ TEST_F(TabletServerTest, TestStatus) {
     }
   });
   SCOPED_CLEANUP({
+    latch.CountDown();
     status_thread.join();
   });
 
@@ -242,9 +245,6 @@ TEST_F(TabletServerTest, TestStatus) {
     mini_server_->Shutdown();
     ASSERT_OK(mini_server_->Restart());
   }
-
-  // All done, stop the test thread.
-  latch.CountDown();
 }
 
 TEST_F(TabletServerTest, TestServerClock) {
@@ -400,13 +400,13 @@ TEST_F(TabletServerTest, TestWebPages) {
   ASSERT_OK(c.FetchURL(Substitute("http://$0/tablets", addr),
                               &buf));
   ASSERT_STR_CONTAINS(buf.ToString(), kTabletId);
-  ASSERT_STR_CONTAINS(buf.ToString(), "RANGE (key) PARTITION UNBOUNDED</td>");
+  ASSERT_STR_CONTAINS(buf.ToString(), "RANGE (key) PARTITION UNBOUNDED");
 
   // Tablet page should include the schema.
   ASSERT_OK(c.FetchURL(Substitute("http://$0/tablet?id=$1", addr, kTabletId),
                        &buf));
-  ASSERT_STR_CONTAINS(buf.ToString(), "<th><u>key</u></th>");
-  ASSERT_STR_CONTAINS(buf.ToString(), "<td>string NULLABLE</td>");
+  ASSERT_STR_CONTAINS(buf.ToString(), "key");
+  ASSERT_STR_CONTAINS(buf.ToString(), "string NULLABLE");
 
   // Test fetching metrics.
   // Fetching metrics has the side effect of retiring metrics, but not in a single pass.
@@ -421,7 +421,7 @@ TEST_F(TabletServerTest, TestWebPages) {
 
     // Check that the tablet entry shows up.
     ASSERT_STR_CONTAINS(buf.ToString(), "\"type\": \"tablet\"");
-    ASSERT_STR_CONTAINS(buf.ToString(), "\"id\": \"TestTablet\"");
+    ASSERT_STR_CONTAINS(buf.ToString(), "\"id\": \"ffffffffffffffffffffffffffffffff\"");
     ASSERT_STR_CONTAINS(buf.ToString(), "\"partition\": \"RANGE (key) PARTITION UNBOUNDED");
 
 
@@ -505,8 +505,8 @@ TEST_F(TabletServerTest, TestFailedTabletsRejectConsensusState) {
   ASSERT_STR_CONTAINS(s.ToString(), "Tablet replica is shutdown");
 }
 
-// Test that tablets that get failed and deleted will eventually show up as
-// failed tombstones on the web UI.
+// Test that tablet replicas that get failed and deleted will eventually show
+// up as failed tombstones on the web UI.
 TEST_F(TabletServerTest, TestFailedTabletsOnWebUI) {
   scoped_refptr<TabletReplica> replica;
   TSTabletManager* tablet_manager = mini_server_->server()->tablet_manager();
@@ -515,7 +515,7 @@ TEST_F(TabletServerTest, TestFailedTabletsOnWebUI) {
   replica->Shutdown();
   ASSERT_EQ(tablet::FAILED, replica->state());
 
-  // Now delete the tablet and leave it tombstoned, e.g. as if the failed
+  // Now delete the replica and leave it tombstoned, e.g. as if the failed
   // replica were deleted.
   TabletServerErrorPB::Code error_code;
   ASSERT_OK(tablet_manager->DeleteTablet(kTabletId,
@@ -526,9 +526,8 @@ TEST_F(TabletServerTest, TestFailedTabletsOnWebUI) {
   const string addr = mini_server_->bound_http_addr().ToString();
   ASSERT_OK(c.FetchURL(Substitute("http://$0/tablets", addr), &buf));
 
-  // Ensure the html contains the "Tombstoned Tablets" header, indicating the
-  // failed tombstone is correctly displayed as a tombstone.
-  ASSERT_STR_CONTAINS(buf.ToString(), "Tombstoned Tablets");
+  // The webui should have a record of a FAILED and tombstoned tablet replica.
+  ASSERT_STR_CONTAINS(buf.ToString(), "FAILED (TABLET_DATA_TOMBSTONED)");
 }
 
 // Test that tombstoned tablets are displayed correctly in the web ui:
@@ -537,8 +536,11 @@ TEST_F(TabletServerTest, TestFailedTabletsOnWebUI) {
 TEST_F(TabletServerTest, TestTombstonedTabletOnWebUI) {
   TSTabletManager* tablet_manager = mini_server_->server()->tablet_manager();
   TabletServerErrorPB::Code error_code;
-  ASSERT_OK(tablet_manager->DeleteTablet(kTabletId,
-                                         tablet::TABLET_DATA_TOMBSTONED, boost::none, &error_code));
+  ASSERT_OK(
+      tablet_manager->DeleteTablet(kTabletId,
+                                   tablet::TABLET_DATA_TOMBSTONED,
+                                   boost::none,
+                                   &error_code));
 
   // Restart the server. We drop the tablet_replica_ reference since it becomes
   // invalid when the server shuts down.
@@ -552,19 +554,24 @@ TEST_F(TabletServerTest, TestTombstonedTabletOnWebUI) {
   const string addr = mini_server_->bound_http_addr().ToString();
   ASSERT_OK(c.FetchURL(Substitute("http://$0/tablets", addr), &buf));
 
-  // Ensure the html contains the "Tombstoned Tablets" header and
-  // a table entry with the proper status message.
+  // Check the page contains a tombstoned tablet, and its state is not
+  // "Tablet initializing...".
   string s = buf.ToString();
-  ASSERT_STR_CONTAINS(s, "Tombstoned Tablets");
-  ASSERT_STR_CONTAINS(s, "<td>Tombstoned</td>");
-  ASSERT_STR_NOT_CONTAINS(s, "<td>Tablet initializing...</td>");
+  ASSERT_STR_CONTAINS(s, "TABLET_DATA_TOMBSTONED");
+  ASSERT_STR_NOT_CONTAINS(s, "Tablet initializing...");
 
-  // Since the consensus config shouldn't be displayed, the html should not
+  // Since the consensus config shouldn't be displayed, the page should not
   // contain the server's RPC address.
   ASSERT_STR_NOT_CONTAINS(s, mini_server_->bound_rpc_addr().ToString());
 }
 
-class TabletServerDiskFailureTest : public TabletServerTestBase {
+enum class ErrorType {
+  DISK_FAILURE,
+  CFILE_CORRUPTION
+};
+
+class TabletServerDiskErrorTest : public TabletServerTestBase,
+                                  public testing::WithParamInterface<ErrorType> {
  public:
   virtual void SetUp() override {
     const int kNumDirs = 5;
@@ -581,9 +588,12 @@ class TabletServerDiskFailureTest : public TabletServerTestBase {
   }
 };
 
-// Test that applies random operations to a tablet with a non-zero disk-failure
-// injection rate.
-TEST_F(TabletServerDiskFailureTest, TestRandomOpSequence) {
+INSTANTIATE_TEST_CASE_P(ErrorType, TabletServerDiskErrorTest, ::testing::Values(
+    ErrorType::DISK_FAILURE, ErrorType::CFILE_CORRUPTION));
+
+// Test that applies random write operations to a tablet with a high
+// maintenance manager load and a non-zero error injection rate.
+TEST_P(TabletServerDiskErrorTest, TestRandomOpSequence) {
   if (!AllowSlowTests()) {
     LOG(INFO) << "Not running slow test. To run, use KUDU_ALLOW_SLOW_TESTS=1";
     return;
@@ -594,12 +604,14 @@ TEST_F(TabletServerDiskFailureTest, TestRandomOpSequence) {
                                         RowOperationsPB::DELETE };
   const int kMaxKey = 100000;
 
-  // Set these way up-front so we can change a single value to actually start
-  // injecting errors. Inject errors into all data dirs but one.
-  FLAGS_crash_on_eio = false;
-  const vector<string> failed_dirs = { mini_server_->options()->fs_opts.data_roots.begin() + 1,
-                                       mini_server_->options()->fs_opts.data_roots.end() };
-  FLAGS_env_inject_eio_globs = JoinStrings(JoinPathSegmentsV(failed_dirs, "**"), ",");
+  if (GetParam() == ErrorType::DISK_FAILURE) {
+    // Set these way up-front so we can change a single value to actually start
+    // injecting errors. Inject errors into all data dirs but one.
+    FLAGS_crash_on_eio = false;
+    const vector<string> failed_dirs = { mini_server_->options()->fs_opts.data_roots.begin() + 1,
+                                         mini_server_->options()->fs_opts.data_roots.end() };
+    FLAGS_env_inject_eio_globs = JoinStrings(JoinPathSegmentsV(failed_dirs, "**"), ",");
+  }
 
   set<int> keys;
   const auto GetRandomString = [] {
@@ -650,9 +662,16 @@ TEST_F(TabletServerDiskFailureTest, TestRandomOpSequence) {
     }
     ASSERT_OK(PerformOp());
   }
-  // At this point, a bunch of operations have gone through successfully. Fail
-  // one of the disks that the tablet lives on.
-  FLAGS_env_inject_eio = 0.01;
+  // At this point, a bunch of operations have gone through successfully. Start
+  // injecting errors.
+  switch (GetParam()) {
+    case ErrorType::DISK_FAILURE:
+      FLAGS_env_inject_eio = 0.01;
+      break;
+    case ErrorType::CFILE_CORRUPTION:
+      FLAGS_cfile_inject_corruption = 0.01;
+      break;
+  }
 
   // The tablet will eventually be failed and will not be able to accept
   // updates. Keep on inserting until that happens.
@@ -1639,17 +1658,26 @@ TEST_P(ScanCorruptedDeltasParamTest, Test) {
   ASSERT_OK(SchemaToColumnPBs(schema_, scan->mutable_projected_columns()));
 
   // Send the call. This first call should attempt to init the corrupted
-  // deltafiles and return with an error. The second call should see that the
-  // previous call to init failed and should return the failed status.
+  // deltafiles and return with an error. Subsequent calls should see that the
+  // previous call to init failed and should return an appropriate error.
   req.set_batch_size_bytes(10000);
+  SCOPED_TRACE(SecureDebugString(req));
+  ASSERT_OK(proxy_->Scan(req, &resp, &rpc));
+  SCOPED_TRACE(SecureDebugString(resp));
+  ASSERT_TRUE(resp.has_error());
+  ASSERT_EQ(resp.error().status().code(), AppStatusPB::CORRUPTION);
+  ASSERT_STR_CONTAINS(resp.error().status().message(), "failed to init CFileReader");
+
+  // The tablet will end up transitioning to a failed state and yield "not
+  // running" errors.
   for (int i = 0; i < 2; i++) {
     rpc.Reset();
-    SCOPED_TRACE(SecureDebugString(req));
     ASSERT_OK(proxy_->Scan(req, &resp, &rpc));
-    SCOPED_TRACE(SecureDebugString(resp));
+    SCOPED_TRACE(SecureDebugString(req));
     ASSERT_TRUE(resp.has_error());
-    ASSERT_EQ(resp.error().status().code(), AppStatusPB::CORRUPTION);
-    ASSERT_STR_CONTAINS(resp.error().status().message(), "failed to init CFileReader");
+    SCOPED_TRACE(SecureDebugString(resp));
+    ASSERT_EQ(resp.error().status().code(), AppStatusPB::ILLEGAL_STATE);
+    ASSERT_STR_CONTAINS(resp.error().status().message(), "Tablet not RUNNING");
   }
 }
 
@@ -3292,6 +3320,24 @@ TEST_F(TabletServerTest, TestNoMetricsForTombstonedTablet) {
       ASSERT_STR_NOT_CONTAINS(buf.ToString(), "\"type\": \"tablet\"");
     }
   }
+}
+
+TEST_F(TabletServerTest, TestTabletNumberOfDiskRowSetsMetric) {
+  scoped_refptr<TabletReplica> tablet;
+  ASSERT_TRUE(mini_server_->server()->tablet_manager()->LookupTablet(kTabletId, &tablet));
+  ASSERT_TRUE(tablet->tablet()->GetMetricEntity());
+
+  // We don't care what the function is, since the metric is already instantiated.
+  auto num_diskrowsets = METRIC_num_rowsets_on_disk.InstantiateFunctionGauge(
+      tablet->tablet()->GetMetricEntity(), Callback<size_t(void)>());
+
+  // No data, no diskrowsets.
+  ASSERT_EQ(0, num_diskrowsets->value());
+
+  // Insert a row and flush. There should be 1 diskrowset.
+  ASSERT_NO_FATAL_FAILURE(InsertTestRowsRemote(0, 1, 1));
+  ASSERT_OK(tablet->tablet()->Flush());
+  ASSERT_EQ(1, num_diskrowsets->value());
 }
 
 // Test ensuring that when rowset min/max keys are stored with and read from

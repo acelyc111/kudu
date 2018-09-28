@@ -621,12 +621,13 @@ LogBlockContainer::LogBlockContainer(
 
 void LogBlockContainer::HandleError(const Status& s) const {
   HANDLE_DISK_FAILURE(s,
-      block_manager()->error_manager()->RunErrorNotificationCb(ErrorHandlerType::DISK, data_dir_));
+      block_manager()->error_manager()->RunErrorNotificationCb(ErrorHandlerType::DISK_ERROR,
+                                                               data_dir_));
 }
 
 #define RETURN_NOT_OK_CONTAINER_DISK_FAILURE(status_expr) do { \
   RETURN_NOT_OK_HANDLE_DISK_FAILURE((status_expr), \
-    block_manager->error_manager()->RunErrorNotificationCb(ErrorHandlerType::DISK, dir)); \
+    block_manager->error_manager()->RunErrorNotificationCb(ErrorHandlerType::DISK_ERROR, dir)); \
 } while (0);
 
 Status LogBlockContainer::Create(LogBlockManager* block_manager,
@@ -691,8 +692,9 @@ Status LogBlockContainer::Create(LogBlockManager* block_manager,
 
   // Prefer metadata status (arbitrarily).
   FsErrorManager* em = block_manager->error_manager();
-  HANDLE_DISK_FAILURE(metadata_status, em->RunErrorNotificationCb(ErrorHandlerType::DISK, dir));
-  HANDLE_DISK_FAILURE(data_status, em->RunErrorNotificationCb(ErrorHandlerType::DISK, dir));
+  HANDLE_DISK_FAILURE(metadata_status, em->RunErrorNotificationCb(
+      ErrorHandlerType::DISK_ERROR, dir));
+  HANDLE_DISK_FAILURE(data_status, em->RunErrorNotificationCb(ErrorHandlerType::DISK_ERROR, dir));
   return !metadata_status.ok() ? metadata_status : data_status;
 }
 
@@ -1557,6 +1559,8 @@ class LogReadableBlock : public ReadableBlock {
 
   virtual const BlockId& id() const OVERRIDE;
 
+  virtual BlockManager* block_manager() const OVERRIDE;
+
   virtual Status Size(uint64_t* sz) const OVERRIDE;
 
   virtual Status Read(uint64_t offset, Slice result) const OVERRIDE;
@@ -1604,6 +1608,10 @@ Status LogReadableBlock::Close() {
   }
 
   return Status::OK();
+}
+
+BlockManager* LogReadableBlock::block_manager() const {
+  return container_->block_manager();
 }
 
 const BlockId& LogReadableBlock::id() const {
@@ -1927,7 +1935,7 @@ Status LogBlockManager::GetOrCreateContainer(const CreateBlockOptions& opts,
                                              LogBlockContainer** container) {
   DataDir* dir;
   RETURN_NOT_OK_EVAL(dd_manager_->GetNextDataDir(opts, &dir),
-      error_manager_->RunErrorNotificationCb(ErrorHandlerType::TABLET, opts.tablet_id));
+      error_manager_->RunErrorNotificationCb(ErrorHandlerType::NO_AVAILABLE_DISKS, opts.tablet_id));
 
   {
     std::lock_guard<simple_spinlock> l(lock_);
@@ -1946,7 +1954,7 @@ Status LogBlockManager::GetOrCreateContainer(const CreateBlockOptions& opts,
   // We could create a container in a different directory, but there's
   // currently no point in doing so. On disk failure, the tablet specified by
   // 'opts' will be shut down, so the returned container would not be used.
-  HANDLE_DISK_FAILURE(s, error_manager_->RunErrorNotificationCb(ErrorHandlerType::DISK, dir));
+  HANDLE_DISK_FAILURE(s, error_manager_->RunErrorNotificationCb(ErrorHandlerType::DISK_ERROR, dir));
   RETURN_NOT_OK_PREPEND(s, "Could not create new log block container at " + dir->dir());
   {
     std::lock_guard<simple_spinlock> l(lock_);
@@ -2038,8 +2046,8 @@ bool LogBlockManager::AddLogBlockUnlocked(scoped_refptr<LogBlock> lb) {
     return false;
   }
 
-  VLOG(2) << Substitute("Added block: offset $0, length $1",
-                        lb->offset(), lb->length());
+  VLOG(2) << Substitute("Added block: id $0, offset $1, length $2",
+                        lb->block_id().ToString(), lb->offset(), lb->length());
 
   // There may already be an entry in open_block_ids_ (e.g. we just finished
   // writing out a block).
@@ -2127,7 +2135,7 @@ Status LogBlockManager::RemoveLogBlockUnlocked(const BlockId& block_id,
 
   LogBlockContainer* container = it->second->container();
   HANDLE_DISK_FAILURE(container->read_only_status(),
-      error_manager_->RunErrorNotificationCb(ErrorHandlerType::DISK, container->data_dir()));
+      error_manager_->RunErrorNotificationCb(ErrorHandlerType::DISK_ERROR, container->data_dir()));
 
   // Return early if deleting a block in a failed directory.
   set<int> failed_dirs = dd_manager_->GetFailedDataDirs();
@@ -2143,8 +2151,8 @@ Status LogBlockManager::RemoveLogBlockUnlocked(const BlockId& block_id,
   *lb = std::move(it->second);
   blocks_by_block_id_.erase(it);
 
-  VLOG(2) << Substitute("Removed block: offset $0, length $1",
-                        (*lb)->offset(), (*lb)->length());
+  VLOG(2) << Substitute("Removed block: id $0, offset $1, length $2",
+                        (*lb)->block_id().ToString(), (*lb)->offset(), (*lb)->length());
   return Status::OK();
 }
 
@@ -2181,7 +2189,8 @@ void LogBlockManager::OpenDataDir(DataDir* dir,
   vector<string> children;
   Status s = env_->GetChildren(dir->dir(), &children);
   if (!s.ok()) {
-    HANDLE_DISK_FAILURE(s, error_manager_->RunErrorNotificationCb(ErrorHandlerType::DISK, dir));
+    HANDLE_DISK_FAILURE(s, error_manager_->RunErrorNotificationCb(
+        ErrorHandlerType::DISK_ERROR, dir));
     *result_status = s.CloneAndPrepend(Substitute(
         "Could not list children of $0", dir->dir()));
     return;
@@ -2334,7 +2343,8 @@ void LogBlockManager::OpenDataDir(DataDir* dir,
       uint64_t reported_size;
       s = env_->GetFileSizeOnDisk(data_filename, &reported_size);
       if (!s.ok()) {
-        HANDLE_DISK_FAILURE(s, error_manager_->RunErrorNotificationCb(ErrorHandlerType::DISK, dir));
+        HANDLE_DISK_FAILURE(s, error_manager_->RunErrorNotificationCb(
+            ErrorHandlerType::DISK_ERROR, dir));
         *result_status = s.CloneAndPrepend(Substitute(
             "Could not get on-disk file size of container $0", container->ToString()));
         return;
@@ -2418,12 +2428,13 @@ void LogBlockManager::OpenDataDir(DataDir* dir,
   Status s_ = (status_expr); \
   s_ = s_.CloneAndPrepend(msg); \
   RETURN_NOT_OK_HANDLE_DISK_FAILURE(s_, \
-      error_manager_->RunErrorNotificationCb(ErrorHandlerType::DISK, dir)); \
+      error_manager_->RunErrorNotificationCb(ErrorHandlerType::DISK_ERROR, dir)); \
 } while (0);
 
 #define WARN_NOT_OK_LBM_DISK_FAILURE(status_expr, msg) do { \
   Status s_ = (status_expr); \
-  HANDLE_DISK_FAILURE(s_, error_manager_->RunErrorNotificationCb(ErrorHandlerType::DISK, dir)); \
+  HANDLE_DISK_FAILURE(s_, error_manager_->RunErrorNotificationCb( \
+      ErrorHandlerType::DISK_ERROR, dir)); \
   WARN_NOT_OK(s_, msg); \
 } while (0);
 

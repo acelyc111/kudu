@@ -54,7 +54,9 @@
 #include "kudu/gutil/strings/join.h"
 #include "kudu/gutil/strings/numbers.h"
 #include "kudu/gutil/strings/split.h"
+#include "kudu/gutil/strings/stringpiece.h"
 #include "kudu/gutil/strings/substitute.h"
+#include "kudu/gutil/strings/util.h"
 #include "kudu/master/master.proxy.h" // IWYU pragma: keep
 #include "kudu/rpc/messenger.h"
 #include "kudu/rpc/rpc_controller.h"
@@ -86,6 +88,8 @@ DEFINE_string(print_entries, "decoded",
               "  true|1|yes|decoded = print them decoded\n"
               "  pb = print the raw protobuf\n"
               "  id = print only their ids");
+DEFINE_string(table_name, "",
+              "Restrict output to a specific table by name");
 DEFINE_int64(timeout_ms, 1000 * 60, "RPC timeout in milliseconds");
 DEFINE_int32(truncate_data, 100,
              "Truncate the data fields to the given number of bytes "
@@ -100,6 +104,8 @@ DEFINE_string(flag_tags, "", "Comma-separated list of tags used to restrict whic
                              "flags are returned. An empty value matches all tags");
 DEFINE_bool(all_flags, false, "Whether to return all flags, or only flags that "
                               "were explicitly set.");
+DEFINE_string(tables, "", "Tables to include (comma-separated list of table names)"
+                          "If not specified, includes all tables.");
 
 namespace boost {
 template <typename Signature>
@@ -121,6 +127,8 @@ namespace tools {
 
 using client::KuduClient;
 using client::KuduClientBuilder;
+using client::KuduTablet;
+using client::KuduTabletServer;
 using consensus::ConsensusServiceProxy;
 using consensus::ReplicateMsg;
 using log::LogEntryPB;
@@ -337,22 +345,24 @@ Status PrintSegment(const scoped_refptr<ReadableLogSegment>& segment) {
     RETURN_NOT_OK(SchemaFromPB(segment->header().schema(), &tablet_schema));
 
     LogEntryReader reader(segment.get());
-    LogEntryPB entry;
     while (true) {
+      unique_ptr<LogEntryPB> entry;
       Status s = reader.ReadNextEntry(&entry);
-      if (s.IsEndOfFile()) break;
+      if (s.IsEndOfFile()) {
+        break;
+      }
       RETURN_NOT_OK(s);
 
       if (print_type == PRINT_PB) {
         if (FLAGS_truncate_data > 0) {
-          pb_util::TruncateFields(&entry, FLAGS_truncate_data);
+          pb_util::TruncateFields(entry.get(), FLAGS_truncate_data);
         }
 
-        cout << "Entry:\n" << SecureDebugString(entry);
+        cout << "Entry:\n" << SecureDebugString(*entry);
       } else if (print_type == PRINT_DECODED) {
-        RETURN_NOT_OK(PrintDecoded(entry, tablet_schema));
+        RETURN_NOT_OK(PrintDecoded(*entry, tablet_schema));
       } else if (print_type == PRINT_ID) {
-        PrintIdOnly(entry);
+        PrintIdOnly(*entry);
       }
     }
   }
@@ -363,7 +373,11 @@ Status PrintSegment(const scoped_refptr<ReadableLogSegment>& segment) {
   return Status::OK();
 }
 
-Status PrintServerFlags(const string& address, uint16_t default_port) {
+Status GetServerFlags(const std::string& address,
+                      uint16_t default_port,
+                      bool all_flags,
+                      const std::string& flag_tags,
+                      std::vector<server::GetFlagsResponsePB_Flag>* flags) {
   unique_ptr<GenericServiceProxy> proxy;
   RETURN_NOT_OK(BuildProxy(address, default_port, &proxy));
 
@@ -372,27 +386,35 @@ Status PrintServerFlags(const string& address, uint16_t default_port) {
   RpcController rpc;
   rpc.set_timeout(MonoDelta::FromMilliseconds(FLAGS_timeout_ms));
 
-  req.set_all_flags(FLAGS_all_flags);
-  vector<string> tags = strings::Split(FLAGS_flag_tags, ",", strings::SkipEmpty());
-  for (const auto& tag : tags) {
-    req.add_tags(tag);
+  req.set_all_flags(all_flags);
+  for (StringPiece tag : strings::Split(flag_tags, ",", strings::SkipEmpty())) {
+    req.add_tags(tag.as_string());
   }
   RETURN_NOT_OK(proxy->GetFlags(req, &resp, &rpc));
 
-  vector<GetFlagsResponsePB::Flag> flags(resp.flags().begin(), resp.flags().end());
+  flags->clear();
+  std::move(resp.flags().begin(), resp.flags().end(), std::back_inserter(*flags));
+  return Status::OK();
+}
+
+Status PrintServerFlags(const string& address, uint16_t default_port) {
+  vector<server::GetFlagsResponsePB_Flag> flags;
+  RETURN_NOT_OK(GetServerFlags(address, default_port, FLAGS_all_flags, FLAGS_flag_tags, &flags));
+
   std::sort(flags.begin(), flags.end(),
       [](const GetFlagsResponsePB::Flag& left,
          const GetFlagsResponsePB::Flag& right) -> bool {
         return left.name() < right.name();
       });
   DataTable table({ "flag", "value", "default value?", "tags" });
+  vector<string> tags;
   for (const auto& flag : flags) {
     tags.clear();
     std::copy(flag.tags().begin(), flag.tags().end(), std::back_inserter(tags));
     std::sort(tags.begin(), tags.end());
     table.AddRow({ flag.name(),
                    flag.value(),
-                   Substitute("$0", flag.is_default_value()),
+                   flag.is_default_value() ? "true" : "false",
                    JoinStrings(tags, ",") });
   }
   return table.PrintTo(cout);
@@ -422,6 +444,20 @@ Status SetServerFlag(const string& address, uint16_t default_port,
     default:
       return Status::RemoteError(SecureShortDebugString(resp));
   }
+}
+
+string GetMasterAddresses(const client::KuduClient& client) {
+  return HostPort::ToCommaSeparatedString(client.data_->master_hostports());
+}
+
+bool MatchesAnyPattern(const vector<string>& patterns, const string& str) {
+  // Consider no filter a wildcard.
+  if (patterns.empty()) return true;
+
+  for (const auto& p : patterns) {
+    if (MatchPattern(str, p)) return true;
+  }
+  return false;
 }
 
 Status PrintServerStatus(const string& address, uint16_t default_port) {
@@ -663,8 +699,9 @@ ControlShellProtocol::ControlShellProtocol(SerializationMode serialization_mode,
 
 ControlShellProtocol::~ControlShellProtocol() {
   if (close_mode_ == CloseMode::CLOSE_ON_DESTROY) {
-    close(read_fd_);
-    close(write_fd_);
+    int ret;
+    RETRY_ON_EINTR(ret, close(read_fd_));
+    RETRY_ON_EINTR(ret, close(write_fd_));
   }
 }
 
@@ -772,12 +809,9 @@ Status ControlShellProtocol::DoRead(faststring* buf) {
   uint8_t* pos = buf->data();
   size_t rem = buf->length();
   while (rem > 0) {
-    ssize_t r = read(read_fd_, pos, rem);
+    ssize_t r;
+    RETRY_ON_EINTR(r, read(read_fd_, pos, rem));
     if (r == -1) {
-      if (errno == EINTR) {
-        // Interrupted by a signal, retry.
-        continue;
-      }
       return Status::IOError("Error reading from pipe", "", errno);
     }
     if (r == 0) {
@@ -794,12 +828,9 @@ Status ControlShellProtocol::DoWrite(const faststring& buf) {
   const uint8_t* pos = buf.data();
   size_t rem = buf.length();
   while (rem > 0) {
-    ssize_t r = write(write_fd_, pos, rem);
+    ssize_t r;
+    RETRY_ON_EINTR(r, write(write_fd_, pos, rem));
     if (r == -1) {
-      if (errno == EINTR) {
-        // Interrupted by a signal, retry.
-        continue;
-      }
       if (errno == EPIPE) {
         return Status::EndOfFile("Other end of pipe was closed");
       }

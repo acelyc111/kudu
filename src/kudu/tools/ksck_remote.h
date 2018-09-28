@@ -54,6 +54,8 @@ class TabletServerServiceProxy;
 
 namespace tools {
 
+enum class KsckServerHealth;
+
 // This implementation connects to a master via RPC.
 class RemoteKsckMaster : public KsckMaster {
  public:
@@ -71,6 +73,8 @@ class RemoteKsckMaster : public KsckMaster {
 
   // Gathers consensus state for the master tablet.
   Status FetchConsensusState() override;
+
+  Status FetchUnusualFlags() override;
 
  private:
   std::shared_ptr<rpc::Messenger> messenger_;
@@ -93,9 +97,11 @@ class RemoteKsckTabletServer : public KsckTabletServer {
   // Must be called after constructing.
   Status Init();
 
-  Status FetchInfo() override;
+  Status FetchInfo(KsckServerHealth* health) override;
 
-  Status FetchConsensusState() override;
+  Status FetchConsensusState(KsckServerHealth* health) override;
+
+  Status FetchUnusualFlags() override;
 
   void RunTabletChecksumScanAsync(
       const std::string& tablet_id,

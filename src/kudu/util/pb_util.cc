@@ -23,6 +23,7 @@
 
 #include "kudu/util/pb_util.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <deque>
 #include <initializer_list>
@@ -31,7 +32,6 @@
 #include <ostream>
 #include <string>
 #include <unordered_set>
-#include <utility>
 #include <vector>
 
 #include <boost/optional/optional.hpp>
@@ -55,8 +55,8 @@
 #include "kudu/gutil/strings/escaping.h"
 #include "kudu/gutil/strings/fastmem.h"
 #include "kudu/gutil/strings/substitute.h"
-#include "kudu/util/coding-inl.h"
 #include "kudu/util/coding.h"
+#include "kudu/util/coding-inl.h"
 #include "kudu/util/crc.h"
 #include "kudu/util/debug/sanitizer_scopes.h"
 #include "kudu/util/debug/trace_event.h"
@@ -253,6 +253,33 @@ Status CacheFileSize(ReadableFileType* reader,
   return Status::OK();
 }
 
+template<typename ReadableFileType>
+Status RestOfFileIsAllZeros(ReadableFileType* reader,
+                            uint64_t filesize,
+                            uint64_t offset,
+                            bool* all_zeros) {
+  DCHECK(reader);
+  DCHECK_GE(filesize, offset);
+  DCHECK(all_zeros);
+  constexpr uint64_t max_to_read = 4 * 1024 * 1024; // 4 MiB.
+  faststring buf;
+  while (true) {
+    uint64_t to_read = std::min(max_to_read, filesize - offset);
+    if (to_read == 0) {
+      break;
+    }
+    buf.resize(to_read);
+    RETURN_NOT_OK(reader->Read(offset, Slice(buf)));
+    offset += to_read;
+    if (!IsAllZeros(buf)) {
+      *all_zeros = false;
+      return Status::OK();
+    }
+  }
+  *all_zeros = true;
+  return Status::OK();
+}
+
 // Read and parse a message of the specified format at the given offset in the
 // format documented in pb_util.h. 'offset' is an in-out parameter and will be
 // updated with the new offset on success. On failure, 'offset' is not modified.
@@ -283,6 +310,18 @@ Status ReadPBStartingAt(ReadableFileType* reader, int version,
 
   // Versions >= 2 have an individual checksum for the data length.
   if (version >= 2) {
+    // KUDU-2260: If the length and checksum data are all 0's, and the rest of
+    // the file is all 0's, then it's an incomplete record, not corruption.
+    // This can happen e.g. on ext4 in the default data=ordered mode, when the
+    // filesize metadata is updated but the new data is not persisted.
+    // See https://plus.google.com/+KentonVarda/posts/JDwHfAiLGNQ.
+    if (IsAllZeros(length_and_cksum_buf)) {
+      bool all_zeros;
+      RETURN_NOT_OK(RestOfFileIsAllZeros(reader, file_size, tmp_offset, &all_zeros));
+      if (all_zeros) {
+        return Status::Incomplete("incomplete write of PB: rest of file is NULL bytes");
+      }
+    }
     Slice length_checksum(length_and_cksum_buf.data() + sizeof(uint32_t), kPBContainerChecksumLen);
     RETURN_NOT_OK_PREPEND(ParseAndCompareChecksum(length_checksum.data(), { length }),
         CHECKSUM_ERR_MSG("Data length checksum does not match",
@@ -901,6 +940,17 @@ Status ReadablePBContainerFile::Dump(ostream* os, ReadablePBContainerFile::Forma
     return Status::NotSupported("cannot dump PBC file in JSON format if redaction is enabled");
   }
 
+  const char* const kDashes = "-------";
+
+  if (format == Format::DEBUG) {
+    *os << "File header" << endl;
+    *os << kDashes << endl;
+    *os << "Protobuf container version: " << version_ << endl;
+    *os << "Total container file size: " << *cached_file_size_ << endl;
+    *os << "Entry PB type: " << pb_type_ << endl;
+    *os << endl;
+  }
+
   // Use the embedded protobuf information from the container file to
   // create the appropriate kind of protobuf Message.
   const Message* prototype;
@@ -909,6 +959,7 @@ Status ReadablePBContainerFile::Dump(ostream* os, ReadablePBContainerFile::Forma
 
   // Dump each message in the container file.
   int count = 0;
+  uint64_t prev_offset = offset_;
   Status s;
   string buf;
   for (s = ReadNextPB(msg.get());
@@ -919,8 +970,13 @@ Status ReadablePBContainerFile::Dump(ostream* os, ReadablePBContainerFile::Forma
         *os << count << "\t" << SecureShortDebugString(*msg) << endl;
         break;
       case Format::DEFAULT:
+      case Format::DEBUG:
         *os << "Message " << count << endl;
-        *os << "-------" << endl;
+        if (format == Format::DEBUG) {
+          *os << "offset: " << prev_offset << endl;
+          *os << "length: " << (offset_ - prev_offset) << endl;
+        }
+        *os << kDashes << endl;
         *os << SecureDebugString(*msg) << endl;
         break;
       case Format::JSON:
@@ -933,10 +989,18 @@ Status ReadablePBContainerFile::Dump(ostream* os, ReadablePBContainerFile::Forma
         *os << buf << endl;
         break;
     }
-    count++;
 
+    prev_offset = offset_;
+    count++;
   }
-  return s.IsEndOfFile() ? s.OK() : s;
+  if (format == Format::DEBUG && !s.IsEndOfFile()) {
+    *os << "Message " << count << endl;
+    *os << "error: failed to parse protobuf message" << endl;
+    *os << "offset: " << prev_offset << endl;
+    *os << "remaining file length: " << (*cached_file_size_ - prev_offset) << endl;
+    *os << kDashes << endl;
+  }
+  return s.IsEndOfFile() ? Status::OK() : s;
 }
 
 Status ReadablePBContainerFile::Close() {

@@ -34,9 +34,9 @@ set(INTEGRATION_TESTS_SRCS
 
 add_library(itest_util ${INTEGRATION_TESTS_SRCS})
 target_link_libraries(itest_util
-  tserver
+  tserver_proto
   tserver_test_util
-  master
+  master_proto
   mini_cluster
   ksck
   kudu_client
@@ -47,16 +47,15 @@ target_link_libraries(itest_util
   kudu_tools_util
   security_test_util)
 add_dependencies(itest_util
-  kudu-tserver
-  kudu-master)
+  kudu-master
+  kudu-tserver)
 
 # Tests
-set(KUDU_TEST_LINK_LIBS itest_util ${KUDU_MIN_TEST_LIBS})
+SET_KUDU_TEST_LINK_LIBS(itest_util)
 ADD_KUDU_TEST(all_types-itest
   PROCESSORS 4
   NUM_SHARDS 8)
-ADD_KUDU_TEST(alter_table-randomized-test
-  PROCESSORS 4)
+ADD_KUDU_TEST(alter_table-randomized-test NUM_SHARDS 2 PROCESSORS 4)
 ADD_KUDU_TEST(alter_table-test PROCESSORS 3)
 ADD_KUDU_TEST(authn_token_expire-itest)
 ADD_KUDU_TEST(catalog_manager_tsk-itest PROCESSORS 2)
@@ -81,7 +80,9 @@ ADD_KUDU_TEST(heavy-update-compaction-itest RUN_SERIAL true)
 ADD_KUDU_TEST(linked_list-test RUN_SERIAL true)
 ADD_KUDU_TEST(log-rolling-itest)
 ADD_KUDU_TEST(master_cert_authority-itest PROCESSORS 2)
-ADD_KUDU_TEST(master_failover-itest PROCESSORS 3)
+ADD_KUDU_TEST(master_failover-itest NUM_SHARDS 4 PROCESSORS 3)
+ADD_KUDU_TEST_DEPENDENCIES(master_failover-itest
+  kudu)
 ADD_KUDU_TEST(master_hms-itest RUN_SERIAL true PROCESSORS 4)
 ADD_KUDU_TEST(master_migration-itest)
 ADD_KUDU_TEST_DEPENDENCIES(master_migration-itest
@@ -108,6 +109,7 @@ ADD_KUDU_TEST(tablet_copy-itest NUM_SHARDS 6 PROCESSORS 4)
 ADD_KUDU_TEST(tablet_copy_client_session-itest)
 ADD_KUDU_TEST(tablet_history_gc-itest)
 ADD_KUDU_TEST(tablet_replacement-itest)
+ADD_KUDU_TEST(timestamp_advancement-itest)
 ADD_KUDU_TEST(tombstoned_voting-imc-itest)
 ADD_KUDU_TEST(tombstoned_voting-itest)
 ADD_KUDU_TEST(tombstoned_voting-stress-test RUN_SERIAL true)

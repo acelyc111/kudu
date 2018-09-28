@@ -16,23 +16,19 @@
 // under the License.
 package org.apache.kudu.client;
 
+import static org.apache.kudu.util.ClientTestUtil.createBasicSchemaInsert;
+import static org.apache.kudu.util.ClientTestUtil.createFourTabletsTableWithNineRows;
+import static org.apache.kudu.util.ClientTestUtil.getBasicCreateTableOptions;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 import java.util.List;
 
-import org.junit.BeforeClass;
 import org.junit.Test;
 
 public class TestRowErrors extends BaseKuduTest {
 
   private static KuduTable table;
-
-  @BeforeClass
-  public static void setUpBeforeClass() throws Exception {
-    BaseKuduTest.setUpBeforeClass();
-
-  }
 
   @Test(timeout = 100000)
   public void singleTabletTest() throws Exception {
@@ -74,7 +70,7 @@ public class TestRowErrors extends BaseKuduTest {
   @Test(timeout = 100000)
   public void multiTabletTest() throws Exception {
     String tableName = TestRowErrors.class.getName() + "-" + System.currentTimeMillis();
-    createFourTabletsTableWithNineRows(tableName);
+    createFourTabletsTableWithNineRows(client, tableName, DEFAULT_SLEEP);
     table = openTable(tableName);
     KuduSession session = syncClient.newSession();
     session.setFlushMode(KuduSession.FlushMode.AUTO_FLUSH_BACKGROUND);

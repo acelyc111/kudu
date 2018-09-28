@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include <boost/optional/optional.hpp>
 #include <gflags/gflags.h>
 #include <gflags/gflags_declare.h>
 #include <glog/logging.h>
@@ -33,6 +34,7 @@
 #include "kudu/consensus/metadata.pb.h"
 #include "kudu/consensus/replica_management.pb.h"
 #include "kudu/gutil/strings/substitute.h"
+#include "kudu/hms/hms_catalog.h"
 #include "kudu/master/catalog_manager.h"
 #include "kudu/master/master.h"
 #include "kudu/master/master.pb.h"
@@ -52,7 +54,9 @@
 #include "kudu/util/pb_util.h"
 #include "kudu/util/status.h"
 
+DECLARE_bool(hive_metastore_sasl_enabled);
 DECLARE_bool(raft_prepare_replacement_before_eviction);
+DECLARE_string(hive_metastore_uris);
 
 DEFINE_int32(master_inject_latency_on_tablet_lookups_ms, 0,
              "Number of milliseconds that the master will sleep before responding to "
@@ -112,18 +116,18 @@ bool MasterServiceImpl::AuthorizeClient(const Message* /*req*/,
   return server_->Authorize(context, ServerBase::SUPER_USER | ServerBase::USER);
 }
 
-bool MasterServiceImpl::AuthorizeService(const Message* /*req*/,
-                                         Message* /*resp*/,
-                                         rpc::RpcContext* context) {
+bool MasterServiceImpl::AuthorizeServiceUser(const Message* /*req*/,
+                                             Message* /*resp*/,
+                                             rpc::RpcContext* context) {
   // We don't allow superusers to pretend to be tablet servers -- there are no
   // operator tools that do anything like this and since we sign requests for
   // tablet servers, we should be extra tight here.
   return server_->Authorize(context, ServerBase::SERVICE_USER);
 }
 
-bool MasterServiceImpl::AuthorizeClientOrService(const Message* /*req*/,
-                                                 Message* /*resp*/,
-                                                 rpc::RpcContext* context) {
+bool MasterServiceImpl::AuthorizeClientOrServiceUser(const Message* /*req*/,
+                                                     Message* /*resp*/,
+                                                     rpc::RpcContext* context) {
   return server_->Authorize(context, ServerBase::SUPER_USER | ServerBase::USER |
                             ServerBase::SERVICE_USER);
 }
@@ -332,7 +336,7 @@ void MasterServiceImpl::DeleteTable(const DeleteTableRequestPB* req,
     return;
   }
 
-  Status s = server_->catalog_manager()->DeleteTable(req, resp, rpc);
+  Status s = server_->catalog_manager()->DeleteTableRpc(*req, resp, rpc);
   CheckRespErrorOrSetUnknown(s, resp);
   rpc->RespondSuccess();
 }
@@ -345,7 +349,7 @@ void MasterServiceImpl::AlterTable(const AlterTableRequestPB* req,
     return;
   }
 
-  Status s = server_->catalog_manager()->AlterTable(req, resp, rpc);
+  Status s = server_->catalog_manager()->AlterTableRpc(*req, resp, rpc);
   CheckRespErrorOrSetUnknown(s, resp);
   rpc->RespondSuccess();
 }
@@ -415,6 +419,7 @@ void MasterServiceImpl::ListTabletServers(const ListTabletServersRequestPB* req,
     desc->GetNodeInstancePB(entry->mutable_instance_id());
     desc->GetRegistration(entry->mutable_registration());
     entry->set_millis_since_heartbeat(desc->TimeSinceHeartbeat().ToMilliseconds());
+    if (desc->location()) entry->set_location(desc->location().get());
   }
   rpc->RespondSuccess();
 }
@@ -507,6 +512,14 @@ void MasterServiceImpl::ConnectToMaster(const ConnectToMasterRequestPB* /*req*/,
       // TODO(todd): this might be a good spot for some auditing code?
       resp->mutable_authn_token()->Swap(&authn_token);
     }
+  }
+
+  // Add Hive Metastore information.
+  if (hms::HmsCatalog::IsEnabled()) {
+    auto* metastore_config = resp->mutable_hms_config();
+    metastore_config->set_hms_uris(FLAGS_hive_metastore_uris);
+    metastore_config->set_hms_sasl_enabled(FLAGS_hive_metastore_sasl_enabled);
+    // TODO(dan): set the hms_uuid field.
   }
 
   // Rather than consulting the current consensus role, instead base it

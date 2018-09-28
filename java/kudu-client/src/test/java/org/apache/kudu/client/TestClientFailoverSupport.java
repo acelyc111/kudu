@@ -17,6 +17,9 @@
 package org.apache.kudu.client;
 
 import static org.apache.kudu.util.AssertHelpers.assertEventuallyTrue;
+import static org.apache.kudu.util.ClientTestUtil.countRowsInScan;
+import static org.apache.kudu.util.ClientTestUtil.createBasicSchemaInsert;
+import static org.apache.kudu.util.ClientTestUtil.getBasicCreateTableOptions;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 
@@ -27,10 +30,7 @@ import org.apache.kudu.util.AssertHelpers.BooleanExpression;
 import org.apache.kudu.util.CapturingLogAppender;
 import org.junit.After;
 import org.junit.Before;
-import org.junit.BeforeClass;
 import org.junit.Test;
-
-import com.google.common.net.HostAndPort;
 
 public class TestClientFailoverSupport extends BaseKuduTest {
   private CapturingLogAppender cla = new CapturingLogAppender();
@@ -41,21 +41,9 @@ public class TestClientFailoverSupport extends BaseKuduTest {
     KILL
   }
 
-  @BeforeClass
-  public static void setUpBeforeClass() throws Exception {
-    final int NUM_TABLET_SERVERS = 3;
-    BaseKuduTest.doSetup(3, NUM_TABLET_SERVERS);
-  }
-
   @Before
   public void attachToLog() {
     claAttach = cla.attach();
-  }
-
-  @After
-  public void restartKilledMaster() throws IOException {
-    miniCluster.restartDeadMasters();
-    miniCluster.restartDeadTservers();
   }
 
   @After
@@ -118,7 +106,7 @@ public class TestClientFailoverSupport extends BaseKuduTest {
     // Kill or restart the leader master.
     switch (failureType) {
     case KILL:
-      killMasterLeader();
+      killLeaderMasterServer();
       break;
     case RESTART:
       restartLeaderMaster();
@@ -131,8 +119,7 @@ public class TestClientFailoverSupport extends BaseKuduTest {
     // to the new one.
     List<LocatedTablet> tablets = table.getTabletsLocations(DEFAULT_SLEEP);
     assertEquals(1, tablets.size());
-    HostAndPort hp = findLeaderTabletServerHostPort(tablets.get(0));
-    miniCluster.killTabletServerOnHostPort(hp);
+    killTabletLeader(tablets.get(0));
 
     // Insert some more rows.
     for (int i = TOTAL_ROWS_TO_INSERT; i < 2*TOTAL_ROWS_TO_INSERT; i++) {

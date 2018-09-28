@@ -53,6 +53,7 @@
 #include "kudu/fs/block_manager.h"
 #include "kudu/fs/fs-test-util.h"
 #include "kudu/fs/fs_manager.h"
+#include "kudu/fs/io_context.h"
 #include "kudu/gutil/casts.h"
 #include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/port.h"
@@ -118,7 +119,7 @@ class TestCFile : public CFileTestBase {
 
     BlockPointer ptr;
     gscoped_ptr<CFileIterator> iter;
-    ASSERT_OK(reader->NewIterator(&iter, CFileReader::CACHE_BLOCK));
+    ASSERT_OK(reader->NewIterator(&iter, CFileReader::CACHE_BLOCK, nullptr));
 
     ASSERT_OK(iter->SeekToOrdinal(5000));
     ASSERT_EQ(5000u, iter->GetCurrentOrdinal());
@@ -201,7 +202,7 @@ class TestCFile : public CFileTestBase {
     ASSERT_EQ(DataGeneratorType::kDataType, reader->type_info()->type());
 
     gscoped_ptr<CFileIterator> iter;
-    ASSERT_OK(reader->NewIterator(&iter, CFileReader::CACHE_BLOCK));
+    ASSERT_OK(reader->NewIterator(&iter, CFileReader::CACHE_BLOCK, nullptr));
 
     Arena arena(8192);
     ScopedColumnBlock<DataGeneratorType::kDataType> cb(10);
@@ -290,7 +291,7 @@ class TestCFile : public CFileTestBase {
     }
 
     gscoped_ptr<IndexTreeIterator> iter;
-    iter.reset(IndexTreeIterator::Create(reader.get(), reader->posidx_root()));
+    iter.reset(IndexTreeIterator::Create(nullptr, reader.get(), reader->posidx_root()));
     ASSERT_OK(iter->SeekToFirst());
 
     uint8_t data[16];
@@ -301,7 +302,7 @@ class TestCFile : public CFileTestBase {
     do {
       BlockHandle dblk_data;
       BlockPointer blk_ptr = iter->GetCurrentBlockPointer();
-      ASSERT_OK(reader->ReadBlock(blk_ptr, CFileReader::CACHE_BLOCK, &dblk_data));
+      ASSERT_OK(reader->ReadBlock(nullptr, blk_ptr, CFileReader::CACHE_BLOCK, &dblk_data));
 
       memcpy(data + 12, &count, 4);
       ASSERT_EQ(expected_data, dblk_data.data());
@@ -373,15 +374,19 @@ class TestCFile : public CFileTestBase {
     unique_ptr<ReadableBlock> corrupt_source;
     RETURN_NOT_OK(fs_manager_->OpenBlock(new_id, &corrupt_source));
     unique_ptr<CFileReader> reader;
-    RETURN_NOT_OK(CFileReader::Open(std::move(corrupt_source), ReaderOptions(), &reader));
+    ReaderOptions opts;
+    const fs::IOContext io_context({ "corrupted-dummy-tablet" });
+    opts.io_context = &io_context;
+    RETURN_NOT_OK(CFileReader::Open(std::move(corrupt_source), std::move(opts), &reader));
     gscoped_ptr<IndexTreeIterator> iter;
-    iter.reset(IndexTreeIterator::Create(reader.get(), reader->posidx_root()));
+    iter.reset(IndexTreeIterator::Create(&io_context, reader.get(), reader->posidx_root()));
     RETURN_NOT_OK(iter->SeekToFirst());
 
     do {
       BlockHandle dblk_data;
       BlockPointer blk_ptr = iter->GetCurrentBlockPointer();
-      RETURN_NOT_OK(reader->ReadBlock(blk_ptr, CFileReader::DONT_CACHE_BLOCK, &dblk_data));
+      RETURN_NOT_OK(reader->ReadBlock(&io_context, blk_ptr,
+          CFileReader::DONT_CACHE_BLOCK, &dblk_data));
     } while (iter->Next().ok());
 
     return Status::OK();
@@ -395,7 +400,7 @@ class TestCFileBothCacheTypes : public TestCFile,
                                 public ::testing::WithParamInterface<CacheType> {
  public:
   void SetUp() OVERRIDE {
-#if defined(__linux__)
+#if defined(HAVE_LIB_VMEM)
     // The NVM cache can run using any directory as its path -- it doesn't have
     // a lot of practical use outside of an actual NVM device, but for testing
     // purposes, we'll point it at our test dir, unless otherwise specified.
@@ -408,7 +413,7 @@ class TestCFileBothCacheTypes : public TestCFile,
       case DRAM_CACHE:
         FLAGS_block_cache_type = "DRAM";
         break;
-#if defined(__linux__)
+#if defined(HAVE_LIB_VMEM)
       case NVM_CACHE:
         FLAGS_block_cache_type = "NVM";
         break;
@@ -615,7 +620,7 @@ void TestCFile::TestReadWriteStrings(EncodingType encoding,
   BlockPointer ptr;
 
   gscoped_ptr<CFileIterator> iter;
-  ASSERT_OK(reader->NewIterator(&iter, CFileReader::CACHE_BLOCK));
+  ASSERT_OK(reader->NewIterator(&iter, CFileReader::CACHE_BLOCK, nullptr));
 
   Arena arena(1024);
 
@@ -970,10 +975,10 @@ TEST_P(TestCFileBothCacheTypes, TestLazyInit) {
 
   // But initializing it should (only the first time), and the reader's
   // memory usage should increase.
-  ASSERT_OK(reader->Init());
+  ASSERT_OK(reader->Init(nullptr));
   ASSERT_GT(bytes_read, 0);
   size_t bytes_read_after_init = bytes_read;
-  ASSERT_OK(reader->Init());
+  ASSERT_OK(reader->Init(nullptr));
   ASSERT_EQ(bytes_read_after_init, bytes_read);
   ASSERT_GT(tracker->consumption(), lazy_mem_usage);
 
@@ -1013,11 +1018,11 @@ TEST_P(TestCFileBothCacheTypes, TestCacheKeysAreStable) {
     ASSERT_OK(CFileReader::Open(std::move(source), ReaderOptions(), &reader));
 
     gscoped_ptr<IndexTreeIterator> iter;
-    iter.reset(IndexTreeIterator::Create(reader.get(), reader->posidx_root()));
+    iter.reset(IndexTreeIterator::Create(nullptr, reader.get(), reader->posidx_root()));
     ASSERT_OK(iter->SeekToFirst());
 
     BlockHandle bh;
-    ASSERT_OK(reader->ReadBlock(iter->GetCurrentBlockPointer(),
+    ASSERT_OK(reader->ReadBlock(nullptr, iter->GetCurrentBlockPointer(),
                                 CFileReader::CACHE_BLOCK,
                                 &bh));
 
@@ -1029,7 +1034,7 @@ TEST_P(TestCFileBothCacheTypes, TestCacheKeysAreStable) {
   }
 }
 
-#if defined(__linux__)
+#if defined(HAVE_LIB_VMEM)
 // Inject failures in nvm allocation and ensure that we can still read a file.
 TEST_P(TestCFileBothCacheTypes, TestNvmAllocationFailure) {
   if (GetParam() != NVM_CACHE) return;

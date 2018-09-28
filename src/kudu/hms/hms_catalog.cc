@@ -20,12 +20,14 @@
 #include <algorithm>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
+#include <boost/optional/optional.hpp>
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 
@@ -33,25 +35,32 @@
 #include "kudu/common/schema.h"
 #include "kudu/common/types.h"
 #include "kudu/gutil/macros.h"
+#include "kudu/gutil/map-util.h"
+#include "kudu/gutil/strings/ascii_ctype.h"
+#include "kudu/gutil/strings/charset.h"
 #include "kudu/gutil/strings/split.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/hms/hive_metastore_types.h"
 #include "kudu/hms/hms_client.h"
+#include "kudu/thrift/client.h"
 #include "kudu/util/async_util.h"
 #include "kudu/util/flag_tags.h"
 #include "kudu/util/net/net_util.h"
 #include "kudu/util/slice.h"
 #include "kudu/util/threadpool.h"
 
+using boost::none;
+using boost::optional;
+using std::move;
 using std::string;
 using std::vector;
 using strings::Substitute;
 
 DEFINE_string(hive_metastore_uris, "",
               "Address of the Hive Metastore instance(s). The provided port must be for the HMS "
-              "Thrift service. If a port isn't provided, defaults to 9083. If the HMS is deployed "
-              "in an HA configuration, multiple comma-separated addresses can be supplied. If not "
-              "set, the Kudu master will not send Kudu table catalog updates to Hive. The "
+              "Thrift service. If a port is not provided, defaults to 9083. If the HMS is deployed "
+              "in an HA configuration, multiple comma-separated addresses should be supplied. "
+              "If not set, the Kudu master will not send Kudu table catalog updates to Hive. The "
               "configured value must match the Hive hive.metastore.uris configuration.");
 DEFINE_validator(hive_metastore_uris, &kudu::hms::HmsCatalog::ValidateUris);
 TAG_FLAG(hive_metastore_uris, experimental);
@@ -63,6 +72,12 @@ DEFINE_bool(hive_metastore_sasl_enabled, false,
             "hive.metastore.sasl.enabled option in the Hive Metastore configuration. "
             "When enabled, the --keytab_file flag must be provided.");
 TAG_FLAG(hive_metastore_sasl_enabled, experimental);
+
+DEFINE_string(hive_metastore_kerberos_principal, "hive",
+              "The service principal of the Hive Metastore server. Must match "
+              "the primary (user) portion of hive.metastore.kerberos.principal option "
+              "in the Hive Metastore configuration.");
+TAG_FLAG(hive_metastore_kerberos_principal, experimental);
 
 DEFINE_int32(hive_metastore_retry_count, 1,
              "The number of times that HMS operations will retry after "
@@ -92,12 +107,24 @@ TAG_FLAG(hive_metastore_conn_timeout, advanced);
 TAG_FLAG(hive_metastore_conn_timeout, experimental);
 TAG_FLAG(hive_metastore_conn_timeout, runtime);
 
+DEFINE_int32(hive_metastore_max_message_size, 100 * 1024 * 1024,
+             "Maximum size of Hive Metastore objects that can be received by the "
+             "HMS client in bytes. Should match the metastore.server.max.message.size "
+             "configuration.");
+TAG_FLAG(hive_metastore_max_message_size, advanced);
+TAG_FLAG(hive_metastore_max_message_size, experimental);
+TAG_FLAG(hive_metastore_max_message_size, runtime);
+
 namespace kudu {
 namespace hms {
 
+const char* const HmsCatalog::kInvalidTableError = "when the Hive Metastore integration "
+    "is enabled, Kudu table names must be a period ('.') separated database and table name "
+    "identifier pair, each containing only ASCII alphanumeric characters, '_', and '/'";
+
 HmsCatalog::HmsCatalog(string master_addresses)
     : master_addresses_(std::move(master_addresses)),
-      hms_client_(HostPort("", 0), hms_client_options_),
+      hms_client_(HostPort("", 0), thrift::ClientOptions()),
       reconnect_after_(MonoTime::Now()),
       reconnect_failure_(Status::OK()),
       consecutive_reconnect_failures_(0),
@@ -133,46 +160,106 @@ void HmsCatalog::Stop() {
 
 Status HmsCatalog::CreateTable(const string& id,
                                const string& name,
+                               optional<const string&> owner,
                                const Schema& schema) {
   return Execute([&] (HmsClient* client) {
-      return CreateOrUpdateTable(client, id, name, schema, master_addresses_);
+      hive::Table table;
+      RETURN_NOT_OK(PopulateTable(id, name, owner, schema, master_addresses_, &table));
+      return client->CreateTable(table, EnvironmentContext());
   });
 }
 
 Status HmsCatalog::DropTable(const string& id, const string& name) {
-  string hms_database;
-  string hms_table;
-
-  if (!ParseTableName(name, &hms_database, &hms_table).ok()) {
-    // This is a legacy table; it can't be in the HMS, so return success.
-    VLOG(1) << "Ignoring missing HMS table entry while dropping table "
-            << name;
-    return Status::OK();
-  }
-
   hive::EnvironmentContext env_ctx = EnvironmentContext();
   env_ctx.properties.insert(make_pair(HmsClient::kKuduTableIdKey, id));
+  return DropTable(name, env_ctx);
+}
 
+Status HmsCatalog::DropLegacyTable(const string& name) {
+  return DropTable(name, EnvironmentContext());
+}
+
+Status HmsCatalog::DropTable(const string& name, const hive::EnvironmentContext& env_ctx) {
+  Slice hms_database;
+  Slice hms_table;
+  RETURN_NOT_OK(ParseTableName(name, &hms_database, &hms_table));
   return Execute([&] (HmsClient* client) {
-    Status s = client->DropTable(hms_database, hms_table, env_ctx);
-    if (s.IsNotFound()) {
-      VLOG(1) << "Ignoring missing HMS table entry while dropping table "
-              << name << "(" << id << ")";
-      return Status::OK();
-    }
-    if (s.IsRemoteError() &&
-        s.message().ToString().find("Kudu table ID does not match the non-Kudu HMS entry")
-        != string::npos) {
-      // TODO(dan): the string match above is extraordinarily hacky, is there a
-      // better way to match this failure scenario?  Unfortunately errors
-      // occuring in the Kudu Metastore Plugin only manifest as a
-      // 'MetaException', so they can't have a more specific error code.
-      VLOG(1) << "Ignoring HMS table entry which does not belong to the Kudu table being dropped "
-              << name << "(" << id << ")";
-      return Status::OK();
+    return client->DropTable(hms_database.ToString(), hms_table.ToString(), env_ctx);
+  });
+}
+
+Status HmsCatalog::UpgradeLegacyImpalaTable(const string& id,
+                                            const string& db_name,
+                                            const string& tb_name,
+                                            const Schema& schema) {
+  return Execute([&] (HmsClient* client) {
+    hive::Table table;
+    RETURN_NOT_OK(client->GetTable(db_name, tb_name, &table));
+    if (table.parameters[HmsClient::kStorageHandlerKey] !=
+        HmsClient::kLegacyKuduStorageHandler) {
+      return Status::IllegalState("non-legacy table cannot be upgraded");
     }
 
-    return s;
+    RETURN_NOT_OK(PopulateTable(id, Substitute("$0.$1", db_name, tb_name),
+                                none, schema, master_addresses_, &table));
+    return client->AlterTable(db_name, tb_name, table, EnvironmentContext());
+  });
+}
+
+Status HmsCatalog::DowngradeToLegacyImpalaTable(const string& name) {
+  return Execute([&] (HmsClient* client) {
+    Slice hms_database;
+    Slice hms_table;
+    RETURN_NOT_OK(ParseTableName(name, &hms_database, &hms_table));
+
+    hive::Table table;
+    RETURN_NOT_OK(client->GetTable(hms_database.ToString(), hms_table.ToString(), &table));
+    if (table.parameters[HmsClient::kStorageHandlerKey] !=
+        HmsClient::kKuduStorageHandler) {
+      return Status::IllegalState("non-Kudu table cannot be downgraded");
+    }
+
+    // Add the legacy Kudu-specific parameters. And set it to
+    // external table type.
+    table.tableType = HmsClient::kExternalTable;
+    table.parameters[HmsClient::kLegacyKuduTableNameKey] = name;
+    table.parameters[HmsClient::kKuduMasterAddrsKey] = master_addresses_;
+    table.parameters[HmsClient::kStorageHandlerKey] = HmsClient::kLegacyKuduStorageHandler;
+    table.parameters[HmsClient::kExternalTableKey] = "TRUE";
+
+    // Remove the Kudu-specific field 'kudu.table_id'.
+    EraseKeyReturnValuePtr(&table.parameters, HmsClient::kKuduTableIdKey);
+
+    return client->AlterTable(table.dbName, table.tableName, table, EnvironmentContext());
+  });
+}
+
+Status HmsCatalog::GetKuduTables(vector<hive::Table>* kudu_tables) {
+  return Execute([&] (HmsClient* client) {
+    vector<string> database_names;
+    RETURN_NOT_OK(client->GetAllDatabases(&database_names));
+    vector<string> table_names;
+    vector<hive::Table> tables;
+
+    for (const auto& database_name : database_names) {
+      table_names.clear();
+      tables.clear();
+      RETURN_NOT_OK(client->GetTableNames(
+            database_name,
+            Substitute("$0$1 = \"$2\" OR $0$1 = \"$3\"",
+              HmsClient::kHiveFilterFieldParams,
+              HmsClient::kStorageHandlerKey,
+              HmsClient::kKuduStorageHandler,
+              HmsClient::kLegacyKuduStorageHandler),
+            &table_names));
+
+      if (!table_names.empty()) {
+        RETURN_NOT_OK(client->GetTables(database_name, table_names, &tables));
+        std::move(tables.begin(), tables.end(), std::back_inserter(*kudu_tables));
+      }
+    }
+
+    return Status::OK();
   });
 }
 
@@ -190,59 +277,39 @@ Status HmsCatalog::AlterTable(const string& id,
       // and the full set of columns. This ensures entries are fully 'repaired'
       // during an alter operation.
       //
-      // This can go wrong in a myriad of ways, including:
+      // This can go wrong in a number of ways, including:
       //
       // - The original table name isn't a valid Hive database/table pair
       // - The new table name isn't a valid Hive database/table pair
-      // - The original table entry does not exist in the HMS
-      // - The original table entry doesn't match the Kudu table being altered
-      // - The alteration has already been applied to the HMS
-      //
-      // Where possible, we try to repair the HMS state to whatever it should be
-      // in these situations, unless we detect that such a repair would alter an
-      // unrelated table entry.
+      // - The original table does not exist in the HMS
+      // - The original table doesn't match the Kudu table being altered
 
-      // If this is not a rename, then attempt to update the existing entry, or
-      // create it if it's missing.
-      if (name == new_name) {
-        return CreateOrUpdateTable(client, id, name, schema, master_addresses_);
-      }
-
-      string hms_database;
-      string hms_table;
-      Status s = ParseTableName(name, &hms_database, &hms_table);
-      if (!s.ok()) {
-        // Parsing the original table name has failed, so it can not be present in
-        // the HMS. Instead of altering the table, create it in the HMS as a new table.
-        VLOG(1) << "Failed to parse the name of the table being renamed as an "
-                   "HMS database/table pair, will attempt to create an HMS table entry "
-                   "with the new name: "
-                << s.ToString();
-        return CreateOrUpdateTable(client, id, new_name, schema, master_addresses_);
-      }
+      Slice hms_database;
+      Slice hms_table;
+      RETURN_NOT_OK(ParseTableName(name, &hms_database, &hms_table));
 
       hive::Table table;
-      s = client->GetTable(hms_database, hms_table, &table);
-
-      if (s.IsNotFound()) {
-        // The table doesn't already exist in the HMS, so create it.
-        VLOG(1) << "The table being renamed does not have an existing HMS entry, "
-                   "will attempt to create an HMS table entry with the new name.";
-        return CreateOrUpdateTable(client, id, new_name, schema, master_addresses_);
-      }
+      RETURN_NOT_OK(client->GetTable(hms_database.ToString(), hms_table.ToString(), &table));
 
       // Check that the HMS entry belongs to the table being altered.
       if (table.parameters[HmsClient::kStorageHandlerKey] != HmsClient::kKuduStorageHandler ||
           table.parameters[HmsClient::kKuduTableIdKey] != id) {
         // The original table isn't a Kudu table, or isn't the same Kudu table.
-        VLOG(1) << "The HMS entry for the table being renamed belongs to another table, "
-                    "will attempt to create an HMS entry with the new name.";
-        return CreateOrUpdateTable(client, id, new_name, schema, master_addresses_);
+        return Status::NotFound("the HMS entry for the table being "
+                                "altered belongs to another table");
       }
 
       // Overwrite fields in the table that have changed, including the new name.
-      RETURN_NOT_OK(PopulateTable(id, new_name, schema, master_addresses_, &table));
-      return client->AlterTable(hms_database, hms_table, table, EnvironmentContext());
+      RETURN_NOT_OK(PopulateTable(id, new_name, none, schema, master_addresses_, &table));
+      return client->AlterTable(hms_database.ToString(), hms_table.ToString(),
+                                table, EnvironmentContext());
+  });
+}
+
+Status HmsCatalog::GetNotificationEvents(int64_t last_event_id, int max_events,
+                                         vector<hive::NotificationEvent>* events) {
+  return Execute([&] (HmsClient* client) {
+    return client->GetNotificationEvents(last_event_id, max_events, events);
   });
 }
 
@@ -350,11 +417,13 @@ Status HmsCatalog::Execute(Task task) {
 Status HmsCatalog::Reconnect() {
   Status s;
 
-  HmsClientOptions options;
+  thrift::ClientOptions options;
   options.send_timeout = MonoDelta::FromSeconds(FLAGS_hive_metastore_send_timeout);
   options.recv_timeout = MonoDelta::FromSeconds(FLAGS_hive_metastore_recv_timeout);
   options.conn_timeout = MonoDelta::FromSeconds(FLAGS_hive_metastore_conn_timeout);
   options.enable_kerberos = FLAGS_hive_metastore_sasl_enabled;
+  options.service_principal = FLAGS_hive_metastore_kerberos_principal;
+  options.max_buf_size = FLAGS_hive_metastore_max_message_size;
 
   // Try reconnecting to each HMS in sequence, returning the first one which
   // succeeds. In order to avoid getting 'stuck' on a partially failed HMS, we
@@ -422,21 +491,45 @@ hive::FieldSchema column_to_field(const ColumnSchema& column) {
   return field;
 }
 
+// Convert an ASCII encoded string to lowercase in place.
+void ToLowerCase(Slice s) {
+  for (int i = 0; i < s.size(); i++) {
+    s.mutable_data()[i] = ascii_tolower(s[i]);
+  }
+}
 } // anonymous namespace
 
 Status HmsCatalog::PopulateTable(const string& id,
                                  const string& name,
+                                 const optional<const string&>& owner,
                                  const Schema& schema,
                                  const string& master_addresses,
                                  hive::Table* table) {
-  RETURN_NOT_OK(ParseTableName(name, &table->dbName, &table->tableName));
-  table->tableType = HmsClient::kManagedTable;
+  Slice hms_database_name;
+  Slice hms_table_name;
+  RETURN_NOT_OK(ParseTableName(name, &hms_database_name, &hms_table_name));
+  table->dbName = hms_database_name.ToString();
+  table->tableName = hms_table_name.ToString();
+  if (owner) {
+    table->owner = *owner;
+  }
 
   // Add the Kudu-specific parameters. This intentionally avoids overwriting
   // other parameters.
   table->parameters[HmsClient::kKuduTableIdKey] = id;
   table->parameters[HmsClient::kKuduMasterAddrsKey] = master_addresses;
   table->parameters[HmsClient::kStorageHandlerKey] = HmsClient::kKuduStorageHandler;
+  // Workaround for HIVE-19253.
+  table->parameters[HmsClient::kExternalTableKey] = "TRUE";
+
+  // Set the table type to external so that the table's (HD)FS directory will
+  // not be deleted when the table is dropped. Deleting the directory is
+  // unnecessary, and causes a race in the HMS between concurrent DROP TABLE and
+  // CREATE TABLE operations on existing tables.
+  table->tableType = HmsClient::kExternalTable;
+
+  // Remove the deprecated Kudu-specific field 'kudu.table_name'.
+  EraseKeyReturnValuePtr(&table->parameters, HmsClient::kLegacyKuduTableNameKey);
 
   // Overwrite the entire set of columns.
   vector<hive::FieldSchema> fields;
@@ -448,73 +541,45 @@ Status HmsCatalog::PopulateTable(const string& id,
   return Status::OK();
 }
 
-Status HmsCatalog::CreateOrUpdateTable(hms::HmsClient* client,
-                                       const string& id,
-                                       const string& name,
-                                       const Schema& schema,
-                                       const string& master_addresses) {
-  string hms_database;
-  string hms_table;
-  RETURN_NOT_OK(ParseTableName(name, &hms_database, &hms_table));
+Status HmsCatalog::NormalizeTableName(string* table_name) {
+  CHECK_NOTNULL(table_name);
+  Slice hms_database;
+  Slice hms_table;
+  RETURN_NOT_OK(ParseTableName(*table_name, &hms_database, &hms_table));
 
-  hive::Table existing_table;
-  Status s = client->GetTable(hms_database, hms_table, &existing_table);
+  ToLowerCase(hms_database);
+  ToLowerCase(hms_table);
 
-  if (s.IsNotFound()) {
-      VLOG(1) << "Table " << name << " (" << id << ") does not have an existing HMS entry, "
-                  "will attempt to create a new HMS table entry.";
-      hive::Table table;
-      RETURN_NOT_OK(PopulateTable(id, name, schema, master_addresses, &table));
-
-      return client->CreateTable(table, EnvironmentContext());
-  }
-
-  // All other errors are fatal.
-  RETURN_NOT_OK(s);
-
-  // The table already exists, so we update it.
-
-  // Check if the existing HMS entry belongs to the table being altered.
-  if (existing_table.parameters[HmsClient::kStorageHandlerKey] != HmsClient::kKuduStorageHandler ||
-      existing_table.parameters[HmsClient::kKuduTableIdKey] != id) {
-
-    // Otherwise we fail, since we must not update an entry belonging to a different table.
-    return Status::AlreadyPresent(Substitute("table $0 already exists in the HMS", name));
-  }
-
-  // Create a copy of the table object, and set the Kudu fields in it. If
-  // the original table object and the new table object match exactly then
-  // we don't need to alter the table in the HMS.
-  hive::Table table(existing_table);
-  RETURN_NOT_OK(PopulateTable(id, name, schema, master_addresses, &table));
-  if (existing_table == table) {
-    VLOG(1) << "Short-circuiting alter or update table for " << name << " (" << id << ")";
-    return Status::OK();
-  }
-  return client->AlterTable(hms_database, hms_table, table, EnvironmentContext());
+  return Status::OK();
 }
 
-Status HmsCatalog::ParseTableName(const string& table,
-                                  string* hms_database,
-                                  string* hms_table) {
-  // We do minimal parsing or validating of the identifiers, since Hive has
-  // different validation rules based on configuration (and probably version).
-  // The only rule we enforce is that there be exactly one period to separate
-  // the database and table names, we leave checking of everything else to the
-  // HMS.
-  //
-  // See org.apache.hadoop.hive.metastore.MetaStoreUtils.validateName.
+Status HmsCatalog::ParseTableName(const string& table_name,
+                                  Slice* hms_database,
+                                  Slice* hms_table) {
+  const char kSeparator = '.';
+  strings::CharSet charset("abcdefghijklmnopqrstuvwxyz"
+                           "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                           "0123456789"
+                           "_/");
 
-  vector<string> identifiers = strings::Split(table, ".");
-  if (identifiers.size() != 2) {
-    return Status::InvalidArgument(
-        "when the Hive Metastore integration is enabled, Kudu table names must be a "
-        "period ('.') separated database and table name pair",
-        table);
+  optional<int> separator_idx;
+  for (int idx = 0; idx < table_name.size(); idx++) {
+    char c = table_name[idx];
+    if (!charset.Test(c)) {
+      if (c == kSeparator && !separator_idx) {
+        separator_idx = idx;
+      } else {
+        return Status::InvalidArgument(kInvalidTableError, table_name);
+      }
+    }
+  }
+  if (!separator_idx || *separator_idx == 0 || *separator_idx == table_name.size() - 1) {
+    return Status::InvalidArgument(kInvalidTableError, table_name);
   }
 
-  *hms_database = std::move(identifiers[0]);
-  *hms_table = std::move(identifiers[1]);
+  *hms_database = Slice(table_name.data(), *separator_idx);
+  *hms_table = Slice(table_name.data() + *separator_idx + 1,
+                     table_name.size() - *separator_idx - 1);
   return Status::OK();
 }
 

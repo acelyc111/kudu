@@ -41,6 +41,7 @@
 #include "kudu/common/encoded_key.h"
 #include "kudu/common/iterator.h"
 #include "kudu/common/iterator_stats.h"
+#include "kudu/common/key_range.h"
 #include "kudu/common/partition.h"
 #include "kudu/common/rowblock.h"
 #include "kudu/common/scan_spec.h"
@@ -97,7 +98,6 @@
 #include "kudu/util/status_callback.h"
 #include "kudu/util/trace.h"
 #include "kudu/util/trace_metrics.h"
-#include "kudu/util/website_util.h"
 
 DEFINE_int32(scanner_default_batch_size_bytes, 1024 * 1024,
              "The default size for batches of scan results");
@@ -623,18 +623,17 @@ TabletServiceImpl::TabletServiceImpl(TabletServer* server)
 }
 
 bool TabletServiceImpl::AuthorizeClientOrServiceUser(const google::protobuf::Message* /*req*/,
-                                                 google::protobuf::Message* /*resp*/,
-                                                 rpc::RpcContext* rpc) {
-  return server_->Authorize(rpc, ServerBase::SUPER_USER | ServerBase::USER |
+                                                     google::protobuf::Message* /*resp*/,
+                                                     rpc::RpcContext* context) {
+  return server_->Authorize(context, ServerBase::SUPER_USER | ServerBase::USER |
                             ServerBase::SERVICE_USER);
 }
 
 bool TabletServiceImpl::AuthorizeClient(const google::protobuf::Message* /*req*/,
                                         google::protobuf::Message* /*resp*/,
-                                        rpc::RpcContext* rpc) {
-  return server_->Authorize(rpc, ServerBase::SUPER_USER | ServerBase::USER);
+                                        rpc::RpcContext* context) {
+  return server_->Authorize(context, ServerBase::SUPER_USER | ServerBase::USER);
 }
-
 
 void TabletServiceImpl::Ping(const PingRequestPB* /*req*/,
                              PingResponsePB* /*resp*/,
@@ -649,8 +648,8 @@ TabletServiceAdminImpl::TabletServiceAdminImpl(TabletServer* server)
 
 bool TabletServiceAdminImpl::AuthorizeServiceUser(const google::protobuf::Message* /*req*/,
                                                   google::protobuf::Message* /*resp*/,
-                                                  rpc::RpcContext* rpc) {
-  return server_->Authorize(rpc, ServerBase::SUPER_USER | ServerBase::SERVICE_USER);
+                                                  rpc::RpcContext* context) {
+  return server_->Authorize(context, ServerBase::SUPER_USER | ServerBase::SERVICE_USER);
 }
 
 void TabletServiceAdminImpl::AlterSchema(const AlterSchemaRequestPB* req,
@@ -858,9 +857,7 @@ void TabletServiceImpl::Write(const WriteRequestPB* req,
   double capacity_pct;
   if (process_memory::SoftLimitExceeded(&capacity_pct)) {
     tablet->metrics()->leader_memory_pressure_rejections->Increment();
-    string msg = StringPrintf(
-        "Soft memory limit exceeded (at %.2f%% of capacity). See %s",
-        capacity_pct, KuduDocsTroubleshootingUrl().c_str());
+    string msg = StringPrintf("Soft memory limit exceeded (at %.2f%% of capacity)", capacity_pct);
     if (capacity_pct >= FLAGS_memory_limit_warn_threshold_percentage) {
       KLOG_EVERY_N_SECS(WARNING, 1) << "Rejecting Write request: " << msg << THROTTLE_MSG;
     } else {
@@ -1089,11 +1086,13 @@ void ConsensusServiceImpl::UnsafeChangeConfig(const UnsafeChangeConfigRequestPB*
   }
 
   shared_ptr<RaftConsensus> consensus;
-  if (!GetConsensusOrRespond(replica, resp, context, &consensus)) return;
-  TabletServerErrorPB::Code error_code;
-  Status s = consensus->UnsafeChangeConfig(*req, &error_code);
+  if (!GetConsensusOrRespond(replica, resp, context, &consensus)) {
+    return;
+  }
+  boost::optional<TabletServerErrorPB::Code> error_code;
+  const Status s = consensus->UnsafeChangeConfig(*req, &error_code);
   if (PREDICT_FALSE(!s.ok())) {
-    SetupErrorAndRespond(resp->mutable_error(), s, error_code, context);
+    HandleErrorResponse(req, resp, context, error_code, s);
     return;
   }
   context->RespondSuccess();
@@ -1386,6 +1385,113 @@ void TabletServiceImpl::ListTablets(const ListTabletsRequestPB* req,
       replica->tablet_metadata()->partition_schema().ToPB(status->mutable_partition_schema());
     }
   }
+  context->RespondSuccess();
+}
+
+void TabletServiceImpl::SplitKeyRange(const SplitKeyRangeRequestPB* req,
+                                      SplitKeyRangeResponsePB* resp,
+                                      rpc::RpcContext* context) {
+  TRACE_EVENT1("tserver", "TabletServiceImpl::SplitKeyRange",
+               "tablet_id", req->tablet_id());
+  DVLOG(3) << "Received SplitKeyRange RPC: " << SecureDebugString(*req);
+
+  scoped_refptr<TabletReplica> replica;
+  if (!LookupRunningTabletReplicaOrRespond(server_->tablet_manager(), req->tablet_id(), resp,
+                                           context, &replica)) {
+    return;
+  }
+
+  shared_ptr<Tablet> tablet;
+  TabletServerErrorPB::Code error_code;
+  Status s = GetTabletRef(replica, &tablet, &error_code);
+  if (PREDICT_FALSE(!s.ok())) {
+    SetupErrorAndRespond(resp->mutable_error(), s, error_code, context);
+    return;
+  }
+
+  // Decode encoded key
+  Arena arena(256);
+  Schema tablet_schema = replica->tablet_metadata()->schema();
+  gscoped_ptr<EncodedKey> start, stop;
+  if (req->has_start_primary_key()) {
+    s = EncodedKey::DecodeEncodedString(tablet_schema, &arena, req->start_primary_key(), &start);
+    if (PREDICT_FALSE(!s.ok())) {
+      SetupErrorAndRespond(resp->mutable_error(),
+                           Status::InvalidArgument("Invalid SplitKeyRange start primary key"),
+                           TabletServerErrorPB::UNKNOWN_ERROR,
+                           context);
+      return;
+    }
+  }
+  if (req->has_stop_primary_key()) {
+    s = EncodedKey::DecodeEncodedString(tablet_schema, &arena, req->stop_primary_key(), &stop);
+    if (PREDICT_FALSE(!s.ok())) {
+      SetupErrorAndRespond(resp->mutable_error(),
+                           Status::InvalidArgument("Invalid SplitKeyRange stop primary key"),
+                           TabletServerErrorPB::UNKNOWN_ERROR,
+                           context);
+      return;
+    }
+  }
+  if (req->has_start_primary_key() && req->has_stop_primary_key()) {
+    // Validate the start key is less than the stop key, if they are both set
+    if (start->encoded_key().compare(stop->encoded_key()) > 0) {
+      SetupErrorAndRespond(resp->mutable_error(),
+                           Status::InvalidArgument("Invalid primary key range"),
+                           TabletServerErrorPB::UNKNOWN_ERROR,
+                           context);
+      return;
+    }
+  }
+
+  // Validate the column are valid
+  Schema schema;
+  s = ColumnPBsToSchema(req->columns(), &schema);
+  if (PREDICT_FALSE(!s.ok())) {
+    SetupErrorAndRespond(resp->mutable_error(),
+                         s,
+                         TabletServerErrorPB::INVALID_SCHEMA,
+                         context);
+    return;
+  }
+  if (schema.has_column_ids()) {
+    SetupErrorAndRespond(resp->mutable_error(),
+                         Status::InvalidArgument("User requests should not have Column IDs"),
+                         TabletServerErrorPB::INVALID_SCHEMA,
+                         context);
+    return;
+  }
+
+  vector<ColumnId> column_ids;
+  for (const ColumnSchema& column : schema.columns()) {
+    int column_id = tablet_schema.find_column(column.name());
+    if (PREDICT_FALSE(column_id == Schema::kColumnNotFound)) {
+      SetupErrorAndRespond(resp->mutable_error(),
+                           Status::InvalidArgument(
+                               "Invalid SplitKeyRange column name", column.name()),
+                           TabletServerErrorPB::INVALID_SCHEMA,
+                           context);
+      return;
+    }
+    column_ids.emplace_back(column_id);
+  }
+
+  // Validate the target chunk size are valid
+  if (req->target_chunk_size_bytes() == 0) {
+    SetupErrorAndRespond(resp->mutable_error(),
+                         Status::InvalidArgument("Invalid SplitKeyRange target chunk size"),
+                         TabletServerErrorPB::UNKNOWN_ERROR,
+                         context);
+    return;
+  }
+
+  vector<KeyRange> ranges;
+  tablet->SplitKeyRange(start.get(), stop.get(), column_ids,
+                        req->target_chunk_size_bytes(), &ranges);
+  for (auto range : ranges) {
+    range.ToPB(resp->add_ranges());
+  }
+
   context->RespondSuccess();
 }
 
@@ -1683,6 +1789,7 @@ Status TabletServiceImpl::HandleNewScanRequest(TabletReplica* replica,
                                          rpc_context->requestor_string(),
                                          scan_pb.row_format_flags(),
                                          &scanner);
+  TRACE("Created scanner $0 for tablet $1", scanner->id(), scanner->tablet_id());
 
   // If we early-exit out of this function, automatically unregister
   // the scanner.
@@ -1787,8 +1894,8 @@ Status TabletServiceImpl::HandleNewScanRequest(TabletReplica* replica,
         }
         break;
       }
-      TRACE("Iterator created");
     }
+    TRACE("Iterator created");
   }
 
   // Make a copy of the optimized spec before it's passed to the iterator.
@@ -1914,7 +2021,7 @@ Status TabletServiceImpl::HandleContinueScanRequest(const ScanRequestPB* req,
 
   VLOG(2) << "Found existing scanner " << scanner->id() << " for request: "
           << SecureShortDebugString(*req);
-  TRACE("Found scanner $0", scanner->id());
+  TRACE("Found scanner $0 for tablet $1", scanner->id(), scanner->tablet_id());
 
   if (batch_size_bytes == 0 && req->close_scanner()) {
     *has_more_results = false;

@@ -21,6 +21,7 @@
 #include <array>
 #include <cstdint>
 #include <iosfwd>
+#include <limits>
 #include <map>
 #include <memory>
 #include <sstream>
@@ -31,6 +32,7 @@
 #include <vector>
 
 #include <boost/bind.hpp> // IWYU pragma: keep
+#include <boost/optional/optional.hpp>
 #include <glog/logging.h>
 
 #include "kudu/common/common.pb.h"
@@ -44,6 +46,7 @@
 #include "kudu/gutil/port.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/stringprintf.h"
+#include "kudu/gutil/strings/ascii_ctype.h"
 #include "kudu/gutil/strings/join.h"
 #include "kudu/gutil/strings/numbers.h"
 #include "kudu/gutil/strings/substitute.h"
@@ -88,8 +91,16 @@ MasterPathHandlers::~MasterPathHandlers() {
 void MasterPathHandlers::HandleTabletServers(const Webserver::WebRequest& /*req*/,
                                              Webserver::WebResponse* resp) {
   EasyJson* output = resp->output;
-  vector<std::shared_ptr<TSDescriptor>> descs;
+  vector<shared_ptr<TSDescriptor>> descs;
   master_->ts_manager()->GetAllDescriptors(&descs);
+
+  // Sort by UUID so the order remains consistent betweeen restarts.
+  std::sort(descs.begin(), descs.end(),
+            [](const shared_ptr<TSDescriptor>& left,
+               const shared_ptr<TSDescriptor>& right) {
+              DCHECK(left && right);
+              return left->permanent_uuid() < right->permanent_uuid();
+            });
 
   (*output)["num_ts"] = std::to_string(descs.size());
 
@@ -104,7 +115,7 @@ void MasterPathHandlers::HandleTabletServers(const Webserver::WebRequest& /*req*
   output->Set("live_tservers", EasyJson::kArray);
   output->Set("dead_tservers", EasyJson::kArray);
   map<string, array<int, 2>> version_counts;
-  for (const std::shared_ptr<TSDescriptor>& desc : descs) {
+  for (const auto& desc : descs) {
     string ts_key = desc->PresumedDead() ? "dead_tservers" : "live_tservers";
     EasyJson ts_json = (*output)[ts_key].PushBack(EasyJson::kObject);
 
@@ -119,6 +130,7 @@ void MasterPathHandlers::HandleTabletServers(const Webserver::WebRequest& /*req*
     }
     ts_json["time_since_hb"] = StringPrintf("%.1fs", desc->TimeSinceHeartbeat().ToSeconds());
     ts_json["registration"] = pb_util::SecureShortDebugString(reg);
+    ts_json["location"] = desc->location().get_value_or("<none>");
     version_counts[reg.software_version()][desc->PresumedDead() ? 1 : 0]++;
     has_no_live_ts &= desc->PresumedDead();
     has_no_dead_ts &= !desc->PresumedDead();
@@ -260,6 +272,32 @@ void MasterPathHandlers::HandleTablePage(const Webserver::WebRequest& req,
   {
     TableMetadataLock l(table.get(), LockMode::READ);
     (*output)["name"] = l.data().name();
+
+    // Not all Kudu tablenames are also valid Impala identifiers. We need to
+    // replace such names with a placeholder when they are used as Impala
+    // identifiers, like when used for Impala tablename in the Kudu Web UI.
+    // Valid Impala identifiers conform to the following rules:
+    // 1. Must not be empty.
+    // 2. Length must not exceed 128 characters.
+    // 3. First character must be alphabetic.
+    // 4. Every character must be alphanumeric or an underscore.
+    // 5. If it matches any Impala-reserved keyword, it must be surrounded
+    // by backticks.
+    // The last rule is not tested for in the code segment below as the backticks
+    // can be added at the time of usage, as is the case for Web UI where it's
+    // currently being passed to.
+    string impala_name = "<placeholder>";
+    string orig_name = l.data().name();
+    if (!orig_name.empty() &&
+      orig_name.length() <= 128 &&
+      ascii_isalpha(orig_name[0]) &&
+      find_if(orig_name.begin(), orig_name.end(), [](char c) {
+        return !(ascii_isalnum(c) || (c == '_'));
+        }) == orig_name.end()) {
+      impala_name = orig_name;
+    }
+
+    (*output)["impala_table_name"] = impala_name;
     (*output)["id"] = table_id;
     (*output)["version"] = l.data().pb.version();
 
@@ -291,6 +329,7 @@ void MasterPathHandlers::HandleTablePage(const Webserver::WebRequest& req,
   // up the partition schema, tablet summary, and tablet detail tables.
   std::vector<string> range_partitions;
   map<string, int> summary_states;
+  map<string, int> replica_counts;
   (*output)["detail_partition_schema_header"] = partition_schema.PartitionTableHeader(schema);
   EasyJson tablets_detail_json = output->Set("tablets_detail", EasyJson::kArray);
   for (const scoped_refptr<TabletInfo>& tablet : tablets) {
@@ -304,6 +343,7 @@ void MasterPathHandlers::HandleTablePage(const Webserver::WebRequest& req,
     if (l.data().pb.has_consensus_state()) {
       const ConsensusStatePB& cstate = l.data().pb.consensus_state();
       for (const auto& peer : cstate.committed_config().peers()) {
+        replica_counts[peer.permanent_uuid()]++;
         TabletDetailPeerInfo peer_info;
         shared_ptr<TSDescriptor> ts_desc;
         if (master_->ts_manager()->LookupTSByUUID(peer.permanent_uuid(), &ts_desc)) {
@@ -367,6 +407,22 @@ void MasterPathHandlers::HandleTablePage(const Webserver::WebRequest& req,
     double percentage = (100.0 * entry.second) / tablets.size();
     state_json["percentage"] = tablets.empty() ? "0.0" : StringPrintf("%.2f", percentage);
   }
+
+  // Set up the report on replica distribution.
+  EasyJson replica_dist_json = output->Set("replica_distribution", EasyJson::kObject);
+  EasyJson counts_json = replica_dist_json.Set("counts", EasyJson::kArray);
+  int min_count = replica_counts.empty() ? 0 : std::numeric_limits<int>::max();
+  int max_count = 0;
+  for (const auto& entry : replica_counts) {
+    EasyJson count_json = counts_json.PushBack(EasyJson::kObject);
+    count_json["ts_uuid"] = entry.first;
+    count_json["count"] = entry.second;
+    min_count = std::min(min_count, entry.second);
+    max_count = std::max(max_count, entry.second);
+  }
+  replica_dist_json["max_count"] = max_count;
+  replica_dist_json["min_count"] = min_count;
+  replica_dist_json["skew"] = max_count - min_count;
 
   // Used to make the Impala CREATE TABLE statement.
   (*output)["master_addresses"] = MasterAddrsToCsv();
@@ -553,9 +609,9 @@ void MasterPathHandlers::HandleDumpEntities(const Webserver::WebRequest& /*req*/
 
   jw.String("tablet_servers");
   jw.StartArray();
-  vector<std::shared_ptr<TSDescriptor> > descs;
+  vector<shared_ptr<TSDescriptor> > descs;
   master_->ts_manager()->GetAllDescriptors(&descs);
-  for (const std::shared_ptr<TSDescriptor>& desc : descs) {
+  for (const auto& desc : descs) {
     jw.StartObject();
 
     jw.String("uuid");

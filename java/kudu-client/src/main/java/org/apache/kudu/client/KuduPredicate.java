@@ -17,8 +17,12 @@
 
 package org.apache.kudu.client;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.math.BigInteger;
 import java.math.BigDecimal;
+import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -32,6 +36,7 @@ import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
 import com.google.common.primitives.UnsignedBytes;
 import com.google.protobuf.ByteString;
+import org.apache.kudu.util.TimestampUtil;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
 
@@ -292,6 +297,20 @@ public class KuduPredicate {
       default:
         throw new RuntimeException("unknown comparison op");
     }
+  }
+
+  /**
+   * Creates a new comparison predicate on a timestamp column.
+   * @param column the column schema
+   * @param op the comparison operation
+   * @param value the value to compare against
+   */
+  public static KuduPredicate newComparisonPredicate(ColumnSchema column,
+                                                     ComparisonOp op,
+                                                     Timestamp value) {
+    checkColumn(column, Type.UNIXTIME_MICROS);
+    long micros = TimestampUtil.timestampToMicros(value);
+    return newComparisonPredicate(column, op, micros);
   }
 
   /**
@@ -765,6 +784,37 @@ public class KuduPredicate {
   }
 
   /**
+   * Serializes a list of {@code KuduPredicate} into a byte array.
+   * @return the serialized kudu predicates
+   * @throws IOException
+   */
+  @InterfaceAudience.LimitedPrivate("kudu-mapreduce")
+  public static byte[] serialize(List<KuduPredicate> predicates) throws IOException {
+    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+    for (KuduPredicate predicate : predicates) {
+      Common.ColumnPredicatePB message = predicate.toPB();
+      message.writeDelimitedTo(baos);
+    }
+    return baos.toByteArray();
+  }
+
+  /**
+   * Serializes a list of {@code KuduPredicate} into a byte array.
+   * @return the serialized kudu predicates
+   * @throws IOException
+   */
+  @InterfaceAudience.LimitedPrivate("kudu-mapreduce")
+  public static List<KuduPredicate> deserialize(Schema schema, byte[] bytes) throws IOException {
+    ByteArrayInputStream bais = new ByteArrayInputStream(bytes);
+    List<KuduPredicate> predicates = new ArrayList<>();
+    while (bais.available() > 0) {
+      Common.ColumnPredicatePB message = Common.ColumnPredicatePB.parseDelimitedFrom(bais);
+      predicates.add(KuduPredicate.fromPB(schema, message));
+    }
+    return predicates;
+  }
+
+  /**
    * Convert the predicate to the protobuf representation.
    * @return the protobuf message for this predicate
    */
@@ -1045,7 +1095,7 @@ public class KuduPredicate {
       case INT16: return Short.toString(Bytes.getShort(value));
       case INT32: return Integer.toString(Bytes.getInt(value));
       case INT64: return Long.toString(Bytes.getLong(value));
-      case UNIXTIME_MICROS: return RowResult.timestampToString(Bytes.getLong(value));
+      case UNIXTIME_MICROS: return TimestampUtil.timestampToString(Bytes.getLong(value));
       case FLOAT: return Float.toString(Bytes.getFloat(value));
       case DOUBLE: return Double.toString(Bytes.getDouble(value));
       case STRING: {

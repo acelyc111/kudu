@@ -204,6 +204,12 @@ message SysTskEntryPB {
   required security.TokenSigningPrivateKeyPB tsk = 1;
 }
 
+// The on-disk entry in the sys.catalog table ("metadata" column) to represent
+// the latest processed Hive Metastore notification log event ID.
+message SysNotificationLogEventIdPB {
+  optional int64 latest_notification_log_event_id = 1;
+}
+
 ////////////////////////////////////////////////////////////
 // RPCs
 ////////////////////////////////////////////////////////////
@@ -437,6 +443,10 @@ message IsCreateTableDoneResponsePB {
 
 message DeleteTableRequestPB {
   required TableIdentifierPB table = 1;
+
+  // Whether to apply the deletion to external catalogs, such as the Hive Metastore,
+  // which the Kudu master has been configured to integrate with.
+  optional bool modify_external_catalogs = 2 [default = true];
 }
 
 message DeleteTableResponsePB {
@@ -558,6 +568,10 @@ message AlterTableRequestPB {
   // The table schema to use when decoding the range bound row operations. Only
   // necessary when partitions are being added or dropped.
   optional SchemaPB schema = 4;
+
+  // Whether to apply the alteration to external catalogs, such as the Hive Metastore,
+  // which the Kudu master has been configured to integrate with.
+  optional bool modify_external_catalogs = 5 [default = true];
 }
 
 message AlterTableResponsePB {
@@ -649,6 +663,33 @@ message ConnectToMasterResponsePB {
   // an HA setup. If that master then fails, the applications would go
   // offline.
   repeated HostPortPB master_addrs = 5;
+
+  // If the master is configured with the Hive Metastore integration enabled,
+  // this field will include the configuration options.
+  optional HiveMetastoreConfig hms_config = 6;
+}
+
+// Hive Metastore integration options and configuration.
+message HiveMetastoreConfig {
+
+  // Address(es) of the Hive Metastore instance(s).
+  //
+  // For more info see the Kudu master --hive_metastore_uris flag for more info,
+  // or the Hive Metastore hive.metastore.uris configuration.
+  optional string hms_uris = 1;
+
+  // Whether the Hive Metastore instance uses SASL (Kerberos) security.
+  //
+  // For more info see the Kudu master --hive_metastore_sasl_enabled flag, or
+  // the Hive Metastore hive.metastore.sasl.enabled configuration.
+  optional bool hms_sasl_enabled = 2;
+
+  // An ID which uniquely identifies the Hive Metastore instance.
+  //
+  // NOTE: this is provided on a best-effort basis, as not all Hive Metastore
+  // versions which Kudu is compatible with include the necessary APIs. See
+  // HIVE-16452 for more info.
+  optional string hms_uuid = 3;
 }
 
 // ============================================================================
@@ -665,6 +706,7 @@ message ListTabletServersResponsePB {
     required NodeInstancePB instance_id = 1;
     optional ServerRegistrationPB registration = 2;
     optional int32 millis_since_heartbeat = 3;
+    optional string location = 4;
   }
   repeated Entry servers = 2;
 }
@@ -743,7 +785,7 @@ service MasterService {
   // TS->Master RPCs
   // ------------------------------------------------------------
   rpc TSHeartbeat(TSHeartbeatRequestPB) returns (TSHeartbeatResponsePB) {
-    option (kudu.rpc.authz_method) = "AuthorizeService";
+    option (kudu.rpc.authz_method) = "AuthorizeServiceUser";
   }
 
   // Client->Master RPCs
@@ -794,7 +836,7 @@ service MasterService {
     option (kudu.rpc.authz_method) = "AuthorizeClient";
   }
   rpc Ping(PingRequestPB) returns (PingResponsePB) {
-    option (kudu.rpc.authz_method) = "AuthorizeClientOrService";
+    option (kudu.rpc.authz_method) = "AuthorizeClientOrServiceUser";
   }
   rpc ReplaceTablet(ReplaceTabletRequestPB) returns (ReplaceTabletResponsePB) {
     option (kudu.rpc.authz_method) = "AuthorizeSuperUser";
@@ -807,6 +849,6 @@ service MasterService {
   // cluster.
   rpc GetMasterRegistration(GetMasterRegistrationRequestPB) returns
       (GetMasterRegistrationResponsePB) {
-    option (kudu.rpc.authz_method) = "AuthorizeClientOrService";
+    option (kudu.rpc.authz_method) = "AuthorizeClientOrServiceUser";
   }
 }

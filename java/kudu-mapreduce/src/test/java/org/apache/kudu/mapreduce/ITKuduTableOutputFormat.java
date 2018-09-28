@@ -16,13 +16,15 @@
 // under the License.
 package org.apache.kudu.mapreduce;
 
+import static org.apache.kudu.util.ClientTestUtil.countRowsInScan;
+import static org.apache.kudu.util.ClientTestUtil.getBasicCreateTableOptions;
+import static org.apache.kudu.util.ClientTestUtil.getBasicSchema;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.NullWritable;
 import org.apache.hadoop.mapreduce.RecordWriter;
-import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.kudu.client.AsyncKuduScanner;
@@ -37,18 +39,13 @@ public class ITKuduTableOutputFormat extends BaseKuduTest {
   private static final String TABLE_NAME =
       ITKuduTableOutputFormat.class.getName() + "-" + System.currentTimeMillis();
 
-  @BeforeClass
-  public static void setUpBeforeClass() throws Exception {
-    BaseKuduTest.setUpBeforeClass();
-  }
-
   @Test
   public void test() throws Exception {
     createTable(TABLE_NAME, getBasicSchema(), getBasicCreateTableOptions());
 
     KuduTableOutputFormat output = new KuduTableOutputFormat();
     Configuration conf = new Configuration();
-    conf.set(KuduTableOutputFormat.MASTER_ADDRESSES_KEY, getMasterAddresses());
+    conf.set(KuduTableOutputFormat.MASTER_ADDRESSES_KEY, getMasterAddressesAsString());
     conf.set(KuduTableOutputFormat.OUTPUT_TABLE_KEY, TABLE_NAME);
     output.setConf(conf);
 

@@ -247,7 +247,7 @@ it and the vendor's instructions should be used instead as details may differ.
 +
 [source,bash]
 ----
-$ sudo -u kudu kudu fs dump uuid --fs_wal_dir=<master_wal_dir> [--fs_data_dirs=<master_data_dirs>] 2>/dev/null
+$ sudo -u kudu kudu fs dump uuid --fs_wal_dir=<master_wal_dir> [--fs_data_dirs=<master_data_dir>] 2>/dev/null
 ----
 master_data_dir:: existing master's previously recorded data directory
 +
@@ -302,8 +302,8 @@ the migration section for updating HMS.
 +
 [source,bash]
 ----
-$ sudo -u kudu kudu fs format --fs_wal_dir=<master_wal_dir> [--fs_data_dirs=<master_data_dirs>]
-$ sudo -u kudu kudu fs dump uuid --fs_wal_dir=<master_wal_dir> [--fs_data_dirs=<master_data_dirs>] 2>/dev/null
+$ sudo -u kudu kudu fs format --fs_wal_dir=<master_wal_dir> [--fs_data_dirs=<master_data_dir>]
+$ sudo -u kudu kudu fs dump uuid --fs_wal_dir=<master_wal_dir> [--fs_data_dirs=<master_data_dir>] 2>/dev/null
 ----
 +
 master_data_dir:: new master's previously recorded data directory
@@ -327,7 +327,7 @@ f5624e05f40649b79a757629a69d061e
 +
 [source,bash]
 ----
-$ sudo -u kudu kudu local_replica cmeta rewrite_raft_config --fs_wal_dir=<master_wal_dir> [--fs_data_dirs=<master_data_dirs>] <tablet_id> <all_masters>
+$ sudo -u kudu kudu local_replica cmeta rewrite_raft_config --fs_wal_dir=<master_wal_dir> [--fs_data_dirs=<master_data_dir>] <tablet_id> <all_masters>
 ----
 +
 master_data_dir:: existing master's previously recorded data directory
@@ -360,7 +360,7 @@ WARNING: If your Kudu cluster is secure, in addition to running as the Kudu UNIX
 +
 [source,bash]
 ----
-$ sudo -u kudu kudu local_replica copy_from_remote --fs_wal_dir=<master_wal_dir> [--fs_data_dirs=<master_data_dirs>] <tablet_id> <existing_master>
+$ sudo -u kudu kudu local_replica copy_from_remote --fs_wal_dir=<master_wal_dir> [--fs_data_dirs=<master_data_dir>] <tablet_id> <existing_master>
 ----
 +
 master_data_dir:: new master's previously recorded data directory
@@ -477,7 +477,7 @@ WARNING: All of the command line steps below should be executed as the Kudu UNIX
 +
 [source,bash]
 ----
-$ sudo -u kudu kudu fs dump uuid --fs_wal_dir=<master_wal_dir> [--fs_data_dirs=<master_data_dirs>] 2>/dev/null
+$ sudo -u kudu kudu fs dump uuid --fs_wal_dir=<master_wal_dir> [--fs_data_dirs=<master_data_dir>] 2>/dev/null
 ----
 master_data_dir:: live master's previously recorded data directory
 +
@@ -500,7 +500,7 @@ $ sudo -u kudu kudu fs dump uuid --fs_wal_dir=/data/kudu/master/wal --fs_data_di
 +
 [source,bash]
 ----
-$ sudo -u kudu kudu local_replica cmeta print_replica_uuids --fs_wal_dir=<master_wal_dir> [--fs_data_dirs=<master_data_dirs>] <tablet_id> 2>/dev/null
+$ sudo -u kudu kudu local_replica cmeta print_replica_uuids --fs_wal_dir=<master_wal_dir> [--fs_data_dirs=<master_data_dir>] <tablet_id> 2>/dev/null
 ----
 master_data_dir:: reference master's previously recorded data directory
 tablet_id:: must be the string `00000000000000000000000000000000`
@@ -523,7 +523,7 @@ $ sudo -u kudu kudu local_replica cmeta print_replica_uuids --fs_wal_dir=/data/k
 +
 [source,bash]
 ----
-$ sudo -u kudu kudu fs format --fs_wal_dir=<master_wal_dir> [--fs_data_dirs=<master_data_dirs>] --uuid=<uuid>
+$ sudo -u kudu kudu fs format --fs_wal_dir=<master_wal_dir> [--fs_data_dirs=<master_data_dir>] --uuid=<uuid>
 ----
 +
 master_data_dir:: replacement master's previously recorded data directory
@@ -543,7 +543,7 @@ WARNING: If your Kudu cluster is secure, in addition to running as the Kudu UNIX
 +
 [source,bash]
 ----
-$ sudo -u kudu kudu local_replica copy_from_remote --fs_wal_dir=<master_wal_dir> [--fs_data_dirs=<master_data_dirs>] <tablet_id> <reference_master>
+$ sudo -u kudu kudu local_replica copy_from_remote --fs_wal_dir=<master_wal_dir> [--fs_data_dirs=<master_data_dir>] <tablet_id> <reference_master>
 ----
 +
 master_data_dir:: replacement master's previously recorded data directory
@@ -644,16 +644,98 @@ To verify that all masters are working properly, perform the following sanity ch
 * Run a Kudu system check (ksck) on the cluster using the `kudu` command line
   tool. See <<ksck>> for more details.
 
+=== Changing the master hostnames
+
+To prevent long maintenance windows when replacing dead masters, DNS aliases should be used. If the
+cluster was set up without aliases, changing the host names can be done by following the below
+steps.
+
+==== Prepare for the hostname change
+
+. Establish a maintenance window (one hour should be sufficient). During this time the Kudu cluster
+will be unavailable.
+
+. Note the UUID and RPC address of every master by visiting the `/masters` page of any master's web
+UI.
+
+. Stop all the Kudu processes in the entire cluster.
+
+. Set up the new hostnames to point to the masters and verify all servers and clients properly
+resolve them.
+
+==== Perform the hostname change
+
+. Rewrite each master’s Raft configuration with the following command, executed on all master hosts:
+----
+$ sudo -u kudu kudu local_replica cmeta rewrite_raft_config --fs_wal_dir=<master_wal_dir> [--fs_data_dirs=<master_data_dir>] 00000000000000000000000000000000 <all_masters>
+----
+
+For example:
+
+----
+$ sudo -u kudu kudu local_replica cmeta rewrite_raft_config --fs_wal_dir=/data/kudu/master/wal --fs_data_dirs=/data/kudu/master/data 00000000000000000000000000000000 4aab798a69e94fab8d77069edff28ce0:new-master-name-1:7051 f5624e05f40649b79a757629a69d061e:new-master-name-2:7051 988d8ac6530f426cbe180be5ba52033d:new-master-name-3:7051
+----
+
+. Change the masters' gflagfile so the `master_addresses` parameter reflects the new hostnames.
+
+. Change the `tserver_master_addrs` parameter in the tablet servers' gflagfiles to the new
+hostnames.
+
+. Start up the masters.
+
+. To verify that all masters are working properly, perform the following sanity checks:
+
+.. Using a browser, visit each master's web UI. Look at the /masters page. All of the masters should
+  be listed there with one master in the LEADER role and the others in the FOLLOWER role. The
+  contents of /masters on each master should be the same.
+
+.. Run the below command to verify all masters are up and listening. The UUIDs
+should be the same and belong to the same master as before the hostname change:
++
+----
+$ sudo -u kudu kudu master list new-master-name-1:7051,new-master-name-2:7051,new-master-name-3:7051
+----
+
+. Start all of the tablet servers.
+
+. Run a Kudu system check (ksck) on the cluster using the `kudu` command line
+tool. See <<ksck>> for more details. After startup, some tablets may be
+unavailable as it takes some time to initialize all of them.
+
+. If you have Kudu tables that are accessed from Impala, update the HMS
+database manually in the underlying database that provides the storage for HMS.
+
+.. The following is an example SQL statement you should run in the HMS database:
++
+[source,sql]
+----
+UPDATE TABLE_PARAMS
+SET PARAM_VALUE =
+  'new-master-name-1:7051,new-master-name-2:7051,new-master-name-3:7051'
+WHERE PARAM_KEY = 'kudu.master_addresses'
+AND PARAM_VALUE = 'master-1:7051,master-2:7051,master-3:7051';
+----
++
+.. In `impala-shell`, run:
++
+[source,bash]
+----
+INVALIDATE METADATA;
+----
++
+.. Verify updating the metadata worked by running a simple `SELECT` query on a
+Kudu-backed Impala table.
+
 [[ksck]]
 === Checking Cluster Health with `ksck`
 
-The `kudu` CLI includes a tool named `ksck` which can be used for checking
-cluster health and data integrity. `ksck` will identify issues such as
-under-replicated tablets, unreachable tablet servers, or tablets without a
-leader.
+The `kudu` CLI includes a tool named `ksck` that can be used for gathering
+information about the state of a Kudu cluster, including checking its health.
+`ksck` will identify issues such as under-replicated tablets, unreachable
+tablet servers, or tablets without a leader.
 
-`ksck` should be run from the command line, and requires the full list of master
-addresses to be specified:
+`ksck` should be run from the command line as the Kudu admin user, and requires
+the full list of master addresses to be specified:
 
 [source,bash]
 ----
@@ -661,54 +743,88 @@ $ sudo -u kudu kudu cluster ksck master-01.example.com,master-02.example.com,mas
 ----
 
 To see a full list of the options available with `ksck`, use the `--help` flag.
-If the cluster is healthy, `ksck` will print a success message, and return a
-zero (success) exit status.
+If the cluster is healthy, `ksck` will print information about the cluster, a
+success message, and return a zero (success) exit status.
 
 ----
-Connected to the Master
-Fetched info from all 1 Tablet Servers
-Table IntegrationTestBigLinkedList is HEALTHY (1 tablet(s) checked)
+Master Summary
+               UUID               |       Address         | Status
+----------------------------------+-----------------------+---------
+ a811c07b99394df799e6650e7310f282 | master-01.example.com | HEALTHY
+ b579355eeeea446e998606bcb7e87844 | master-02.example.com | HEALTHY
+ cfdcc8592711485fad32ec4eea4fbfcd | master-02.example.com | HEALTHY
 
-The metadata for 1 table(s) is HEALTHY
+Tablet Server Summary
+               UUID               |        Address         | Status
+----------------------------------+------------------------+---------
+ a598f75345834133a39c6e51163245db | tserver-01.example.com | HEALTHY
+ e05ca6b6573b4e1f9a518157c0c0c637 | tserver-02.example.com | HEALTHY
+ e7e53a91fe704296b3a59ad304e7444a | tserver-03.example.com | HEALTHY
+
+Version Summary
+ Version |      Servers
+---------+-------------------------
+  1.7.1  | all 6 server(s) checked
+
+Summary by table
+   Name   | RF | Status  | Total Tablets | Healthy | Recovering | Under-replicated | Unavailable
+----------+----+---------+---------------+---------+------------+------------------+-------------
+ my_table | 3  | HEALTHY | 8             | 8       | 0          | 0                | 0
+
+                | Total Count
+----------------+-------------
+ Masters        | 3
+ Tablet Servers | 3
+ Tables         | 1
+ Tablets        | 8
+ Replicas       | 24
 OK
 ----
 
 If the cluster is unhealthy, for instance if a tablet server process has
-stopped, `ksck` will report the issue(s) and return a non-zero exit status:
+stopped, `ksck` will report the issue(s) and return a non-zero exit status, as
+shown in the abbreviated snippet of `ksck` output below:
 
 ----
-Connected to the Master
-WARNING: Unable to connect to Tablet Server 8a0b66a756014def82760a09946d1fce
-(tserver-01.example.com:7050): Network error: could not send Ping RPC to server: Client connection negotiation failed: client connection to 192.168.0.2:7050: connect: Connection refused (error 61)
-WARNING: Fetched info from 0 Tablet Servers, 1 weren't reachable
-Tablet ce3c2d27010d4253949a989b9d9bf43c of table 'IntegrationTestBigLinkedList'
-is unavailable: 1 replica(s) not RUNNING
-  8a0b66a756014def82760a09946d1fce (tserver-01.example.com:7050): TS unavailable [LEADER]
+Tablet Server Summary
+               UUID               |        Address         |   Status
+----------------------------------+------------------------+-------------
+ a598f75345834133a39c6e51163245db | tserver-01.example.com | HEALTHY
+ e05ca6b6573b4e1f9a518157c0c0c637 | tserver-02.example.com | HEALTHY
+ e7e53a91fe704296b3a59ad304e7444a | tserver-03.example.com | UNAVAILABLE
+Error from 127.0.0.1:7150: Network error: could not get status from server: Client connection negotiation failed: client connection to 127.0.0.1:7150: connect: Connection refused (error 61) (UNAVAILABLE)
 
-  Table IntegrationTestBigLinkedList has 1 unavailable tablet(s)
+... (full output elided)
 
-  WARNING: 1 out of 1 table(s) are not in a healthy state
-  ==================
-  Errors:
-  ==================
-  error fetching info from tablet servers: Network error: Not all Tablet Servers are reachable
-  table consistency check error: Corruption: 1 table(s) are bad
+==================
+Errors:
+==================
+Network error: error fetching info from tablet servers: failed to gather info for all tablet servers: 1 of 3 had errors
+Corruption: table consistency check error: 1 out of 1 table(s) are not healthy
 
-  FAILED
-  Runtime error: ksck discovered errors
+FAILED
+Runtime error: ksck discovered errors
 ----
 
 To verify data integrity, the optional `--checksum_scan` flag can be set, which
 will ensure the cluster has consistent data by scanning each tablet replica and
 comparing results. The `--tables` or `--tablets` flags can be used to limit the
 scope of the checksum scan to specific tables or tablets, respectively. For
-example, checking data integrity on the `IntegrationTestBigLinkedList` table can
-be done with the following command:
+example, checking data integrity on the `my_table` table can be done with the
+following command:
 
 [source,bash]
 ----
-$ sudo -u kudu kudu cluster ksck --checksum_scan --tables IntegrationTestBigLinkedList master-01.example.com,master-02.example.com,master-03.example.com
+$ sudo -u kudu kudu cluster ksck --checksum_scan --tables my_table master-01.example.com,master-02.example.com,master-03.example.com
 ----
+
+By default, `ksck` will attempt to use a snapshot scan of the table, so the
+checksum scan can be done while writes continue.
+
+Finally, `ksck` also supports output in JSON format using the `--ksck_format`
+flag. JSON output contains the same information as the plain text output, but
+in a format that can be used by other tools. See `kudu cluster ksck --help` for
+more information.
 
 [[change_dir_config]]
 === Changing Directory Configurations
@@ -728,7 +844,7 @@ removal of a directory across which tablets are configured to spread data. If
 `--force` is specified, all tablets configured to use that directory will fail
 upon starting up and be replicated elsewhere.
 
-NOTE: If the link:configuration.html$directory_configuration[metadata
+NOTE: If the link:configuration.html#directory_configuration[metadata
 directory] overlaps with a data directory, as was the default prior to Kudu
 1.7, or if a non-default metadata directory is configured, the
 `--fs_metadata_dir` configuration must be specified when running the `kudu fs
@@ -1003,3 +1119,133 @@ a node onto another machine.
   sparseness.
 
 . Start all Kudu processes in the cluster.
+
+[[minimizing_cluster_disruption_during_temporary_single_ts_downtime]]
+=== Minimizing cluster disruption during temporary planned downtime of a single tablet server
+
+If a single tablet server is brought down temporarily in a healthy cluster, all
+tablets will remain available and clients will function as normal, after
+potential short delays due to leader elections. However, if the downtime lasts
+for more than `--follower_unavailable_considered_failed_sec` (default 300)
+seconds, the tablet replicas on the down tablet server will be replaced by new
+replicas on available tablet servers. This will cause stress on the cluster
+as tablets re-replicate and, if the downtime lasts long enough, significant
+reduction in the number of replicas on the down tablet server. This may require
+the rebalancer to fix.
+
+To work around this, increase `--follower_unavailable_considered_failed_sec` on
+all tablet servers so the amount of time before re-replication will start is
+longer than the expected downtime of the tablet server, including the time it
+takes the tablet server to restart and bootstrap its tablet replicas. To do
+this, run the following command for each tablet server:
+
+[source,bash]
+----
+$ sudo -u kudu kudu tserver set_flag <tserver_address> follower_unavailable_considered_failed_sec <num_seconds>
+----
+
+where `<num_seconds>` is the number of seconds that will encompass the downtime.
+Once the downtime is finished, reset the flag to its original value.
+
+----
+$ sudo -u kudu kudu tserver set_flag <tserver_address> follower_unavailable_considered_failed_sec <original_value>
+----
+
+WARNING: Be sure to reset the value of `--follower_unavailable_considered_failed_sec`
+to its original value.
+
+NOTE: On Kudu versions prior to 1.8, the `--force` flag must be provided in the above
+commands.
+
+[[rebalancer_tool]]
+=== Running the tablet rebalancing tool
+
+The `kudu` CLI contains a rebalancing tool that can be used to rebalance
+tablet replicas among tablet servers. For each table, the tool attempts to
+balance the number of replicas per tablet server. It will also, without
+unbalancing any table, attempt to even out the number of replicas per tablet
+server across the cluster as a whole. The rebalancing tool should be run as the
+Kudu admin user, specifying all master addresses:
+
+[source,bash]
+----
+sudo -u kudu kudu cluster rebalance master-01.example.com,master-02.example.com,master-03.example.com
+----
+
+When run, the rebalancer will report on the initial tablet replica distribution
+in the cluster, log the replicas it moves, and print a final summary of the
+distribution when it terminates:
+
+----
+Per-server replica distribution summary:
+       Statistic       |   Value
+-----------------------+-----------
+ Minimum Replica Count | 0
+ Maximum Replica Count | 24
+ Average Replica Count | 14.400000
+
+Per-table replica distribution summary:
+ Replica Skew |  Value
+--------------+----------
+ Minimum      | 8
+ Maximum      | 8
+ Average      | 8.000000
+
+I0613 14:18:49.905897 3002065792 rebalancer.cc:779] tablet e7ee9ade95b342a7a94649b7862b345d: 206a51de1486402bbb214b5ce97a633c -> 3b4d9266ac8c45ff9a5d4d7c3e1cb326 move scheduled
+I0613 14:18:49.917578 3002065792 rebalancer.cc:779] tablet 5f03944529f44626a0d6ec8b1edc566e: 6e64c4165b864cbab0e67ccd82091d60 -> ba8c22ab030346b4baa289d6d11d0809 move scheduled
+I0613 14:18:49.928683 3002065792 rebalancer.cc:779] tablet 9373fee3bfe74cec9054737371a3b15d: fab382adf72c480984c6cc868fdd5f0e -> 3b4d9266ac8c45ff9a5d4d7c3e1cb326 move scheduled
+
+... (full output elided)
+
+I0613 14:19:01.162802 3002065792 rebalancer.cc:842] tablet f4c046f18b174cc2974c65ac0bf52767: 206a51de1486402bbb214b5ce97a633c -> 3b4d9266ac8c45ff9a5d4d7c3e1cb326 move completed: OK
+
+rebalancing is complete: cluster is balanced (moved 28 replicas)
+Per-server replica distribution summary:
+       Statistic       |   Value
+-----------------------+-----------
+ Minimum Replica Count | 14
+ Maximum Replica Count | 15
+ Average Replica Count | 14.400000
+
+Per-table replica distribution summary:
+ Replica Skew |  Value
+--------------+----------
+ Minimum      | 1
+ Maximum      | 1
+ Average      | 1.000000
+----
+
+If more details are needed in addition to the replica distribution summary,
+use the `--output_replica_distribution_details` flag. If added, the flag makes
+the tool print per-table and per-tablet server replica distribution statistics
+as well.
+
+Use the `--report_only` flag to get a report on table- and cluster-wide
+replica distribution statistics without starting any rebalancing activity.
+
+The rebalancer can also be restricted to run on a subset of the tables by
+supplying the `--tables` flag. Note that, when running on a subset of tables,
+the tool will not attempt to balance the cluster as a whole.
+
+The length of time rebalancing is run for can be controlled with the flag
+`--max_run_time_sec`. By default, the rebalancer will run until the cluster is
+balanced. To control the amount of resources devoted to rebalancing, modify
+the flag `--max_moves_per_server`. See `kudu cluster rebalance --help` for more.
+
+The rebalancing tool can rebalance Kudu clusters running older versions as well,
+with some restrictions. Consult the following table for more information. In the
+table, "RF" stands for "replication factor".
+
+[[rebalancer_compatibility]]
+.Kudu Rebalancing Tool Compatibility
+[options="header"]
+|===
+| Version Range | Rebalances RF = 1 Tables? | Rebalances RF > 1 Tables?
+| v < 1.4.0 | No | No
+| 1.4.0 +<=+ v < 1.7.1 | No | Yes
+| v >= 1.7.1 | Yes | Yes
+|===
+
+If the rebalancer is running against a cluster where rebalancing replication
+factor one tables is not supported, it will rebalance all the other tables
+and the cluster as if those singly-replicated tables did not exist.

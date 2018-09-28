@@ -14,6 +14,8 @@
 package org.apache.kudu.client;
 
 import static org.apache.kudu.util.AssertHelpers.assertEventuallyTrue;
+import static org.apache.kudu.util.ClientTestUtil.createBasicSchemaInsert;
+import static org.apache.kudu.util.ClientTestUtil.getBasicCreateTableOptions;
 import static org.junit.Assert.assertNotNull;
 
 import java.io.Closeable;
@@ -28,6 +30,7 @@ import javax.security.auth.Subject;
 
 import org.apache.kudu.client.Client.AuthenticationCredentialsPB;
 import org.apache.kudu.client.MiniKuduCluster.MiniKuduClusterBuilder;
+import org.apache.kudu.junit.RetryRule;
 import org.apache.kudu.master.Master.ConnectToMasterResponsePB;
 import org.apache.kudu.util.AssertHelpers;
 import org.apache.kudu.util.AssertHelpers.BooleanExpression;
@@ -36,10 +39,10 @@ import org.apache.kudu.util.SecurityUtil;
 import org.hamcrest.CoreMatchers;
 import org.junit.After;
 import org.junit.Assert;
-import org.junit.BeforeClass;
+import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 
-import com.google.common.base.Preconditions;
 import com.google.common.base.Stopwatch;
 import com.google.common.collect.ImmutableSet;
 import com.stumbleupon.async.Deferred;
@@ -47,7 +50,7 @@ import com.stumbleupon.async.Deferred;
 public class TestSecurity {
   private static final String TABLE_NAME = "TestSecurity-table";
   private static final int TICKET_LIFETIME_SECS = 10;
-  private static final int RENEWABLE_LIFETIME_SECS = 30;
+  private static final int RENEWABLE_LIFETIME_SECS = 20;
 
   private final CapturingLogAppender cla = new CapturingLogAppender();
   private MiniKuduCluster miniCluster;
@@ -60,7 +63,6 @@ public class TestSecurity {
   };
 
   private void startCluster(Set<Option> opts) throws IOException {
-    Preconditions.checkState(miniCluster == null);
     MiniKuduClusterBuilder mcb = new MiniKuduClusterBuilder();
     mcb.enableKerberos();
     if (opts.contains(Option.LONG_LEADER_ELECTION)) {
@@ -75,7 +77,7 @@ public class TestSecurity {
         .numTservers(opts.contains(Option.START_TSERVERS) ? 3 : 0)
         .build();
     miniCluster.kinit("test-admin");
-    client = new KuduClient.KuduClientBuilder(miniCluster.getMasterAddresses()).build();
+    client = new KuduClient.KuduClientBuilder(miniCluster.getMasterAddressesAsString()).build();
 
     // TODO(todd): it seems that exportAuthenticationCredentials() doesn't properly retry
     // in the case that there is no leader, even though NoLeaderFoundException is a RecoverableException.
@@ -84,13 +86,18 @@ public class TestSecurity {
     client.listTabletServers();
   }
 
-  @BeforeClass
-  public static void setUpBeforeClass() throws Exception {
+  // Add a rule to rerun tests. We use this with Gradle because it doesn't support
+  // Surefire/Failsafe rerunFailingTestsCount like Maven does.
+  @Rule
+  public RetryRule retryRule = new RetryRule();
+
+  @Before
+  public void setUp() {
     FakeDNS.getInstance().install();
   }
 
   @After
-  public void reset() throws IOException, InterruptedException {
+  public void tearDown() throws IOException {
     if (client != null) {
       client.close();
     }
@@ -113,7 +120,7 @@ public class TestSecurity {
   }
 
   private KuduClient createClient() {
-    return new KuduClient.KuduClientBuilder(miniCluster.getMasterAddresses()).build();
+    return new KuduClient.KuduClientBuilder(miniCluster.getMasterAddressesAsString()).build();
   }
 
   private void checkClientCanReconnect(KuduClient client) throws IOException {
@@ -123,8 +130,8 @@ public class TestSecurity {
     // would continue to work even though our credentials might have
     // expired (we only authenticate when a connection is negotiated, not
     // for each call).
-    miniCluster.killMasters();
-    miniCluster.restartDeadMasters();
+    miniCluster.killAllMasterServers();
+    miniCluster.startAllMasterServers();
     client.listTabletServers();
   }
 
@@ -143,7 +150,7 @@ public class TestSecurity {
     System.clearProperty(SecurityUtil.KUDU_TICKETCACHE_PROPERTY);
     try {
       KuduClient newClient = new KuduClient.KuduClientBuilder(
-          miniCluster.getMasterAddresses()).build();
+          miniCluster.getMasterAddressesAsString()).build();
 
       // Test that a client with no credentials cannot list servers.
       try {
@@ -161,9 +168,9 @@ public class TestSecurity {
       // we should now be able to perform all of the normal client operations.
       newClient.importAuthenticationCredentials(authnData);
       KuduTable table = newClient.createTable(TABLE_NAME, BaseKuduTest.basicSchema,
-          BaseKuduTest.getBasicCreateTableOptions());
+          getBasicCreateTableOptions());
       KuduSession session = newClient.newSession();
-      session.apply(BaseKuduTest.createBasicSchemaInsert(table, 1));
+      session.apply(createBasicSchemaInsert(table, 1));
       session.flush();
     } finally {
       // Restore ticket cache for other test cases.
@@ -246,7 +253,7 @@ public class TestSecurity {
           new BooleanExpression() {
             @Override
             public boolean get() throws Exception {
-              ConnectToCluster connector = new ConnectToCluster(miniCluster.getMasterHostPorts());
+              ConnectToCluster connector = new ConnectToCluster(miniCluster.getMasterServers());
               List<Deferred<ConnectToMasterResponsePB>> deferreds =
                       connector.connectToMasters(newClient.asyncClient.getMasterTable(), null,
                       /* timeout = */50000,
@@ -284,8 +291,8 @@ public class TestSecurity {
       newClient.importAuthenticationCredentials(authnData);
       System.err.println("=> imported auth");
 
-      miniCluster.killMasters();
-      miniCluster.restartDeadMasters();
+      miniCluster.killAllMasterServers();
+      miniCluster.startAllMasterServers();
       newClient.listTabletServers();
       System.err.println("=> listTabletServers");
     } finally {
@@ -304,7 +311,7 @@ public class TestSecurity {
     try (Closeable c = cla.attach()) {
       for (Stopwatch sw = Stopwatch.createStarted();
            sw.elapsed(TimeUnit.SECONDS) < RENEWABLE_LIFETIME_SECS * 2;) {
-        if (timeSinceKinit.elapsed(TimeUnit.SECONDS) > TICKET_LIFETIME_SECS + 5) {
+        if (timeSinceKinit.elapsed(TimeUnit.SECONDS) > TICKET_LIFETIME_SECS + 2) {
           // We have gotten past the initial lifetime and well into the renewable
           // lifetime. If we haven't failed yet, that means that Kudu
           // successfully renewed the ticket.
@@ -315,7 +322,7 @@ public class TestSecurity {
           miniCluster.kinit("test-admin");
           timeSinceKinit.reset().start();
         }
-        Thread.sleep(5000);
+        Thread.sleep(1000);
         // Ensure that we don't use an authentication token to reconnect.
         client.asyncClient.securityContext.setAuthenticationToken(null);
         checkClientCanReconnect(client);
@@ -355,8 +362,8 @@ public class TestSecurity {
           @Override
           public boolean get() throws Exception {
             Thread.sleep(3000);
-            miniCluster.killMasters();
-            miniCluster.restartDeadMasters();
+            miniCluster.killAllMasterServers();
+            miniCluster.startAllMasterServers();
             try {
               client.listTabletServers();
             } catch (Exception e) {
@@ -409,6 +416,7 @@ public class TestSecurity {
   @Test(timeout=300000)
   public void testExternallyProvidedSubjectRefreshedExternally() throws Exception {
     startCluster(ImmutableSet.of(Option.SHORT_TOKENS_AND_TICKETS));
+
     Subject subject = SecurityUtil.getSubjectFromTicketCacheOrNull();
     Assert.assertNotNull(subject);
     try (Closeable c = cla.attach()) {
@@ -418,7 +426,7 @@ public class TestSecurity {
       // are indeed picking up the new credentials.
       for (Stopwatch sw = Stopwatch.createStarted();
           sw.elapsed(TimeUnit.SECONDS) < RENEWABLE_LIFETIME_SECS + 5;
-          Thread.sleep(3000)) {
+          Thread.sleep(1000)) {
         miniCluster.kinit("test-admin");
 
         // Update the existing subject in-place by copying over the credentials from

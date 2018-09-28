@@ -27,8 +27,8 @@ import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.List;
 
-import com.google.common.net.HostAndPort;
 import com.google.protobuf.ByteString;
+import org.apache.kudu.util.ProtobufUtils;
 import org.junit.Test;
 
 import org.apache.kudu.consensus.Metadata;
@@ -120,6 +120,27 @@ public class TestRemoteTablet {
         tablet.getReplicaSelectedServerInfo(ReplicaSelection.CLOSEST_REPLICA).getUuid());
   }
 
+  // AsyncKuduClient has methods like scanNextRows, keepAlive, and closeScanner that rely on
+  // RemoteTablet.getReplicaSelectedServerInfo to be deterministic given the same state.
+  // This ensures follow up calls are routed to the same server with the scanner open.
+  // This test ensures that remains true.
+  @Test
+  public void testGetReplicaSelectedServerInfoDeterminism() {
+    RemoteTablet tabletWithLocal = getTablet(0, 0);
+    verifyGetReplicaSelectedServerInfoDeterminism(tabletWithLocal);
+
+    RemoteTablet tabletWithRemote = getTablet(0, -1);
+    verifyGetReplicaSelectedServerInfoDeterminism(tabletWithRemote);
+  }
+
+  private void verifyGetReplicaSelectedServerInfoDeterminism(RemoteTablet tablet) {
+    String init = tablet.getReplicaSelectedServerInfo(ReplicaSelection.CLOSEST_REPLICA).getUuid();
+    for (int i = 0; i < 10; i++) {
+      String next = tablet.getReplicaSelectedServerInfo(ReplicaSelection.CLOSEST_REPLICA).getUuid();
+      assertEquals("getReplicaSelectedServerInfo was not deterministic", init, next);
+    }
+  }
+
   @Test
   public void testToString() {
     RemoteTablet tablet = getTablet(0, 1);
@@ -134,7 +155,7 @@ public class TestRemoteTablet {
   static RemoteTablet getTablet(int leaderIndex, int localReplicaIndex) {
     Master.TabletLocationsPB.Builder tabletPb = Master.TabletLocationsPB.newBuilder();
 
-    tabletPb.setPartition(TestUtils.getFakePartitionPB());
+    tabletPb.setPartition(ProtobufUtils.getFakePartitionPB());
     tabletPb.setTabletId(ByteString.copyFromUtf8("fake tablet"));
     List<ServerInfo> servers = new ArrayList<>();
     for (int i = 0; i < 3; i++) {
@@ -151,9 +172,9 @@ public class TestRemoteTablet {
 
       String uuid = kUuids[i];
       servers.add(new ServerInfo(uuid,
-                                 HostAndPort.fromParts("host", 1000 + i),
+                                 new HostAndPort("host", 1000 + i),
                                  addr));
-      tabletPb.addReplicas(TestUtils.getFakeTabletReplicaPB(
+      tabletPb.addReplicas(ProtobufUtils.getFakeTabletReplicaPB(
           uuid, "host", i,
           leaderIndex == i ? Metadata.RaftPeerPB.Role.LEADER : Metadata.RaftPeerPB.Role.FOLLOWER));
     }

@@ -115,7 +115,8 @@ class KuduClient::Data {
 
   Status DeleteTable(KuduClient* client,
                      const std::string& table_name,
-                     const MonoTime& deadline);
+                     const MonoTime& deadline,
+                     bool modify_external_catalogs = true);
 
   Status AlterTable(KuduClient* client,
                     const master::AlterTableRequestPB& req,
@@ -187,9 +188,23 @@ class KuduClient::Data {
       const MonoTime& deadline,
       rpc::CredentialsPolicy creds_policy = rpc::CredentialsPolicy::ANY_CREDENTIALS);
 
+  // A wrapper around ConnectToCluster() to handle various errors in case
+  // if a call to thought-to-be-leader master fails. First, this method calls
+  // ConnectToCluster() with current client credentials unless
+  // INVALID_AUTHN_TOKEN reason is specified. If the ConnectToCluster() with the
+  // current client credentials fails, call ConnectToCluster() with primary
+  // credentials. The ReconnectionReason is a dedicated enumeration for the
+  // third parameter of the method.
+  enum class ReconnectionReason { INVALID_AUTHN_TOKEN, OTHER };
+  void ReconnectToCluster(KuduClient* client,
+                          const MonoTime& deadline,
+                          ReconnectionReason reason);
+
   std::shared_ptr<master::MasterServiceProxy> master_proxy() const;
 
   HostPort leader_master_hostport() const;
+
+  std::vector<HostPort> master_hostports() const;
 
   uint64_t GetLatestObservedTimestamp() const;
 
@@ -254,6 +269,17 @@ class KuduClient::Data {
   // ConnectToClusterAsync.
   HostPort leader_master_hostport_;
 
+  // The master RPC host ports as configured on the most recently connected to
+  // leader master in ConnectedToClusterCb.
+  std::vector<HostPort> master_hostports_;
+
+  // The Hive Metastore configuration of the most recently connected to leader
+  // master, or an empty string if the leader master is not configured to
+  // integrate with a Hive Metastore.
+  std::string hive_metastore_uris_;
+  bool hive_metastore_sasl_enabled_;
+  std::string hive_metastore_uuid_;
+
   // Proxy to the leader master.
   std::shared_ptr<master::MasterServiceProxy> master_proxy_;
 
@@ -266,7 +292,7 @@ class KuduClient::Data {
   std::vector<StatusCallback> leader_master_callbacks_primary_creds_;
 
   // Protects 'leader_master_rpc_{any,primary}_creds_',
-  // 'leader_master_hostport_', and 'master_proxy_'.
+  // 'leader_master_hostport_', 'master_hostports_', and 'master_proxy_'.
   //
   // See: KuduClient::Data::ConnectToClusterAsync for a more
   // in-depth explanation of why this is needed and how it works.

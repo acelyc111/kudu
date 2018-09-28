@@ -23,10 +23,14 @@ import org.apache.kudu.client.KuduClient
 import org.apache.kudu.spark.tools.ImportExportKudu.ArgsCls
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.SparkConf
-import org.slf4j.{Logger, LoggerFactory}
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
 import org.apache.kudu.spark.kudu._
 import org.apache.yetus.audience.InterfaceAudience
+import org.apache.yetus.audience.InterfaceStability
 
+@InterfaceAudience.Public
+@InterfaceStability.Unstable //TODO: Unstable due to KUDU-2454
 object ImportExportKudu {
   val LOG: Logger = LoggerFactory.getLogger(ImportExportKudu.getClass)
 
@@ -51,16 +55,16 @@ object ImportExportKudu {
        |      header: header for csv import/export, default:false
      """.stripMargin
 
-  case class ArgsCls(operation: String = "import",
-                     format: String = "csv",
-                     masterAddrs: String = defaultMasterAddrs,
-                     path: String = "file://",
-                     tableName: String = "",
-                     columns: String = "*",
-                     delimiter: String = ",",
-                     header: String = "false",
-                     inferschema: String="false"
-                    )
+  case class ArgsCls(
+      operation: String = "import",
+      format: String = "csv",
+      masterAddrs: String = defaultMasterAddrs,
+      path: String = "file://",
+      tableName: String = "",
+      columns: String = "*",
+      delimiter: String = ",",
+      header: String = "false",
+      inferschema: String = "false")
 
   object ArgsCls {
     private def parseInner(options: ArgsCls, args: List[String]): ArgsCls = {
@@ -107,21 +111,25 @@ object ImportExportFiles {
       fail(args.tableName + s" table doesn't exist")
     }
 
-    val kuduOptions = Map(
-      "kudu.table" -> args.tableName,
-      "kudu.master" -> args.masterAddrs)
+    val kuduOptions =
+      Map("kudu.table" -> args.tableName, "kudu.master" -> args.masterAddrs)
 
     args.operation match {
       case "import" =>
         args.format match {
           case "csv" =>
-            val df = sqlContext.read.option("header", args.header).option("delimiter", args.delimiter).csv(args.path)
+            val df = sqlContext.read
+              .option("header", args.header)
+              .option("delimiter", args.delimiter)
+              .csv(args.path)
             kc.upsertRows(df, args.tableName)
           case "parquet" =>
             val df = sqlContext.read.parquet(args.path)
             kc.upsertRows(df, args.tableName)
           case "avro" =>
-            val df = sqlContext.read.format("com.databricks.spark.avro").load(args.path)
+            val df = sqlContext.read
+              .format("com.databricks.spark.avro")
+              .load(args.path)
             kc.upsertRows(df, args.tableName)
           case _ => fail(args.format + s"unknown argument given ")
         }
@@ -129,8 +137,11 @@ object ImportExportFiles {
         val df = sqlContext.read.options(kuduOptions).kudu.select(args.columns)
         args.format match {
           case "csv" =>
-            df.write.format("com.databricks.spark.csv").option("header", args.header).option("delimiter",
-              args.delimiter).save(args.path)
+            df.write
+              .format("com.databricks.spark.csv")
+              .option("header", args.header)
+              .option("delimiter", args.delimiter)
+              .save(args.path)
           case "parquet" =>
             df.write.parquet(args.path)
           case "avro" =>
@@ -142,18 +153,18 @@ object ImportExportFiles {
   }
 
   /**
-    * Entry point for testing. SparkContext is a singleton,
-    * so tests must create and manage their own.
-    */
+   * Entry point for testing. SparkContext is a singleton,
+   * so tests must create and manage their own.
+   */
   @InterfaceAudience.LimitedPrivate(Array("Test"))
   def testMain(args: Array[String], ss: SparkSession): Unit = {
     run(ArgsCls.parse(args), ss)
   }
 
   def main(args: Array[String]): Unit = {
-    val conf = new SparkConf().setAppName("Import or Export CSV files from/to Kudu ")
+    val conf =
+      new SparkConf().setAppName("Import or Export CSV files from/to Kudu ")
     val ss = SparkSession.builder().config(conf).getOrCreate()
     testMain(args, ss)
   }
 }
-

@@ -16,6 +16,11 @@
 // under the License.
 package org.apache.kudu.client;
 
+import static org.apache.kudu.util.ClientTestUtil.createBasicSchemaInsert;
+import static org.apache.kudu.util.ClientTestUtil.getBasicCreateTableOptions;
+import static org.apache.kudu.util.ClientTestUtil.getBasicSchema;
+import static org.apache.kudu.util.ClientTestUtil.getBasicTableOptionsWithNonCoveredRange;
+import static org.apache.kudu.util.ClientTestUtil.scanTableToStrings;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -28,30 +33,22 @@ import java.util.List;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
+import org.junit.Before;
 import org.junit.BeforeClass;
-import org.junit.Rule;
 import org.junit.Test;
-import org.junit.rules.TestName;
 
 import org.apache.kudu.ColumnSchema;
 import org.apache.kudu.Schema;
 import org.apache.kudu.Type;
 
 public class TestKuduTable extends BaseKuduTest {
-  @Rule
-  public TestName name = new TestName();
-
-  private static Schema schema = getBasicSchema();
-
-  @BeforeClass
-  public static void setUpBeforeClass() throws Exception {
-    BaseKuduTest.setUpBeforeClass();
-  }
+  private static final Schema BASIC_SCHEMA = getBasicSchema();
+  private static final String tableName = "TestKuduTable";
 
   @Test(timeout = 100000)
   public void testAlterColumn() throws Exception {
-    // Used a simplified schema because basicSchema has extra columns that make the asserts verbose.
-    String tableName = name.getMethodName() + System.currentTimeMillis();
+    // Used a simplified schema because BASIC_SCHEMA has extra columns that make the asserts
+    // verbose.
     List<ColumnSchema> columns = ImmutableList.of(
         new ColumnSchema.ColumnSchemaBuilder("key", Type.INT32).key(true).build(),
         new ColumnSchema.ColumnSchemaBuilder("value", Type.STRING)
@@ -64,6 +61,7 @@ public class TestKuduTable extends BaseKuduTest {
     KuduSession session = syncClient.newSession();
     // Insert a row before a default is defined and check the value is NULL.
     insertDefaultRow(table, session, 0);
+    //ClientTestUtil.scanTa
     List<String> rows = scanTableToStrings(table);
     assertEquals("wrong number of rows", 1, rows.size());
     assertEquals("wrong row", "INT32 key=0, STRING value=NULL", rows.get(0));
@@ -139,7 +137,6 @@ public class TestKuduTable extends BaseKuduTest {
 
   @Test(timeout = 100000)
   public void testAlterTable() throws Exception {
-    String tableName = name.getMethodName() + System.currentTimeMillis();
     createTable(tableName, basicSchema, getBasicCreateTableOptions());
     try {
 
@@ -199,24 +196,24 @@ public class TestKuduTable extends BaseKuduTest {
    */
   @Test
   public void testGetLocations() throws Exception {
-    String table1 = name.getMethodName() + System.currentTimeMillis();
-
     int initialTableCount = client.getTablesList().join(DEFAULT_SLEEP).getTablesList().size();
+
+    final String NON_EXISTENT_TABLE = "NON_EXISTENT_TABLE";
 
     // Test a non-existing table
     try {
-      openTable(table1);
+      openTable(NON_EXISTENT_TABLE);
       fail("Should receive an exception since the table doesn't exist");
     } catch (Exception ex) {
       // expected
     }
     // Test with defaults
-    String tableWithDefault = name.getMethodName() + "WithDefault" + System.currentTimeMillis();
+    String tableWithDefault = tableName + "-WithDefault";
     CreateTableOptions builder = getBasicCreateTableOptions();
-    List<ColumnSchema> columns = new ArrayList<ColumnSchema>(schema.getColumnCount());
+    List<ColumnSchema> columns = new ArrayList<ColumnSchema>(BASIC_SCHEMA.getColumnCount());
     int defaultInt = 30;
     String defaultString = "data";
-    for (ColumnSchema columnSchema : schema.getColumns()) {
+    for (ColumnSchema columnSchema : BASIC_SCHEMA.getColumns()) {
 
       Object defaultValue;
 
@@ -247,14 +244,15 @@ public class TestKuduTable extends BaseKuduTest {
     // Test we can open a table that was already created.
     openTable(tableWithDefault);
 
+    String splitTablePrefix = tableName + "-Splits";
     // Test splitting and reading those splits
-    KuduTable kuduTableWithoutDefaults = createTableWithSplitsAndTest(0);
+    KuduTable kuduTableWithoutDefaults = createTableWithSplitsAndTest(splitTablePrefix, 0);
     // finish testing read defaults
     assertNull(kuduTableWithoutDefaults.getSchema().getColumnByIndex(0).getDefaultValue());
-    createTableWithSplitsAndTest(3);
-    createTableWithSplitsAndTest(10);
+    createTableWithSplitsAndTest(splitTablePrefix, 3);
+    createTableWithSplitsAndTest(splitTablePrefix, 10);
 
-    KuduTable table = createTableWithSplitsAndTest(30);
+    KuduTable table = createTableWithSplitsAndTest(splitTablePrefix, 30);
 
     List<LocatedTablet>tablets = table.getTabletsLocations(null, getKeyInBytes(9), DEFAULT_SLEEP);
     assertEquals(9, tablets.size());
@@ -289,7 +287,7 @@ public class TestKuduTable extends BaseKuduTest {
     assertEquals(11, table.asyncGetTabletsLocations(getKeyInBytes(20), getKeyInBytes(10000), DEFAULT_SLEEP).join().size());
 
     // Test listing tables.
-    assertEquals(0, client.getTablesList(table1).join(DEFAULT_SLEEP).getTablesList().size());
+    assertEquals(0, client.getTablesList(NON_EXISTENT_TABLE).join(DEFAULT_SLEEP).getTablesList().size());
     assertEquals(1, client.getTablesList(tableWithDefault)
                           .join(DEFAULT_SLEEP).getTablesList().size());
     assertEquals(initialTableCount + 5,
@@ -297,13 +295,12 @@ public class TestKuduTable extends BaseKuduTest {
     assertFalse(client.getTablesList(tableWithDefault).
         join(DEFAULT_SLEEP).getTablesList().isEmpty());
 
-    assertFalse(client.tableExists(table1).join(DEFAULT_SLEEP));
+    assertFalse(client.tableExists(NON_EXISTENT_TABLE).join(DEFAULT_SLEEP));
     assertTrue(client.tableExists(tableWithDefault).join(DEFAULT_SLEEP));
   }
 
   @Test(timeout = 100000)
   public void testLocateTableNonCoveringRange() throws Exception {
-    String tableName = name.getMethodName() + System.currentTimeMillis();
     syncClient.createTable(tableName, basicSchema, getBasicTableOptionsWithNonCoveredRange());
     KuduTable table = syncClient.openTable(tableName);
 
@@ -343,22 +340,21 @@ public class TestKuduTable extends BaseKuduTest {
   }
 
   public byte[] getKeyInBytes(int i) {
-    PartialRow row = schema.newPartialRow();
+    PartialRow row = BASIC_SCHEMA.newPartialRow();
     row.addInt(0, i);
     return row.encodePrimaryKey();
   }
 
   @Test(timeout = 100000)
   public void testAlterTableNonCoveringRange() throws Exception {
-    String tableName = name.getMethodName() + System.currentTimeMillis();
     syncClient.createTable(tableName, basicSchema, getBasicTableOptionsWithNonCoveredRange());
     KuduTable table = syncClient.openTable(tableName);
     KuduSession session = syncClient.newSession();
 
     AlterTableOptions ato = new AlterTableOptions();
-    PartialRow bLowerBound = schema.newPartialRow();
+    PartialRow bLowerBound = BASIC_SCHEMA.newPartialRow();
     bLowerBound.addInt("key", 300);
-    PartialRow bUpperBound = schema.newPartialRow();
+    PartialRow bUpperBound = BASIC_SCHEMA.newPartialRow();
     bUpperBound.addInt("key", 400);
     ato.addRangePartition(bLowerBound, bUpperBound);
     syncClient.alterTable(tableName, ato);
@@ -378,9 +374,9 @@ public class TestKuduTable extends BaseKuduTest {
     session.apply(insert);
 
     ato = new AlterTableOptions();
-    bLowerBound = schema.newPartialRow();
+    bLowerBound = BASIC_SCHEMA.newPartialRow();
     bLowerBound.addInt("key", 200);
-    bUpperBound = schema.newPartialRow();
+    bUpperBound = BASIC_SCHEMA.newPartialRow();
     bUpperBound.addInt("key", 300);
     ato.dropRangePartition(bLowerBound, bUpperBound);
     syncClient.alterTable(tableName, ato);
@@ -393,7 +389,6 @@ public class TestKuduTable extends BaseKuduTest {
 
   @Test(timeout = 100000)
   public void testFormatRangePartitions() throws Exception {
-    String tableName = name.getMethodName() + System.currentTimeMillis();
     CreateTableOptions builder = getBasicCreateTableOptions();
     List<String> expected = Lists.newArrayList();
 
@@ -446,8 +441,6 @@ public class TestKuduTable extends BaseKuduTest {
 
   @Test(timeout = 100000)
   public void testFormatRangePartitionsCompoundColumns() throws Exception {
-    String tableName = name.getMethodName() + System.currentTimeMillis();
-
     ArrayList<ColumnSchema> columns = new ArrayList<>();
     columns.add(new ColumnSchema.ColumnSchemaBuilder("a", Type.STRING).key(true).build());
     columns.add(new ColumnSchema.ColumnSchemaBuilder("b", Type.INT8).key(true).build());
@@ -497,8 +490,6 @@ public class TestKuduTable extends BaseKuduTest {
 
   @Test(timeout = 100000)
   public void testFormatRangePartitionsStringColumn() throws Exception {
-    String tableName = name.getMethodName() + System.currentTimeMillis();
-
     ArrayList<ColumnSchema> columns = new ArrayList<>();
     columns.add(new ColumnSchema.ColumnSchemaBuilder("a", Type.STRING).key(true).build());
     Schema schema = new Schema(columns);
@@ -544,7 +535,6 @@ public class TestKuduTable extends BaseKuduTest {
 
   @Test(timeout = 100000)
   public void testFormatRangePartitionsUnbounded() throws Exception {
-    String tableName = name.getMethodName() + System.currentTimeMillis();
     CreateTableOptions builder = getBasicCreateTableOptions();
     syncClient.createTable(tableName, basicSchema, builder);
 
@@ -553,18 +543,19 @@ public class TestKuduTable extends BaseKuduTest {
         syncClient.openTable(tableName).getFormattedRangePartitions(10000));
   }
 
-  public KuduTable createTableWithSplitsAndTest(int splitsCount) throws Exception {
-    String tableName = name.getMethodName() + System.currentTimeMillis();
+  private KuduTable createTableWithSplitsAndTest(String tableNamePrefix, int splitsCount)
+      throws Exception {
+    String newTableName = tableNamePrefix + "-" + splitsCount;
     CreateTableOptions builder = getBasicCreateTableOptions();
 
     if (splitsCount != 0) {
       for (int i = 1; i <= splitsCount; i++) {
-        PartialRow row = schema.newPartialRow();
+        PartialRow row = BASIC_SCHEMA.newPartialRow();
         row.addInt(0, i);
         builder.addSplitRow(row);
       }
     }
-    KuduTable table = createTable(tableName, schema, builder);
+    KuduTable table = createTable(newTableName, BASIC_SCHEMA, builder);
 
     List<LocatedTablet> tablets = table.getTabletsLocations(DEFAULT_SLEEP);
     assertEquals(splitsCount + 1, tablets.size());
@@ -576,8 +567,62 @@ public class TestKuduTable extends BaseKuduTest {
   }
 
   @Test(timeout = 100000)
+  public void testGetRangePartitions() throws Exception {
+    ArrayList<ColumnSchema> columns = new ArrayList<>();
+    columns.add(new ColumnSchema.ColumnSchemaBuilder("a", Type.STRING).key(true).build());
+    columns.add(new ColumnSchema.ColumnSchemaBuilder("b", Type.INT8).key(true).build());
+    Schema schema = new Schema(columns);
+
+    CreateTableOptions builder = new CreateTableOptions();
+    builder.addHashPartitions(ImmutableList.of("a"), 2);
+    builder.addHashPartitions(ImmutableList.of("b"), 2);
+    builder.setRangePartitionColumns(ImmutableList.of("a", "b"));
+
+    PartialRow bottom = schema.newPartialRow();
+    PartialRow middle = schema.newPartialRow();
+    middle.addString("a", "");
+    middle.addByte("b", (byte) -100);
+    PartialRow upper = schema.newPartialRow();
+
+    builder.addRangePartition(bottom, middle);
+    builder.addRangePartition(middle, upper);
+
+    KuduTable table = createTable(tableName, schema, builder);
+
+    List<Partition> rangePartitions =
+        table.getRangePartitions(client.getDefaultOperationTimeoutMs());
+    assertEquals(rangePartitions.size(), 2);
+
+    Partition lowerPartition = rangePartitions.get(0);
+    assertEquals(0, lowerPartition.getRangeKeyStart().length);
+    assertTrue(lowerPartition.getRangeKeyEnd().length > 0);
+    PartialRow decodedLower = lowerPartition.getDecodedRangeKeyEnd(table);
+    assertEquals("", decodedLower.getString("a"));
+    assertEquals((byte) -100, decodedLower.getByte("b"));
+
+    Partition upperPartition = rangePartitions.get(1);
+    assertTrue(upperPartition.getRangeKeyStart().length > 0);
+    assertEquals(0, upperPartition.getRangeKeyEnd().length);
+    PartialRow decodedUpper = upperPartition.getDecodedRangeKeyStart(table);
+    assertEquals("", decodedUpper.getString("a"));
+    assertEquals((byte) -100, decodedUpper.getByte("b"));
+  }
+
+  @Test(timeout = 100000)
+  public void testGetRangePartitionsUnbounded() throws Exception {
+    CreateTableOptions builder = getBasicCreateTableOptions();
+    KuduTable table = createTable(tableName, BASIC_SCHEMA, builder);
+
+    List<Partition> rangePartitions =
+        table.getRangePartitions(client.getDefaultOperationTimeoutMs());
+    assertEquals(rangePartitions.size(), 1);
+    Partition partition = rangePartitions.get(0);
+    assertEquals(0, partition.getRangeKeyStart().length);
+    assertEquals(0, partition.getRangeKeyEnd().length);
+  }
+
+  @Test(timeout = 100000)
   public void testAlterNoWait() throws Exception {
-    String tableName = name.getMethodName() + System.currentTimeMillis();
     createTable(tableName, basicSchema, getBasicCreateTableOptions());
 
     String oldName = "column2_i";
@@ -618,5 +663,20 @@ public class TestKuduTable extends BaseKuduTest {
       return;
     }
     fail("Could not run test even after multiple attempts");
+  }
+
+  @Test(timeout = 100000)
+  public void testNumReplicas() throws Exception {
+    for (int i = 1; i <= 3; i++) {
+      // Ignore even numbers.
+      if (i % 2 != 0) {
+        String tableName = "testNumReplicas" + "-" + i;
+        CreateTableOptions options = getBasicCreateTableOptions();
+        options.setNumReplicas(i);
+        createTable(tableName, basicSchema, options);
+        KuduTable table = syncClient.openTable(tableName);
+        assertEquals(i, table.getNumReplicas());
+      }
+    }
   }
 }

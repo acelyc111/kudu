@@ -16,6 +16,8 @@
 // under the License.
 package org.apache.kudu.client;
 
+import static org.apache.kudu.util.ClientTestUtil.countRowsInTable;
+import static org.apache.kudu.util.ClientTestUtil.scanTableToStrings;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -78,7 +80,7 @@ public class TestAlterTable extends BaseKuduTest {
       createOptions.addRangePartition(lower, upper);
     }
 
-    return BaseKuduTest.createTable(tableName, schema, createOptions);
+    return createTable(tableName, schema, createOptions);
   }
 
   /**
@@ -312,7 +314,7 @@ public class TestAlterTable extends BaseKuduTest {
                                     RangePartitionBound.EXCLUSIVE_BOUND,
                                     RangePartitionBound.INCLUSIVE_BOUND);
 
-    KuduTable table = BaseKuduTest.createTable(tableName, schema, createOptions);
+    KuduTable table = createTable(tableName, schema, createOptions);
 
     lower.addInt("c0", 199);
     upper.addInt("c0", 299);

@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cstring>
 #include <iostream>
+#include <memory>
 
 #include <gflags/gflags.h>
 #include <glog/logging.h>
@@ -65,16 +66,16 @@ DEFINE_double(fault_crash_before_write_log_segment_header, 0.0,
               "Fraction of the time we will crash just before writing the log segment header");
 TAG_FLAG(fault_crash_before_write_log_segment_header, unsafe);
 
-namespace kudu {
-namespace log {
-
-using consensus::OpId;
+using kudu::consensus::OpId;
 using std::string;
 using std::shared_ptr;
 using std::vector;
 using std::unique_ptr;
 using strings::Substitute;
 using strings::SubstituteAndAppend;
+
+namespace kudu {
+namespace log {
 
 const char kLogSegmentHeaderMagicString[] = "kudulogf";
 
@@ -128,7 +129,7 @@ LogEntryReader::LogEntryReader(ReadableLogSegment* seg)
 
 LogEntryReader::~LogEntryReader() {}
 
-Status LogEntryReader::ReadNextEntry(LogEntryPB* entry) {
+Status LogEntryReader::ReadNextEntry(unique_ptr<LogEntryPB>* entry) {
   // Refill pending_entries_ if none are available.
   while (pending_entries_.empty()) {
 
@@ -145,7 +146,7 @@ Status LogEntryReader::ReadNextEntry(LogEntryPB* entry) {
     }
 
     // We still expect to have more entries in the log.
-    gscoped_ptr<LogEntryBatchPB> current_batch;
+    unique_ptr<LogEntryBatchPB> current_batch;
 
     // Read and validate the entry header first.
     Status s;
@@ -182,7 +183,7 @@ Status LogEntryReader::ReadNextEntry(LogEntryPB* entry) {
         0, current_batch->entry_size(), nullptr);
   }
 
-  pending_entries_[0]->Swap(entry);
+  *entry = std::move(pending_entries_.front());
   pending_entries_.pop_front();
   return Status::OK();
 }
@@ -372,14 +373,15 @@ Status ReadableLogSegment::RebuildFooterByScanning() {
 
   LogSegmentFooterPB new_footer;
   int num_entries = 0;
-  LogEntryPB entry;
   while (true) {
+    unique_ptr<LogEntryPB> entry;
     Status s = reader.ReadNextEntry(&entry);
     if (s.IsEndOfFile()) break;
     RETURN_NOT_OK(s);
 
-    if (entry.has_replicate()) {
-      UpdateFooterForReplicateEntry(entry, &new_footer);
+    DCHECK(entry);
+    if (entry->has_replicate()) {
+      UpdateFooterForReplicateEntry(*entry, &new_footer);
     }
     num_entries++;
   }
@@ -453,33 +455,6 @@ Status ReadableLogSegment::ReadHeaderMagicAndHeaderLength(uint32_t *len) {
   RETURN_NOT_OK(ParseHeaderMagicAndHeaderLength(slice, len));
   return Status::OK();
 }
-
-namespace {
-
-// We don't run TSAN on this function because it makes it really slow and causes some
-// test timeouts. This is only used on local buffers anyway, so we don't lose much
-// by not checking it.
-ATTRIBUTE_NO_SANITIZE_THREAD
-bool IsAllZeros(const Slice& s) {
-  // Walk a pointer through the slice instead of using s[i]
-  // since this is way faster in debug mode builds. We also do some
-  // manual unrolling for the same purpose.
-  const uint8_t* p = &s[0];
-  int rem = s.size();
-
-  while (rem >= 8) {
-    if (UNALIGNED_LOAD64(p) != 0) return false;
-    rem -= 8;
-    p += 8;
-  }
-
-  while (rem > 0) {
-    if (*p++ != '\0') return false;
-    rem--;
-  }
-  return true;
-}
-} // anonymous namespace
 
 Status ReadableLogSegment::ParseHeaderMagicAndHeaderLength(const Slice &data,
                                                            uint32_t *parsed_len) {
@@ -572,17 +547,20 @@ Status ReadableLogSegment::ParseFooterMagicAndFooterLength(const Slice &data,
   return Status::OK();
 }
 
-Status ReadableLogSegment::ReadEntries(vector<LogEntryPB*>* entries) {
+Status ReadableLogSegment::ReadEntries(LogEntries* entries) {
   TRACE_EVENT1("log", "ReadableLogSegment::ReadEntries",
                "path", path_);
   LogEntryReader reader(this);
 
   while (true) {
-    unique_ptr<LogEntryPB> entry(new LogEntryPB());
-    Status s = reader.ReadNextEntry(entry.get());
-    if (s.IsEndOfFile()) break;
+    unique_ptr<LogEntryPB> entry;
+    Status s = reader.ReadNextEntry(&entry);
+    if (s.IsEndOfFile()) {
+      break;
+    }
     RETURN_NOT_OK(s);
-    entries->push_back(entry.release());
+    DCHECK(entry);
+    entries->emplace_back(std::move(entry));
   }
 
   return Status::OK();
@@ -600,8 +578,8 @@ Status ReadableLogSegment::ScanForValidEntryHeaders(int64_t offset, bool* has_va
           << "following offset " << offset << "...";
   *has_valid_entries = false;
 
-  const int kChunkSize = 1024 * 1024;
-  gscoped_ptr<uint8_t[]> buf(new uint8_t[kChunkSize]);
+  constexpr auto kChunkSize = 1024 * 1024;
+  unique_ptr<uint8_t[]> buf(new uint8_t[kChunkSize]);
 
   // We overlap the reads by the size of the header, so that if a header
   // spans chunks, we don't miss it.
@@ -638,7 +616,7 @@ Status ReadableLogSegment::ScanForValidEntryHeaders(int64_t offset, bool* has_va
 }
 
 Status ReadableLogSegment::ReadEntryHeaderAndBatch(int64_t* offset, faststring* tmp_buf,
-                                                   gscoped_ptr<LogEntryBatchPB>* batch,
+                                                   unique_ptr<LogEntryBatchPB>* batch,
                                                    EntryHeaderStatus* status_detail) {
   int64_t cur_offset = *offset;
   EntryHeader header;
@@ -708,10 +686,10 @@ EntryHeaderStatus ReadableLogSegment::DecodeEntryHeader(
 }
 
 
-Status ReadableLogSegment::ReadEntryBatch(int64_t *offset,
+Status ReadableLogSegment::ReadEntryBatch(int64_t* offset,
                                           const EntryHeader& header,
-                                          faststring *tmp_buf,
-                                          gscoped_ptr<LogEntryBatchPB> *entry_batch) {
+                                          faststring* tmp_buf,
+                                          unique_ptr<LogEntryBatchPB>* entry_batch) {
   TRACE_EVENT2("log", "ReadableLogSegment::ReadEntryBatch",
                "path", path_,
                "range", Substitute("offset=$0 entry_len=$1",
@@ -760,7 +738,7 @@ Status ReadableLogSegment::ReadEntryBatch(int64_t *offset,
     entry_batch_slice = Slice(uncompress_buf, header.msg_length);
   }
 
-  gscoped_ptr<LogEntryBatchPB> read_entry_batch(new LogEntryBatchPB());
+  unique_ptr<LogEntryBatchPB> read_entry_batch(new LogEntryBatchPB);
   s = pb_util::ParseFromArray(read_entry_batch.get(),
                               entry_batch_slice.data(),
                               header.msg_length);

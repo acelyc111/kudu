@@ -16,14 +16,14 @@
 // under the License.
 package org.apache.kudu.client;
 
+import static org.apache.kudu.util.ClientTestUtil.getBasicSchema;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 import java.util.Random;
 
 import com.google.common.collect.Lists;
-import org.junit.After;
-import org.junit.BeforeClass;
+import org.junit.Before;
 
 import org.apache.kudu.Schema;
 
@@ -43,10 +43,8 @@ public class ITScannerMultiTablet extends BaseKuduTest {
 
   private static Random random = new Random(1234);
 
-  @BeforeClass
-  public static void setUpBeforeClass() throws Exception {
-    BaseKuduTest.setUpBeforeClass();
-
+  @Before
+  public void setUp() throws Exception {
     CreateTableOptions builder = new CreateTableOptions();
 
     builder.addHashPartitions(
@@ -72,11 +70,6 @@ public class ITScannerMultiTablet extends BaseKuduTest {
     }
     session.flush();
     assertEquals(0, session.countPendingErrors());
-  }
-
-  @After
-  public void tearDown() throws Exception {
-    restartTabletServers();
   }
 
   /**

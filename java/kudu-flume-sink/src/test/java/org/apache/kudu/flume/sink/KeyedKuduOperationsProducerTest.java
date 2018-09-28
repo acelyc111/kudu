@@ -26,6 +26,7 @@ import static org.apache.kudu.flume.sink.KuduSinkConfigurationConstants.TABLE_NA
 import static org.apache.kudu.flume.sink.SimpleKeyedKuduOperationsProducer.KEY_COLUMN_DEFAULT;
 import static org.apache.kudu.flume.sink.SimpleKeyedKuduOperationsProducer.OPERATION_PROP;
 import static org.apache.kudu.flume.sink.SimpleKeyedKuduOperationsProducer.PAYLOAD_COLUMN_DEFAULT;
+import static org.apache.kudu.util.ClientTestUtil.scanTableToStrings;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -217,7 +218,7 @@ public class KeyedKuduOperationsProducerTest extends BaseKuduTest {
     KuduSink sink = new KuduSink(syncClient);
     HashMap<String, String> parameters = new HashMap<>();
     parameters.put(TABLE_NAME, tableName);
-    parameters.put(MASTER_ADDRESSES, getMasterAddresses());
+    parameters.put(MASTER_ADDRESSES, getMasterAddressesAsString());
     parameters.put(PRODUCER, SimpleKeyedKuduOperationsProducer.class.getName());
     Context context = new Context(parameters);
     context.putAll(ctx.getParameters());

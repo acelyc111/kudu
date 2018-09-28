@@ -34,6 +34,7 @@
 #include "kudu/fs/error_manager.h"
 #include "kudu/fs/file_block_manager.h"
 #include "kudu/fs/fs.pb.h"
+#include "kudu/fs/fs_report.h"
 #include "kudu/fs/log_block_manager.h"
 #include "kudu/gutil/bind.h"
 #include "kudu/gutil/bind_helpers.h"
@@ -56,6 +57,7 @@
 #include "kudu/util/path_util.h"
 #include "kudu/util/pb_util.h"
 #include "kudu/util/scoped_cleanup.h"
+#include "kudu/util/slice.h"
 #include "kudu/util/stopwatch.h"
 
 DEFINE_bool(enable_data_block_fsync, true,
@@ -217,7 +219,7 @@ Status FsManager::Init() {
     string canonicalized;
     Status s = env_->Canonicalize(DirName(root), &canonicalized);
     if (PREDICT_FALSE(!s.ok())) {
-      if (s.IsDiskFailure()) {
+      if (s.IsNotFound() || s.IsDiskFailure()) {
         // If the directory fails to canonicalize due to disk failure, store
         // the non-canonicalized form and the returned error.
         canonicalized = DirName(root);
@@ -325,8 +327,7 @@ Status FsManager::Open(FsReport* report) {
     Status s = pb_util::ReadPBContainerFromPath(env_, GetInstanceMetadataPath(root.path),
                                                 pb.get());
     if (PREDICT_FALSE(!s.ok())) {
-      if (s.IsNotFound() &&
-          opts_.consistency_check != ConsistencyCheckBehavior::ENFORCE_CONSISTENCY) {
+      if (s.IsNotFound()) {
         missing_roots.emplace_back(root);
         continue;
       }
@@ -348,7 +349,7 @@ Status FsManager::Open(FsReport* report) {
   }
 
   if (!metadata_) {
-    return Status::Corruption("All instance files are missing");
+    return Status::NotFound("could not find a healthy instance file");
   }
 
   // Ensure all of the ancillary directories exist.
@@ -409,13 +410,19 @@ Status FsManager::Open(FsReport* report) {
   }
 
   // Set an initial error handler to mark data directories as failed.
-  error_manager_->SetErrorNotificationCb(ErrorHandlerType::DISK,
+  error_manager_->SetErrorNotificationCb(ErrorHandlerType::DISK_ERROR,
       Bind(&DataDirManager::MarkDataDirFailedByUuid, Unretained(dd_manager_.get())));
 
   // Finally, initialize and open the block manager.
   InitBlockManager();
   LOG_TIMING(INFO, "opening block manager") {
     RETURN_NOT_OK(block_manager_->Open(report));
+  }
+
+  // Report wal and metadata directories.
+  if (report) {
+    report->wal_dir = canonicalized_wal_fs_root_.path;
+    report->metadata_dir = canonicalized_metadata_fs_root_.path;
   }
 
   if (FLAGS_enable_data_block_fsync) {
@@ -563,13 +570,12 @@ Status FsManager::CreateFileSystemRoots(
 
 Status FsManager::CreateInstanceMetadata(boost::optional<string> uuid,
                                          InstanceMetadataPB* metadata) {
-  ObjectIdGenerator oid_generator;
   if (uuid) {
     string canonicalized_uuid;
-    RETURN_NOT_OK(oid_generator.Canonicalize(uuid.get(), &canonicalized_uuid));
+    RETURN_NOT_OK(oid_generator_.Canonicalize(uuid.get(), &canonicalized_uuid));
     metadata->set_uuid(canonicalized_uuid);
   } else {
-    metadata->set_uuid(oid_generator.Next());
+    metadata->set_uuid(oid_generator_.Next());
   }
 
   string time_str;
@@ -615,24 +621,31 @@ string FsManager::GetTabletMetadataPath(const string& tablet_id) const {
   return JoinPathSegments(GetTabletMetadataDir(), tablet_id);
 }
 
-namespace {
-// Return true if 'fname' is a valid tablet ID.
-bool IsValidTabletId(const string& fname) {
-  if (fname.find(kTmpInfix) != string::npos ||
-      fname.find(kOldTmpInfix) != string::npos) {
-    LOG(WARNING) << "Ignoring tmp file in tablet metadata dir: " << fname;
+bool FsManager::IsValidTabletId(const string& fname) {
+  // Prevent warning logs for hidden files or ./..
+  if (HasPrefixString(fname, ".")) {
+    VLOG(1) << "Ignoring hidden file in tablet metadata dir: " << fname;
     return false;
   }
 
-  if (HasPrefixString(fname, ".")) {
-    // Hidden file or ./..
-    VLOG(1) << "Ignoring hidden file in tablet metadata dir: " << fname;
+  string canonicalized_uuid;
+  Status s = oid_generator_.Canonicalize(fname, &canonicalized_uuid);
+
+  if (!s.ok()) {
+    LOG(WARNING) << "Ignoring file in tablet metadata dir: " << fname << ": " <<
+                 s.message().ToString();
+    return false;
+  }
+
+  if (fname != canonicalized_uuid) {
+    LOG(WARNING) << "Ignoring file in tablet metadata dir: " << fname << ": " <<
+                 Substitute("canonicalized uuid $0 does not match file name",
+                            canonicalized_uuid);
     return false;
   }
 
   return true;
 }
-} // anonymous namespace
 
 Status FsManager::ListTabletIds(vector<string>* tablet_ids) {
   string dir = GetTabletMetadataDir();

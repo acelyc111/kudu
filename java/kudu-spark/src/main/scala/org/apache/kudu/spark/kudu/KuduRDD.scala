@@ -20,40 +20,53 @@ import scala.collection.JavaConverters._
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.Row
-import org.apache.spark.{Partition, SparkContext, TaskContext}
+import org.apache.spark.Partition
+import org.apache.spark.SparkContext
+import org.apache.spark.TaskContext
 
 import org.apache.kudu.client._
-import org.apache.kudu.{Type, client}
+import org.apache.kudu.Type
+import org.apache.kudu.client
 
 /**
-  * A Resilient Distributed Dataset backed by a Kudu table.
-  *
-  * To construct a KuduRDD, use {@link KuduContext#kuduRdd} or a Kudu DataSource.
-  */
-class KuduRDD private[kudu] (val kuduContext: KuduContext,
-                             @transient val batchSize: Integer,
-                             @transient val projectedCols: Array[String],
-                             @transient val predicates: Array[client.KuduPredicate],
-                             @transient val table: KuduTable,
-                             @transient val isFaultTolerant: Boolean,
-                             @transient val scanLocality: ReplicaSelection,
-                             @transient val sc: SparkContext) extends RDD[Row](sc, Nil) {
+ * A Resilient Distributed Dataset backed by a Kudu table.
+ *
+ * To construct a KuduRDD, use [[KuduContext#kuduRDD]] or a Kudu DataSource.
+ */
+class KuduRDD private[kudu] (
+    val kuduContext: KuduContext,
+    @transient val batchSize: Integer,
+    @transient val projectedCols: Array[String],
+    @transient val predicates: Array[client.KuduPredicate],
+    @transient val table: KuduTable,
+    @transient val isFaultTolerant: Boolean,
+    @transient val scanLocality: ReplicaSelection,
+    @transient val scanRequestTimeoutMs: Option[Long],
+    @transient val socketReadTimeoutMs: Option[Long],
+    @transient val sc: SparkContext)
+    extends RDD[Row](sc, Nil) {
 
   override protected def getPartitions: Array[Partition] = {
     val builder = kuduContext.syncClient
-                             .newScanTokenBuilder(table)
-                             .batchSizeBytes(batchSize)
-                             .setProjectedColumnNames(projectedCols.toSeq.asJava)
-                             .setFaultTolerant(isFaultTolerant)
-                             .cacheBlocks(true)
+      .newScanTokenBuilder(table)
+      .batchSizeBytes(batchSize)
+      .setProjectedColumnNames(projectedCols.toSeq.asJava)
+      .setFaultTolerant(isFaultTolerant)
+      .cacheBlocks(true)
 
     // A scan is partitioned to multiple ones. If scan locality is enabled,
     // each will take place at the closet replica from the executor. In this
     // case, to ensure the consistency of such scan, we use READ_AT_SNAPSHOT
     // read mode without setting a timestamp.
     if (scanLocality == ReplicaSelection.CLOSEST_REPLICA) {
-      builder.replicaSelection(ReplicaSelection.CLOSEST_REPLICA)
-             .readMode(AsyncKuduScanner.ReadMode.READ_AT_SNAPSHOT)
+      builder
+        .replicaSelection(ReplicaSelection.CLOSEST_REPLICA)
+        .readMode(AsyncKuduScanner.ReadMode.READ_AT_SNAPSHOT)
+    }
+
+    scanRequestTimeoutMs match {
+      case Some(timeout) => builder.scanRequestTimeout(timeout)
+      case _ =>
     }
 
     for (predicate <- predicates) {
@@ -78,7 +91,8 @@ class KuduRDD private[kudu] (val kuduContext: KuduContext,
   override def compute(part: Partition, taskContext: TaskContext): Iterator[Row] = {
     val client: KuduClient = kuduContext.syncClient
     val partition: KuduPartition = part.asInstanceOf[KuduPartition]
-    val scanner = KuduScanToken.deserializeIntoScanner(partition.scanToken, client)
+    val scanner =
+      KuduScanToken.deserializeIntoScanner(partition.scanToken, client)
     new RowIterator(scanner, kuduContext)
   }
 
@@ -88,25 +102,26 @@ class KuduRDD private[kudu] (val kuduContext: KuduContext,
 }
 
 /**
-  * A Spark SQL [[Partition]] which wraps a [[KuduScanToken]].
-  */
-private class KuduPartition(val index: Int,
-                            val scanToken: Array[Byte],
-                            val locations: Array[String]) extends Partition {}
+ * A Spark SQL [[Partition]] which wraps a [[KuduScanToken]].
+ */
+private class KuduPartition(
+    val index: Int,
+    val scanToken: Array[Byte],
+    val locations: Array[String])
+    extends Partition {}
 
 /**
-  * A Spark SQL [[Row]] iterator which wraps a [[KuduScanner]].
-  * @param scanner the wrapped scanner
-  * @param kuduContext the kudu context
-  */
-private class RowIterator(private val scanner: KuduScanner,
-                          private val kuduContext: KuduContext) extends Iterator[Row] {
+ * A Spark SQL [[Row]] iterator which wraps a [[KuduScanner]].
+ * @param scanner the wrapped scanner
+ * @param kuduContext the kudu context
+ */
+private class RowIterator(private val scanner: KuduScanner, private val kuduContext: KuduContext)
+    extends Iterator[Row] {
 
-  private var currentIterator: RowResultIterator = null
+  private var currentIterator: RowResultIterator = RowResultIterator.empty
 
   override def hasNext: Boolean = {
-    while ((currentIterator != null && !currentIterator.hasNext && scanner.hasMoreRows) ||
-           (scanner.hasMoreRows && currentIterator == null)) {
+    while (!currentIterator.hasNext && scanner.hasMoreRows) {
       if (TaskContext.get().isInterrupted()) {
         throw new RuntimeException("Kudu task interrupted")
       }
@@ -120,19 +135,20 @@ private class RowIterator(private val scanner: KuduScanner,
 
   private def get(rowResult: RowResult, i: Int): Any = {
     if (rowResult.isNull(i)) null
-    else rowResult.getColumnType(i) match {
-      case Type.BOOL => rowResult.getBoolean(i)
-      case Type.INT8 => rowResult.getByte(i)
-      case Type.INT16 => rowResult.getShort(i)
-      case Type.INT32 => rowResult.getInt(i)
-      case Type.INT64 => rowResult.getLong(i)
-      case Type.UNIXTIME_MICROS => KuduRelation.microsToTimestamp(rowResult.getLong(i))
-      case Type.FLOAT => rowResult.getFloat(i)
-      case Type.DOUBLE => rowResult.getDouble(i)
-      case Type.STRING => rowResult.getString(i)
-      case Type.BINARY => rowResult.getBinaryCopy(i)
-      case Type.DECIMAL => rowResult.getDecimal(i)
-    }
+    else
+      rowResult.getColumnType(i) match {
+        case Type.BOOL => rowResult.getBoolean(i)
+        case Type.INT8 => rowResult.getByte(i)
+        case Type.INT16 => rowResult.getShort(i)
+        case Type.INT32 => rowResult.getInt(i)
+        case Type.INT64 => rowResult.getLong(i)
+        case Type.UNIXTIME_MICROS => rowResult.getTimestamp(i)
+        case Type.FLOAT => rowResult.getFloat(i)
+        case Type.DOUBLE => rowResult.getDouble(i)
+        case Type.STRING => rowResult.getString(i)
+        case Type.BINARY => rowResult.getBinaryCopy(i)
+        case Type.DECIMAL => rowResult.getDecimal(i)
+      }
   }
 
   override def next(): Row = {

@@ -311,8 +311,8 @@ if ("${KUDU_USE_ASAN}" AND "${KUDU_USE_TSAN}")
   message(SEND_ERROR "Can only enable one of ASAN or TSAN at a time")
 endif()
 
-# Flag to enable clang address sanitizer
-# This will only build if clang or a recent enough gcc is the chosen compiler
+# Flag to enable clang address sanitizer (using it along with leak sanitizer).
+# This will only build if clang or a recent enough gcc is the chosen compiler.
 if (${KUDU_USE_ASAN})
   if(NOT (("${COMPILER_FAMILY}" STREQUAL "clang") OR
           ("${COMPILER_FAMILY}" STREQUAL "gcc" AND "${COMPILER_VERSION}" VERSION_GREATER "4.8")))
@@ -332,6 +332,7 @@ if (${KUDU_USE_ASAN})
     endif()
   endif()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -DADDRESS_SANITIZER")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DLEAK_SANITIZER")
 endif()
 
 if (${KUDU_USE_XRAY})
@@ -355,6 +356,7 @@ if (${KUDU_USE_UBSAN})
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize-blacklist=${CMAKE_CURRENT_SOURCE_DIR}/build-support/ubsan-blacklist.txt")
   # Stop execution after UB or overflow is detected.
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-sanitize-recover")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DUNDEFINED_SANITIZER")
 endif ()
 
 # Flag to enable thread sanitizer (clang or gcc 4.8)
@@ -397,7 +399,7 @@ if (${KUDU_USE_TSAN})
 endif()
 
 
-if ("${KUDU_USE_UBSAN}" OR "${KUDU_USE_ASAN}" OR "${KUDU_USE_TSAN}")
+if ("${KUDU_USE_ASAN}" OR "${KUDU_USE_TSAN}" OR "${KUDU_USE_UBSAN}")
   # GCC 4.8 and 4.9 (latest as of this writing) don't allow you to specify a
   # sanitizer blacklist.
   if("${COMPILER_FAMILY}" STREQUAL "clang")
@@ -438,27 +440,89 @@ if ("${KUDU_LINK}" STREQUAL "a")
   endif()
 endif()
 
-# Are we using the gold linker? It doesn't work with dynamic linking as
-# weak symbols aren't properly overridden, causing tcmalloc to be omitted.
-# Let's flag this as an error in RELEASE builds (we shouldn't release a
-# product like this).
+# Interrogates the linker version via the C++ compiler to determine whether
+# we're using the gold linker, and if so, extracts its version.
 #
-# See https://sourceware.org/bugzilla/show_bug.cgi?id=16979 for details.
+# If the gold linker is being used, sets GOLD_VERSION in the parent scope with
+# the extracted version.
 #
-# The gold linker is only for ELF binaries, which OSX doesn't use. We can
-# just skip.
-if (NOT APPLE)
-  execute_process(COMMAND ${CMAKE_CXX_COMPILER} -Wl,--version OUTPUT_VARIABLE LINKER_OUTPUT)
-endif ()
-if (LINKER_OUTPUT MATCHES "gold")
-  if ("${KUDU_LINK}" STREQUAL "d" AND
-      "${CMAKE_BUILD_TYPE}" STREQUAL "RELEASE")
-    message(SEND_ERROR "Cannot use gold with dynamic linking in a RELEASE build "
-      "as it would cause tcmalloc symbols to get dropped")
-  else()
-    message("Using gold linker")
+# Any additional arguments are passed verbatim into the C++ compiler invocation.
+function(GET_GOLD_VERSION)
+  # The gold linker is only for ELF binaries, which macOS doesn't use.
+  if (APPLE)
+    return()
   endif()
-  set(KUDU_USING_GOLD 1)
+
+  execute_process(COMMAND ${CMAKE_CXX_COMPILER} "-Wl,--version" ${ARGN}
+    ERROR_QUIET
+    OUTPUT_VARIABLE LINKER_OUTPUT)
+  # We're expecting LINKER_OUTPUT to look like one of these:
+  #   GNU gold (version 2.24) 1.11
+  #   GNU gold (GNU Binutils for Ubuntu 2.30) 1.15
+  if (LINKER_OUTPUT MATCHES "GNU gold")
+    string(REGEX MATCH "GNU gold \\([^\\)]*\\) (([0-9]+\\.?)+)" _ "${LINKER_OUTPUT}")
+    if (NOT CMAKE_MATCH_1)
+      message(SEND_ERROR "Could not extract GNU gold version. "
+        "Linker version output: ${LINKER_OUTPUT}")
+    endif()
+    set(GOLD_VERSION "${CMAKE_MATCH_1}" PARENT_SCOPE)
+  endif()
+endfunction()
+
+# Is the compiler hard-wired to use the gold linker?
+GET_GOLD_VERSION()
+if (GOLD_VERSION)
+  set(MUST_USE_GOLD 1)
+else()
+  # Can the compiler optionally enable the gold linker?
+  GET_GOLD_VERSION("-fuse-ld=gold")
+
+  # We can't use the gold linker if it's inside devtoolset because the compiler
+  # won't find it when invoked directly from make/ninja (which is typically
+  # done outside devtoolset).
+  execute_process(COMMAND which ld.gold
+    OUTPUT_VARIABLE GOLD_LOCATION
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  if ("${GOLD_LOCATION}" MATCHES "^/opt/rh/devtoolset")
+    message("Skipping optional gold linker (version ${GOLD_VERSION}) because "
+      "it's in devtoolset")
+    set(GOLD_VERSION)
+  endif()
+endif()
+if (GOLD_VERSION)
+  # Older versions of the gold linker are vulnerable to a bug [1] which
+  # prevents weak symbols from being overridden properly. This leads to
+  # omitting of Kudu's tcmalloc dependency.
+  #
+  # How we handle this situation depends on other factors:
+  # - If gold is optional, we won't use it.
+  # - If gold is required, we'll either:
+  #   - Raise an error in RELEASE builds (we shouldn't release such a product), or
+  #   - Drop tcmalloc in all other builds.
+  #
+  # 1. https://sourceware.org/bugzilla/show_bug.cgi?id=16979.
+  if ("${GOLD_VERSION}" VERSION_LESS "1.12")
+    set(KUDU_BUGGY_GOLD 1)
+  endif()
+  if (MUST_USE_GOLD)
+    message("Using hard-wired gold linker (version ${GOLD_VERSION})")
+    if (KUDU_BUGGY_GOLD)
+      if ("${KUDU_LINK}" STREQUAL "d" AND
+          "${CMAKE_BUILD_TYPE}" STREQUAL "RELEASE")
+        message(SEND_ERROR "Configured to use buggy gold with dynamic linking "
+          "in a RELEASE build; this would cause tcmalloc symbols to get dropped")
+      endif()
+      message("Hard-wired gold linker is buggy, dropping tcmalloc dependency")
+    endif()
+  elseif (NOT KUDU_BUGGY_GOLD)
+    # The Gold linker must be manually enabled.
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fuse-ld=gold")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fuse-ld=gold")
+    message("Using optional gold linker (version ${GOLD_VERSION})")
+  else()
+    message("Optional gold linker is buggy, using ld linker instead")
+  endif()
 else()
   message("Using ld linker")
 endif()
@@ -613,7 +677,9 @@ endif()
   # include sized deallocation (new in C++14). This reverses the setting from
   # non-exported (default) flags.
   if(COMPILER_SUPPORTS_SIZED_DEALLOCATION)
-    set(EXPORTED_FLAGS "${EXPORTED_FLAGS} -fno-sized-deallocation")
+    # Note: this is retained by the set_target_properties() call below.
+    target_compile_options(${EXPORTED_LIB_NAME}
+      PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fno-sized-deallocation>)
   endif()
 
   set_target_properties(${EXPORTED_LIB_NAME}
@@ -777,10 +843,10 @@ function(ADD_KUDU_TEST REL_TEST_NAME)
       file(REMOVE ${DST_DIR}/${DATA_FILE})
     endif()
     file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/${DATA_FILE}
-      # Copy with read-only permissions since tests should not
-      # modify the data files in place.
+      # Copy with read and execute permissions, since tests should not modify
+      # the data files in place, but data files may be scripts used by tests.
       DIRECTORY_PERMISSIONS OWNER_READ OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
-      FILE_PERMISSIONS OWNER_READ GROUP_READ
+      FILE_PERMISSIONS OWNER_READ OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
       DESTINATION ${DST_DIR})
   endforeach()
 
@@ -876,7 +942,7 @@ function(ADD_THIRDPARTY_LIB LIB_NAME)
   # A shared object exported variant will force any "leaf" library that
   # transitively depends on it to also depend on it at runtime; this is
   # desirable for some libraries (e.g. cyrus_sasl).
-  set(LIB_NAME_EXPORTED ${LIB_NAME}_exported)
+  set(LIB_NAME_EXPORTED "${LIB_NAME}_exported")
   if(ARG_STATIC_LIB)
     add_library(${LIB_NAME_EXPORTED} STATIC IMPORTED)
     set_target_properties(${LIB_NAME_EXPORTED}
@@ -887,8 +953,11 @@ function(ADD_THIRDPARTY_LIB LIB_NAME)
       PROPERTIES IMPORTED_LOCATION "${ARG_SHARED_LIB}")
   endif()
   if(ARG_DEPS)
+    foreach(DEP ${ARG_DEPS})
+      list(APPEND EXPORTED_DEPS "${DEP}_exported")
+    endforeach()
     set_target_properties(${LIB_NAME_EXPORTED}
-      PROPERTIES IMPORTED_LINK_INTERFACE_LIBRARIES "${ARG_DEPS}")
+      PROPERTIES IMPORTED_LINK_INTERFACE_LIBRARIES "${EXPORTED_DEPS}")
   endif()
 endfunction()
 
@@ -908,25 +977,29 @@ set(CMAKE_PREFIX_PATH
 find_package(CyrusSASL REQUIRED)
 include_directories(SYSTEM ${CYRUS_SASL_INCLUDE_DIR})
 ADD_THIRDPARTY_LIB(cyrus_sasl
-  SHARED_LIB "${CYRUS_SASL_SHARED_LIB}"
-  DEPS ${CYRUS_SASL_LIB_DEPS})
+  SHARED_LIB "${CYRUS_SASL_SHARED_LIB}")
 
 ## GSSAPI
 find_package(GSSAPI REQUIRED)
 include_directories(SYSTEM ${GSSAPI_INCLUDE_DIR})
 ADD_THIRDPARTY_LIB(gssapi_krb5
-  SHARED_LIB "${GSSAPI_SHARED_LIB}"
-  DEPS ${GSSAPI_LIB_DEPS})
+  SHARED_LIB "${GSSAPI_SHARED_LIB}")
 
-## GLog
+## GLog (depends on libunwind)
 find_package(GLog REQUIRED)
 include_directories(SYSTEM ${GLOG_INCLUDE_DIR})
+set(GLOG_DEPS)
+if (NOT APPLE)
+  set(GLOG_DEPS unwind)
+endif()
 ADD_THIRDPARTY_LIB(glog
   STATIC_LIB "${GLOG_STATIC_LIB}"
-  SHARED_LIB "${GLOG_SHARED_LIB}")
+  SHARED_LIB "${GLOG_SHARED_LIB}"
+  DEPS "${GLOG_DEPS}")
 list(APPEND KUDU_BASE_LIBS glog)
 
-## libunwind (dependent of glog)
+## libunwind
+##
 ## Doesn't build on OSX.
 if (NOT APPLE)
   find_package(LibUnwind REQUIRED)
@@ -1042,7 +1115,7 @@ if (NOT OPENSSL_ROOT_DIR AND EXISTS "${CENTOS_6_4_OPENSSL_DIR}")
   set(OPENSSL_ROOT_DIR "${CENTOS_6_4_OPENSSL_DIR}")
 endif()
 find_package(OpenSSL 1.0.0 REQUIRED)
-include_directories(${OPENSSL_INCLUDE_DIR})
+include_directories(SYSTEM ${OPENSSL_INCLUDE_DIR})
 ADD_THIRDPARTY_LIB(openssl_ssl
   SHARED_LIB "${OPENSSL_SSL_LIBRARY}")
 ADD_THIRDPARTY_LIB(openssl_crypto
@@ -1056,12 +1129,12 @@ ADD_THIRDPARTY_LIB(krb5
 
 ## Google PerfTools
 ##
-## Disabled with TSAN/ASAN as well as with gold+dynamic linking (see comment
-## near definition of KUDU_USING_GOLD).
-find_package(GPerf REQUIRED)
+## Disabled with TSAN/ASAN as well as with gold+dynamic linking (see
+## earlier comment).
 if (NOT "${KUDU_USE_ASAN}" AND
     NOT "${KUDU_USE_TSAN}" AND
-    NOT ("${KUDU_USING_GOLD}" AND "${KUDU_LINK}" STREQUAL "d"))
+    NOT ("${KUDU_BUGGY_GOLD}" AND "${KUDU_LINK}" STREQUAL "d"))
+  find_package(GPerf REQUIRED)
   ADD_THIRDPARTY_LIB(tcmalloc
     STATIC_LIB "${TCMALLOC_STATIC_LIB}"
     SHARED_LIB "${TCMALLOC_SHARED_LIB}")
@@ -1085,8 +1158,12 @@ ADD_THIRDPARTY_LIB(pmem
   SHARED_LIB "${PMEM_SHARED_LIB}")
 ADD_THIRDPARTY_LIB(pmemobj
   STATIC_LIB "${PMEMOBJ_STATIC_LIB}"
-  SHARED_LIB "${PMEMOBJ_SHARED_LIB}"
-  DEPS ${PMEMOBJ_DEPS})
+  SHARED_LIB "${PMEMOBJ_SHARED_LIB}")
+endif()
+
+if (EXISTS ${VMEM_SHARED_LIB})
+  set(HAVE_LIB_VMEM 1)
+  add_definitions(-DHAVE_LIB_VMEM=1)
 endif()
 
 ## curl
@@ -1142,13 +1219,14 @@ if (NOT NO_TESTS)
 endif()
 
 # The tests as well as any binaries which are run as subprocesses by tests (eg tserver,
-# master, and the 'kudu' CLI tool) need to link this in. We have to set it
-# here so it's accessible by all targets.
-#
-# OSX doesn't support the linker flag below, but also has a new enough krb5 that the
-# override library isn't necessary.
+# master, and the 'kudu' CLI tool) need to link these in. We have to set them
+# here so they are accessible by all targets.
 if (NOT APPLE)
-set(KRB5_REALM_OVERRIDE -Wl,--undefined=krb5_realm_override_loaded krb5_realm_override)
+  set(SANITIZER_OPTIONS_OVERRIDE -Wl,-u_sanitizer_options_link_helper sanitizer_options)
+  set(KRB5_REALM_OVERRIDE -Wl,--undefined=krb5_realm_override_loaded krb5_realm_override)
+else()
+  set(SANITIZER_OPTIONS_OVERRIDE -Wl,-U,_sanitizer_options_link_helper sanitizer_options)
+  set(KRB5_REALM_OVERRIDE -Wl,-U,krb5_realm_override_loaded krb5_realm_override)
 endif()
 
 ## Boost
@@ -1204,8 +1282,24 @@ endif()
 ############################################################
 # Linker setup
 ############################################################
-set(KUDU_MIN_TEST_LIBS kudu_test_main kudu_test_util ${KUDU_BASE_LIBS})
+
+set(KUDU_MIN_TEST_LIBS ${KUDU_BASE_LIBS} kudu_test_main kudu_test_util)
+# Prepend SANITIZER_OPTIONS_OVERRIDE if this is a sanitizer build.
+# SANITIZER_OPTIONS_OVERRIDE needs to be linked first so that it is statically
+# linked to the test binaries directly. Otherwise the weakly linked default
+# implementations coul be be used when running tests.
+if ("${KUDU_USE_ASAN}" OR "${KUDU_USE_TSAN}" OR "${KUDU_USE_UBSAN}")
+  list(INSERT KUDU_MIN_TEST_LIBS 0 ${SANITIZER_OPTIONS_OVERRIDE})
+endif()
 set(KUDU_TEST_LINK_LIBS ${KUDU_MIN_TEST_LIBS})
+
+# This macro initializes KUDU_MIN_TEST_LIBS to KUDU_MIN_TEST_LIBS and
+# appends the passed list of libraries to the end. This ensures that
+# KUDU_MIN_TEST_LIBS is linked first.
+macro(SET_KUDU_TEST_LINK_LIBS)
+  set(KUDU_TEST_LINK_LIBS ${KUDU_MIN_TEST_LIBS})
+  list(APPEND KUDU_TEST_LINK_LIBS ${ARGN})
+endmacro()
 
 # Use "thin archives" for our static libraries. We only use static libraries
 # internal to our own build, so thin ones are just as good and much smaller.
@@ -1280,7 +1374,7 @@ endif (UNIX)
 ############################################################
 if (UNIX)
   add_custom_target(iwyu-generated-headers
-    DEPENDS pb-gen krpc-gen hms_thrift)
+    DEPENDS pb-gen krpc-gen hms_thrift sentry_thrift)
   add_custom_target(iwyu ${BUILD_SUPPORT_DIR}/iwyu.py --from-git
     DEPENDS iwyu-generated-headers)
   add_custom_target(iwyu-fix ${BUILD_SUPPORT_DIR}/iwyu.py --fix --from-git
@@ -1380,8 +1474,10 @@ add_subdirectory(src/kudu/master)
 add_subdirectory(src/kudu/mini-cluster)
 add_subdirectory(src/kudu/rpc)
 add_subdirectory(src/kudu/security)
+add_subdirectory(src/kudu/sentry)
 add_subdirectory(src/kudu/server)
 add_subdirectory(src/kudu/tablet)
+add_subdirectory(src/kudu/thrift)
 add_subdirectory(src/kudu/tools)
 add_subdirectory(src/kudu/tserver)
 add_subdirectory(src/kudu/util)

@@ -20,20 +20,26 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
+#include <boost/optional/optional.hpp>
 #include <gflags/gflags_declare.h>
 #include <gtest/gtest.h>
 
 #include "kudu/common/common.pb.h"
 #include "kudu/common/schema.h"
+#include "kudu/gutil/map-util.h" // IWYU pragma: keep
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/hms/hive_metastore_types.h"
 #include "kudu/hms/hms_client.h"
 #include "kudu/hms/mini_hms.h"
 #include "kudu/rpc/sasl_common.h"
 #include "kudu/security/test/mini_kdc.h"
+#include "kudu/thrift/client.h"
 #include "kudu/util/net/net_util.h"
+#include "kudu/util/slice.h"
 #include "kudu/util/status.h"
 #include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
@@ -42,6 +48,7 @@ DECLARE_string(hive_metastore_uris);
 DECLARE_bool(hive_metastore_sasl_enabled);
 
 using kudu::rpc::SaslProtection;
+using std::make_pair;
 using std::string;
 using std::unique_ptr;
 using std::vector;
@@ -51,35 +58,64 @@ namespace kudu {
 namespace hms {
 
 TEST(HmsCatalogStaticTest, TestParseTableName) {
-  string db;
-  string tbl;
+  Slice db;
+  Slice tbl;
+  string table;
 
-  EXPECT_OK(HmsCatalog::ParseTableName("foo.bar", &db, &tbl));
+  table = "foo.bar";
+  ASSERT_OK(HmsCatalog::ParseTableName(table, &db, &tbl));
   EXPECT_EQ("foo", db);
   EXPECT_EQ("bar", tbl);
 
-  EXPECT_OK(HmsCatalog::ParseTableName("99bottles.my_awesome/table/22", &db, &tbl));
+  table = "99bottles.my_awesome/table/22";
+  ASSERT_OK(HmsCatalog::ParseTableName(table, &db, &tbl));
   EXPECT_EQ("99bottles", db);
   EXPECT_EQ("my_awesome/table/22", tbl);
 
-  EXPECT_OK(HmsCatalog::ParseTableName("_leading_underscore.trailing_underscore_", &db, &tbl));
+  table = "_leading_underscore.trailing_underscore_";
+  ASSERT_OK(HmsCatalog::ParseTableName(table, &db, &tbl));
   EXPECT_EQ("_leading_underscore", db);
   EXPECT_EQ("trailing_underscore_", tbl);
 
-  EXPECT_OK(HmsCatalog::ParseTableName("unicode ☃ tables?.maybe/one_day", &db, &tbl));
-  EXPECT_EQ("unicode ☃ tables?", db);
-  EXPECT_EQ("maybe/one_day", tbl);
-
-  EXPECT_OK(HmsCatalog::ParseTableName(".", &db, &tbl));
-  EXPECT_EQ("", db);
-  EXPECT_EQ("", tbl);
-
-  EXPECT_OK(HmsCatalog::ParseTableName(string("\0.\0", 3), &db, &tbl));
-  EXPECT_EQ(string("\0", 1), db);
-  EXPECT_EQ(string("\0", 1), tbl);
-
+  EXPECT_TRUE(HmsCatalog::ParseTableName(".", &db, &tbl).IsInvalidArgument());
   EXPECT_TRUE(HmsCatalog::ParseTableName("no-table", &db, &tbl).IsInvalidArgument());
   EXPECT_TRUE(HmsCatalog::ParseTableName("lots.of.tables", &db, &tbl).IsInvalidArgument());
+  EXPECT_TRUE(HmsCatalog::ParseTableName("no-table", &db, &tbl).IsInvalidArgument());
+  EXPECT_TRUE(HmsCatalog::ParseTableName("lots.of.tables", &db, &tbl).IsInvalidArgument());
+  EXPECT_TRUE(HmsCatalog::ParseTableName(".no_table", &db, &tbl).IsInvalidArgument());
+  EXPECT_TRUE(HmsCatalog::ParseTableName(".no_database", &db, &tbl).IsInvalidArgument());
+  EXPECT_TRUE(HmsCatalog::ParseTableName("punctuation?.no", &db, &tbl).IsInvalidArgument());
+  EXPECT_TRUE(HmsCatalog::ParseTableName("white space.no", &db, &tbl).IsInvalidArgument());
+  EXPECT_TRUE(HmsCatalog::ParseTableName("unicode☃tables.no", &db, &tbl).IsInvalidArgument());
+  EXPECT_TRUE(HmsCatalog::ParseTableName(string("\0.\0", 3), &db, &tbl).IsInvalidArgument());
+}
+
+TEST(HmsCatalogStaticTest, TestNormalizeTableName) {
+  string table = "foo.bar";
+  ASSERT_OK(HmsCatalog::NormalizeTableName(&table));
+  ASSERT_EQ("foo.bar", table);
+
+  table = "fOo.BaR";
+  ASSERT_OK(HmsCatalog::NormalizeTableName(&table));
+  EXPECT_EQ("foo.bar", table);
+
+  table = "A.B";
+  ASSERT_OK(HmsCatalog::NormalizeTableName(&table));
+  EXPECT_EQ("a.b", table);
+
+  table = "__/A__.buzz";
+  ASSERT_OK(HmsCatalog::NormalizeTableName(&table));
+  EXPECT_EQ("__/a__.buzz", table);
+
+  table = "THE/QUICK/BROWN/FOX/JUMPS/OVER/THE/LAZY/DOG."
+          "the_quick_brown_fox_jumps_over_the_lazy_dog";
+  ASSERT_OK(HmsCatalog::NormalizeTableName(&table));
+  EXPECT_EQ("the/quick/brown/fox/jumps/over/the/lazy/dog."
+            "the_quick_brown_fox_jumps_over_the_lazy_dog", table);
+
+  table = "default.MyTable";
+  ASSERT_OK(HmsCatalog::NormalizeTableName(&table));
+  EXPECT_EQ("default.mytable", table);
 }
 
 TEST(HmsCatalogStaticTest, TestParseUris) {
@@ -126,7 +162,7 @@ class HmsCatalogTest : public KuduTest {
   void SetUp() override {
     bool enable_kerberos = EnableKerberos();
 
-    HmsClientOptions hms_client_opts;
+    thrift::ClientOptions hms_client_opts;
 
     hms_.reset(new hms::MiniHms());
     if (enable_kerberos) {
@@ -148,6 +184,7 @@ class HmsCatalogTest : public KuduTest {
       ASSERT_OK(kdc_->Kinit("alice"));
       ASSERT_OK(kdc_->SetKrb5Environment());
       hms_client_opts.enable_kerberos = true;
+      hms_client_opts.service_principal = "hive";
 
       // Configure the HmsCatalog flags.
       FLAGS_hive_metastore_sasl_enabled = true;
@@ -202,10 +239,16 @@ class HmsCatalogTest : public KuduTest {
   void CheckTable(const string& database_name,
                   const string& table_name,
                   const string& table_id,
+                  const boost::optional<const string&>& owner,
                   const Schema& schema) {
     hive::Table table;
     ASSERT_OK(hms_client_->GetTable(database_name, table_name, &table));
 
+    if (owner) {
+      EXPECT_EQ(table.owner, *owner);
+    } else {
+      EXPECT_TRUE(table.owner.empty());
+    }
     EXPECT_EQ(table.parameters[HmsClient::kKuduTableIdKey], table_id);
     EXPECT_EQ(table.parameters[HmsClient::kKuduMasterAddrsKey], kMasterAddrs);
     EXPECT_EQ(table.parameters[HmsClient::kStorageHandlerKey], HmsClient::kKuduStorageHandler);
@@ -213,6 +256,36 @@ class HmsCatalogTest : public KuduTest {
     for (int column_idx = 0; column_idx < schema.num_columns(); column_idx++) {
       EXPECT_EQ(table.sd.cols[column_idx].name, schema.columns()[column_idx].name());
     }
+  }
+
+  Status CreateLegacyTable(const string& database_name,
+                           const string& table_name,
+                           const string& table_type) {
+    hive::Table table;
+    string kudu_table_name(table_name);
+    table.dbName = database_name;
+    table.tableName = table_name;
+    table.tableType = table_type;
+    if (table_type == HmsClient::kManagedTable) {
+      kudu_table_name = Substitute("$0$1.$2", HmsClient::kLegacyTablePrefix,
+                                   database_name, table_name);
+    }
+
+    table.__set_parameters({
+        make_pair(HmsClient::kStorageHandlerKey,
+                  HmsClient::kLegacyKuduStorageHandler),
+        make_pair(HmsClient::kLegacyKuduTableNameKey,
+                  kudu_table_name),
+        make_pair(HmsClient::kKuduMasterAddrsKey,
+                  kMasterAddrs),
+    });
+
+    // TODO(Hao): Remove this once HIVE-19253 is fixed.
+    if (table_type == HmsClient::kExternalTable) {
+      table.parameters[HmsClient::kExternalTableKey] = "TRUE";
+    }
+
+    return hms_client_->CreateTable(table);
   }
 
   void CheckTableDoesNotExist(const string& database_name, const string& table_name) {
@@ -249,23 +322,18 @@ TEST_P(HmsCatalogTestParameterized, TestTableLifecycle) {
   const string kTableName = Substitute("$0.$1", kHmsDatabase, kHmsTableName);
   const string kHmsAlteredTableName = "altered_table_name";
   const string kAlteredTableName = Substitute("$0.$1", kHmsDatabase, kHmsAlteredTableName);
+  const string kOwner = "alice";
 
   Schema schema = AllTypesSchema();
 
   // Create the table.
-  ASSERT_OK(hms_catalog_->CreateTable(kTableId, kTableName, schema));
-  NO_FATALS(CheckTable(kHmsDatabase, kHmsTableName, kTableId, schema));
+  ASSERT_OK(hms_catalog_->CreateTable(kTableId, kTableName, kOwner, schema));
+  NO_FATALS(CheckTable(kHmsDatabase, kHmsTableName, kTableId, kOwner, schema));
 
-  // Create the table again. This should succeed since the table ID matches. The
-  // HMS catalog will automatically short-circuit creating the table.
-  // TODO(dan): once we have HMS catalog stats, assert that the op short circuits.
-  ASSERT_OK(hms_catalog_->CreateTable(kTableId, kTableName, schema));
-  NO_FATALS(CheckTable(kHmsDatabase, kHmsTableName, kTableId, schema));
-
-  // Create the table again, but with a different table ID.
-  Status s = hms_catalog_->CreateTable("new-table-id", kTableName, schema);
+  // Create the table again, and check that the expected failure occurs.
+  Status s = hms_catalog_->CreateTable(kTableId, kTableName, kOwner, schema);
   ASSERT_TRUE(s.IsAlreadyPresent()) << s.ToString();
-  NO_FATALS(CheckTable(kHmsDatabase, kHmsTableName, kTableId, schema));
+  NO_FATALS(CheckTable(kHmsDatabase, kHmsTableName, kTableId, kOwner, schema));
 
   // Alter the table.
   SchemaBuilder b(schema);
@@ -273,41 +341,12 @@ TEST_P(HmsCatalogTestParameterized, TestTableLifecycle) {
   Schema altered_schema = b.Build();
   ASSERT_OK(hms_catalog_->AlterTable(kTableId, kTableName, kAlteredTableName, altered_schema));
   NO_FATALS(CheckTableDoesNotExist(kHmsDatabase, kHmsTableName));
-  NO_FATALS(CheckTable(kHmsDatabase, kHmsAlteredTableName, kTableId, altered_schema));
+  NO_FATALS(CheckTable(kHmsDatabase, kHmsAlteredTableName, kTableId, kOwner, altered_schema));
 
   // Drop the table.
   ASSERT_OK(hms_catalog_->DropTable(kTableId, kAlteredTableName));
   NO_FATALS(CheckTableDoesNotExist(kHmsDatabase, kHmsTableName));
   NO_FATALS(CheckTableDoesNotExist(kHmsDatabase, kHmsAlteredTableName));
-}
-
-// Checks that 'legacy' Kudu tables can be altered and dropped by the
-// HmsCatalog. Altering a legacy table to be HMS compliant should result in a
-// valid HMS table entry being created. Dropping a legacy table should do
-// nothing, but return success.
-TEST_F(HmsCatalogTest, TestLegacyTables) {
-  const string kTableId = "table-id";
-  const string kHmsDatabase = "default";
-
-  Schema schema = AllTypesSchema();
-  hive::Table table;
-
-  // Alter a table containing a non Hive-compatible character, and ensure an
-  // entry is created with the new (valid) name.
-  NO_FATALS(CheckTableDoesNotExist(kHmsDatabase, "a"));
-  ASSERT_OK(hms_catalog_->AlterTable(kTableId, "default.☃", "default.a", schema));
-  NO_FATALS(CheckTable(kHmsDatabase, "a", kTableId, schema));
-
-  // Alter a table without a database and ensure an entry is created with the new (valid) name.
-  NO_FATALS(CheckTableDoesNotExist(kHmsDatabase, "b"));
-  ASSERT_OK(hms_catalog_->AlterTable(kTableId, "no_database", "default.b", schema));
-  NO_FATALS(CheckTable(kHmsDatabase, "b", kTableId, schema));
-
-  // Drop a table containing a Hive incompatible character, and ensure it doesn't fail.
-  ASSERT_OK(hms_catalog_->DropTable(kTableId, "foo.☃"));
-
-  // Drop a table without a database, and ensure it doesn't fail.
-  ASSERT_OK(hms_catalog_->DropTable(kTableId, "no_database"));
 }
 
 // Checks that Kudu tables will not replace or modify existing HMS entries that
@@ -333,11 +372,11 @@ TEST_F(HmsCatalogTest, TestExternalTable) {
 
   // Create the Kudu table (default.a).
   Schema schema = AllTypesSchema();
-  ASSERT_OK(hms_catalog_->CreateTable(kTableId, "default.a", schema));
-  NO_FATALS(CheckTable("default", "a", kTableId, schema));
+  ASSERT_OK(hms_catalog_->CreateTable(kTableId, "default.a", boost::none, schema));
+  NO_FATALS(CheckTable("default", "a", kTableId, boost::none, schema));
 
   // Try and create a Kudu table with the same name as the external table.
-  Status s = hms_catalog_->CreateTable(kTableId, "default.ext", schema);
+  Status s = hms_catalog_->CreateTable(kTableId, "default.ext", boost::none, schema);
   EXPECT_TRUE(s.IsAlreadyPresent()) << s.ToString();
   NO_FATALS(CheckExternalTable());
 
@@ -345,42 +384,62 @@ TEST_F(HmsCatalogTest, TestExternalTable) {
   s = hms_catalog_->AlterTable(kTableId, "default.a", "default.ext", schema);
   EXPECT_TRUE(s.IsIllegalState()) << s.ToString();
   NO_FATALS(CheckExternalTable());
-  NO_FATALS(CheckTable("default", "a", kTableId, schema));
+  NO_FATALS(CheckTable("default", "a", kTableId, boost::none, schema));
 
-  // Try and rename a Kudu table from the external table name to a new name.
-  // This depends on the Kudu table not actually existing in the HMS catalog.
-  ASSERT_OK(hms_catalog_->AlterTable(kTableId, "default.ext", "default.b", schema));
+  // Try and rename the external table. This shouldn't succeed because the Table
+  // ID doesn't match.
+  s = hms_catalog_->AlterTable(kTableId, "default.ext", "default.b", schema);
+  EXPECT_TRUE(s.IsNotFound()) << s.ToString();
   NO_FATALS(CheckExternalTable());
-  // The 'renamed' table is really just created with the new name.
-  NO_FATALS(CheckTable("default", "b", kTableId, schema));
+  NO_FATALS(CheckTable("default", "a", kTableId, boost::none, schema));
+  NO_FATALS(CheckTableDoesNotExist("default", "b"));
 
-  // Try the previous alter operation again. This should succeed, since the
-  // destination table ID matches, so the HMS catalog knows its the same table.
-  // TODO(dan): once we have HMS catalog stats, assert that the op short circuits.
-  ASSERT_OK(hms_catalog_->AlterTable(kTableId, "default.ext", "default.b", schema));
-  NO_FATALS(CheckExternalTable());
-  // The 'renamed' table is really just created with the new name.
-  NO_FATALS(CheckTable("default", "b", kTableId, schema));
-
-  // Try the previous alter operation again, but with a different table ID.
-  s = hms_catalog_->AlterTable("new-table-id", "default.ext", "default.b", schema);
-  ASSERT_TRUE(s.IsAlreadyPresent()) << s.ToString();
-
-  // Try and alter a Kudu table with the same name as the external table.
-  // This depends on the Kudu table not actually existing in the HMS catalog.
-  s = hms_catalog_->AlterTable(kTableId, "default.ext", "default.ext", schema);
-  EXPECT_TRUE(s.IsAlreadyPresent()) << s.ToString();
-  NO_FATALS(CheckExternalTable());
-
-  // Try and drop the external table as if it were a Kudu table.  This should
-  // return an OK status, but not actually modify the external table.
-  ASSERT_OK(hms_catalog_->DropTable(kTableId, "default.ext"));
+  // Try and drop the external table as if it were a Kudu table.
+  s = hms_catalog_->DropTable(kTableId, "default.ext");
+  EXPECT_TRUE(s.IsRemoteError()) << s.ToString();
   NO_FATALS(CheckExternalTable());
 
   // Drop a Kudu table with no corresponding HMS entry.
   NO_FATALS(CheckTableDoesNotExist("default", "bogus_table_name"));
-  ASSERT_OK(hms_catalog_->DropTable(kTableId, "default.bogus_table_name"));
+  s = hms_catalog_->DropTable(kTableId, "default.bogus_table_name");
+  ASSERT_TRUE(s.IsNotFound()) << s.ToString();
   NO_FATALS(CheckTableDoesNotExist("default", "bogus_table_name"));
+}
+
+TEST_F(HmsCatalogTest, TestGetKuduTables) {
+  const string kHmsDatabase = "db";
+  const string kManagedTableName = "managed_table";
+  const string kExternalTableName = "external_table";
+  const string kTableName = "external_table";
+  const string kNonKuduTableName = "non_kudu_table";
+  const string kOwner = "alice";
+
+  // Create a legacy Impala managed table, a legacy Impala external table, a
+  // Kudu table, and a non Kudu table.
+  hive::Database db;
+  db.name = "db";
+  ASSERT_OK(hms_client_->CreateDatabase(db));
+  ASSERT_OK(CreateLegacyTable("db", "managed_table", HmsClient::kManagedTable));
+  hive::Table table;
+  ASSERT_OK(hms_client_->GetTable(kHmsDatabase, "managed_table", &table));
+  ASSERT_OK(CreateLegacyTable("db", "external_table", HmsClient::kExternalTable));
+  ASSERT_OK(hms_client_->GetTable("db", "external_table", &table));
+
+  ASSERT_OK(hms_catalog_->CreateTable("fake-id", "db.table", kOwner, Schema()));
+
+  hive::Table non_kudu_table;
+  non_kudu_table.dbName = "db";
+  non_kudu_table.tableName = "non_kudu_table";
+  ASSERT_OK(hms_client_->CreateTable(non_kudu_table));
+  ASSERT_OK(hms_client_->GetTable("db", "non_kudu_table", &table));
+
+  // Retrieve all tables and ensure all entries are found.
+  vector<hive::Table> kudu_tables;
+  ASSERT_OK(hms_catalog_->GetKuduTables(&kudu_tables));
+  ASSERT_EQ(3, kudu_tables.size());
+  for (const auto& kudu_table : kudu_tables) {
+    ASSERT_FALSE(kudu_table.tableName == "non_kudu_table") << kudu_table;
+  }
 }
 
 // Checks that the HmsCatalog handles reconnecting to the metastore after a connection failure.
@@ -390,9 +449,10 @@ TEST_F(HmsCatalogTest, TestReconnect) {
 
   const string kTableId = "table-id";
   const string kHmsDatabase = "default";
+  const string kOwner = "alice";
   Schema schema = AllTypesSchema();
-  ASSERT_OK(hms_catalog_->CreateTable(kTableId, "default.a", schema));
-  NO_FATALS(CheckTable(kHmsDatabase, "a", kTableId, schema));
+  ASSERT_OK(hms_catalog_->CreateTable(kTableId, "default.a", kOwner, schema));
+  NO_FATALS(CheckTable(kHmsDatabase, "a", kTableId, kOwner, schema));
 
   // Shutdown the HMS and try a few operations.
   ASSERT_OK(StopHms());
@@ -401,7 +461,7 @@ TEST_F(HmsCatalogTest, TestReconnect) {
   // while the HMS is unavailable results in a non-linear number of reconnect
   // attempts.
 
-  Status s = hms_catalog_->CreateTable(kTableId, "default.b", schema);
+  Status s = hms_catalog_->CreateTable(kTableId, "default.b", kOwner, schema);
   EXPECT_TRUE(s.IsNetworkError()) << s.ToString();
 
   s = hms_catalog_->AlterTable(kTableId, "default.a", "default.c", schema);
@@ -411,14 +471,14 @@ TEST_F(HmsCatalogTest, TestReconnect) {
   ASSERT_OK(StartHms());
   ASSERT_EVENTUALLY([&] {
     // HmsCatalog throttles reconnections, so it's necessary to wait out the backoff.
-    ASSERT_OK(hms_catalog_->CreateTable(kTableId, "default.d", schema));
+    ASSERT_OK(hms_catalog_->CreateTable(kTableId, "default.d", kOwner, schema));
   });
 
-  NO_FATALS(CheckTable(kHmsDatabase, "a", kTableId, schema));
-  NO_FATALS(CheckTable(kHmsDatabase, "d", kTableId, schema));
+  NO_FATALS(CheckTable(kHmsDatabase, "a", kTableId, kOwner, schema));
+  NO_FATALS(CheckTable(kHmsDatabase, "d", kTableId, kOwner, schema));
 
   EXPECT_OK(hms_catalog_->AlterTable(kTableId, "default.a", "default.c", schema));
-  NO_FATALS(CheckTable(kHmsDatabase, "c", kTableId, schema));
+  NO_FATALS(CheckTable(kHmsDatabase, "c", kTableId, kOwner, schema));
   NO_FATALS(CheckTableDoesNotExist(kHmsDatabase, "a"));
 }
 

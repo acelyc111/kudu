@@ -19,7 +19,6 @@
 
 #include <algorithm>
 #include <csignal>
-#include <cstdlib>
 #include <map>
 #include <memory>
 #include <ostream>
@@ -34,7 +33,6 @@
 #include "kudu/util/slice.h"
 #include "kudu/util/status.h"
 #include "kudu/util/stopwatch.h"
-#include "kudu/util/string_case.h"
 #include "kudu/util/subprocess.h"
 #include "kudu/util/test_util.h"
 
@@ -75,21 +73,9 @@ void MiniHms::EnableKerberos(string krb5_conf,
   protection_ = protection;
 }
 
-namespace {
-Status FindHomeDir(const char* name, const string& bin_dir, string* home_dir) {
-  string name_upper;
-  ToUpperCase(name, &name_upper);
-
-  string env_var = Substitute("$0_HOME", name_upper);
-  const char* env = std::getenv(env_var.c_str());
-  *home_dir = env == nullptr ? JoinPathSegments(bin_dir, Substitute("$0-home", name)) : env;
-
-  if (!Env::Default()->FileExists(*home_dir)) {
-    return Status::NotFound(Substitute("$0 directory does not exist", env_var), *home_dir);
-  }
-  return Status::OK();
+void MiniHms::SetDataRoot(string data_root) {
+  data_root_ = std::move(data_root);
 }
-} // anonymous namespace
 
 Status MiniHms::Start() {
   SCOPED_LOG_SLOW_EXECUTION(WARNING, kHmsStartTimeoutMs / 2, "Starting HMS");
@@ -110,24 +96,45 @@ Status MiniHms::Start() {
   RETURN_NOT_OK(FindHomeDir("hive", bin_dir, &hive_home));
   RETURN_NOT_OK(FindHomeDir("java", bin_dir, &java_home));
 
-  auto tmp_dir = GetTestDataDirectory();
+  if (data_root_.empty()) {
+    data_root_ = GetTestDataDirectory();
+  }
 
-  RETURN_NOT_OK(CreateHiveSite(tmp_dir));
-  RETURN_NOT_OK(CreateCoreSite(tmp_dir));
+  RETURN_NOT_OK(CreateHiveSite());
+  RETURN_NOT_OK(CreateCoreSite());
 
   // Comma-separated list of additional jars to add to the HMS classpath.
-  string aux_jars = Substitute("$0/hms-plugin.jar", bin_dir);
+  string aux_jars = Substitute("$0/hms-plugin.jar,$1/hcatalog/share/hcatalog/*",
+                               bin_dir, hive_home);
+
+  // List of JVM environment options to pass to the HMS.
+  string java_options =
+    // Ensure IPv4 is used.
+    "-Djava.net.preferIPv4Stack=true "
+    // Make logging less verbose.
+    "-Dhive.log.level=WARN "
+    // Log to the console.
+    "-Dhive.root.logger=console "
+    // Tune down the Derby deadlock timeout. The HMS's use of Derby with the
+    // NOTIFICATION_SEQUENCE table is prone to deadlocks, at which point Derby
+    // cancels a conflicting transaction after waiting out the timeout. This
+    // typically doesn't cause issues since the HMS auto retries these
+    // transactions, however the default period of 20 seconds causes tests to
+    // timeout.
+    "-Dderby.locks.deadlockTimeout=1";
+
+  if (!krb5_conf_.empty()) {
+    java_options += Substitute(" -Djava.security.krb5.conf=$0", krb5_conf_);
+  }
+
   map<string, string> env_vars {
       { "JAVA_HOME", java_home },
       { "HADOOP_HOME", hadoop_home },
       { "HIVE_AUX_JARS_PATH", aux_jars },
-      { "HIVE_CONF_DIR", tmp_dir },
-      { "JAVA_TOOL_OPTIONS",  "-Dhive.log.level=WARN -Dhive.root.logger=console" },
-      { "HADOOP_CONF_DIR", tmp_dir },
+      { "HIVE_CONF_DIR", data_root_ },
+      { "JAVA_TOOL_OPTIONS", java_options },
+      { "HADOOP_CONF_DIR", data_root_ },
   };
-  if (!krb5_conf_.empty()) {
-    env_vars["JAVA_TOOL_OPTIONS"] += Substitute(" -Djava.security.krb5.conf=$0", krb5_conf_);
-  }
 
   // Start the HMS.
   hms_process_.reset(new Subprocess({
@@ -154,7 +161,7 @@ Status MiniHms::Stop() {
   if (hms_process_) {
     VLOG(1) << "Stopping HMS";
     unique_ptr<Subprocess> proc = std::move(hms_process_);
-    RETURN_NOT_OK_PREPEND(proc->KillAndWait(SIGTERM), "failed to stop the Hive MetaStore process");
+    RETURN_NOT_OK_PREPEND(proc->KillAndWait(SIGTERM), "failed to stop the Hive Metastore process");
   }
   return Status::OK();
 }
@@ -163,7 +170,7 @@ Status MiniHms::Pause() {
   CHECK(hms_process_);
   VLOG(1) << "Pausing HMS";
   RETURN_NOT_OK_PREPEND(hms_process_->Kill(SIGSTOP),
-                        "failed to pause the Hive MetaStore process");
+                        "failed to pause the Hive Metastore process");
   return Status::OK();
 }
 
@@ -171,7 +178,7 @@ Status MiniHms::Resume() {
   CHECK(hms_process_);
   VLOG(1) << "Resuming HMS";
   RETURN_NOT_OK_PREPEND(hms_process_->Kill(SIGCONT),
-                        "failed to unpause the Hive MetaStore process");
+                        "failed to unpause the Hive Metastore process");
   return Status::OK();
 }
 
@@ -179,7 +186,7 @@ string MiniHms::uris() const {
   return Substitute("thrift://127.0.0.1:$0", port_);
 }
 
-Status MiniHms::CreateHiveSite(const string& tmp_dir) const {
+Status MiniHms::CreateHiveSite() const {
 
   // - datanucleus.schema.autoCreateAll
   // - hive.metastore.schema.verification
@@ -196,6 +203,10 @@ Status MiniHms::CreateHiveSite(const string& tmp_dir) const {
   //
   // - hive.metastore.disallow.incompatible.col.type.changes
   //     Configures the HMS to allow altering and dropping columns.
+  //
+  // - hive.support.special.characters.tablename
+  //     Configures the HMS to allow special characters such as '/' in table
+  //     names.
   static const string kFileTemplate = R"(
 <configuration>
   <property>
@@ -255,23 +266,28 @@ Status MiniHms::CreateHiveSite(const string& tmp_dir) const {
     <name>hive.metastore.disallow.incompatible.col.type.changes</name>
     <value>false</value>
   </property>
+
+  <property>
+    <name>hive.support.special.characters.tablename</name>
+    <value>true</value>
+  </property>
 </configuration>
   )";
 
-  string file_contents = strings::Substitute(kFileTemplate,
-                                             notification_log_ttl_.ToSeconds(),
-                                             tmp_dir,
-                                             !keytab_file_.empty(),
-                                             keytab_file_,
-                                             service_principal_,
-                                             SaslProtection::name_of(protection_));
+  string file_contents = Substitute(kFileTemplate,
+                                    notification_log_ttl_.ToSeconds(),
+                                    data_root_,
+                                    !keytab_file_.empty(),
+                                    keytab_file_,
+                                    service_principal_,
+                                    SaslProtection::name_of(protection_));
 
   return WriteStringToFile(Env::Default(),
                            file_contents,
-                           JoinPathSegments(tmp_dir, "hive-site.xml"));
+                           JoinPathSegments(data_root_, "hive-site.xml"));
 }
 
-Status MiniHms::CreateCoreSite(const string& tmp_dir) const {
+Status MiniHms::CreateCoreSite() const {
 
   // - hadoop.security.authentication
   //     The HMS uses Hadoop's UGI contraption which will refuse to login a user
@@ -289,12 +305,11 @@ Status MiniHms::CreateCoreSite(const string& tmp_dir) const {
 </configuration>
   )";
 
-  string file_contents = strings::Substitute(kFileTemplate,
-                                             keytab_file_.empty() ? "simple" : "kerberos");
+  string file_contents = Substitute(kFileTemplate, keytab_file_.empty() ? "simple" : "kerberos");
 
   return WriteStringToFile(Env::Default(),
                            file_contents,
-                           JoinPathSegments(tmp_dir, "core-site.xml"));
+                           JoinPathSegments(data_root_, "core-site.xml"));
 }
 
 } // namespace hms

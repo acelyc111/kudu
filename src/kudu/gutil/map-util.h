@@ -292,8 +292,7 @@ bool FindCopy(const Collection& collection,
 // Returns true iff the given collection contains the given key.
 template <class Collection, class Key>
 bool ContainsKey(const Collection& collection, const Key& key) {
-  auto it = collection.find(key);
-  return it != collection.end();
+  return collection.find(key) != collection.end();
 }
 
 // Returns true iff the given collection contains the given key-value pair.
@@ -447,6 +446,23 @@ bool EmplaceIfNotPresent(Collection* const collection,
   return collection->emplace(std::forward<Args>(args)...).second;
 }
 
+// Emplaces the given key-value pair into the collection. Returns true if the
+// given key didn't previously exist. If the given key already existed in the
+// map, its value is changed to the given "value" and false is returned.
+template <class Collection>
+bool EmplaceOrUpdate(Collection* const collection,
+                     const typename Collection::key_type& key,
+                     typename Collection::mapped_type&& value) {
+  typedef typename Collection::mapped_type mapped_type;
+  auto it = collection->find(key);
+  if (it == collection->end()) {
+    collection->emplace(key, std::forward<mapped_type>(value));
+    return true;
+  }
+  it->second = std::forward<mapped_type>(value);
+  return false;
+}
+
 template <class Collection, class... Args>
 void EmplaceOrDie(Collection* const collection,
                   Args&&... args) {
@@ -476,6 +492,21 @@ LookupOrInsert(Collection* const collection,
                const typename Collection::mapped_type& value) {
   return LookupOrInsert(
       collection, typename Collection::value_type(key, value));
+}
+
+// It's similar to LookupOrInsert() but uses the emplace and r-value mechanics
+// to achieve the desired results. The constructor of the new element is called
+// with exactly the same arguments as supplied to emplace, forwarded via
+// std::forward<Args>(args). The element may be constructed even if there
+// already is an element with the same key in the container, in which case the
+// newly constructed element will be destroyed immediately.
+// For details, see
+//   https://en.cppreference.com/w/cpp/container/map/emplace
+//   https://en.cppreference.com/w/cpp/container/unordered_map/emplace
+template <class Collection, class... Args>
+typename Collection::mapped_type&
+LookupOrEmplace(Collection* const collection, Args&&... args) {
+  return collection->emplace(std::forward<Args>(args)...).first->second;
 }
 
 // Counts the number of equivalent elements in the given "sequence", and stores

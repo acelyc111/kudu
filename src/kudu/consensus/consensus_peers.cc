@@ -365,8 +365,7 @@ void Peer::DoProcessResponse() {
   VLOG_WITH_PREFIX_UNLOCKED(2) << "Response from peer " << peer_pb().permanent_uuid() << ": "
       << SecureShortDebugString(response_);
 
-  bool more_pending;
-  queue_->ResponseFromPeer(peer_pb_.permanent_uuid(), response_, &more_pending);
+  bool send_more_immediately = queue_->ResponseFromPeer(peer_pb_.permanent_uuid(), response_);
 
   {
     std::unique_lock<simple_spinlock> lock(peer_lock_);
@@ -377,7 +376,7 @@ void Peer::DoProcessResponse() {
   // We're OK to read the state_ without a lock here -- if we get a race,
   // the worst thing that could happen is that we'll make one more request before
   // noticing a close.
-  if (more_pending) {
+  if (send_more_immediately) {
     SendNextRequest(true);
   }
 }
@@ -416,7 +415,7 @@ void Peer::ProcessTabletCopyResponse() {
               tc_response_.error().code() != TabletServerErrorPB::TabletServerErrorPB::THROTTLED) {
     // THROTTLED is a common response after a tserver with many replicas fails;
     // logging it would generate a great deal of log spam.
-    LOG_WITH_PREFIX_UNLOCKED(WARNING) << "Unable to begin Tablet Copy on peer: "
+    LOG_WITH_PREFIX_UNLOCKED(WARNING) << "Unable to start Tablet Copy on peer: "
                                       << (controller_status.ok() ?
                                           SecureShortDebugString(tc_response_) :
                                           controller_status.ToString());
@@ -470,8 +469,8 @@ Peer::~Peer() {
 
 RpcPeerProxy::RpcPeerProxy(gscoped_ptr<HostPort> hostport,
                            gscoped_ptr<ConsensusServiceProxy> consensus_proxy)
-    : hostport_(std::move(hostport)),
-      consensus_proxy_(std::move(consensus_proxy)) {
+    : hostport_(std::move(DCHECK_NOTNULL(hostport))),
+      consensus_proxy_(std::move(DCHECK_NOTNULL(consensus_proxy))) {
 }
 
 void RpcPeerProxy::UpdateAsync(const ConsensusRequestPB* request,
@@ -493,10 +492,13 @@ void RpcPeerProxy::StartTabletCopy(const StartTabletCopyRequestPB* request,
                                    StartTabletCopyResponsePB* response,
                                    rpc::RpcController* controller,
                                    const rpc::ResponseCallback& callback) {
+  controller->set_timeout(MonoDelta::FromMilliseconds(FLAGS_consensus_rpc_timeout_ms));
   consensus_proxy_->StartTabletCopyAsync(*request, response, controller, callback);
 }
 
-RpcPeerProxy::~RpcPeerProxy() {}
+string RpcPeerProxy::PeerName() const {
+  return hostport_->ToString();
+}
 
 namespace {
 

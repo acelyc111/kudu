@@ -47,20 +47,25 @@ public class KuduTable {
   private final AsyncKuduClient client;
   private final String name;
   private final String tableId;
+  private final int numReplicas;
 
   /**
    * Package-private constructor, use {@link KuduClient#openTable(String)} to get an instance.
    * @param client the client this instance belongs to
    * @param name this table's name
+   * @param tableId this table's UUID
    * @param schema this table's schema
+   * @param partitionSchema this table's partition schema
+   * @param numReplicas this table's replication factor
    */
   KuduTable(AsyncKuduClient client, String name, String tableId,
-            Schema schema, PartitionSchema partitionSchema) {
+            Schema schema, PartitionSchema partitionSchema, int numReplicas) {
     this.schema = schema;
     this.partitionSchema = partitionSchema;
     this.client = client;
     this.name = name;
     this.tableId = tableId;
+    this.numReplicas = numReplicas;
   }
 
   /**
@@ -98,6 +103,14 @@ public class KuduTable {
    */
   public String getTableId() {
     return tableId;
+  }
+
+  /**
+   * Get this table's replication factor.
+   * @return this table's replication factor
+   */
+  public int getNumReplicas() {
+    return numReplicas;
   }
 
   /**
@@ -214,15 +227,36 @@ public class KuduTable {
    * range partitions will be returned in sorted order by value, and will
    * contain no duplicates.
    *
-   * @param deadline the deadline of the operation
+   * @param timeout the timeout of the operation
    * @return a list of the formatted range partitions
    */
   @InterfaceAudience.LimitedPrivate("Impala")
   @InterfaceStability.Unstable
-  public List<String> getFormattedRangePartitions(long deadline) throws Exception {
-    List<String> rangePartitions = new ArrayList<>();
+  public List<String> getFormattedRangePartitions(long timeout) throws Exception {
+    List<Partition> rangePartitions = getRangePartitions(timeout);
+    List<String> formattedPartitions = new ArrayList<>();
+    for (Partition partition : rangePartitions) {
+      formattedPartitions.add(partition.formatRangePartition(this));
+    }
+    return formattedPartitions;
+  }
+
+  /**
+   * Retrieves this table's range partitions. The range partitions will be returned
+   * in sorted order by value, and will contain no duplicates.
+   *
+   * @param timeout the timeout of the operation
+   * @return a list of the formatted range partitions
+   */
+  @InterfaceAudience.Private
+  @InterfaceStability.Unstable
+  public List<Partition> getRangePartitions(long timeout) throws Exception {
+    // TODO: This could be moved into the RangeSchemaPB returned from server
+    // to avoid an extra call to get the range partitions.
+    List<Partition> rangePartitions = new ArrayList<>();
     List<KuduScanToken> scanTokens = new KuduScanToken.KuduScanTokenBuilder(client, this)
-        .setTimeout(deadline).build();
+      .setTimeout(timeout)
+      .build();
     for (KuduScanToken token : scanTokens) {
       Partition partition = token.getTablet().getPartition();
       // Filter duplicate range partitions by taking only the tablets whose hash
@@ -230,7 +264,7 @@ public class KuduTable {
       if (!Iterators.all(partition.getHashBuckets().iterator(), Predicates.equalTo(0))) {
         continue;
       }
-      rangePartitions.add(partition.formatRangePartition(this));
+      rangePartitions.add(partition);
     }
     return rangePartitions;
   }

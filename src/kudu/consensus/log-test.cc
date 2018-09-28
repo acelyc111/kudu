@@ -15,9 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include "kudu/consensus/log.h"
+
 #include <algorithm>
 #include <cerrno>
-#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -36,7 +37,6 @@
 #include "kudu/common/wire_protocol.h"
 #include "kudu/consensus/consensus.pb.h"
 #include "kudu/consensus/log-test-base.h"
-#include "kudu/consensus/log.h"
 #include "kudu/consensus/log.pb.h"
 #include "kudu/consensus/log_anchor_registry.h"
 #include "kudu/consensus/log_index.h"
@@ -193,11 +193,10 @@ TEST_P(LogTestOptionalCompression, TestMultipleEntriesInABatch) {
   // RollOver() the batch so that we have a properly formed footer.
   ASSERT_OK(log_->AllocateSegmentAndRollOver());
 
-  vector<LogEntryPB*> entries;
-  ElementDeleter deleter(&entries);
   SegmentSequence segments;
   ASSERT_OK(log_->reader()->GetSegmentsSnapshot(&segments));
 
+  LogEntries entries;
   ASSERT_OK(segments[0]->ReadEntries(&entries));
 
   ASSERT_EQ(2, entries.size());
@@ -285,14 +284,13 @@ TEST_P(LogTestOptionalCompression, TestLogNotTrimmed) {
 
   AppendNoOp(&opid);
 
-  vector<LogEntryPB*> entries;
-  ElementDeleter deleter(&entries);
   SegmentSequence segments;
   ASSERT_OK(log_->reader()->GetSegmentsSnapshot(&segments));
 
+  LogEntries entries;
   ASSERT_OK(segments[0]->ReadEntries(&entries));
   // Close after testing to ensure correct shutdown
-  // TODO : put this in TearDown() with a test on log state?
+  // TODO(unknown): put this in TearDown() with a test on log state?
   ASSERT_OK(log_->Close());
 }
 
@@ -306,15 +304,14 @@ TEST_P(LogTestOptionalCompression, TestBlankLogFile) {
   ASSERT_EQ(log_->reader()->num_segments(), 1);
 
   // ...and we're able to read from it.
-  vector<LogEntryPB*> entries;
-  ElementDeleter deleter(&entries);
   SegmentSequence segments;
   ASSERT_OK(log_->reader()->GetSegmentsSnapshot(&segments));
 
+  LogEntries entries;
   ASSERT_OK(segments[0]->ReadEntries(&entries));
 
   // ...It's just that it's empty.
-  ASSERT_EQ(entries.size(), 0);
+  ASSERT_TRUE(entries.empty());
 }
 
 void LogTest::DoCorruptionTest(CorruptionType type, CorruptionPosition place,
@@ -354,7 +351,7 @@ void LogTest::DoCorruptionTest(CorruptionType type, CorruptionPosition place,
   ASSERT_OK(reader->GetSegmentsSnapshot(&segments));
   Status s = segments[0]->ReadEntries(&entries_);
   ASSERT_EQ(s.CodeAsString(), expected_status.CodeAsString())
-    << "Got unexpected status: " << s.ToString();
+      << "Got unexpected status: " << s.ToString();
 
   // Last entry is ignored, but we should still see the previous ones.
   ASSERT_EQ(expected_entries, entries_.size());
@@ -408,7 +405,7 @@ TEST_P(LogTestOptionalCompression, TestSegmentRollover) {
   ASSERT_OK(log_->Close());
 
   shared_ptr<LogReader> reader;
-  ASSERT_OK(LogReader::Open(fs_manager_.get(), NULL, kTestTablet, NULL, &reader));
+  ASSERT_OK(LogReader::Open(fs_manager_.get(), nullptr, kTestTablet, nullptr, &reader));
   ASSERT_OK(reader->GetSegmentsSnapshot(&segments));
 
   ASSERT_TRUE(segments.back()->HasFooter());
@@ -440,12 +437,11 @@ TEST_F(LogTest, TestWriteAndReadToAndFromInProgressSegment) {
   ASSERT_GT(header_size, 0);
   readable_segment->UpdateReadableToOffset(header_size);
 
-  vector<LogEntryPB*> entries;
-
   // Reading the readable segment now should return OK but yield no
   // entries.
+  LogEntries entries;
   ASSERT_OK(readable_segment->ReadEntries(&entries));
-  ASSERT_EQ(entries.size(), 0);
+  ASSERT_TRUE(entries.empty());
 
   // Dummy add_entry to help us estimate the size of what
   // gets written to disk.
@@ -469,18 +465,18 @@ TEST_F(LogTest, TestWriteAndReadToAndFromInProgressSegment) {
   // Updating the readable segment with the offset of the first entry should
   // make it read a single entry even though there are several in the log.
   readable_segment->UpdateReadableToOffset(header_size + single_entry_size);
+  entries.clear();
   ASSERT_OK(readable_segment->ReadEntries(&entries));
-  ASSERT_EQ(entries.size(), 1);
-  STLDeleteElements(&entries);
+  ASSERT_EQ(1, entries.size());
 
   // Now append another entry so that the Log sets the correct readable offset
   // on the reader.
   ASSERT_OK(AppendNoOps(&op_id, 1, &written_entries_size));
 
   // Now the reader should be able to read all 5 entries.
+  entries.clear();
   ASSERT_OK(readable_segment->ReadEntries(&entries));
-  ASSERT_EQ(entries.size(), 5);
-  STLDeleteElements(&entries);
+  ASSERT_EQ(5, entries.size());
 
   // Offset should get updated for an additional entry.
   ASSERT_EQ(single_entry_size * (kNumEntries + 1) + header_size,
@@ -495,11 +491,11 @@ TEST_F(LogTest, TestWriteAndReadToAndFromInProgressSegment) {
   // Now that we closed the original segment. If we get a segment from the reader
   // again, we should get one with a footer and we should be able to read all entries.
   ASSERT_OK(log_->reader()->GetSegmentsSnapshot(&segments));
-  ASSERT_EQ(segments.size(), 2);
+  ASSERT_EQ(2, segments.size());
   readable_segment = segments[0];
+  entries.clear();
   ASSERT_OK(readable_segment->ReadEntries(&entries));
-  ASSERT_EQ(entries.size(), 5);
-  STLDeleteElements(&entries);
+  ASSERT_EQ(5, entries.size());
 
   // Offset should get updated for an additional entry, again.
   ASSERT_OK(AppendNoOp(&op_id, &written_entries_size));
@@ -589,7 +585,7 @@ TEST_P(LogTestOptionalCompression, TestGCWithLogRunning) {
   }
 
   ASSERT_OK(log_->Close());
-  CheckRightNumberOfSegmentFiles(2);
+  NO_FATALS(CheckRightNumberOfSegmentFiles(2));
 
   // We skip the first three, since we unregistered them above.
   for (int i = 3; i < kNumTotalSegments; i++) {
@@ -644,7 +640,7 @@ TEST_P(LogTestOptionalCompression, TestGCOfIndexChunks) {
 TEST_P(LogTestOptionalCompression, TestWaitUntilAllFlushed) {
   ASSERT_OK(BuildLog());
   // Append 2 replicate/commit pairs asynchronously
-  AppendReplicateBatchAndCommitEntryPairsToLog(2, APPEND_ASYNC);
+  ASSERT_OK(AppendReplicateBatchAndCommitEntryPairsToLog(2, APPEND_ASYNC));
 
   ASSERT_OK(log_->WaitUntilAllFlushed());
 
@@ -653,7 +649,7 @@ TEST_P(LogTestOptionalCompression, TestWaitUntilAllFlushed) {
   ASSERT_OK(log_->reader()->GetSegmentsSnapshot(&segments));
 
   ASSERT_OK(segments[0]->ReadEntries(&entries_));
-  ASSERT_EQ(entries_.size(), 4);
+  ASSERT_EQ(4, entries_.size());
   for (int i = 0; i < 4 ; i++) {
     if (i % 2 == 0) {
       ASSERT_TRUE(entries_[i]->has_replicate());
@@ -715,7 +711,7 @@ TEST_P(LogTestOptionalCompression, TestLogReopenAndGC) {
   retention.for_peers = 0;
   ASSERT_OK(log_->GC(retention, &num_gced_segments));
   ASSERT_EQ(0, num_gced_segments);
-  CheckRightNumberOfSegmentFiles(4);
+  NO_FATALS(CheckRightNumberOfSegmentFiles(4));
 
   // Set the max segments to retain so that, even though we have peers who need
   // the segments, we'll GC them.
@@ -729,7 +725,7 @@ TEST_P(LogTestOptionalCompression, TestLogReopenAndGC) {
   ASSERT_EQ(2, segments.size()) << DumpSegmentsToString(segments);
   ASSERT_OK(log_->Close());
 
-  CheckRightNumberOfSegmentFiles(2);
+  NO_FATALS(CheckRightNumberOfSegmentFiles(2));
 
   // Unregister the final anchor.
   ASSERT_OK(log_anchor_registry_->Unregister(anchors[3]));
@@ -745,7 +741,7 @@ TEST_P(LogTestOptionalCompression, TestWriteManyBatches) {
 
   LOG(INFO)<< "Starting to write " << num_batches << " to log";
   LOG_TIMING(INFO, "Wrote all batches to log") {
-    AppendReplicateBatchAndCommitEntryPairsToLog(num_batches);
+    ASSERT_OK(AppendReplicateBatchAndCommitEntryPairsToLog(num_batches));
   }
   ASSERT_OK(log_->Close());
   LOG(INFO) << "Done writing";
@@ -757,11 +753,11 @@ TEST_P(LogTestOptionalCompression, TestWriteManyBatches) {
     vector<scoped_refptr<ReadableLogSegment> > segments;
 
     shared_ptr<LogReader> reader;
-    ASSERT_OK(LogReader::Open(fs_manager_.get(), NULL, kTestTablet, NULL, &reader));
+    ASSERT_OK(LogReader::Open(fs_manager_.get(), nullptr, kTestTablet, nullptr, &reader));
     ASSERT_OK(reader->GetSegmentsSnapshot(&segments));
 
     for (const scoped_refptr<ReadableLogSegment>& entry : segments) {
-      STLDeleteElements(&entries_);
+      entries_.clear();
       ASSERT_OK(entry->ReadEntries(&entries_));
       num_entries += entries_.size();
     }
@@ -810,15 +806,14 @@ TEST_P(LogTestOptionalCompression, TestLogReaderReturnsLatestSegmentIfIndexEmpty
   ASSERT_OK(BuildLog());
 
   OpId opid = MakeOpId(1, 1);
-  AppendCommit(opid, APPEND_ASYNC);
-  AppendReplicateBatch(opid, APPEND_SYNC);
+  ASSERT_OK(AppendCommit(opid, APPEND_ASYNC));
+  ASSERT_OK(AppendReplicateBatch(opid, APPEND_SYNC));
 
   SegmentSequence segments;
   ASSERT_OK(log_->reader()->GetSegmentsSnapshot(&segments));
   ASSERT_EQ(segments.size(), 1);
 
-  vector<LogEntryPB*> entries;
-  ElementDeleter deleter(&entries);
+  LogEntries entries;
   ASSERT_OK(segments[0]->ReadEntries(&entries));
   ASSERT_EQ(2, entries.size());
 }

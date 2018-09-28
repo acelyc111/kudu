@@ -23,10 +23,10 @@
 #include <map>
 #include <string>
 #include <unordered_map>
-#include <vector>
 
 #include "kudu/consensus/consensus.pb.h"
 #include "kudu/consensus/consensus_peers.h"
+#include "kudu/consensus/metadata.pb.h"
 #include "kudu/consensus/raft_consensus.h"
 #include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/macros.h"
@@ -38,8 +38,6 @@
 
 namespace kudu {
 namespace consensus {
-
-class RaftConfigPB;
 
 // The vote a peer has given.
 enum ElectionVote {
@@ -139,14 +137,17 @@ struct ElectionResult {
 class LeaderElection : public RefCountedThreadSafe<LeaderElection> {
  public:
   typedef std::function<void(const ElectionResult&)> ElectionDecisionCallback;
-  typedef std::unordered_map<std::string, PeerProxy*> ProxyMap;
 
   // Set up a new leader election driver.
   //
+  // 'proxy_factory' must not go out of scope while LeaderElection is alive.
+  //
   // The 'vote_counter' must be initialized with the candidate's own yes vote.
-  LeaderElection(const RaftConfigPB& config, PeerProxyFactory* proxy_factory,
-                 const VoteRequestPB& request,
-                 gscoped_ptr<VoteCounter> vote_counter, MonoDelta timeout,
+  LeaderElection(RaftConfigPB config,
+                 PeerProxyFactory* proxy_factory,
+                 VoteRequestPB request,
+                 gscoped_ptr<VoteCounter> vote_counter,
+                 MonoDelta timeout,
                  ElectionDecisionCallback decision_callback);
 
   // Run the election: send the vote request to followers.
@@ -156,6 +157,7 @@ class LeaderElection : public RefCountedThreadSafe<LeaderElection> {
   friend class RefCountedThreadSafe<LeaderElection>;
 
   struct VoterState {
+    std::string peer_uuid;
     gscoped_ptr<PeerProxy> proxy;
 
     // If constructing the proxy failed (e.g. due to a DNS resolution issue)
@@ -165,6 +167,8 @@ class LeaderElection : public RefCountedThreadSafe<LeaderElection> {
     rpc::RpcController rpc;
     VoteRequestPB request;
     VoteResponsePB response;
+
+    std::string PeerInfo() const;
   };
 
   typedef std::unordered_map<std::string, VoterState*> VoterStateMap;
@@ -181,16 +185,16 @@ class LeaderElection : public RefCountedThreadSafe<LeaderElection> {
   void VoteResponseRpcCallback(const std::string& voter_uuid);
 
   // Record vote from specified peer.
-  void RecordVoteUnlocked(const std::string& voter_uuid, ElectionVote vote);
+  void RecordVoteUnlocked(const VoterState& state, ElectionVote vote);
 
   // Handle a peer that reponded with a term greater than the election term.
-  void HandleHigherTermUnlocked(const std::string& voter_uuid, const VoterState& state);
+  void HandleHigherTermUnlocked(const VoterState& state);
 
   // Log and record a granted vote.
-  void HandleVoteGrantedUnlocked(const std::string& voter_uuid, const VoterState& state);
+  void HandleVoteGrantedUnlocked(const VoterState& state);
 
   // Log the reason for a denied vote and record it.
-  void HandleVoteDeniedUnlocked(const std::string& voter_uuid, const VoterState& state);
+  void HandleVoteDeniedUnlocked(const VoterState& state);
 
   // Returns a string to be prefixed to all log entries.
   // This method accesses const members and is thread safe.
@@ -209,6 +213,12 @@ class LeaderElection : public RefCountedThreadSafe<LeaderElection> {
   // Whether we have responded via the callback yet.
   bool has_responded_;
 
+  // Active Raft configuration at election start time.
+  const RaftConfigPB config_;
+
+  // Factory used in the creation of new proxies.
+  PeerProxyFactory* proxy_factory_;
+
   // Election request to send to voters.
   const VoteRequestPB request_;
 
@@ -220,10 +230,6 @@ class LeaderElection : public RefCountedThreadSafe<LeaderElection> {
 
   // Callback invoked to notify the caller of an election decision.
   const ElectionDecisionCallback decision_callback_;
-
-  // List of all other voters to request votes from.
-  // The candidate's own UUID must not be included.
-  std::vector<std::string> other_voter_uuids_;
 
   // Map of UUID -> VoterState.
   VoterStateMap voter_state_;

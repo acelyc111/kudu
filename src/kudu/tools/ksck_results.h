@@ -16,11 +16,12 @@
 // under the License.
 #pragma once
 
+#include <cstdint>
 #include <iosfwd>
 #include <map>
 #include <set>
-#include <stdint.h>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -33,6 +34,8 @@
 
 namespace kudu {
 namespace tools {
+
+class KsckResultsPB;
 
 // The result of health check on a tablet.
 // Also used to indicate the health of a table, since the health of a table is
@@ -117,6 +120,9 @@ enum class KsckServerHealth {
   // The server is healthy.
   HEALTHY,
 
+  // The server rejected attempts to communicate as unauthorized.
+  UNAUTHORIZED,
+
   // The server can't be contacted.
   UNAVAILABLE,
 
@@ -136,12 +142,14 @@ int ServerHealthScore(KsckServerHealth sh);
 struct KsckServerHealthSummary {
   std::string uuid;
   std::string address;
+  boost::optional<std::string> version;
   KsckServerHealth health = KsckServerHealth::HEALTHY;
   Status status = Status::OK();
 };
 
 // A summary of the state of a table.
 struct KsckTableSummary {
+  std::string id;
   std::string name;
   int replication_factor = 0;
   int healthy_tablets = 0;
@@ -201,10 +209,13 @@ struct KsckReplicaSummary {
 
 // A summary of the state of a tablet.
 struct KsckTabletSummary {
+  std::string id;
+  std::string table_id;
+  std::string table_name;
   KsckCheckResult result;
   std::string status;
   KsckConsensusState master_cstate;
-  std::vector<KsckReplicaSummary> replica_infos;
+  std::vector<KsckReplicaSummary> replicas;
 };
 
 // The result of a checksum on a tablet replica.
@@ -233,12 +244,28 @@ struct KsckChecksumResults {
 };
 
 enum class PrintMode {
-  DEFAULT,
-  // Print all results, including for healthy tablets.
-  VERBOSE,
+  // Print results in pretty-printed JSON format.
+  JSON_PRETTY,
+  // Print results in compact JSON format. Differs from JSON_PRETTY only in
+  // format, not content.
+  JSON_COMPACT,
+  // Print results in plain text, focusing on errors and omitting most
+  // information about healthy tablets.
+  PLAIN_CONCISE,
+  // Print results in plain text.
+  PLAIN_FULL,
 };
 
 typedef std::map<std::string, KsckConsensusState> KsckConsensusStateMap;
+
+// A flag and its value.
+typedef std::pair<std::string, std::string> KsckFlag;
+
+// Map (flag name, flag value) -> server uuids with --flag=value.
+typedef std::map<KsckFlag, std::vector<std::string>> KsckFlagToServersMap;
+
+// Convenience map flag name -> flag tags.
+typedef std::unordered_map<std::string, std::string> KsckFlagTagsMap;
 
 // Container for all the results of a series of ksck checks.
 struct KsckResults {
@@ -247,9 +274,20 @@ struct KsckResults {
   // All checks passed if and only if this vector is empty.
   std::vector<Status> error_messages;
 
+  // Collection of warnings from checks.
+  // These errors are not considered to indicate an unhealthy cluster,
+  // so they do not cause ksck to report an error.
+  std::vector<Status> warning_messages;
+
   // Health summaries for master and tablet servers.
   std::vector<KsckServerHealthSummary> master_summaries;
   std::vector<KsckServerHealthSummary> tserver_summaries;
+
+  // Information about the flags of masters and tablet servers.
+  KsckFlagToServersMap master_flag_to_servers_map;
+  KsckFlagTagsMap master_flag_tags_map;
+  KsckFlagToServersMap tserver_flag_to_servers_map;
+  KsckFlagTagsMap tserver_flag_tags_map;
 
   // Information about the master consensus configuration.
   std::vector<std::string> master_uuids;
@@ -266,6 +304,12 @@ struct KsckResults {
 
   // Print this KsckResults to 'out', according to the PrintMode 'mode'.
   Status PrintTo(PrintMode mode, std::ostream& out);
+
+  // Print this KsckResults to 'out' in JSON format.
+  // 'mode' must be PrintMode::JSON_PRETTY or PrintMode::JSON_COMPACT.
+  Status PrintJsonTo(PrintMode mode, std::ostream& out) const;
+
+  void ToPb(KsckResultsPB* pb) const;
 };
 
 // Print a formatted health summary to 'out', given a list `summaries`
@@ -273,6 +317,22 @@ struct KsckResults {
 Status PrintServerHealthSummaries(KsckServerType type,
                                   const std::vector<KsckServerHealthSummary>& summaries,
                                   std::ostream& out);
+
+// Print a formatted summary of the flags in 'flag_to_servers_map', indicating
+// which servers have which (flag, value) pairs set.
+// Flag tag information is sourced from 'flag_tags_map'.
+Status PrintFlagTable(KsckServerType type,
+                      int num_servers,
+                      const KsckFlagToServersMap& flag_to_servers_map,
+                      const KsckFlagTagsMap& flag_tags_map,
+                      std::ostream& out);
+
+// Print a summary of the Kudu versions running across all servers from which
+// information could be fetched. Servers are grouped by version to make the
+// table compact.
+Status PrintVersionTable(const std::vector<KsckServerHealthSummary>& masters,
+                         const std::vector<KsckServerHealthSummary>& tservers,
+                         std::ostream& out);
 
 // Print a formatted summary of the tables in 'table_summaries' to 'out'.
 Status PrintTableSummaries(const std::vector<KsckTableSummary>& table_summaries,

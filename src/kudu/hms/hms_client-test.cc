@@ -31,10 +31,12 @@
 #include <glog/stl_logging.h>
 #include <gtest/gtest.h>
 
+#include "kudu/gutil/strings/substitute.h"
 #include "kudu/hms/hive_metastore_types.h"
 #include "kudu/hms/mini_hms.h"
 #include "kudu/rpc/sasl_common.h"
 #include "kudu/security/test/mini_kdc.h"
+#include "kudu/thrift/client.h"
 #include "kudu/util/monotime.h"
 #include "kudu/util/net/net_util.h"
 #include "kudu/util/net/sockaddr.h"
@@ -48,6 +50,7 @@ using kudu::rpc::SaslProtection;
 using std::make_pair;
 using std::string;
 using std::vector;
+using strings::Substitute;
 
 namespace kudu {
 namespace hms {
@@ -63,12 +66,13 @@ class HmsClientTest : public KuduTest,
     hive::Table table;
     table.dbName = database_name;
     table.tableName = table_name;
-    table.tableType = HmsClient::kManagedTable;
+    table.tableType = HmsClient::kExternalTable;
 
     table.__set_parameters({
         make_pair(HmsClient::kKuduTableIdKey, table_id),
         make_pair(HmsClient::kKuduMasterAddrsKey, string("TODO")),
         make_pair(HmsClient::kStorageHandlerKey, HmsClient::kKuduStorageHandler),
+        make_pair(HmsClient::kExternalTableKey, "TRUE")
     });
 
     hive::EnvironmentContext env_ctx;
@@ -104,7 +108,7 @@ TEST_P(HmsClientTest, TestHmsOperations) {
   optional<SaslProtection::Type> protection = GetParam();
   MiniKdc kdc;
   MiniHms hms;
-  HmsClientOptions hms_client_opts;
+  thrift::ClientOptions hms_client_opts;
 
   if (protection) {
     ASSERT_OK(kdc.Start());
@@ -123,6 +127,7 @@ TEST_P(HmsClientTest, TestHmsOperations) {
     ASSERT_OK(kdc.Kinit("alice"));
     ASSERT_OK(kdc.SetKrb5Environment());
     hms_client_opts.enable_kerberos = true;
+    hms_client_opts.service_principal = "hive";
   }
 
   ASSERT_OK(hms.Start());
@@ -145,7 +150,7 @@ TEST_P(HmsClientTest, TestHmsOperations) {
   std::sort(databases.begin(), databases.end());
   EXPECT_EQ(vector<string>({ "default", database_name }), databases) << "Databases: " << databases;
 
-  // Get a specific database..
+  // Get a specific database.
   hive::Database my_db;
   ASSERT_OK(client.GetDatabase(database_name, &my_db));
   EXPECT_EQ(database_name, my_db.name) << "my_db: " << my_db;
@@ -168,7 +173,7 @@ TEST_P(HmsClientTest, TestHmsOperations) {
   EXPECT_EQ(table_name, my_table.tableName);
   EXPECT_EQ(table_id, my_table.parameters[HmsClient::kKuduTableIdKey]);
   EXPECT_EQ(HmsClient::kKuduStorageHandler, my_table.parameters[HmsClient::kStorageHandlerKey]);
-  EXPECT_EQ(HmsClient::kManagedTable, my_table.tableType);
+  EXPECT_EQ(HmsClient::kExternalTable, my_table.tableType);
 
   string new_table_name = "my_altered_table";
 
@@ -193,7 +198,7 @@ TEST_P(HmsClientTest, TestHmsOperations) {
   EXPECT_EQ(table_id, renamed_table.parameters[HmsClient::kKuduTableIdKey]);
   EXPECT_EQ(HmsClient::kKuduStorageHandler,
             renamed_table.parameters[HmsClient::kStorageHandlerKey]);
-  EXPECT_EQ(HmsClient::kManagedTable, renamed_table.tableType);
+  EXPECT_EQ(HmsClient::kExternalTable, renamed_table.tableType);
 
   // Create a table with an uppercase name.
   string uppercase_table_name = "my_UPPERCASE_Table";
@@ -202,12 +207,36 @@ TEST_P(HmsClientTest, TestHmsOperations) {
   // Create a table with an illegal utf-8 name.
   ASSERT_TRUE(CreateTable(&client, database_name, "☃ sculptures 😉", table_id).IsInvalidArgument());
 
-  // Get all tables.
-  vector<string> tables;
-  ASSERT_OK(client.GetAllTables(database_name, &tables));
-  std::sort(tables.begin(), tables.end());
-  EXPECT_EQ(vector<string>({ new_table_name, "my_uppercase_table" }), tables)
-      << "Tables: " << tables;
+  // Create a non-Kudu table.
+  hive::Table non_kudu_table;
+  non_kudu_table.dbName = database_name;
+  non_kudu_table.tableName = "non_kudu_table";
+  non_kudu_table.parameters[HmsClient::kStorageHandlerKey] = "bogus.storage.Handler";
+  ASSERT_OK(client.CreateTable(non_kudu_table));
+
+  // Get all table names.
+  vector<string> table_names;
+  ASSERT_OK(client.GetTableNames(database_name, &table_names));
+  std::sort(table_names.begin(), table_names.end());
+  EXPECT_EQ(vector<string>({ new_table_name, "my_uppercase_table", "non_kudu_table" }), table_names)
+      << "table names: " << table_names;
+
+  // Get filtered table names.
+  table_names.clear();
+  string filter = Substitute(
+      "$0$1 = \"$2\"", HmsClient::kHiveFilterFieldParams,
+      HmsClient::kStorageHandlerKey, HmsClient::kKuduStorageHandler);
+  ASSERT_OK(client.GetTableNames(database_name, filter, &table_names))
+  std::sort(table_names.begin(), table_names.end());
+  EXPECT_EQ(vector<string>({ new_table_name, "my_uppercase_table" }), table_names)
+      << "table names: " << table_names;
+
+  // Get multiple tables.
+  vector<hive::Table> tables;
+  ASSERT_OK(client.GetTables(database_name, table_names, &tables));
+  ASSERT_EQ(2, tables.size());
+  EXPECT_EQ(new_table_name, tables[0].tableName);
+  EXPECT_EQ("my_uppercase_table", tables[1].tableName);
 
   // Check that the HMS rejects Kudu table drops with a bogus table ID.
   ASSERT_TRUE(DropTable(&client, database_name, new_table_name, "bogus-table-id").IsRemoteError());
@@ -231,15 +260,16 @@ TEST_P(HmsClientTest, TestHmsOperations) {
   vector<hive::NotificationEvent> events;
   ASSERT_OK(client.GetNotificationEvents(-1, 100, &events));
 
-  ASSERT_EQ(5, events.size());
+  ASSERT_EQ(6, events.size());
   EXPECT_EQ("CREATE_DATABASE", events[0].eventType);
   EXPECT_EQ("CREATE_TABLE", events[1].eventType);
   EXPECT_EQ("ALTER_TABLE", events[2].eventType);
   EXPECT_EQ("CREATE_TABLE", events[3].eventType);
-  EXPECT_EQ("DROP_TABLE", events[4].eventType);
+  EXPECT_EQ("CREATE_TABLE", events[4].eventType);
+  EXPECT_EQ("DROP_TABLE", events[5].eventType);
   // TODO(HIVE-17008)
-  //EXPECT_EQ("DROP_TABLE", events[5].eventType);
-  //EXPECT_EQ("DROP_DATABASE", events[6].eventType);
+  //EXPECT_EQ("DROP_TABLE", events[6].eventType);
+  //EXPECT_EQ("DROP_DATABASE", events[7].eventType);
 
   // Retrieve a specific notification log.
   events.clear();
@@ -254,12 +284,13 @@ TEST_P(HmsClientTest, TestLargeObjects) {
 
   MiniKdc kdc;
   MiniHms hms;
-  HmsClientOptions hms_client_opts;
+  thrift::ClientOptions hms_client_opts;
 
   if (protection) {
     ASSERT_OK(kdc.Start());
 
-    string spn = "hive/127.0.0.1";
+    // Try a non-standard service principal to ensure it works correctly.
+    string spn = "hive_alternate_sp/127.0.0.1";
     string ktpath;
     ASSERT_OK(kdc.CreateServiceKeytab(spn, &ktpath));
 
@@ -273,6 +304,7 @@ TEST_P(HmsClientTest, TestLargeObjects) {
     ASSERT_OK(kdc.Kinit("alice"));
     ASSERT_OK(kdc.SetKrb5Environment());
     hms_client_opts.enable_kerberos = true;
+    hms_client_opts.service_principal = "hive_alternate_sp";
   }
 
   ASSERT_OK(hms.Start());
@@ -286,7 +318,7 @@ TEST_P(HmsClientTest, TestLargeObjects) {
   hive::Table table;
   table.dbName = database_name;
   table.tableName = table_name;
-  table.tableType = HmsClient::kManagedTable;
+  table.tableType = HmsClient::kExternalTable;
   hive::FieldSchema partition_key;
   partition_key.name = "c1";
   partition_key.type = "int";
@@ -324,7 +356,7 @@ TEST_F(HmsClientTest, TestHmsFaultHandling) {
   MiniHms hms;
   ASSERT_OK(hms.Start());
 
-  HmsClientOptions options;
+  thrift::ClientOptions options;
   options.recv_timeout = MonoDelta::FromMilliseconds(500),
   options.send_timeout = MonoDelta::FromMilliseconds(500);
   HmsClient client(hms.address(), options);
@@ -358,7 +390,7 @@ TEST_F(HmsClientTest, TestHmsConnect) {
   Sockaddr loopback;
   ASSERT_OK(loopback.ParseString("127.0.0.1", 0));
 
-  HmsClientOptions options;
+  thrift::ClientOptions options;
   options.recv_timeout = MonoDelta::FromMilliseconds(100),
   options.send_timeout = MonoDelta::FromMilliseconds(100);
   options.conn_timeout = MonoDelta::FromMilliseconds(100);
@@ -400,6 +432,34 @@ TEST_F(HmsClientTest, TestDeserializeJsonTable) {
   ASSERT_OK(HmsClient::DeserializeJsonTable(json, &table));
   ASSERT_EQ("table_name", table.tableName);
   ASSERT_EQ("database_name", table.dbName);
+}
+
+TEST_F(HmsClientTest, TestCaseSensitivity) {
+  MiniKdc kdc;
+  MiniHms hms;
+  ASSERT_OK(hms.Start());
+
+  HmsClient client(hms.address(), thrift::ClientOptions());
+  ASSERT_OK(client.Start());
+
+  // Create a database.
+  hive::Database db;
+  db.name = "my_db";
+  ASSERT_OK(client.CreateDatabase(db));
+
+  // Create a table.
+  ASSERT_OK(CreateTable(&client, "my_db", "Foo", "abc123"));
+
+  hive::Table table;
+  ASSERT_OK(client.GetTable("my_db", "Foo", &table));
+  ASSERT_EQ(table.tableName, "foo");
+
+  ASSERT_OK(client.GetTable("my_db", "foo", &table));
+  ASSERT_EQ(table.tableName, "foo");
+
+  ASSERT_OK(client.GetTable("MY_DB", "FOO", &table));
+  ASSERT_EQ(table.dbName, "my_db");
+  ASSERT_EQ(table.tableName, "foo");
 }
 
 } // namespace hms

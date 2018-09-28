@@ -49,6 +49,15 @@ ADD_EXPORTABLE_LIBRARY(token_proto
 # security
 ##############################
 
+# Check for krb5_get_init_creds_opt_set_out_ccache, which is not available in versions
+# of MIT Kerberos older than krb5-1.6, and is also not present in Heimdal kerberos.
+include(CheckLibraryExists)
+check_library_exists("krb5" krb5_get_init_creds_opt_set_out_ccache
+  ${KERBEROS_LIBRARY} HAVE_KRB5_GET_INIT_CREDS_OPT_SET_OUT_CCACHE)
+if(HAVE_KRB5_GET_INIT_CREDS_OPT_SET_OUT_CCACHE)
+  add_definitions(-DHAVE_KRB5_GET_INIT_CREDS_OPT_SET_OUT_CCACHE=1)
+endif()
+
 # Fall back to using the ported functionality if we're using an older version of OpenSSL.
 if (${OPENSSL_VERSION} VERSION_LESS "1.0.2")
   set(PORTED_X509_CHECK_HOST_CC "x509_check_host.cc")
@@ -116,11 +125,10 @@ if (NOT NO_TESTS)
     security)
 
   # Tests
-  set(KUDU_TEST_LINK_LIBS
+  SET_KUDU_TEST_LINK_LIBS(
     mini_kdc
     security
-    security_test_util
-    ${KUDU_MIN_TEST_LIBS})
+    security_test_util)
 
   ADD_KUDU_TEST(ca/cert_management-test)
   ADD_KUDU_TEST(cert-test)

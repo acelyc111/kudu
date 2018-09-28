@@ -52,6 +52,7 @@ class OpId;
 }
 
 namespace fs {
+struct IOContext;
 class WritableBlock;
 }
 
@@ -63,11 +64,11 @@ namespace tablet {
 
 class DeltaFileReader;
 class DeltaMemStore;
-class MvccSnapshot;
 class OperationResultPB;
 class RowSetMetadata;
 class RowSetMetadataUpdate;
 struct ProbeStats;
+struct RowIteratorOptions;
 
 // The DeltaTracker is the part of a DiskRowSet which is responsible for
 // tracking modifications against the base data. It consists of a set of
@@ -85,10 +86,11 @@ class DeltaTracker {
   static Status Open(const std::shared_ptr<RowSetMetadata>& rowset_metadata,
                      log::LogAnchorRegistry* log_anchor_registry,
                      const TabletMemTrackers& mem_trackers,
+                     const fs::IOContext* io_context,
                      gscoped_ptr<DeltaTracker>* delta_tracker);
 
   Status WrapIterator(const std::shared_ptr<CFileSet::Iterator> &base,
-                      const MvccSnapshot &mvcc_snap,
+                      const RowIteratorOptions& opts,
                       gscoped_ptr<ColumnwiseIterator>* out) const;
 
   // Enum used for NewDeltaIterator() and CollectStores() below.
@@ -104,17 +106,14 @@ class DeltaTracker {
   // by this DeltaTracker. Depending on the value of 'which' (see above),
   // this iterator may include UNDOs, REDOs, or both.
   //
-  // 'schema' is the schema of the rows that are being read by the client.
-  // It must remain valid for the lifetime of the returned iterator.
-  Status NewDeltaIterator(const Schema* schema,
-                          const MvccSnapshot& snap,
+  // Pointers in 'opts' must remain valid for the lifetime of the returned iterator.
+  Status NewDeltaIterator(const RowIteratorOptions& opts,
                           WhichStores which,
                           std::unique_ptr<DeltaIterator>* out) const;
 
-  Status NewDeltaIterator(const Schema* schema,
-                          const MvccSnapshot& snap,
+  Status NewDeltaIterator(const RowIteratorOptions& opts,
                           std::unique_ptr<DeltaIterator>* out) const {
-    return NewDeltaIterator(schema, snap, UNDOS_AND_REDOS, out);
+    return NewDeltaIterator(opts, UNDOS_AND_REDOS, out);
   }
 
 
@@ -122,20 +121,18 @@ class DeltaTracker {
   // the DMS.
   // Returns the delta stores being merged in *included_stores.
   Status NewDeltaFileIterator(
-    const Schema* schema,
-    const MvccSnapshot &snap,
-    DeltaType type,
-    std::vector<std::shared_ptr<DeltaStore> >* included_stores,
-    std::unique_ptr<DeltaIterator>* out) const;
+      const RowIteratorOptions& opts,
+      DeltaType type,
+      std::vector<std::shared_ptr<DeltaStore>>* included_stores,
+      std::unique_ptr<DeltaIterator>* out) const;
 
   // Flushes the current DeltaMemStore and replaces it with a new one.
   // Caller selects whether to also have the RowSetMetadata (and consequently
   // the TabletMetadata) flushed.
   //
   // NOTE: 'flush_type' should almost always be set to 'FLUSH_METADATA', or else
-  // delta stores might become unrecoverable. TODO: see KUDU-204 to clean this up
-  // a bit.
-  Status Flush(MetadataFlushType flush_type);
+  // delta stores might become unrecoverable.
+  Status Flush(const fs::IOContext* io_context, MetadataFlushType flush_type);
 
   // Update the given row in the database.
   // Copies the data, as well as any referenced values into a local arena.
@@ -151,14 +148,11 @@ class DeltaTracker {
   // delta for this row is a deletion.
   //
   // Sets *deleted to true if so; otherwise sets it to false.
-  Status CheckRowDeleted(rowid_t row_idx, bool *deleted, ProbeStats* stats) const;
+  Status CheckRowDeleted(rowid_t row_idx, const fs::IOContext* io_context,
+                         bool *deleted, ProbeStats* stats) const;
 
   // Compacts all REDO delta files.
-  //
-  // TODO keep metadata in the delta stores to indicate whether or not
-  // a minor (or -- when implemented -- major) compaction is warranted
-  // and if so, compact the stores.
-  Status Compact();
+  Status Compact(const fs::IOContext* io_context);
 
   // Updates the in-memory list of delta stores and then persists the updated
   // metadata. This should only be used for compactions or ancient history
@@ -169,6 +163,7 @@ class DeltaTracker {
   Status CommitDeltaStoreMetadataUpdate(const RowSetMetadataUpdate& update,
                                         const SharedDeltaStoreVector& to_remove,
                                         const std::vector<BlockId>& new_delta_blocks,
+                                        const fs::IOContext* io_context,
                                         DeltaType type,
                                         MetadataFlushType flush_type);
 
@@ -176,7 +171,7 @@ class DeltaTracker {
   // "start_idx" and "end_idx" (inclusive) and writes this to a
   // new REDO delta block. If "end_idx" is set to -1, then delta files at
   // all indexes starting with "start_idx" will be compacted.
-  Status CompactStores(int start_idx, int end_idx);
+  Status CompactStores(const fs::IOContext* io_context, int start_idx, int end_idx);
 
   // See RowSet::EstimateBytesInPotentiallyAncientUndoDeltas().
   Status EstimateBytesInPotentiallyAncientUndoDeltas(Timestamp ancient_history_mark,
@@ -185,17 +180,19 @@ class DeltaTracker {
   // See RowSet::InitUndoDeltas().
   Status InitUndoDeltas(Timestamp ancient_history_mark,
                         MonoTime deadline,
+                        const fs::IOContext* io_context,
                         int64_t* delta_blocks_initialized,
                         int64_t* bytes_in_ancient_undos);
 
   // See RowSet::DeleteAncientUndoDeltas().
-  Status DeleteAncientUndoDeltas(Timestamp ancient_history_mark,
+  Status DeleteAncientUndoDeltas(Timestamp ancient_history_mark, const fs::IOContext* io_context,
                                  int64_t* blocks_deleted, int64_t* bytes_deleted);
 
   // Opens the input 'blocks' of type 'type' and returns the opened delta file
   // readers in 'stores'.
   Status OpenDeltaReaders(const std::vector<BlockId>& blocks,
-                          std::vector<std::shared_ptr<DeltaStore> >* stores,
+                          const fs::IOContext* io_context,
+                          std::vector<std::shared_ptr<DeltaStore>>* stores,
                           DeltaType type);
 
   // Validates that 'first' may precede 'second' in an ordered list of deltas,
@@ -272,9 +269,10 @@ class DeltaTracker {
                log::LogAnchorRegistry* log_anchor_registry,
                TabletMemTrackers mem_trackers);
 
-  Status DoOpen();
+  Status DoOpen(const fs::IOContext* io_context);
 
   Status FlushDMS(DeltaMemStore* dms,
+                  const fs::IOContext* io_context,
                   std::shared_ptr<DeltaFileReader>* dfr,
                   MetadataFlushType flush_type);
 
@@ -289,7 +287,8 @@ class DeltaTracker {
   // NOTE: the caller of this method should acquire or already hold an
   // exclusive lock on 'compact_flush_lock_' before calling this
   // method in order to protect 'redo_delta_stores_'.
-  Status DoCompactStores(size_t start_idx, size_t end_idx,
+  Status DoCompactStores(const fs::IOContext* io_context,
+                         size_t start_idx, size_t end_idx,
                          std::unique_ptr<fs::WritableBlock> block,
                          std::vector<std::shared_ptr<DeltaStore>>* compacted_stores,
                          std::vector<BlockId>* compacted_blocks);
@@ -303,11 +302,11 @@ class DeltaTracker {
   // NOTE: the caller of this method must first acquire or already
   // hold a lock on 'compact_flush_lock_'in order to guard against a
   // race on 'redo_delta_stores_'.
-  Status MakeDeltaIteratorMergerUnlocked(size_t start_idx, size_t end_idx,
-                                         const Schema* schema,
-                                         std::vector<std::shared_ptr<DeltaStore > > *target_stores,
-                                         std::vector<BlockId> *target_blocks,
-                                         std::unique_ptr<DeltaIterator> *out);
+  Status MakeDeltaIteratorMergerUnlocked(const fs::IOContext* io_context,
+                                         size_t start_idx, size_t end_idx, const Schema* projection,
+                                         std::vector<std::shared_ptr<DeltaStore>>* target_stores,
+                                         std::vector<BlockId>* target_blocks,
+                                         std::unique_ptr<DeltaIterator>* out);
 
   std::string LogPrefix() const;
 

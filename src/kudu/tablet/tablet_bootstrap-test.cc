@@ -15,9 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "kudu/consensus/log-test-base.h"
+#include "kudu/tablet/tablet_bootstrap.h"
 
-#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -35,7 +34,9 @@
 #include "kudu/clock/logical_clock.h"
 #include "kudu/common/common.pb.h"
 #include "kudu/common/iterator.h"
+#include "kudu/common/partial_row.h"
 #include "kudu/common/partition.h"
+#include "kudu/common/row_operations.h"
 #include "kudu/common/schema.h"
 #include "kudu/common/timestamp.h"
 #include "kudu/common/wire_protocol-test-util.h"
@@ -45,6 +46,7 @@
 #include "kudu/consensus/consensus.pb.h"
 #include "kudu/consensus/consensus_meta.h"
 #include "kudu/consensus/consensus_meta_manager.h"
+#include "kudu/consensus/log-test-base.h"
 #include "kudu/consensus/log.h"
 #include "kudu/consensus/log_anchor_registry.h"
 #include "kudu/consensus/log_reader.h"
@@ -67,7 +69,6 @@
 #include "kudu/tablet/tablet-test-util.h"
 #include "kudu/tablet/tablet.h"
 #include "kudu/tablet/tablet.pb.h"
-#include "kudu/tablet/tablet_bootstrap.h"
 #include "kudu/tablet/tablet_metadata.h"
 #include "kudu/tablet/tablet_replica.h"
 #include "kudu/tserver/tserver.pb.h"
@@ -170,7 +171,7 @@ class BootstrapTest : public LogTestBase {
         scoped_refptr<Clock>(LogicalClock::CreateStartingAt(Timestamp::kInitialTimestamp)),
         shared_ptr<MemTracker>(),
         scoped_refptr<rpc::ResultTracker>(),
-        NULL,
+        nullptr,
         nullptr, // no status listener
         tablet,
         &log_,
@@ -218,10 +219,10 @@ class BootstrapTest : public LogTestBase {
 TEST_F(BootstrapTest, TestBootstrap) {
   ASSERT_OK(BuildLog());
 
-  AppendReplicateBatch(MakeOpId(1, current_index_));
+  ASSERT_OK(AppendReplicateBatch(MakeOpId(1, current_index_)));
   ASSERT_OK(RollLog());
 
-  AppendCommit(MakeOpId(1, current_index_));
+  ASSERT_OK(AppendCommit(MakeOpId(1, current_index_)));
 
   shared_ptr<Tablet> tablet;
   ConsensusBootstrapInfo boot_info;
@@ -297,11 +298,11 @@ TEST_F(BootstrapTest, TestOrphanCommit) {
   OpId opid = MakeOpId(1, current_index_);
 
   // Step 1) Write a REPLICATE to the log, and roll it.
-  AppendReplicateBatch(opid);
+  ASSERT_OK(AppendReplicateBatch(opid));
   ASSERT_OK(RollLog());
 
   // Step 2) Write the corresponding COMMIT in the second segment.
-  AppendCommit(opid);
+  ASSERT_OK(AppendCommit(opid));
 
   scoped_refptr<TabletMetadata> meta;
   ASSERT_OK(LoadTestTabletMetadata(/*mrs_id=*/ -1, /*delta_id=*/ -1, &meta));
@@ -322,7 +323,7 @@ TEST_F(BootstrapTest, TestOrphanCommit) {
     // Step 4) Create an orphaned commit by first adding a commit to
     // the newly rolled logfile, and then by removing the previous
     // commits.
-    AppendCommit(opid);
+    ASSERT_OK(AppendCommit(opid));
     log::SegmentSequence segments;
     ASSERT_OK(log_->reader()->GetSegmentsSnapshot(&segments));
     fs_manager_->env()->DeleteFile(segments[0]->path());
@@ -360,9 +361,9 @@ TEST_F(BootstrapTest, TestPendingFailedCommit) {
 
   // Step 2) Write the corresponding COMMIT in the second segment,
   // with a status indicating that the writes had 'NotFound' results.
-  AppendReplicateBatch(opid_1);
-  AppendReplicateBatch(opid_2);
-  AppendCommitWithNotFoundOpResults(opid_2);
+  ASSERT_OK(AppendReplicateBatch(opid_1));
+  ASSERT_OK(AppendReplicateBatch(opid_2));
+  ASSERT_OK(AppendCommitWithNotFoundOpResults(opid_2));
 
   {
     shared_ptr<Tablet> tablet;
@@ -386,10 +387,10 @@ TEST_F(BootstrapTest, TestNonOrphansAfterOrphanCommit) {
 
   OpId opid = MakeOpId(1, current_index_);
 
-  AppendReplicateBatch(opid);
+  ASSERT_OK(AppendReplicateBatch(opid));
   ASSERT_OK(RollLog());
 
-  AppendCommit(opid);
+  ASSERT_OK(AppendCommit(opid));
 
   log::SegmentSequence segments;
   ASSERT_OK(log_->reader()->GetSegmentsSnapshot(&segments));
@@ -399,8 +400,8 @@ TEST_F(BootstrapTest, TestNonOrphansAfterOrphanCommit) {
 
   opid = MakeOpId(1, current_index_);
 
-  AppendReplicateBatch(opid);
-  AppendCommit(opid, 2, 1, 0);
+  ASSERT_OK(AppendReplicateBatch(opid));
+  ASSERT_OK(AppendCommit(opid, 2, 1, 0));
 
   shared_ptr<Tablet> tablet;
   ConsensusBootstrapInfo boot_info;
@@ -428,7 +429,7 @@ TEST_F(BootstrapTest, TestOrphanedReplicate) {
 
   OpId opid = MakeOpId(1, replicate_index);
 
-  AppendReplicateBatch(opid);
+  ASSERT_OK(AppendReplicateBatch(opid));
 
   // Bootstrap the tablet. It shouldn't replay anything.
   ConsensusBootstrapInfo boot_info;
@@ -470,18 +471,18 @@ TEST_F(BootstrapTest, TestOperationOverwriting) {
   OpId opid = MakeOpId(1, 1);
 
   // Append a replicate in term 1
-  AppendReplicateBatch(opid);
+  ASSERT_OK(AppendReplicateBatch(opid));
 
   // Append a commit for op 1.1
-  AppendCommit(opid);
+  ASSERT_OK(AppendCommit(opid));
 
   // Now append replicates for 4.2 and 4.3
-  AppendReplicateBatch(MakeOpId(4, 2));
-  AppendReplicateBatch(MakeOpId(4, 3));
+  ASSERT_OK(AppendReplicateBatch(MakeOpId(4, 2)));
+  ASSERT_OK(AppendReplicateBatch(MakeOpId(4, 3)));
 
   ASSERT_OK(RollLog());
   // And overwrite with 3.2
-  AppendReplicateBatch(MakeOpId(3, 2), true);
+  ASSERT_OK(AppendReplicateBatch(MakeOpId(3, 2)));
 
   // When bootstrapping we should apply ops 1.1 and get 3.2 as pending.
   ConsensusBootstrapInfo boot_info;
@@ -518,7 +519,7 @@ TEST_F(BootstrapTest, TestOutOfOrderCommits) {
   replicate->get()->set_timestamp(clock_->Now().ToUint64());
   AddTestRowToPB(RowOperationsPB::INSERT, schema_, 10, 1,
                  "this is a test insert", batch_request->mutable_row_operations());
-  AppendReplicateBatch(replicate, true);
+  ASSERT_OK(AppendReplicateBatch(replicate));
 
   // This appends Mutate(1) with op 10.11
   OpId mutate_opid = MakeOpId(10, 11);
@@ -528,7 +529,7 @@ TEST_F(BootstrapTest, TestOutOfOrderCommits) {
   AddTestRowToPB(RowOperationsPB::UPDATE, schema_,
                  10, 2, "this is a test mutate",
                  batch_request->mutable_row_operations());
-  AppendReplicateBatch(replicate, true);
+  ASSERT_OK(AppendReplicateBatch(replicate));
 
   // Now commit the mutate before the insert (in the log).
   gscoped_ptr<consensus::CommitMsg> mutate_commit(new consensus::CommitMsg);
@@ -539,7 +540,7 @@ TEST_F(BootstrapTest, TestOutOfOrderCommits) {
   MemStoreTargetPB* target = mutate->add_mutated_stores();
   target->set_mrs_id(1);
 
-  AppendCommit(std::move(mutate_commit));
+  ASSERT_OK(AppendCommit(std::move(mutate_commit)));
 
   gscoped_ptr<consensus::CommitMsg> insert_commit(new consensus::CommitMsg);
   insert_commit->set_op_type(consensus::WRITE_OP);
@@ -549,7 +550,7 @@ TEST_F(BootstrapTest, TestOutOfOrderCommits) {
   target = insert->add_mutated_stores();
   target->set_mrs_id(1);
 
-  AppendCommit(std::move(insert_commit));
+  ASSERT_OK(AppendCommit(std::move(insert_commit)));
 
   ConsensusBootstrapInfo boot_info;
   shared_ptr<Tablet> tablet;
@@ -582,7 +583,7 @@ TEST_F(BootstrapTest, TestMissingCommitMessage) {
   replicate->get()->set_timestamp(clock_->Now().ToUint64());
   AddTestRowToPB(RowOperationsPB::INSERT, schema_, 10, 1,
                  "this is a test insert", batch_request->mutable_row_operations());
-  AppendReplicateBatch(replicate, true);
+  ASSERT_OK(AppendReplicateBatch(replicate));
 
   // This appends Mutate(1) with op 10.11
   OpId mutate_opid = MakeOpId(10, 11);
@@ -592,7 +593,7 @@ TEST_F(BootstrapTest, TestMissingCommitMessage) {
   AddTestRowToPB(RowOperationsPB::UPDATE, schema_,
                  10, 2, "this is a test mutate",
                  batch_request->mutable_row_operations());
-  AppendReplicateBatch(replicate, true);
+  ASSERT_OK(AppendReplicateBatch(replicate));
 
   // Now commit the mutate before the insert (in the log).
   gscoped_ptr<consensus::CommitMsg> mutate_commit(new consensus::CommitMsg);
@@ -603,7 +604,7 @@ TEST_F(BootstrapTest, TestMissingCommitMessage) {
   MemStoreTargetPB* target = mutate->add_mutated_stores();
   target->set_mrs_id(1);
 
-  AppendCommit(std::move(mutate_commit));
+  ASSERT_OK(AppendCommit(std::move(mutate_commit)));
 
   ConsensusBootstrapInfo boot_info;
   shared_ptr<Tablet> tablet;
@@ -628,8 +629,9 @@ TEST_F(BootstrapTest, TestConsensusOnlyOperationOutOfOrderTimestamp) {
   noop_replicate->get()->set_op_type(consensus::NO_OP);
   *noop_replicate->get()->mutable_id() = MakeOpId(1, 1);
   noop_replicate->get()->set_timestamp(2);
+  noop_replicate->get()->mutable_noop_request()->set_timestamp_in_opid_order(false);
 
-  AppendReplicateBatch(noop_replicate, true);
+  ASSERT_OK(AppendReplicateBatch(noop_replicate));
 
   // Append WRITE_OP with higher OpId and lower timestamp.
   ReplicateRefPtr write_replicate = make_scoped_refptr_replicate(new ReplicateMsg());
@@ -642,7 +644,7 @@ TEST_F(BootstrapTest, TestConsensusOnlyOperationOutOfOrderTimestamp) {
   AddTestRowToPB(RowOperationsPB::INSERT, schema_, 1, 1, "foo",
                  batch_request->mutable_row_operations());
 
-  AppendReplicateBatch(write_replicate, true);
+  ASSERT_OK(AppendReplicateBatch(write_replicate));
 
   // Now commit in OpId order.
   // NO_OP...
@@ -650,7 +652,7 @@ TEST_F(BootstrapTest, TestConsensusOnlyOperationOutOfOrderTimestamp) {
   mutate_commit->set_op_type(consensus::NO_OP);
   *mutate_commit->mutable_commited_op_id() = noop_replicate->get()->id();
 
-  AppendCommit(std::move(mutate_commit));
+  ASSERT_OK(AppendCommit(std::move(mutate_commit)));
 
   // ...and WRITE_OP...
   mutate_commit = gscoped_ptr<consensus::CommitMsg>(new consensus::CommitMsg);
@@ -661,7 +663,7 @@ TEST_F(BootstrapTest, TestConsensusOnlyOperationOutOfOrderTimestamp) {
   MemStoreTargetPB* target = mutate->add_mutated_stores();
   target->set_mrs_id(1);
 
-  AppendCommit(std::move(mutate_commit));
+  ASSERT_OK(AppendCommit(std::move(mutate_commit)));
 
   ConsensusBootstrapInfo boot_info;
   shared_ptr<Tablet> tablet;
@@ -673,6 +675,75 @@ TEST_F(BootstrapTest, TestConsensusOnlyOperationOutOfOrderTimestamp) {
   vector<string> results;
   IterateTabletRows(tablet.get(), &results);
   ASSERT_EQ(1, results.size());
+}
+
+// Regression test for KUDU-2509. There was a use-after-free bug that sometimes
+// lead to SIGSEGV while replaying the WAL. This scenario would crash or
+// at least UB sanitizer would report a warning if such condition exists.
+TEST_F(BootstrapTest, TestKudu2509) {
+  ASSERT_OK(BuildLog());
+
+  consensus::ReplicateRefPtr replicate = consensus::make_scoped_refptr_replicate(
+      new consensus::ReplicateMsg());
+  replicate->get()->set_op_type(consensus::WRITE_OP);
+  tserver::WriteRequestPB* batch_request = replicate->get()->mutable_write_request();
+  ASSERT_OK(SchemaToPB(schema_, batch_request->mutable_schema()));
+  batch_request->set_tablet_id(log::kTestTablet);
+
+  // This appends Insert(1) with op 10.10
+  const OpId insert_opid = MakeOpId(10, 10);
+  replicate->get()->mutable_id()->CopyFrom(insert_opid);
+  replicate->get()->set_timestamp(clock_->Now().ToUint64());
+  AddTestRowToPB(RowOperationsPB::INSERT, schema_, 10, 1,
+                 "this is a test insert", batch_request->mutable_row_operations());
+  ASSERT_OK(AppendReplicateBatch(replicate));
+
+  // This appends Mutate(1) with op 10.11. The operation would try to update
+  // a row having an extra column. This should fail since there hasn't been
+  // corresponding DDL operation committed yet.
+  const OpId mutate_opid = MakeOpId(10, 11);
+  batch_request->mutable_row_operations()->Clear();
+  replicate->get()->mutable_id()->CopyFrom(mutate_opid);
+  replicate->get()->set_timestamp(clock_->Now().ToUint64());
+  {
+    // Modify the existing schema to add an extra row.
+    SchemaBuilder builder(schema_);
+    ASSERT_OK(builder.AddNullableColumn("string_val_extra", STRING));
+    const auto schema = builder.BuildWithoutIds();
+    ASSERT_OK(SchemaToPB(schema, batch_request->mutable_schema()));
+
+    KuduPartialRow row(&schema);
+    ASSERT_OK(row.SetInt32("key", 100));
+    ASSERT_OK(row.SetInt32("int_val", 200));
+    ASSERT_OK(row.SetStringCopy("string_val", "300"));
+    ASSERT_OK(row.SetStringCopy("string_val_extra", "100500"));
+    RowOperationsPBEncoder enc(batch_request->mutable_row_operations());
+    enc.Add(RowOperationsPB::UPDATE, row);
+  }
+  ASSERT_OK(AppendReplicateBatch(replicate));
+
+  // Now commit the mutate before the insert (in the log).
+  gscoped_ptr<consensus::CommitMsg> mutate_commit(new consensus::CommitMsg);
+  mutate_commit->set_op_type(consensus::WRITE_OP);
+  mutate_commit->mutable_commited_op_id()->CopyFrom(mutate_opid);
+  mutate_commit->mutable_result()->add_ops()->add_mutated_stores()->set_mrs_id(1);
+  ASSERT_OK(AppendCommit(std::move(mutate_commit)));
+
+  gscoped_ptr<consensus::CommitMsg> insert_commit(new consensus::CommitMsg);
+  insert_commit->set_op_type(consensus::WRITE_OP);
+  insert_commit->mutable_commited_op_id()->CopyFrom(insert_opid);
+  insert_commit->mutable_result()->add_ops()->add_mutated_stores()->set_mrs_id(1);
+  ASSERT_OK(AppendCommit(std::move(insert_commit)));
+
+  ConsensusBootstrapInfo boot_info;
+  shared_ptr<Tablet> tablet;
+  const auto s = BootstrapTestTablet(-1, -1, &tablet, &boot_info);
+  const auto& status_msg = s.ToString();
+  ASSERT_TRUE(s.IsInvalidArgument()) << status_msg;
+  ASSERT_STR_CONTAINS(status_msg,
+      "Unable to bootstrap test tablet: Failed log replay.");
+  ASSERT_STR_CONTAINS(status_msg,
+      "column string_val_extra[string NULLABLE] not present in tablet");
 }
 
 } // namespace tablet

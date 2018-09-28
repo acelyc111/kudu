@@ -51,7 +51,6 @@ import javax.annotation.concurrent.GuardedBy;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
-import com.google.common.net.HostAndPort;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Message;
@@ -80,10 +79,16 @@ import org.apache.kudu.util.Pair;
 /**
  * A fully asynchronous and thread-safe client for Kudu.
  * <p>
- * A single Kudu client instance corresponds to a single remote Kudu cluster.
+ * A single Kudu client instance corresponds to a single remote Kudu cluster,
  * and can be used to read or write any number of tables within that cluster.
- * Separate client instances should be used in the case that a single
- * application needs to access multiple distinct Kudu clusters.
+ * An application should use exactly one Kudu client instance per distinct Kudu
+ * cluster it connects to.
+ *
+ * In rare cases where a single application needs multiple instances connected
+ * to the same cluster, or when many applications each using one or more Kudu
+ * client instances are running on the same machine, it may be necessary to
+ * adjust the instances to use less resources. See the options in
+ * {@link AsyncKuduClientBuilder}.
  *
  * <h1>Creating a client instance</h1> An {@link AsyncKuduClient} instance may
  * be created using the {@link AsyncKuduClient.AsyncKuduClientBuilder} class. If
@@ -288,6 +293,10 @@ public class AsyncKuduClient implements AutoCloseable {
   @GuardedBy("sessions")
   private final Set<AsyncKuduSession> sessions = new HashSet<>();
 
+  /** The Hive Metastore configuration of the most recently connected-to master. */
+  @GuardedBy("this")
+  private HiveMetastoreConfig hiveMetastoreConfig = null;
+
   // Since RPCs to the masters also go through RpcProxy, we need to treat them as if they were a
   // normal table. We'll use the following fake table name to identify places where we need special
   // handling.
@@ -347,7 +356,7 @@ public class AsyncKuduClient implements AutoCloseable {
     this.channelFactory = b.createChannelFactory();
     this.masterAddresses = b.masterAddresses;
     this.masterTable = new KuduTable(this, MASTER_TABLE_NAME_PLACEHOLDER,
-        MASTER_TABLE_NAME_PLACEHOLDER, null, null);
+        MASTER_TABLE_NAME_PLACEHOLDER, null, null, 1);
     this.defaultOperationTimeoutMs = b.defaultOperationTimeoutMs;
     this.defaultAdminOperationTimeoutMs = b.defaultAdminOperationTimeoutMs;
     this.defaultSocketReadTimeoutMs = b.defaultSocketReadTimeoutMs;
@@ -695,8 +704,8 @@ public class AsyncKuduClient implements AutoCloseable {
   /**
    * Gets a table's schema either by ID or by name. Note: the name must be
    * provided, even if the RPC should be sent by ID.
-   * @param name name of table
-   * @param id immutable ID of table
+   * @param tableName name of table
+   * @param tableId immutable ID of table
    * @param parent parent RPC (for tracing), if any
    * @return a deferred object that yields the schema
    */
@@ -730,7 +739,8 @@ public class AsyncKuduClient implements AutoCloseable {
             tableName,
             resp.getTableId(),
             resp.getSchema(),
-            resp.getPartitionSchema());
+            resp.getPartitionSchema(),
+            resp.getNumReplicas());
       }
     });
   }
@@ -808,13 +818,44 @@ public class AsyncKuduClient implements AutoCloseable {
     // We have no authn data -- connect to the master, which will fetch
     // new info.
     return getMasterTableLocationsPB(null)
-        .addCallback(new MasterLookupCB(masterTable, null, 1))
+        .addCallback(new MasterLookupCB(masterTable,
+                                        /* partitionKey */ null,
+                                        /* requestedBatchSize */ 1))
         .addCallback(new Callback<byte[], Object>() {
           @Override
           public byte[] call(Object ignored) {
             // Connecting to the cluster should have also fetched the
             // authn data.
             return securityContext.exportAuthenticationCredentials();
+          }
+        });
+  }
+
+  /**
+   * Get the Hive Metastore configuration of the most recently connected-to leader master, or
+   * {@code null} if the Hive Metastore integration is not enabled.
+   */
+  @InterfaceAudience.LimitedPrivate("Impala")
+  @InterfaceStability.Unstable
+  public Deferred<HiveMetastoreConfig> getHiveMetastoreConfig() {
+    // If we've already connected to the master, use the config we received when we connected.
+    if (hasConnectedToMaster) {
+      synchronized (this) {
+        return Deferred.fromResult(hiveMetastoreConfig);
+      }
+    }
+    // We have no Metastore config -- connect to the master, which will fetch new info.
+    return getMasterTableLocationsPB(null)
+        .addCallback(new MasterLookupCB(masterTable,
+                                        /* partitionKey */ null,
+                                        /* requestedBatchSize */ 1))
+        .addCallback(new Callback<HiveMetastoreConfig, Object>() {
+          @Override
+          public HiveMetastoreConfig call(Object ignored) {
+            // Connecting to the cluster should have also fetched the metastore config.
+            synchronized (AsyncKuduClient.this) {
+              return hiveMetastoreConfig;
+            }
           }
         });
   }
@@ -962,7 +1003,7 @@ public class AsyncKuduClient implements AutoCloseable {
 
   /**
    * Package-private access point for {@link AsyncKuduScanner}s to close themselves.
-   * @param scanner the scanner to close
+   * @param scanner the scanner to close.
    * @return a deferred object that indicates the completion of the request.
    * The {@link AsyncKuduScanner.Response} can contain rows that were left to scan.
    */
@@ -982,6 +1023,34 @@ public class AsyncKuduClient implements AutoCloseable {
     closeRequest.attempt++;
     RpcProxy.sendRpc(this, connectionCache.getConnection(
         info, Connection.CredentialsPolicy.ANY_CREDENTIALS), closeRequest);
+    return d;
+  }
+
+  /**
+   * Package-private access point for {@link AsyncKuduScanner}s to keep themselves
+   * alive on tablet servers.
+   * @param scanner the scanner to keep alive.
+   * @return a deferred object that indicates the completion of the request.
+   */
+  Deferred<Void> keepAlive(final AsyncKuduScanner scanner) {
+    checkIsClosed();
+    final RemoteTablet tablet = scanner.currentTablet();
+    // Getting a null tablet here without being in a closed state means we were in between tablets.
+    // If there is no scanner to keep alive, we still return Status.OK().
+    if (tablet == null) {
+      return Deferred.fromResult(null);
+    }
+
+    final KuduRpc<Void> keepAliveRequest = scanner.getKeepAliveRequest();
+    final ServerInfo info = tablet.getReplicaSelectedServerInfo(keepAliveRequest.getReplicaSelection());
+    if (info == null) {
+      return Deferred.fromResult(null);
+    }
+
+    final Deferred<Void> d = keepAliveRequest.getDeferred();
+    keepAliveRequest.attempt++;
+    RpcProxy.sendRpc(this, connectionCache.getConnection(
+        info, Connection.CredentialsPolicy.ANY_CREDENTIALS), keepAliveRequest);
     return d;
   }
 
@@ -1536,6 +1605,19 @@ public class AsyncKuduClient implements AutoCloseable {
                         e.getMessage());
                   }
                 }
+
+                HiveMetastoreConfig hiveMetastoreConfig = null;
+                Master.ConnectToMasterResponsePB respPb = resp.getConnectResponse();
+                if (respPb.hasHmsConfig()) {
+                  Master.HiveMetastoreConfig metastoreConf = respPb.getHmsConfig();
+                  hiveMetastoreConfig = new HiveMetastoreConfig(metastoreConf.getHmsUris(),
+                                                                metastoreConf.getHmsSaslEnabled(),
+                                                                metastoreConf.getHmsUuid());
+                }
+                synchronized (AsyncKuduClient.this) {
+                  AsyncKuduClient.this.hiveMetastoreConfig = hiveMetastoreConfig;
+                }
+
                 hasConnectedToMaster = true;
 
                 // Translate the located master into a TableLocations
@@ -2256,7 +2338,11 @@ public class AsyncKuduClient implements AutoCloseable {
     /**
      * Set the maximum number of worker threads.
      * Optional.
-     * If not provided, (2 * the number of available processors) is used.
+     * If not provided, (2 * the number of available processors) is used. If
+     * this client instance will be used on a machine running many client
+     * instances, it may be wise to lower this count, for example to avoid
+     * resource limits, at the possible cost of some performance of this client
+     * instance.
      */
     public AsyncKuduClientBuilder workerCount(int workerCount) {
       Preconditions.checkArgument(workerCount > 0, "workerCount should be greater than 0");

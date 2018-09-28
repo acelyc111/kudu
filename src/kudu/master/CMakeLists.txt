@@ -34,12 +34,14 @@ ADD_EXPORTABLE_LIBRARY(master_proto
 
 set(MASTER_SRCS
   catalog_manager.cc
+  hms_notification_log_listener.cc
   master.cc
   master_cert_authority.cc
   master_options.cc
   master_path_handlers.cc
   master_service.cc
   mini_master.cc
+  placement_policy.cc
   sys_catalog.cc
   ts_descriptor.cc
   ts_manager.cc)
@@ -63,8 +65,7 @@ target_link_libraries(master
   tserver_service_proto)
 
 # Tests
-set(KUDU_TEST_LINK_LIBS
-  ${KUDU_MIN_TEST_LIBS}
+SET_KUDU_TEST_LINK_LIBS(
   kudu_client
   kudu_curl_util
   master
@@ -72,13 +73,17 @@ set(KUDU_TEST_LINK_LIBS
   mini_hms)
 
 ADD_KUDU_TEST(catalog_manager-test)
+ADD_KUDU_TEST(hms_notification_log_listener-test)
 ADD_KUDU_TEST(master-test RESOURCE_LOCK "master-web-port")
 ADD_KUDU_TEST(mini_master-test RESOURCE_LOCK "master-web-port")
+ADD_KUDU_TEST(placement_policy-test)
 ADD_KUDU_TEST(sys_catalog-test RESOURCE_LOCK "master-web-port")
+ADD_KUDU_TEST(ts_descriptor-test DATA_FILES testdata/first_argument.sh)
 
 # Actual master executable
 add_executable(kudu-master master_main.cc)
 target_link_libraries(kudu-master
+  ${SANITIZER_OPTIONS_OVERRIDE}
   ${KRB5_REALM_OVERRIDE}
   master
   ${KUDU_BASE_LIBS})

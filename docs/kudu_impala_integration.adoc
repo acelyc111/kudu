@@ -143,6 +143,21 @@ See <<partitioning_tables>>. The table creation example above is distributed int
 16 partitions by hashing the `id` column, for simplicity. See
 <<partitioning_rules_of_thumb>> for guidelines on partitioning.
 
+By default, Kudu tables created through Impala use a tablet replication factor of 3.
+To specify the replication factor for a Kudu table, add a `TBLPROPERTIES` clause
+to the `CREATE TABLE` statement as shown below where n is the replication factor
+you want to use:
+
+[source,sql]
+----
+TBLPROPERTIES ('kudu.num_tablet_replicas' = 'n')
+----
+
+A replication factor must be an odd number.
+
+Changing the `kudu.num_tablet_replicas` table property using ALTER TABLE currently
+has no effect.
+
 ==== `CREATE TABLE AS SELECT`
 
 You can create a table by querying any other table or tables in Impala, using a `CREATE
@@ -451,8 +466,7 @@ which address scenarios like the following:
   need to be added or removed, such as the introduction or elimination of a product
   type.
 
-Non-covering range partitions have some caveats. Be sure to read the
-link:/docs/schema_design.html [Schema Design guide].
+See link:schema_design.html[Schema Design] for the caveats of non-covering partitions.
 
 This example creates a tablet per year (5 tablets total), for storing log data.
 The table only accepts data from 2012 to 2016. Keys outside of these
@@ -669,8 +683,8 @@ underlying Kudu table.
 
 .Rename the underlying Kudu table for an internal table
 
-If a table is an internal table, the underlying Kudu table may be renamed by
-changing the `kudu.table_name` property:
+In Impala 2.11 and lower, the underlying Kudu table may be renamed by changing
+the `kudu.table_name` property:
 
 [source,sql]
 ----

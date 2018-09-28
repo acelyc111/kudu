@@ -65,7 +65,7 @@ class KuduTest : public ::testing::Test {
   // Returns absolute path based on a unit test-specific work directory, given
   // a relative path. Useful for writing test files that should be deleted after
   // the test ends.
-  std::string GetTestPath(const std::string& relative_path);
+  std::string GetTestPath(const std::string& relative_path) const;
 
   Env* env_;
 
@@ -104,6 +104,9 @@ int SeedRandom();
 // if a KuduTest instance is available.
 std::string GetTestDataDirectory();
 
+// Return the directory which contains the test's executable.
+std::string GetTestExecutableDirectory();
+
 // Wait until 'f()' succeeds without adding any GTest 'fatal failures'.
 // For example:
 //
@@ -128,13 +131,25 @@ void AssertEventually(const std::function<void(void)>& f,
                       AssertBackoff backoff = AssertBackoff::EXPONENTIAL);
 
 // Count the number of open file descriptors in use by this process.
-int CountOpenFds(Env* env);
+// 'path_pattern' is a glob-style pattern. Only paths that match this
+// pattern are included. Note that '*' in this pattern is recursive
+// unlike the usual behavior of path globs.
+int CountOpenFds(Env* env, const std::string& path_pattern);
 
 // Waits for the subprocess to bind to any listening TCP port, and returns the port.
 Status WaitForTcpBind(pid_t pid, uint16_t* port, MonoDelta timeout) WARN_UNUSED_RESULT;
 
 // Waits for the subprocess to bind to any listening UDP port, and returns the port.
 Status WaitForUdpBind(pid_t pid, uint16_t* port, MonoDelta timeout) WARN_UNUSED_RESULT;
+
+// Find the home directory of a Java-style application, e.g. JAVA_HOME or
+// HADOOP_HOME.
+//
+// Checks the environment, or falls back to a symlink in the bin installation
+// directory.
+Status FindHomeDir(const std::string& name,
+                   const std::string& bin_dir,
+                   std::string* home_dir) WARN_UNUSED_RESULT;
 
 } // namespace kudu
 #endif

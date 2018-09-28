@@ -18,6 +18,7 @@ package org.apache.kudu.client;
 
 import static org.apache.kudu.Type.STRING;
 import static org.apache.kudu.client.ExternalConsistencyMode.CLIENT_PROPAGATED;
+import static org.apache.kudu.util.ClientTestUtil.countRowsInScan;
 import static org.apache.kudu.util.HybridTimeUtil.HTTimestampToPhysicalAndLogical;
 import static org.apache.kudu.util.HybridTimeUtil.clockTimestampToHTTimestamp;
 import static org.apache.kudu.util.HybridTimeUtil.physicalAndLogicalToHTTimestamp;
@@ -30,8 +31,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import com.google.common.collect.ImmutableList;
-import com.stumbleupon.async.Deferred;
-import org.junit.BeforeClass;
+import org.junit.Before;
 import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -53,16 +53,18 @@ public class TestHybridTime extends BaseKuduTest {
   protected static final Schema schema = getSchema();
   protected static KuduTable table;
 
-  @BeforeClass
-  public static void setUpBeforeClass() throws Exception {
-    // Before starting the cluster, disable automatic safe time advancement in the
-    // absence of writes. This test does snapshot reads in the present and expects
-    // certain timestamps to be assigned to the scans. If safe time was allowed
-    // to move automatically the scans might not be assigned the expected timestamps.
-    miniClusterBuilder.addTserverFlag("--safe_time_advancement_without_writes=false");
+  @Override
+  protected MiniKuduCluster.MiniKuduClusterBuilder getMiniClusterBuilder() {
+    return super.getMiniClusterBuilder()
+        // Before starting the cluster, disable automatic safe time advancement in the
+        // absence of writes. This test does snapshot reads in the present and expects
+        // certain timestamps to be assigned to the scans. If safe time was allowed
+        // to move automatically the scans might not be assigned the expected timestamps.
+        .addTserverFlag("--safe_time_advancement_without_writes=false");
+  }
 
-    BaseKuduTest.setUpBeforeClass();
-
+  @Before
+  public void setUp() throws Exception {
     // Using multiple tablets doesn't work with the current way this test works since we could
     // jump from one TS to another which changes the logical clock.
     CreateTableOptions builder =

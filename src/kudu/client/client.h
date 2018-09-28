@@ -37,6 +37,7 @@
 #include "kudu/client/shared_ptr.h" // IWYU pragma: keep
 #ifdef KUDU_HEADERS_NO_STUBS
 #include <gtest/gtest_prod.h>
+
 #include "kudu/gutil/macros.h"
 #include "kudu/gutil/port.h"
 #else
@@ -54,13 +55,18 @@ class MonoDelta;
 class PartitionSchema;
 class SecurityUnknownTskTest;
 
+namespace client {
+class KuduClient;
+class KuduTableAlterer;
+}
+
 namespace tools {
 class LeaderMasterProxy;
+std::string GetMasterAddresses(const client::KuduClient&);
 } // namespace tools
 
 namespace client {
 
-class KuduClient;
 class KuduDelete;
 class KuduInsert;
 class KuduLoggingCallback;
@@ -69,7 +75,6 @@ class KuduScanBatch;
 class KuduSession;
 class KuduStatusCallback;
 class KuduTable;
-class KuduTableAlterer;
 class KuduTableCreator;
 class KuduTablet;
 class KuduTabletServer;
@@ -334,6 +339,17 @@ class KUDU_EXPORT KuduClient : public sp::enable_shared_from_this<KuduClient> {
   /// @return Operation status.
   Status DeleteTable(const std::string& table_name);
 
+  /// Delete/drop a table in internal catalogs and possibly external catalogs.
+  ///
+  /// @param [in] table_name
+  ///   Name of the table to drop.
+  /// @param [in] modify_external_catalogs
+  ///   Whether to apply the deletion to external catalogs, such as the Hive Metastore,
+  ///   which the Kudu master has been configured to integrate with.
+  /// @return Operation status.
+  Status DeleteTableInCatalogs(const std::string& table_name,
+                               bool modify_external_catalogs) KUDU_NO_EXPORT;
+
   /// Create a KuduTableAlterer object.
   ///
   /// @param [in] table_name
@@ -429,8 +445,8 @@ class KUDU_EXPORT KuduClient : public sp::enable_shared_from_this<KuduClient> {
   /// @param [out] tablet
   ///   Tablet information. The caller takes ownership of the tablet.
   /// @return Status object for the operation.
-  Status KUDU_NO_EXPORT GetTablet(const std::string& tablet_id,
-                                  KuduTablet** tablet);
+  Status GetTablet(const std::string& tablet_id,
+                   KuduTablet** tablet) KUDU_NO_EXPORT;
 
   /// @endcond
 
@@ -528,9 +544,39 @@ class KUDU_EXPORT KuduClient : public sp::enable_shared_from_this<KuduClient> {
   /// @return Status object for the operation.
   Status ExportAuthenticationCredentials(std::string* authn_creds) const;
 
+  // @return the configured Hive Metastore URIs on the most recently connected to
+  //    leader master, or an empty string if the Hive Metastore integration is not
+  //    enabled.
+  std::string GetHiveMetastoreUris() const KUDU_NO_EXPORT;
+
+  // @return the configured Hive Metastore SASL (Kerberos) configuration on the most
+  //    recently connected to leader master, or an arbitrary value if the Hive
+  //    Metastore integration is not enabled.
+  bool GetHiveMetastoreSaslEnabled() const KUDU_NO_EXPORT;
+
+  // @return a unique ID which identifies the Hive Metastore instance, if the
+  //    cluster is configured with the Hive Metastore integration, or an
+  //    arbitrary value if the Hive Metastore integration is not enabled.
+  //
+  // @note this is provided on a best-effort basis, as not all Hive Metastore
+  //    versions which Kudu is compatible with include the necessary APIs. See
+  //    HIVE-16452 for more info.
+  std::string GetHiveMetastoreUuid() const KUDU_NO_EXPORT;
+
  private:
   class KUDU_NO_EXPORT Data;
 
+  friend class ClientTest;
+  friend class ConnectToClusterBaseTest;
+  friend class KuduClientBuilder;
+  friend class KuduPartitionerBuilder;
+  friend class KuduScanToken;
+  friend class KuduScanTokenBuilder;
+  friend class KuduScanner;
+  friend class KuduSession;
+  friend class KuduTable;
+  friend class KuduTableAlterer;
+  friend class KuduTableCreator;
   friend class internal::Batcher;
   friend class internal::GetTableSchemaRpc;
   friend class internal::LookupRpc;
@@ -538,19 +584,9 @@ class KUDU_EXPORT KuduClient : public sp::enable_shared_from_this<KuduClient> {
   friend class internal::RemoteTablet;
   friend class internal::RemoteTabletServer;
   friend class internal::WriteRpc;
-  friend class ConnectToClusterBaseTest;
-  friend class ClientTest;
-  friend class KuduClientBuilder;
-  friend class KuduPartitionerBuilder;
-  friend class KuduScanner;
-  friend class KuduScanToken;
-  friend class KuduScanTokenBuilder;
-  friend class KuduSession;
-  friend class KuduTable;
-  friend class KuduTableAlterer;
-  friend class KuduTableCreator;
-  friend class ::kudu::SecurityUnknownTskTest;
+  friend class kudu::SecurityUnknownTskTest;
   friend class tools::LeaderMasterProxy;
+  friend std::string tools::GetMasterAddresses(const client::KuduClient&);
 
   FRIEND_TEST(kudu::ClientStressTest, TestUniqueClientIds);
   FRIEND_TEST(ClientTest, TestGetSecurityInfoFromMaster);
@@ -1172,6 +1208,14 @@ class KUDU_EXPORT KuduTableAlterer {
   /// @return Raw pointer to this alterer object.
   KuduTableAlterer* wait(bool wait);
 
+  /// Whether to apply the alteration to external catalogs, such as the Hive
+  /// Metastore, which the Kudu master has been configured to integrate with.
+  ///
+  /// @param [in] modify_external_catalogs
+  ///   Whether to apply the alteration to external catalogs.
+  /// @return Raw pointer to this alterer object.
+  KuduTableAlterer* modify_external_catalogs(bool modify_external_catalogs) KUDU_NO_EXPORT;
+
   /// @return Status of the ALTER TABLE operation. The return value
   ///   may indicate an error in the alter operation,
   ///   or a misuse of the builder (e.g. add_column() with default_value=NULL).
@@ -1180,6 +1224,7 @@ class KUDU_EXPORT KuduTableAlterer {
 
  private:
   class KUDU_NO_EXPORT Data;
+
   friend class KuduClient;
 
   KuduTableAlterer(KuduClient* client,
@@ -1908,11 +1953,13 @@ class KUDU_EXPORT KuduScanner {
 
   /// Keep the current remote scanner alive.
   ///
-  /// Keep the current remote scanner alive on the Tablet server
-  /// for an additional time-to-live (set by a configuration flag on
-  /// the tablet server). This is useful if the interval in between
+  /// Keep the current remote scanner alive on the Tablet server for an
+  /// additional time-to-live. This is useful if the interval in between
   /// NextBatch() calls is big enough that the remote scanner might be garbage
-  /// collected (default TTL is set to 60 secs.).
+  /// collected. The scanner time-to-live can be configured on the tablet
+  /// server via the --scanner_ttl_ms configuration flag and has a default
+  /// of 60 seconds.
+  ///
   /// This does not invalidate any previously fetched results.
   ///
   /// @return Operation result status. In particular, this method returns
@@ -1920,7 +1967,8 @@ class KUDU_EXPORT KuduScanner {
   ///   TabletServer was unreachable, for any reason. Note that a non-OK
   ///   status returned by this method should not be taken as indication
   ///   that the scan has failed. Subsequent calls to NextBatch() might
-  ///   still be successful, particularly if SetFaultTolerant() has been called.
+  ///   still be successful, particularly if the scanner is configured to be
+  ///   fault tolerant.
   Status KeepAlive();
 
   /// Close the scanner.
@@ -2383,6 +2431,7 @@ class KUDU_EXPORT KuduPartitioner {
   Status PartitionRow(const KuduPartialRow& row, int* partition);
  private:
   class KUDU_NO_EXPORT Data;
+
   friend class KuduPartitionerBuilder;
 
   explicit KuduPartitioner(Data* data);

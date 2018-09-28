@@ -58,6 +58,14 @@ MAX_TASKS_PER_JOB=10000
 # of retries, so we have to subtract 1.
 FLAKY_TEST_RETRIES = int(os.environ.get('KUDU_FLAKY_TEST_ATTEMPTS', 1)) - 1
 
+# Whether to retry all failed C++ tests, rather than just known flaky tests.
+# Since Java flaky tests are not reported by the test server, Java tests are
+# always retried, regardless of this value.
+RETRY_ALL_TESTS = int(os.environ.get('KUDU_RETRY_ALL_FAILED_TESTS', 0))
+
+# Flags to include when running Gradle tasks
+GRADLE_FLAGS = os.environ.get('EXTRA_GRADLE_FLAGS', "")
+
 PATH_TO_REPO = "../"
 
 # Matches the command line listings in 'ctest -V -N'. For example:
@@ -76,8 +84,7 @@ DEPS_FOR_ALL = \
     ["build-support/stacktrace_addr2line.pl",
      "build-support/run-test.sh",
      "build-support/run_dist_test.py",
-     "build-support/tsan-suppressions.txt",
-     "build-support/lsan-suppressions.txt",
+     "build-support/java-home-candidates.txt",
 
      # The LLVM symbolizer is necessary for suppressions to work
      "thirdparty/installed/uninstrumented/bin/llvm-symbolizer",
@@ -90,12 +97,13 @@ DEPS_FOR_ALL = \
      # Tests that require tooling require this.
      "build/latest/bin/kudu",
 
-     # The HMS tests require the Hadoop and Hive libraries. These files are just
-     # symlinks, but dist-test will copy the entire directories they point to.
-     # The symlinks themselves won't be recreated, so we point to them with
-     # environment variables in run_dist_test.py.
+     # The HMS and Sentry tests require the Hadoop, Hive, and Sentry libraries.
+     # These files are just symlinks, but dist-test will copy the entire
+     # directories they point to.  The symlinks themselves won't be recreated,
+     # so we point to them with environment variables in run_dist_test.py.
      "build/latest/bin/hive-home",
      "build/latest/bin/hadoop-home",
+     "build/latest/bin/sentry-home",
 
      # Add the Kudu HMS plugin.
      "build/latest/bin/hms-plugin.jar",
@@ -213,6 +221,20 @@ def is_lib_blacklisted(lib):
   return False
 
 
+def get_base_deps():
+  deps = []
+  for d in DEPS_FOR_ALL:
+    d = os.path.realpath(rel_to_abs(d))
+    if os.path.isdir(d):
+      d += "/"
+    deps.append(d)
+    # DEPS_FOR_ALL may include binaries whose dependencies are not dependencies
+    # of the test executable. We must include those dependencies in the archive
+    # for the binaries to be usable.
+    deps.extend(ldd_deps(d))
+  return deps
+
+
 def is_outside_of_tree(path):
   repo_dir = rel_to_abs("./")
   rel = os.path.relpath(path, repo_dir)
@@ -299,15 +321,7 @@ def create_archive_input(staging, execution,
   files = []
   files.append(rel_test_exe)
   deps = ldd_deps(abs_test_exe)
-  for d in DEPS_FOR_ALL:
-    d = os.path.realpath(rel_to_abs(d))
-    if os.path.isdir(d):
-      d += "/"
-    deps.append(d)
-    # DEPS_FOR_ALL may include binaries whose dependencies are not dependencies
-    # of the test executable. We must include those dependencies in the archive
-    # for the binaries to be usable.
-    deps.extend(ldd_deps(d))
+  deps.extend(get_base_deps())
 
   # Deduplicate dependencies included via DEPS_FOR_ALL.
   for d in set(deps):
@@ -360,7 +374,8 @@ def create_archive_input(staging, execution,
 
 def create_task_json(staging,
                      replicate_tasks=1,
-                     flaky_test_set=set()):
+                     flaky_test_set=set(),
+                     retry_all_tests=False):
   """
   Create a task JSON file suitable for submitting to the distributed
   test execution service.
@@ -380,7 +395,7 @@ def create_task_json(staging,
     # to get the test name
     test_name = ".".join(k.split(".")[:-1])
     max_retries = 0
-    if test_name in flaky_test_set:
+    if test_name in flaky_test_set or retry_all_tests:
       max_retries = FLAKY_TEST_RETRIES
 
     tasks += [{"isolate_hash": str(v),
@@ -464,9 +479,11 @@ def run_tests(parser, options):
     create_archive_input(staging, execution,
                          collect_tmpdir=options.collect_tmpdir)
   run_isolate(staging)
+  retry_all = RETRY_ALL_TESTS > 0
   create_task_json(staging,
                    flaky_test_set=get_flakies(),
-                   replicate_tasks=options.num_instances)
+                   replicate_tasks=options.num_instances,
+                   retry_all_tests=retry_all)
   submit_tasks(staging, options)
 
 def add_run_subparser(subparsers):
@@ -522,6 +539,57 @@ def add_loop_test_subparser(subparsers):
   p.set_defaults(func=loop_test)
 
 
+def run_java_tests(parser, options):
+  subprocess.check_call([rel_to_abs("java/gradlew")] + GRADLE_FLAGS.split() +
+                        ["distTest"],
+                        cwd=rel_to_abs("java"))
+  staging = StagingDir(rel_to_abs("java/build/dist-test"))
+  run_isolate(staging)
+  # TODO(ghenke): Add Java tests to the flaky dashboard
+  # KUDU_FLAKY_TEST_LIST doesn't included Java tests.
+  # Instead we will retry all Java tests in case they are flaky.
+  create_task_json(staging, 1, retry_all_tests=True)
+  submit_tasks(staging, options)
+
+def loop_java_test(parser, options):
+  """
+  Runs many instances of a user-provided Java test class on the testing service.
+  """
+  if options.num_instances < 1:
+    parser.error("--num-instances must be >= 1")
+  subprocess.check_call([rel_to_abs("java/gradlew")] + GRADLE_FLAGS.split() +
+                        ["distTest", "--classes", "**/%s" % options.pattern],
+                        cwd=rel_to_abs("java"))
+  staging = StagingDir(rel_to_abs("java/build/dist-test"))
+  run_isolate(staging)
+  create_task_json(staging, options.num_instances)
+  submit_tasks(staging, options)
+
+
+def add_java_subparser(subparsers):
+  p = subparsers.add_parser('java', help='Run java tests via dist-test')
+  sp = p.add_subparsers()
+  run_all = sp.add_parser("run-all",
+      help="Run all of the Java tests via dist-test")
+  run_all.set_defaults(func=run_java_tests)
+
+  loop = sp.add_parser("loop", help="Loop a single Java test")
+  loop.add_argument("--num-instances", "-n", dest="num_instances", type=int,
+                 help="number of test instances to start", metavar="NUM",
+                 default=100)
+  loop.add_argument("pattern", help="Pattern matching a Java test class to run")
+  loop.set_defaults(func=loop_java_test)
+
+
+def dump_base_deps(parser, options):
+  print json.dumps(get_base_deps())
+
+
+def add_internal_commands(subparsers):
+  p = subparsers.add_parser('internal', help="[Internal commands not for users]")
+  p.add_subparsers().add_parser('dump_base_deps').set_defaults(func=dump_base_deps)
+
+
 def main(argv):
   p = argparse.ArgumentParser()
   p.add_argument("--collect-tmpdir", dest="collect_tmpdir", action="store_true",
@@ -531,6 +599,8 @@ def main(argv):
   sp = p.add_subparsers()
   add_loop_test_subparser(sp)
   add_run_subparser(sp)
+  add_java_subparser(sp)
+  add_internal_commands(sp)
   args = p.parse_args(argv)
   args.func(p, args)
 

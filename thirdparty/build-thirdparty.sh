@@ -99,6 +99,7 @@ else
       "bison")        F_BISON=1 ;;
       "hadoop")       F_HADOOP=1 ;;
       "hive")         F_HIVE=1 ;;
+      "sentry")       F_SENTRY=1 ;;
       *)              echo "Unknown module: $arg"; exit 1 ;;
     esac
   done
@@ -244,8 +245,8 @@ if [ -n "$F_COMMON" -o -n "$F_BISON" ]; then
   build_bison
 fi
 
-# Install Hadoop and Hive by symlinking their source directories (which are
-# pre-built) into $PREFIX/opt.
+# Install Hadoop, Hive, and Sentry by symlinking their source directories (which
+# are pre-built) into $PREFIX/opt.
 if [ -n "$F_COMMON" -o -n "$F_HADOOP" ]; then
   mkdir -p $PREFIX/opt
   ln -nsf $HADOOP_SOURCE $PREFIX/opt/hadoop
@@ -254,6 +255,11 @@ fi
 if [ -n "$F_COMMON" -o -n "$F_HIVE" ]; then
   mkdir -p $PREFIX/opt
   ln -nsf $HIVE_SOURCE $PREFIX/opt/hive
+fi
+
+if [ -n "$F_COMMON" -o -n "$F_SENTRY" ]; then
+  mkdir -p $PREFIX/opt
+  ln -nsf $SENTRY_SOURCE $PREFIX/opt/sentry
 fi
 
 ### Build C dependencies without instrumentation
@@ -462,10 +468,6 @@ fi
 
 save_env
 
-# libc++ (and its dependents) need to find libc++abi at link and run time.
-EXTRA_LDFLAGS="-L$PREFIX/lib $EXTRA_LDFLAGS"
-EXTRA_LDFLAGS="-Wl,-rpath,$PREFIX/lib $EXTRA_LDFLAGS"
-
 # Build libc++ with TSAN enabled.
 if [ -n "$F_TSAN" -o -n "$F_LLVM" ]; then
   build_libcxx tsan
@@ -473,9 +475,9 @@ fi
 
 # Build the rest of the dependencies against the TSAN-instrumented libc++
 # instead of the system's C++ standard library.
-EXTRA_CXXFLAGS="-nostdinc++ $EXTRA_CXXFLAGS"
-EXTRA_CXXFLAGS="-stdlib=libc++ $EXTRA_CXXFLAGS"
 EXTRA_CXXFLAGS="-isystem $PREFIX/include/c++/v1 $EXTRA_CXXFLAGS"
+EXTRA_LDFLAGS="-L$PREFIX/lib $EXTRA_LDFLAGS"
+EXTRA_LDFLAGS="-Wl,-rpath,$PREFIX/lib $EXTRA_LDFLAGS"
 
 # Build the rest of the dependencies with TSAN instrumentation.
 EXTRA_CFLAGS="-fsanitize=thread $EXTRA_CFLAGS"
@@ -485,6 +487,19 @@ EXTRA_CXXFLAGS="-DTHREAD_SANITIZER $EXTRA_CXXFLAGS"
 if [ -n "$F_TSAN" -o -n "$F_LLVM" ]; then
   build_llvm tsan
 fi
+
+# LLVM is told to use libc++ explicitly and thus doesn't need these, but the
+# rest of the dependencies need them.
+#
+# Note: -nostdinc++ is necessary to prevent C++ headers from using #include_next
+# to chain the host's C++ headers. However, using it means we need to also use
+# -Qunused-arguments because clang raises an unused argument warning when it
+# detects -nostdinc++ on a link line, and there's no way to prevent that when
+# passing -nostdinc++ to cmake via -DCMAKE_CXX_FLAGS [1].
+#
+# 1. https://gitlab.kitware.com/cmake/cmake/issues/12652
+EXTRA_CXXFLAGS="-Qunused-arguments -nostdinc++ $EXTRA_CXXFLAGS"
+EXTRA_LDFLAGS="-stdlib=libc++ $EXTRA_LDFLAGS"
 
 # Enable debug symbols so that stacktraces and linenumbers are available at
 # runtime. LLVM is compiled without debug symbols because the LLVM debug symbols

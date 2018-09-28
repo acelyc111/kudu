@@ -8,6 +8,7 @@ pax_global_header
 *.bib
 *.pdf
 version.txt
+build-support/build-support-test-data/*
 build-support/iwyu/__init__.py
 build-support/iwyu/fix_includes.py
 build-support/iwyu/iwyu_tool.py
@@ -146,6 +147,7 @@ src/kudu/gutil/utf/utf.h
 src/kudu/gutil/utf/utfdef.h
 src/kudu/security/x509_check_host.cc
 src/kudu/security/x509_check_host.h
+src/kudu/tools/testdata/*
 src/kudu/util/array_view.h
 src/kudu/util/cache.h
 src/kudu/util/coding.cc
@@ -170,7 +172,9 @@ src/kudu/util/debug/trace_event_impl_constants.cc
 src/kudu/util/debug/trace_event_synthetic_delay.cc
 src/kudu/util/debug/trace_event_synthetic_delay.h
 thirdparty/patches/*.patch
+www/bootstrap/css/bootstrap-table.min.css
 www/bootstrap/css/bootstrap.min.css
+www/bootstrap/js/bootstrap-table.min.js
 www/bootstrap/js/bootstrap.min.js
 www/d3.v2.js
 www/epoch.0.5.2.min.css

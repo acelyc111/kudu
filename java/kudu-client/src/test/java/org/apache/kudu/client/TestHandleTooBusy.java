@@ -23,8 +23,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 import com.google.common.collect.Lists;
-import org.junit.BeforeClass;
 import org.junit.Test;
+
+import static org.apache.kudu.util.ClientTestUtil.getBasicCreateTableOptions;
 
 /**
  * Tests which provoke RPC queue overflow errors on the server side
@@ -33,17 +34,15 @@ import org.junit.Test;
 public class TestHandleTooBusy extends BaseKuduTest {
   private static final String TABLE_NAME = "TestHandleTooBusy";
 
-  @BeforeClass
-  public static void setUpBeforeClass() throws Exception {
-    miniClusterBuilder
-      // Short queue to provoke overflow.
-      .addMasterFlag("--rpc_service_queue_length=1")
-      // Low number of service threads, so things stay in the queue.
-      .addMasterFlag("--rpc_num_service_threads=3")
-      // inject latency so lookups process slowly.
-      .addMasterFlag("--master_inject_latency_on_tablet_lookups_ms=100");
-
-    BaseKuduTest.setUpBeforeClass();
+  @Override
+  protected MiniKuduCluster.MiniKuduClusterBuilder getMiniClusterBuilder() {
+    return super.getMiniClusterBuilder()
+        // Short queue to provoke overflow.
+        .addMasterFlag("--rpc_service_queue_length=1")
+        // Low number of service threads, so things stay in the queue.
+        .addMasterFlag("--rpc_num_service_threads=3")
+        // inject latency so lookups process slowly.
+        .addMasterFlag("--master_inject_latency_on_tablet_lookups_ms=100");
   }
 
   /**
@@ -60,7 +59,7 @@ public class TestHandleTooBusy extends BaseKuduTest {
         @Override
         public Void call() throws Exception {
           for (int i = 0; i < 5; i++) {
-            try (KuduClient c = new KuduClient.KuduClientBuilder(miniCluster.getMasterAddresses())
+            try (KuduClient c = new KuduClient.KuduClientBuilder(getMasterAddressesAsString())
                 .build()) {
               KuduTable table = c.openTable(TABLE_NAME);
               for (int j = 0; j < 5; j++) {
