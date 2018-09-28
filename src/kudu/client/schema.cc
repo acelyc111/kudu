@@ -586,6 +586,32 @@ std::string KuduColumnSchema::DataTypeToString(DataType type) {
   LOG(FATAL) << "Unhandled type " << type;
 }
 
+KuduColumnSchema::DataType KuduColumnSchema::StringToDataType(const std::string& type) {
+  if (type == "INT8")
+      return INT8;
+  if (type == "INT16")
+      return INT16;
+  if (type == "INT32")
+      return INT32;
+  if (type == "INT64")
+      return INT64;
+  if (type == "STRING")
+      return STRING;
+  if (type == "BOOL")
+      return BOOL;
+  if (type == "FLOAT")
+      return FLOAT;
+  if (type == "DOUBLE")
+      return DOUBLE;
+  if (type == "BINARY")
+      return BINARY;
+  if (type == "UNIXTIME_MICROS")
+      return UNIXTIME_MICROS;
+  if (type == "DECIMAL")
+      return DECIMAL;
+  LOG(FATAL) << "Unhandled type " << type;
+}
+
 KuduColumnSchema::KuduColumnSchema(const std::string &name,
                                    DataType type,
                                    bool is_nullable,

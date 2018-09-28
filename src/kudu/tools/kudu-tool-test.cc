@@ -1512,6 +1512,7 @@ TEST_F(ToolTest, TestLoadgenAutoFlushBackgroundSequential) {
         "--num_rows_per_thread=2048",
         "--num_threads=4",
         "--run_scan",
+        "--run_cleanup",
         "--string_fixed=0123456789",
       },
       "bench_auto_flush_background_sequential"));
@@ -1528,6 +1529,7 @@ TEST_F(ToolTest, TestLoadgenAutoFlushBackgroundRandom) {
         "--num_rows_per_thread=16",
         "--num_threads=1",
         "--run_scan",
+        "--run_cleanup",
         "--string_len=8",
         "--use_random",
       },
@@ -1544,6 +1546,7 @@ TEST_F(ToolTest, TestLoadgenManualFlush) {
         "--num_rows_per_thread=4096",
         "--num_threads=3",
         "--run_scan",
+        "--run_cleanup",
         "--show_first_n_errors=3",
         "--string_len=16",
       },
@@ -1598,6 +1601,9 @@ TEST_F(ToolTest, TestLoadgenAutoGenTablePartitioning) {
 
     // Let's also make sure we get the correct results.
     "--run_scan",
+
+    // Clean up the test data.
+    "--run_cleanup",
   };
 
   const MonoDelta kTimeout = MonoDelta::FromMilliseconds(10);
