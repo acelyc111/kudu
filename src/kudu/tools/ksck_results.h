@@ -265,7 +265,7 @@ enum class PrintSections {
     CHECKSUM_RESULTS = 1 << 5,
     TOTAL_COUNT = 1 << 6,
 
-    DEFAULT_PRINT_SECTIONS = 0x01111111
+    DEFAULT_PRINT_SECTIONS = 0b01111111
 };
 
 typedef std::map<std::string, KsckConsensusState> KsckConsensusStateMap;

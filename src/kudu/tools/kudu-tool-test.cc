@@ -656,7 +656,7 @@ TEST_F(ToolTest, TestActionMissingRequiredArg) {
                                         "master_addresses"));
   NO_FATALS(RunActionMissingRequiredArg("local_replica cmeta rewrite_raft_config fake_id",
                                         "peers", /* variadic */ true));
-  NO_FATALS(RunActionMissingRequiredArg("scan table --master_addresses=master.example.com", "table_name"));
+  NO_FATALS(RunActionMissingRequiredArg("scan table master.example.com", "table_name"));
 }
 
 TEST_F(ToolTest, TestFsCheck) {
@@ -1691,6 +1691,9 @@ TEST_F(ToolTest, TestNonRandomWorkloadLoadgen) {
     // Since we're using such large payloads, flush more frequently so the
     // client doesn't run out of memory.
     "--flush_per_n_rows=1",
+
+    // Keep the test data to avoid extra lookup.
+    "--run_cleanup=false",
   };
 
   // Partition the table so each thread inserts to a single range.
