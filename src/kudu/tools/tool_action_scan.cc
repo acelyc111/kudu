@@ -221,7 +221,7 @@ unique_ptr<Mode> BuildScanMode() {
       .Build();
 
   return ModeBuilder("scan")
-      .Description("Scan rows from an exist table")
+      .Description("Scan rows")
       .AddAction(std::move(insert))
       .Build();
 }

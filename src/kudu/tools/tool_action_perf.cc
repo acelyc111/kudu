@@ -814,6 +814,7 @@ unique_ptr<Mode> BuildPerfMode() {
       .AddOptionalParameter("seq_start")
       .AddOptionalParameter("show_first_n_errors")
       .AddOptionalParameter("string_fixed")
+      .AddOptionalParameter("string_prefix")
       .AddOptionalParameter("string_len")
       .AddOptionalParameter("table_name")
       .AddOptionalParameter("table_num_hash_partitions")

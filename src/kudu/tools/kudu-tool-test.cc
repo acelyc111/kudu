@@ -438,6 +438,7 @@ TEST_F(ToolTest, TestHelpXML) {
       "pbc",
       "perf",
       "remote_replica",
+      "scan",
       "table",
       "tablet",
       "test",
@@ -463,6 +464,7 @@ TEST_F(ToolTest, TestTopLevelHelp) {
       "pbc.*protobuf container",
       "perf.*performance of a Kudu cluster",
       "remote_replica.*tablet replicas on a Kudu Tablet Server",
+      "scan.*Scan rows",
       "table.*Kudu tables",
       "tablet.*Kudu tablets",
       "test.*test actions",
@@ -583,6 +585,12 @@ TEST_F(ToolTest, TestModeHelp) {
     NO_FATALS(RunTestHelp("remote_replica", kRemoteReplicaModeRegexes));
   }
   {
+    const vector<string> kScanRegexes = {
+        "table.*Scan rows from an exist table",
+    };
+    NO_FATALS(RunTestHelp("scan", kScanRegexes));
+  }
+  {
     const vector<string> kTableModeRegexes = {
         "delete.*Delete a table",
         "rename_table.*Rename a table",
@@ -648,6 +656,7 @@ TEST_F(ToolTest, TestActionMissingRequiredArg) {
                                         "master_addresses"));
   NO_FATALS(RunActionMissingRequiredArg("local_replica cmeta rewrite_raft_config fake_id",
                                         "peers", /* variadic */ true));
+  NO_FATALS(RunActionMissingRequiredArg("scan table --master_addresses=master.example.com", "table_name"));
 }
 
 TEST_F(ToolTest, TestFsCheck) {
@@ -1531,6 +1540,7 @@ TEST_F(ToolTest, TestLoadgenAutoFlushBackgroundRandom) {
         "--run_scan",
         "--run_cleanup",
         "--string_len=8",
+        "--string_prefix=perf.",
         "--use_random",
       },
       "bench_auto_flush_background_random"));
@@ -1601,9 +1611,6 @@ TEST_F(ToolTest, TestLoadgenAutoGenTablePartitioning) {
 
     // Let's also make sure we get the correct results.
     "--run_scan",
-
-    // Clean up the test data.
-    "--run_cleanup",
   };
 
   const MonoDelta kTimeout = MonoDelta::FromMilliseconds(10);
