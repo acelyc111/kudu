@@ -210,9 +210,9 @@ int ServerHealthScore(KsckServerHealth sh) {
   }
 }
 
-Status KsckResults::PrintTo(PrintMode mode, ostream& out) {
+Status KsckResults::PrintTo(PrintMode mode, int sections, ostream& out) {
   if (mode == PrintMode::JSON_PRETTY || mode == PrintMode::JSON_COMPACT) {
-    return PrintJsonTo(mode, out);
+    return PrintJsonTo(mode, sections, out);
   }
 
   // First, report on the masters and master tablet.
@@ -228,6 +228,15 @@ Status KsckResults::PrintTo(PrintMode mode, ostream& out) {
                                          out));
     }
     out << endl;
+
+    RETURN_NOT_OK(PrintFlagTable(KsckServerType::MASTER,
+                                 master_summaries.size(),
+                                 master_flag_to_servers_map,
+                                 master_flag_tags_map,
+                                 out));
+    if (!master_flag_to_servers_map.empty()) {
+      out << endl;
+    }
   }
 
   // Then, on the health of the tablet servers.
@@ -721,7 +730,7 @@ void KsckChecksumResultsToPb(const KsckChecksumResults& results,
   }
 }
 
-void KsckResults::ToPb(KsckResultsPB* pb) const {
+void KsckResults::ToPb(KsckResultsPB* pb, int sections) const {
   for (const auto& error : error_messages) {
     pb->add_errors(error.ToString());
   }
@@ -764,7 +773,7 @@ void KsckResults::ToPb(KsckResultsPB* pb) const {
   }
 }
 
-Status KsckResults::PrintJsonTo(PrintMode mode, ostream& out) const {
+Status KsckResults::PrintJsonTo(PrintMode mode, int sections, ostream& out) const {
   CHECK(mode == PrintMode::JSON_PRETTY || mode == PrintMode::JSON_COMPACT);
   JsonWriter::Mode jw_mode = JsonWriter::Mode::PRETTY;
   if (mode == PrintMode::JSON_COMPACT) {
@@ -772,7 +781,7 @@ Status KsckResults::PrintJsonTo(PrintMode mode, ostream& out) const {
   }
 
   KsckResultsPB pb;
-  ToPb(&pb);
+  ToPb(&pb, sections);
   out << JsonWriter::ToJson(pb, jw_mode) << endl;
   return Status::OK();
 }

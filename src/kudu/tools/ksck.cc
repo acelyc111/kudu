@@ -545,7 +545,7 @@ Status Ksck::PrintResults() {
     return Status::InvalidArgument("unknown ksck format (--ksck_format)",
                                    FLAGS_ksck_format);
   }
-  return results_.PrintTo(mode, *out_);
+  return results_.PrintTo(mode, print_sections_, *out_);
 }
 
 Status Ksck::RunAndPrintResults() {

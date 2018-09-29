@@ -505,6 +505,8 @@ class Ksck {
     tablet_id_filters_ = std::move(tablet_ids);
   }
 
+  void set_print_sections(std::vector<std::string> sections);
+
   const KsckResults& results() const;
 
   // Check that all masters are healthy.
