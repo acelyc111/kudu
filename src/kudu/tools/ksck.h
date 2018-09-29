@@ -592,6 +592,8 @@ class Ksck {
 
   std::ostream* const out_;
 
+  int print_sections_ = PrintSections::DEFAULT_PRINT_SECTIONS;
+
   KsckResults results_;
 
   DISALLOW_COPY_AND_ASSIGN(Ksck);

@@ -196,8 +196,8 @@ class KUDU_EXPORT KuduColumnSchema {
   static std::string DataTypeToString(DataType type);
 
   /// @param [in] type
-  ///   Column data type.
-  /// @return DataType of the column.
+  ///   String representation of the column data type.
+  /// @return Column data type.
   static DataType StringToDataType(const std::string& type);
 
   /// Construct KuduColumnSchema object as a copy of another object.

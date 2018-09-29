@@ -256,6 +256,23 @@ enum class PrintMode {
   PLAIN_FULL,
 };
 
+// It's a convenient method to use `struct ... enum ..` here to keep
+// in a standalone namespace and support some bit operators on this type.
+struct PrintSections {
+  enum Values {
+    NONE = 0,
+    MASTER_SUMMARIES = 1 << 0,
+    TSERVER_SUMMARIES = 1 << 1,
+    VERSION_SUMMARIES = 1 << 2,
+    TABLET_SUMMARIES = 1 << 3,
+    TABLE_SUMMARIES = 1 << 4,
+    CHECKSUM_RESULTS = 1 << 5,
+    TOTAL_COUNT = 1 << 6,
+
+    DEFAULT_PRINT_SECTIONS = 0b01111111
+  };
+};
+
 typedef std::map<std::string, KsckConsensusState> KsckConsensusStateMap;
 
 // A flag and its value.

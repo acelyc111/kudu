@@ -41,6 +41,7 @@
 #include "kudu/util/decimal_util.h"
 #include "kudu/util/compression/compression.pb.h"
 #include "kudu/util/slice.h"
+#include "kudu/util/string_case.h"
 
 MAKE_ENUM_LIMITS(kudu::client::KuduColumnStorageAttributes::EncodingType,
                  kudu::client::KuduColumnStorageAttributes::AUTO_ENCODING,
@@ -587,27 +588,29 @@ std::string KuduColumnSchema::DataTypeToString(DataType type) {
 }
 
 KuduColumnSchema::DataType KuduColumnSchema::StringToDataType(const std::string& type) {
-  if (type == "INT8")
+  std::string type_upper;
+  ToUpperCase(type, &type_upper);
+  if (type_upper == "INT8")
       return INT8;
-  if (type == "INT16")
+  if (type_upper == "INT16")
       return INT16;
-  if (type == "INT32")
+  if (type_upper == "INT32")
       return INT32;
-  if (type == "INT64")
+  if (type_upper == "INT64")
       return INT64;
-  if (type == "STRING")
+  if (type_upper == "STRING")
       return STRING;
-  if (type == "BOOL")
+  if (type_upper == "BOOL")
       return BOOL;
-  if (type == "FLOAT")
+  if (type_upper == "FLOAT")
       return FLOAT;
-  if (type == "DOUBLE")
+  if (type_upper == "DOUBLE")
       return DOUBLE;
-  if (type == "BINARY")
+  if (type_upper == "BINARY")
       return BINARY;
-  if (type == "UNIXTIME_MICROS")
+  if (type_upper == "UNIXTIME_MICROS")
       return UNIXTIME_MICROS;
-  if (type == "DECIMAL")
+  if (type_upper == "DECIMAL")
       return DECIMAL;
   LOG(FATAL) << "Unhandled type " << type;
 }
