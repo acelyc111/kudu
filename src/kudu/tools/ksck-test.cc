@@ -1066,7 +1066,7 @@ TEST_F(KsckTest, TestNonMatchingTableFilter) {
   CreateOneSmallReplicatedTable();
   ksck_->set_table_filters({"xyz"});
   FLAGS_checksum_scan = true;
-  ASSERT_TRUE(RunKsck().ok());
+  ASSERT_TRUE(RunKsck().IsRuntimeError());
   const vector<Status>& error_messages = ksck_->results().error_messages;
   ASSERT_EQ(1, error_messages.size());
   EXPECT_EQ("Not found: checksum scan error: No table found. Filter: table_filters=xyz",
@@ -1094,7 +1094,7 @@ TEST_F(KsckTest, TestNonMatchingTabletIdFilter) {
   CreateOneSmallReplicatedTable();
   ksck_->set_tablet_id_filters({"xyz"});
   FLAGS_checksum_scan = true;
-  ASSERT_TRUE(RunKsck().ok());
+  ASSERT_TRUE(RunKsck().IsRuntimeError());
   const vector<Status>& error_messages = ksck_->results().error_messages;
   ASSERT_EQ(1, error_messages.size());
   EXPECT_EQ(
@@ -1141,7 +1141,7 @@ TEST_F(KsckTest, TestConsensusConflictExtraPeer) {
                                   std::make_pair("ts-id-0", "tablet-id-0"));
   cstate.mutable_committed_config()->add_peers()->set_permanent_uuid("ts-id-fake");
 
-  ASSERT_TRUE(RunKsck().ok());
+  ASSERT_TRUE(RunKsck().IsRuntimeError());
   const vector<Status>& error_messages = ksck_->results().error_messages;
   ASSERT_EQ(1, error_messages.size());
   ASSERT_EQ("Corruption: table consistency check error: 1 out of 1 table(s) are not healthy",
@@ -1174,7 +1174,7 @@ TEST_F(KsckTest, TestConsensusConflictMissingPeer) {
                                   std::make_pair("ts-id-0", "tablet-id-0"));
   cstate.mutable_committed_config()->mutable_peers()->RemoveLast();
 
-  ASSERT_TRUE(RunKsck().ok());
+  ASSERT_TRUE(RunKsck().IsRuntimeError());
   const vector<Status>& error_messages = ksck_->results().error_messages;
   ASSERT_EQ(1, error_messages.size());
   ASSERT_EQ("Corruption: table consistency check error: 1 out of 1 table(s) are not healthy",
@@ -1207,7 +1207,7 @@ TEST_F(KsckTest, TestConsensusConflictDifferentLeader) {
                                   std::make_pair("ts-id-0", "tablet-id-0"));
   cstate.set_leader_uuid("ts-id-1");
 
-  ASSERT_TRUE(RunKsck().ok());
+  ASSERT_TRUE(RunKsck().IsRuntimeError());
   const vector<Status>& error_messages = ksck_->results().error_messages;
   ASSERT_EQ(1, error_messages.size());
   ASSERT_EQ("Corruption: table consistency check error: 1 out of 1 table(s) are not healthy",
@@ -1234,7 +1234,7 @@ TEST_F(KsckTest, TestConsensusConflictDifferentLeader) {
 
 TEST_F(KsckTest, TestOneOneTabletBrokenTable) {
   CreateOneOneTabletReplicatedBrokenTable();
-  ASSERT_TRUE(RunKsck().ok());
+  ASSERT_TRUE(RunKsck().IsRuntimeError());
   const vector<Status>& error_messages = ksck_->results().error_messages;
   ASSERT_EQ(1, error_messages.size());
   ASSERT_EQ("Corruption: table consistency check error: 1 out of 1 table(s) are not healthy",
@@ -1260,7 +1260,7 @@ TEST_F(KsckTest, TestMismatchedAssignments) {
       cluster_->tablet_servers_.at(Substitute("ts-id-$0", 0)));
   ASSERT_EQ(1, ts->tablet_status_map_.erase("tablet-id-2"));
 
-  ASSERT_TRUE(RunKsck().ok());
+  ASSERT_TRUE(RunKsck().IsRuntimeError());
   const vector<Status>& error_messages = ksck_->results().error_messages;
   ASSERT_EQ(1, error_messages.size());
   ASSERT_EQ("Corruption: table consistency check error: 1 out of 1 table(s) are not healthy",
@@ -1286,7 +1286,7 @@ TEST_F(KsckTest, TestMismatchedAssignments) {
 TEST_F(KsckTest, TestTabletNotRunning) {
   CreateOneSmallReplicatedTableWithTabletNotRunning();
 
-  ASSERT_TRUE(RunKsck().ok());
+  ASSERT_TRUE(RunKsck().IsRuntimeError());
   const vector<Status>& error_messages = ksck_->results().error_messages;
   ASSERT_EQ(1, error_messages.size());
   ASSERT_EQ("Corruption: table consistency check error: 1 out of 1 table(s) are not healthy",
@@ -1327,7 +1327,7 @@ TEST_F(KsckTest, TestTabletCopying) {
           cluster_->tablet_servers_.at(assignment_plan_.back()));
   auto& pb = FindOrDie(not_running_ts->tablet_status_map_, "tablet-id-0");
   pb.set_tablet_data_state(TabletDataState::TABLET_DATA_COPYING);
-  ASSERT_TRUE(RunKsck().ok());
+  ASSERT_TRUE(RunKsck().IsRuntimeError());
   const vector<Status>& error_messages = ksck_->results().error_messages;
   ASSERT_EQ(1, error_messages.size());
   ASSERT_EQ("Corruption: table consistency check error: 1 out of 1 table(s) are not healthy",
@@ -1352,7 +1352,7 @@ TEST_F(KsckTest, TestMasterNotReportingTabletServer) {
   // where the master is starting and doesn't list all tablet servers yet, but
   // tablets from other tablet servers are listing a missing tablet server as a peer.
   EraseKeyReturnValuePtr(&cluster_->tablet_servers_, "ts-id-0");
-  ASSERT_TRUE(RunKsck().ok());
+  ASSERT_TRUE(RunKsck().IsRuntimeError());
   const vector<Status>& error_messages = ksck_->results().error_messages;
   ASSERT_EQ(1, error_messages.size());
   ASSERT_EQ("Corruption: table consistency check error: 1 out of 1 table(s) are not healthy",
@@ -1383,7 +1383,7 @@ TEST_F(KsckTest, TestMasterNotReportingTabletServerWithConsensusConflict) {
                                   std::make_pair("ts-id-1", "tablet-id-1"));
   cstate.set_leader_uuid("ts-id-1");
 
-  ASSERT_TRUE(RunKsck().ok());
+  ASSERT_TRUE(RunKsck().IsRuntimeError());
   const vector<Status>& error_messages = ksck_->results().error_messages;
   ASSERT_EQ(1, error_messages.size());
   ASSERT_EQ("Corruption: table consistency check error: 1 out of 1 table(s) are not healthy",

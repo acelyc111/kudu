@@ -73,6 +73,8 @@ DEFINE_uint64(checksum_snapshot_timestamp,
 DEFINE_int32(fetch_replica_info_concurrency, 20,
              "Number of concurrent tablet servers to fetch replica info from.");
 
+DEFINE_bool(ignore_error_msg, false,
+            "Whether to ignore error message when returned from Run()");
 DEFINE_string(ksck_format, "plain_concise",
               "Output format for ksck. Available options are 'plain_concise', "
               "'plain_full', 'json_pretty', and 'json_compact'.\n"
@@ -469,6 +471,9 @@ Status Ksck::Run() {
                         results_.error_messages, "checksum scan error");
   }
 
+  if (FLAGS_ignore_error_msg) {
+    return Status::OK();
+  }
   // Use a special-case error if there are auth errors. This makes it harder
   // for admins to miss that ksck isn't working right because they forgot to
   // (e.g.) sudo -u kudu when running ksck!
