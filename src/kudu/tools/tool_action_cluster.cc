@@ -336,6 +336,7 @@ unique_ptr<Mode> BuildClusterMode() {
         .AddOptionalParameter("color")
         .AddOptionalParameter("consensus")
         .AddOptionalParameter("ksck_format")
+        .AddOptionalParameter("sections")
         .AddOptionalParameter("tables")
         .AddOptionalParameter("tablets")
         .Build();
