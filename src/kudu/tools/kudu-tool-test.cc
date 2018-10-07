@@ -438,6 +438,7 @@ TEST_F(ToolTest, TestHelpXML) {
       "pbc",
       "perf",
       "remote_replica",
+      "scan",
       "table",
       "tablet",
       "test",
@@ -463,6 +464,7 @@ TEST_F(ToolTest, TestTopLevelHelp) {
       "pbc.*protobuf container",
       "perf.*performance of a Kudu cluster",
       "remote_replica.*tablet replicas on a Kudu Tablet Server",
+      "scan.*Scan rows",
       "table.*Kudu tables",
       "tablet.*Kudu tablets",
       "test.*test actions",
@@ -583,6 +585,12 @@ TEST_F(ToolTest, TestModeHelp) {
     NO_FATALS(RunTestHelp("remote_replica", kRemoteReplicaModeRegexes));
   }
   {
+    const vector<string> kScanRegexes = {
+        "table.*Scan rows from an exist table",
+    };
+    NO_FATALS(RunTestHelp("scan", kScanRegexes));
+  }
+  {
     const vector<string> kTableModeRegexes = {
         "delete.*Delete a table",
         "rename_table.*Rename a table",
@@ -648,6 +656,7 @@ TEST_F(ToolTest, TestActionMissingRequiredArg) {
                                         "master_addresses"));
   NO_FATALS(RunActionMissingRequiredArg("local_replica cmeta rewrite_raft_config fake_id",
                                         "peers", /* variadic */ true));
+  NO_FATALS(RunActionMissingRequiredArg("scan table master.example.com", "table_name"));
 }
 
 TEST_F(ToolTest, TestFsCheck) {
@@ -1512,6 +1521,7 @@ TEST_F(ToolTest, TestLoadgenAutoFlushBackgroundSequential) {
         "--num_rows_per_thread=2048",
         "--num_threads=4",
         "--run_scan",
+        "--run_cleanup",
         "--string_fixed=0123456789",
       },
       "bench_auto_flush_background_sequential"));
@@ -1528,7 +1538,9 @@ TEST_F(ToolTest, TestLoadgenAutoFlushBackgroundRandom) {
         "--num_rows_per_thread=16",
         "--num_threads=1",
         "--run_scan",
+        "--run_cleanup",
         "--string_len=8",
+        "--string_prefix=perf.",
         "--use_random",
       },
       "bench_auto_flush_background_random"));
@@ -1544,6 +1556,7 @@ TEST_F(ToolTest, TestLoadgenManualFlush) {
         "--num_rows_per_thread=4096",
         "--num_threads=3",
         "--run_scan",
+        "--run_cleanup",
         "--show_first_n_errors=3",
         "--string_len=16",
       },
@@ -1678,6 +1691,9 @@ TEST_F(ToolTest, TestNonRandomWorkloadLoadgen) {
     // Since we're using such large payloads, flush more frequently so the
     // client doesn't run out of memory.
     "--flush_per_n_rows=1",
+
+    // Keep the test data to avoid extra lookup.
+    "--run_cleanup=false",
   };
 
   // Partition the table so each thread inserts to a single range.
