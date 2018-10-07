@@ -265,10 +265,6 @@ Status KsckResults::PrintTo(PrintMode mode, int sections, ostream& out) {
     out << endl;
   }
 
-  // Finally, in the "server section", print the version summary.
-  RETURN_NOT_OK(PrintVersionTable(master_summaries, tserver_summaries, out));
-  out << endl;
-
   // Then, on each tablet.
   if (sections & PrintSections::TABLET_SUMMARIES) {
     RETURN_NOT_OK(PrintTabletSummaries(tablet_summaries, mode, out));

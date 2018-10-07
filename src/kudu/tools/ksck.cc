@@ -74,7 +74,7 @@ DEFINE_int32(fetch_replica_info_concurrency, 20,
              "Number of concurrent tablet servers to fetch replica info from.");
 
 DEFINE_bool(ignore_error_msg, false,
-            "Whether to ignore error message when returned from Run()");
+            "Whether to ignore error message when run ksck");
 DEFINE_string(ksck_format, "plain_concise",
               "Output format for ksck. Available options are 'plain_concise', "
               "'plain_full', 'json_pretty', and 'json_compact'.\n"
