@@ -70,6 +70,7 @@ unique_ptr<Mode> RootMode(const string& name) {
       .AddMode(BuildPbcMode())
       .AddMode(BuildPerfMode())
       .AddMode(BuildRemoteReplicaMode())
+      .AddMode(BuildScanMode())
       .AddMode(BuildTableMode())
       .AddMode(BuildTabletMode())
       .AddMode(BuildTestMode())

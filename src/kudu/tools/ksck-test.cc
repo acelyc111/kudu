@@ -388,7 +388,8 @@ class KsckTest : public KuduTest {
 
   const string KsckResultsToJsonString() {
     ostringstream json_stream;
-    ksck_->results().PrintJsonTo(PrintMode::JSON_COMPACT, json_stream);
+    ksck_->results().PrintJsonTo(PrintMode::JSON_COMPACT,
+                                 PrintSections::DEFAULT_PRINT_SECTIONS, json_stream);
     return json_stream.str();
   }
 
