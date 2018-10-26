@@ -149,7 +149,7 @@ EXTRA_CXXFLAGS="-fno-omit-frame-pointer -O2 $EXTRA_CXXFLAGS"
 if [[ "$OSTYPE" =~ ^linux ]]; then
   OS_LINUX=1
   DYLIB_SUFFIX="so"
-  PARALLEL=${PARALLEL:-$(grep -c processor /proc/cpuinfo)}
+  PARALLEL=4
 
   if [ -d "$OPENSSL_WORKAROUND_DIR" ]; then
     # If the el6 workaround openssl is present, we must build dependencies

@@ -29,6 +29,7 @@
 #include "kudu/client/replica_controller-internal.h"
 #include "kudu/client/schema.h"
 #include "kudu/client/shared_ptr.h"
+#include "kudu/client/write_op.h"
 #include "kudu/gutil/map-util.h"
 #include "kudu/gutil/stl_util.h"
 #include "kudu/gutil/strings/split.h"
@@ -38,6 +39,11 @@
 #include "kudu/util/status.h"
 
 DECLARE_string(tables);
+DECLARE_double(buffer_flush_watermark_pct);
+DECLARE_int32(buffer_size_bytes);
+DECLARE_int32(buffers_num);
+DECLARE_int32(error_buffer_size_bytes);
+DECLARE_int32(flush_per_n_rows);
 DEFINE_bool(modify_external_catalogs, true,
             "Whether to modify external catalogs, such as the Hive Metastore, "
             "when renaming or dropping a table.");
@@ -49,10 +55,17 @@ namespace tools {
 
 using client::KuduClient;
 using client::KuduClientBuilder;
+using client::KuduColumnSchema;
+using client::KuduInsert;
 using client::KuduScanToken;
 using client::KuduScanTokenBuilder;
+using client::KuduScanBatch;
+using client::KuduScanner;
+using client::KuduSchema;
+using client::KuduSession;
 using client::KuduTable;
 using client::KuduTableAlterer;
+using client::KuduTableCreator;
 using client::internal::ReplicaController;
 using std::cout;
 using std::endl;
@@ -112,6 +125,7 @@ const char* const kTableNameArg = "table_name";
 const char* const kNewTableNameArg = "new_table_name";
 const char* const kColumnNameArg = "column_name";
 const char* const kNewColumnNameArg = "new_column_name";
+const char* const kDestMasterAddressesArg = "dest_master_addresses";
 
 Status CreateKuduClient(const RunnerContext& context,
                         client::sp::shared_ptr<KuduClient>* client) {
@@ -160,6 +174,166 @@ Status ListTables(const RunnerContext& context) {
   return TableLister::ListTablets(Split(master_addresses_str, ","));
 }
 
+Status CopyTable(const RunnerContext& context) {
+  // src table
+  const string& src_table_name = FindOrDie(context.required_args, kTableNameArg);
+  client::sp::shared_ptr<KuduClient> src_client;
+  RETURN_NOT_OK(CreateKuduClient(context, &src_client));
+  client::sp::shared_ptr<KuduTable> src_table;
+  RETURN_NOT_OK(src_client->OpenTable(src_table_name, &src_table));
+
+  // dst table
+  const string& dst_table_name = src_table_name;
+  client::sp::shared_ptr<KuduClient> dst_client;
+  RETURN_NOT_OK(CreateKuduClient(context, &dst_client));
+  client::sp::shared_ptr<KuduTable> dst_table;
+  RETURN_NOT_OK(src_client->OpenTable(dst_table_name, &dst_table));
+
+  const KuduSchema& table_schema = src_table->schema();
+  size_t col_cnt = table_schema.num_columns();
+
+//  unique_ptr<KuduTableCreator> table_creator(dst_client->NewTableCreator());
+//    table_creator->table_name(dst_table_name)
+//                  .schema(&src_table->schema());
+//    table_creator->num_replicas(src_table->num_replicas());
+//    auto pb = PartitionSchemaPB();
+//    src_table->partition_schema().ToPB(&pb);
+//
+//    if (pb.has_range_schema() && pb.range_schema().columns_size() > 1) {
+//      // Split the generated span for a sequential workload evenly across all
+//      // tablets. In case we're inserting in random mode, use unbounded range
+//      // partitioning, so the table has key coverage of the entire keyspace.
+//      const int64_t total_inserted_span = SpanPerThread(schema.num_columns()) * FLAGS_num_threads;
+//      const int64_t span_per_range = total_inserted_span / FLAGS_table_num_range_partitions;
+//      table_creator->set_range_partition_columns({ kKeyColumnName });
+//
+//      for (int i = 0; i < pb.range_schema().columns_size(); i++) {
+//        unique_ptr<KuduPartialRow> split(schema.NewRow());
+//        int64_t split_val = FLAGS_seq_start + i * span_per_range;
+//        RETURN_NOT_OK(split->SetInt64(kKeyColumnName, split_val));
+//        table_creator->add_range_partition_split(split.release());
+//      }
+//    }
+//    if (pb.has_hash_schema()) {
+//      table_creator->add_hash_partitions(
+//          vector<string>({ kKeyColumnName }), FLAGS_table_num_hash_partitions);
+//    }
+//    RETURN_NOT_OK(table_creator->Create());
+//  }
+
+  KuduScanner scanner(src_table.get());
+  RETURN_NOT_OK(scanner.SetFaultTolerant());
+  RETURN_NOT_OK(scanner.SetSelection(KuduClient::LEADER_ONLY));
+  RETURN_NOT_OK(scanner.Open());
+
+  client::sp::shared_ptr<KuduSession> session(dst_client->NewSession());
+  const size_t flush_per_n_rows = FLAGS_flush_per_n_rows;
+  RETURN_NOT_OK(session->SetMutationBufferFlushWatermark(
+                   FLAGS_buffer_flush_watermark_pct));
+  RETURN_NOT_OK(session->SetMutationBufferSpace(
+                   FLAGS_buffer_size_bytes));
+  RETURN_NOT_OK(session->SetMutationBufferMaxNum(FLAGS_buffers_num));
+  RETURN_NOT_OK(session->SetErrorBufferSpace(FLAGS_error_buffer_size_bytes));
+  RETURN_NOT_OK(session->SetFlushMode(
+      flush_per_n_rows == 0 ? KuduSession::AUTO_FLUSH_BACKGROUND
+                            : KuduSession::MANUAL_FLUSH));
+
+  int count = 0;
+  KuduScanBatch batch;
+  while (scanner.HasMoreRows()) {
+    RETURN_NOT_OK(scanner.NextBatch(&batch));
+    for (auto it = batch.begin(); it != batch.end(); ++it) {
+      KuduScanBatch::RowPtr row(*it);
+
+      std::unique_ptr<KuduInsert> insert(dst_table->NewInsert());
+      KuduPartialRow* insert_row = insert->mutable_row();
+      for (int i = 0; i < col_cnt; ++i) {
+        KuduColumnSchema col_schema = table_schema.Column(i);
+        switch (col_schema.type()) {
+          case KuduColumnSchema::DataType::INT8: {
+            int8_t v;
+            row.GetInt8(i, &v);
+            insert_row->SetInt8(i, v);
+            break;
+          }
+          case KuduColumnSchema::DataType::INT16: {
+            int16_t v;
+            row.GetInt16(i, &v);
+            insert_row->SetInt16(i, v);
+            break;
+          }
+          case KuduColumnSchema::DataType::INT32: {
+            int32_t v;
+            row.GetInt32(i, &v);
+            insert_row->SetInt32(i, v);
+            break;
+          }
+          case KuduColumnSchema::DataType::INT64: {
+            int64_t v;
+            row.GetInt64(i, &v);
+            insert_row->SetInt64(i, v);
+            break;
+          }
+          case KuduColumnSchema::DataType::STRING: {
+            Slice v;
+            row.GetString(i, &v);
+            insert_row->SetString(i, v);
+            break;
+          }
+          case KuduColumnSchema::DataType::BOOL: {
+            bool v;
+            row.GetBool(i, &v);
+            insert_row->SetBool(i, v);
+            break;
+          }
+          case KuduColumnSchema::DataType::FLOAT: {
+            float v;
+            row.GetFloat(i, &v);
+            insert_row->SetFloat(i, v);
+            break;
+          }
+          case KuduColumnSchema::DataType::DOUBLE: {
+            double v;
+            row.GetDouble(i, &v);
+            insert_row->SetDouble(i, v);
+            break;
+          }
+          case KuduColumnSchema::DataType::BINARY: {
+            Slice v;
+            row.GetBinary(i, &v);
+            insert_row->SetBinary(i, v);
+            break;
+          }
+          case KuduColumnSchema::DataType::UNIXTIME_MICROS: {
+            int64_t v;
+            row.GetUnixTimeMicros(i, &v);
+            insert_row->SetUnixTimeMicros(i, v);
+            break;
+          }
+          case KuduColumnSchema::DataType::DECIMAL: {
+            int128_t v;
+            row.GetUnscaledDecimal(i, &v);
+            insert_row->SetUnscaledDecimal(i, v);
+            break;
+          }
+          default:
+            return Status::InvalidArgument("unknown data type: $1",
+                                           std::to_string(col_schema.type()));
+        }
+      }
+      RETURN_NOT_OK(session->Apply(insert.release()));
+    }
+  }
+
+//  if (flush_per_n_rows != 0 && idx != 0 && idx % flush_per_n_rows == 0) {
+//    session->FlushAsync(nullptr);
+//  }
+  RETURN_NOT_OK(session->Flush());
+  cout << "Total count: " << count << endl;
+
+  return Status::OK();
+}
+
 } // anonymous namespace
 
 unique_ptr<Mode> BuildTableMode() {
@@ -197,12 +371,22 @@ unique_ptr<Mode> BuildTableMode() {
       .AddOptionalParameter("list_tablets")
       .Build();
 
+  unique_ptr<Action> copy_table =
+      ActionBuilder("copy", &CopyTable)
+      .Description("Copy table")
+      .AddRequiredParameter({ kMasterAddressesArg, kMasterAddressesArgDesc })
+      .AddRequiredParameter({ kTableNameArg, "Name of the table to copy" })
+      .AddRequiredParameter({ kDestMasterAddressesArg, "target cluster master_addresses of this table copy to" })
+      // TODO schema change suopport
+      .Build();
+
   return ModeBuilder("table")
       .Description("Operate on Kudu tables")
       .AddAction(std::move(delete_table))
       .AddAction(std::move(rename_table))
       .AddAction(std::move(rename_column))
       .AddAction(std::move(list_tables))
+      .AddAction(std::move(copy_table))
       .Build();
 }
 
