@@ -30,8 +30,6 @@
 #include "kudu/client/schema.h"
 #include "kudu/client/shared_ptr.h"
 #include "kudu/client/write_op.h"
-//#include <kudu/common/common.pb.h>
-//#include "kudu/common/partition.h"
 #include "kudu/gutil/map-util.h"
 #include "kudu/gutil/stl_util.h"
 #include "kudu/gutil/strings/split.h"
@@ -53,8 +51,6 @@ DEFINE_bool(list_tablets, false,
             "Include tablet and replica UUIDs in the output");
 
 namespace kudu {
-//class PartitionSchema;
-
 namespace tools {
 
 using client::KuduClient;
@@ -206,36 +202,6 @@ Status CopyTable(const RunnerContext& context) {
 
   const KuduSchema& table_schema = src_table->schema();
   size_t col_cnt = table_schema.num_columns();
-
-//  unique_ptr<KuduTableCreator> table_creator(dst_client->NewTableCreator());
-//  table_creator->table_name(dst_table_name)
-//                .schema(&src_table->schema());
-//  table_creator->num_replicas(src_table->num_replicas());
-//
-//  auto pb = PartitionSchemaPB();
-//  src_table->partition_schema().ToPB(&pb);
-//
-//  std::vector<std::string> columns;
-//  for (int i = 0; i < pb.range_schema().columns_size(); ++i) {
-//    columns.push_back(pb.range_schema().columns(i).name());
-//  }
-//  table_creator->set_range_partition_columns(columns);
-//
-//  // TODO how to know the split?
-////  for (int i = 0; i < pb.range_schema().columns_size(); i++) {
-////    unique_ptr<KuduPartialRow> split;
-////    table_creator->add_range_partition_split(split.release());
-////  }
-//
-//  for (auto& hs : pb.hash_bucket_schemas()) {
-//    columns.clear();
-//    for (auto& col : hs.columns()) {
-//      columns.push_back(col.name());
-//    }
-//    table_creator->add_hash_partitions(columns, hs.num_buckets(), hs.seed());
-//  }
-//
-//  RETURN_NOT_OK(table_creator->Create());
 
   KuduScanner scanner(src_table.get());
   RETURN_NOT_OK(scanner.SetFaultTolerant());
