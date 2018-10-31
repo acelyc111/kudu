@@ -258,77 +258,77 @@ Status CopyTable(const RunnerContext& context) {
           case KuduColumnSchema::DataType::INT8: {
             int8_t v;
             if (row.GetInt8(i, &v).ok()) {
-              insert_row->SetInt8(i, v);
+              RETURN_NOT_OK(insert_row->SetInt8(i, v));
             }
             break;
           }
           case KuduColumnSchema::DataType::INT16: {
             int16_t v;
             if (row.GetInt16(i, &v).ok()) {
-              insert_row->SetInt16(i, v);
+              RETURN_NOT_OK(insert_row->SetInt16(i, v));
             }
             break;
           }
           case KuduColumnSchema::DataType::INT32: {
             int32_t v;
             if (row.GetInt32(i, &v).ok()) {
-              insert_row->SetInt32(i, v);
+              RETURN_NOT_OK(insert_row->SetInt32(i, v));
             }
             break;
           }
           case KuduColumnSchema::DataType::INT64: {
             int64_t v;
             if (row.GetInt64(i, &v).ok()) {
-              insert_row->SetInt64(i, v);
+              RETURN_NOT_OK(insert_row->SetInt64(i, v));
             }
             break;
           }
           case KuduColumnSchema::DataType::STRING: {
             Slice v;
             if (row.GetString(i, &v).ok()) {
-              insert_row->SetString(i, v);
+              RETURN_NOT_OK(insert_row->SetString(i, v));
             }
             break;
           }
           case KuduColumnSchema::DataType::BOOL: {
             bool v;
             if (row.GetBool(i, &v).ok()) {
-              insert_row->SetBool(i, v);
+              RETURN_NOT_OK(insert_row->SetBool(i, v));
             }
             break;
           }
           case KuduColumnSchema::DataType::FLOAT: {
             float v;
             if (row.GetFloat(i, &v).ok()) {
-              insert_row->SetFloat(i, v);
+              RETURN_NOT_OK(insert_row->SetFloat(i, v));
             }
             break;
           }
           case KuduColumnSchema::DataType::DOUBLE: {
             double v;
             if (row.GetDouble(i, &v).ok()) {
-              insert_row->SetDouble(i, v);
+              RETURN_NOT_OK(insert_row->SetDouble(i, v));
             }
             break;
           }
           case KuduColumnSchema::DataType::BINARY: {
             Slice v;
             if (row.GetBinary(i, &v).ok()) {
-              insert_row->SetBinary(i, v);
+              RETURN_NOT_OK(insert_row->SetBinary(i, v));
             }
             break;
           }
           case KuduColumnSchema::DataType::UNIXTIME_MICROS: {
             int64_t v;
             if (row.GetUnixTimeMicros(i, &v).ok()) {
-              insert_row->SetUnixTimeMicros(i, v);
+              RETURN_NOT_OK(insert_row->SetUnixTimeMicros(i, v));
             }
             break;
           }
           case KuduColumnSchema::DataType::DECIMAL: {
             int128_t v;
             if (row.GetUnscaledDecimal(i, &v).ok()) {
-              insert_row->SetUnscaledDecimal(i, v);
+              RETURN_NOT_OK(insert_row->SetUnscaledDecimal(i, v));
             }
             break;
           }
