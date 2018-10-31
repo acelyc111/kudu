@@ -65,7 +65,6 @@ using client::KuduSchema;
 using client::KuduSession;
 using client::KuduTable;
 using client::KuduTableAlterer;
-using client::KuduTableCreator;
 using client::internal::ReplicaController;
 using std::cout;
 using std::endl;
