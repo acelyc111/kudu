@@ -30,6 +30,8 @@
 #include "kudu/client/schema.h"
 #include "kudu/client/shared_ptr.h"
 #include "kudu/client/write_op.h"
+//#include <kudu/common/common.pb.h>
+//#include "kudu/common/partition.h"
 #include "kudu/gutil/map-util.h"
 #include "kudu/gutil/stl_util.h"
 #include "kudu/gutil/strings/split.h"
@@ -51,6 +53,8 @@ DEFINE_bool(list_tablets, false,
             "Include tablet and replica UUIDs in the output");
 
 namespace kudu {
+//class PartitionSchema;
+
 namespace tools {
 
 using client::KuduClient;
@@ -128,13 +132,24 @@ const char* const kNewColumnNameArg = "new_column_name";
 const char* const kDestMasterAddressesArg = "dest_master_addresses";
 
 Status CreateKuduClient(const RunnerContext& context,
+                        const char* const master_addresses_arg,
                         client::sp::shared_ptr<KuduClient>* client) {
   const string& master_addresses_str = FindOrDie(context.required_args,
-                                                 kMasterAddressesArg);
+                                                 master_addresses_arg);
   vector<string> master_addresses = Split(master_addresses_str, ",");
   return KuduClientBuilder()
              .master_server_addrs(master_addresses)
              .Build(client);
+}
+
+Status CreateKuduClient(const RunnerContext& context,
+                        client::sp::shared_ptr<KuduClient>* client) {
+  return CreateKuduClient(context, kMasterAddressesArg, client);
+}
+
+Status CreateDestKuduClient(const RunnerContext& context,
+                        client::sp::shared_ptr<KuduClient>* client) {
+  return CreateKuduClient(context, kDestMasterAddressesArg, client);
 }
 
 Status DeleteTable(const RunnerContext& context) {
@@ -185,7 +200,7 @@ Status CopyTable(const RunnerContext& context) {
   // dst table
   const string& dst_table_name = src_table_name;
   client::sp::shared_ptr<KuduClient> dst_client;
-  RETURN_NOT_OK(CreateKuduClient(context, &dst_client));
+  RETURN_NOT_OK(CreateDestKuduClient(context, &dst_client));
   client::sp::shared_ptr<KuduTable> dst_table;
   RETURN_NOT_OK(src_client->OpenTable(dst_table_name, &dst_table));
 
@@ -193,33 +208,34 @@ Status CopyTable(const RunnerContext& context) {
   size_t col_cnt = table_schema.num_columns();
 
 //  unique_ptr<KuduTableCreator> table_creator(dst_client->NewTableCreator());
-//    table_creator->table_name(dst_table_name)
-//                  .schema(&src_table->schema());
-//    table_creator->num_replicas(src_table->num_replicas());
-//    auto pb = PartitionSchemaPB();
-//    src_table->partition_schema().ToPB(&pb);
+//  table_creator->table_name(dst_table_name)
+//                .schema(&src_table->schema());
+//  table_creator->num_replicas(src_table->num_replicas());
 //
-//    if (pb.has_range_schema() && pb.range_schema().columns_size() > 1) {
-//      // Split the generated span for a sequential workload evenly across all
-//      // tablets. In case we're inserting in random mode, use unbounded range
-//      // partitioning, so the table has key coverage of the entire keyspace.
-//      const int64_t total_inserted_span = SpanPerThread(schema.num_columns()) * FLAGS_num_threads;
-//      const int64_t span_per_range = total_inserted_span / FLAGS_table_num_range_partitions;
-//      table_creator->set_range_partition_columns({ kKeyColumnName });
+//  auto pb = PartitionSchemaPB();
+//  src_table->partition_schema().ToPB(&pb);
 //
-//      for (int i = 0; i < pb.range_schema().columns_size(); i++) {
-//        unique_ptr<KuduPartialRow> split(schema.NewRow());
-//        int64_t split_val = FLAGS_seq_start + i * span_per_range;
-//        RETURN_NOT_OK(split->SetInt64(kKeyColumnName, split_val));
-//        table_creator->add_range_partition_split(split.release());
-//      }
-//    }
-//    if (pb.has_hash_schema()) {
-//      table_creator->add_hash_partitions(
-//          vector<string>({ kKeyColumnName }), FLAGS_table_num_hash_partitions);
-//    }
-//    RETURN_NOT_OK(table_creator->Create());
+//  std::vector<std::string> columns;
+//  for (int i = 0; i < pb.range_schema().columns_size(); ++i) {
+//    columns.push_back(pb.range_schema().columns(i).name());
 //  }
+//  table_creator->set_range_partition_columns(columns);
+//
+//  // TODO how to know the split?
+////  for (int i = 0; i < pb.range_schema().columns_size(); i++) {
+////    unique_ptr<KuduPartialRow> split;
+////    table_creator->add_range_partition_split(split.release());
+////  }
+//
+//  for (auto& hs : pb.hash_bucket_schemas()) {
+//    columns.clear();
+//    for (auto& col : hs.columns()) {
+//      columns.push_back(col.name());
+//    }
+//    table_creator->add_hash_partitions(columns, hs.num_buckets(), hs.seed());
+//  }
+//
+//  RETURN_NOT_OK(table_creator->Create());
 
   KuduScanner scanner(src_table.get());
   RETURN_NOT_OK(scanner.SetFaultTolerant());
@@ -252,68 +268,79 @@ Status CopyTable(const RunnerContext& context) {
         switch (col_schema.type()) {
           case KuduColumnSchema::DataType::INT8: {
             int8_t v;
-            row.GetInt8(i, &v);
-            insert_row->SetInt8(i, v);
+            if (row.GetInt8(i, &v).ok()) {
+              insert_row->SetInt8(i, v);
+            }
             break;
           }
           case KuduColumnSchema::DataType::INT16: {
             int16_t v;
-            row.GetInt16(i, &v);
-            insert_row->SetInt16(i, v);
+            if (row.GetInt16(i, &v).ok()) {
+              insert_row->SetInt16(i, v);
+            }
             break;
           }
           case KuduColumnSchema::DataType::INT32: {
             int32_t v;
-            row.GetInt32(i, &v);
-            insert_row->SetInt32(i, v);
+            if (row.GetInt32(i, &v).ok()) {
+              insert_row->SetInt32(i, v);
+            }
             break;
           }
           case KuduColumnSchema::DataType::INT64: {
             int64_t v;
-            row.GetInt64(i, &v);
-            insert_row->SetInt64(i, v);
+            if (row.GetInt64(i, &v).ok()) {
+              insert_row->SetInt64(i, v);
+            }
             break;
           }
           case KuduColumnSchema::DataType::STRING: {
             Slice v;
-            row.GetString(i, &v);
-            insert_row->SetString(i, v);
+            if (row.GetString(i, &v).ok()) {
+              insert_row->SetString(i, v);
+            }
             break;
           }
           case KuduColumnSchema::DataType::BOOL: {
             bool v;
-            row.GetBool(i, &v);
-            insert_row->SetBool(i, v);
+            if (row.GetBool(i, &v).ok()) {
+              insert_row->SetBool(i, v);
+            }
             break;
           }
           case KuduColumnSchema::DataType::FLOAT: {
             float v;
-            row.GetFloat(i, &v);
-            insert_row->SetFloat(i, v);
+            if (row.GetFloat(i, &v).ok()) {
+              insert_row->SetFloat(i, v);
+            }
             break;
           }
           case KuduColumnSchema::DataType::DOUBLE: {
             double v;
-            row.GetDouble(i, &v);
-            insert_row->SetDouble(i, v);
+            if (row.GetDouble(i, &v).ok()) {
+              insert_row->SetDouble(i, v);
+            }
             break;
           }
           case KuduColumnSchema::DataType::BINARY: {
             Slice v;
-            row.GetBinary(i, &v);
-            insert_row->SetBinary(i, v);
+            if (row.GetBinary(i, &v).ok()) {
+              insert_row->SetBinary(i, v);
+            }
             break;
           }
           case KuduColumnSchema::DataType::UNIXTIME_MICROS: {
             int64_t v;
-            row.GetUnixTimeMicros(i, &v);
-            insert_row->SetUnixTimeMicros(i, v);
+            if (row.GetUnixTimeMicros(i, &v).ok()) {
+              insert_row->SetUnixTimeMicros(i, v);
+            }
             break;
           }
           case KuduColumnSchema::DataType::DECIMAL: {
             int128_t v;
-            row.GetUnscaledDecimal(i, &v);
-            insert_row->SetUnscaledDecimal(i, v);
+            if (row.GetUnscaledDecimal(i, &v).ok()) {
+              insert_row->SetUnscaledDecimal(i, v);
+            }
             break;
           }
           default:
@@ -322,13 +349,14 @@ Status CopyTable(const RunnerContext& context) {
         }
       }
       RETURN_NOT_OK(session->Apply(insert.release()));
+      ++count;
+      if (flush_per_n_rows != 0 && count % flush_per_n_rows == 0) {
+        session->FlushAsync(nullptr);
+      }
     }
+    RETURN_NOT_OK(session->Flush());
   }
 
-//  if (flush_per_n_rows != 0 && idx != 0 && idx % flush_per_n_rows == 0) {
-//    session->FlushAsync(nullptr);
-//  }
-  RETURN_NOT_OK(session->Flush());
   cout << "Total count: " << count << endl;
 
   return Status::OK();
