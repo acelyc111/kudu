@@ -56,6 +56,7 @@ namespace tools {
 using client::KuduClient;
 using client::KuduClientBuilder;
 using client::KuduColumnSchema;
+using client::KuduError;
 using client::KuduInsert;
 using client::KuduScanToken;
 using client::KuduScanTokenBuilder;
@@ -133,6 +134,7 @@ Status CreateKuduClient(const RunnerContext& context,
                         client::sp::shared_ptr<KuduClient>* client) {
   const string& master_addresses_str = FindOrDie(context.required_args,
                                                  master_addresses_arg);
+
   vector<string> master_addresses = Split(master_addresses_str, ",");
   return KuduClientBuilder()
              .master_server_addrs(master_addresses)
@@ -205,7 +207,7 @@ Status CreateTable(const RunnerContext& context) {
   table_creator->num_replicas(3);
   table_creator->set_range_partition_columns({col1, col2});
 
-  RETURN_NOT_OK(table_creator->Create());
+  return table_creator->Create();
 }
 
 Status CopyTable(const RunnerContext& context) {
@@ -221,7 +223,7 @@ Status CopyTable(const RunnerContext& context) {
   client::sp::shared_ptr<KuduClient> dst_client;
   RETURN_NOT_OK(CreateDestKuduClient(context, &dst_client));
   client::sp::shared_ptr<KuduTable> dst_table;
-  RETURN_NOT_OK(src_client->OpenTable(dst_table_name, &dst_table));
+  RETURN_NOT_OK(dst_client->OpenTable(dst_table_name, &dst_table));
 
   const KuduSchema& table_schema = src_table->schema();
   size_t col_cnt = table_schema.num_columns();
@@ -232,28 +234,20 @@ Status CopyTable(const RunnerContext& context) {
   RETURN_NOT_OK(scanner.Open());
 
   client::sp::shared_ptr<KuduSession> session(dst_client->NewSession());
-  const size_t flush_per_n_rows = FLAGS_flush_per_n_rows;
-  RETURN_NOT_OK(session->SetMutationBufferFlushWatermark(
-                   FLAGS_buffer_flush_watermark_pct));
-  RETURN_NOT_OK(session->SetMutationBufferSpace(
-                   FLAGS_buffer_size_bytes));
-  RETURN_NOT_OK(session->SetMutationBufferMaxNum(FLAGS_buffers_num));
-  RETURN_NOT_OK(session->SetErrorBufferSpace(FLAGS_error_buffer_size_bytes));
-  RETURN_NOT_OK(session->SetFlushMode(
-      flush_per_n_rows == 0 ? KuduSession::AUTO_FLUSH_BACKGROUND
-                            : KuduSession::MANUAL_FLUSH));
+  RETURN_NOT_OK(session->SetFlushMode(KuduSession::AUTO_FLUSH_BACKGROUND));
 
   int count = 0;
   KuduScanBatch batch;
   while (scanner.HasMoreRows()) {
     RETURN_NOT_OK(scanner.NextBatch(&batch));
+    cout << "start to copy " << batch.NumRows() << " rows..." << endl;
     for (auto it = batch.begin(); it != batch.end(); ++it) {
       KuduScanBatch::RowPtr row(*it);
 
       std::unique_ptr<KuduInsert> insert(dst_table->NewInsert());
       KuduPartialRow* insert_row = insert->mutable_row();
       for (int i = 0; i < col_cnt; ++i) {
-        KuduColumnSchema col_schema = table_schema.Column(i);
+        const KuduColumnSchema& col_schema = table_schema.Column(i);
         switch (col_schema.type()) {
           case KuduColumnSchema::DataType::INT8: {
             int8_t v;
@@ -339,11 +333,14 @@ Status CopyTable(const RunnerContext& context) {
       }
       RETURN_NOT_OK(session->Apply(insert.release()));
       ++count;
-      if (flush_per_n_rows != 0 && count % flush_per_n_rows == 0) {
-        session->FlushAsync(nullptr);
+    }
+    if (!session->Flush().ok()) {
+      std::vector<KuduError*> errors;
+      session->GetPendingErrors(&errors, nullptr);
+      for (auto& it : errors) {
+        cout << it->status().ToString() << endl;
       }
     }
-    RETURN_NOT_OK(session->Flush());
   }
 
   cout << "Total count: " << count << endl;

@@ -55,6 +55,8 @@ DEFINE_string(included_upper_bound, "",
               "Included upper bound of the above key column.");
 DEFINE_int64(count, 0,
              "Count limit for scan rows. <= 0 mean no limit.");
+DEFINE_bool(show_value, true,
+            "Whether to show value of scanned items.");
 
 namespace kudu {
 namespace tools {
@@ -148,11 +150,11 @@ Status ScanRows(const shared_ptr<KuduTable>& table,
   KuduScanBatch batch;
   while (scanner.HasMoreRows()) {
     RETURN_NOT_OK(scanner.NextBatch(&batch));
-    for (KuduScanBatch::const_iterator it = batch.begin();
-         it != batch.end();
-         ++it) {
+    for (auto it = batch.begin(); it != batch.end(); ++it) {
       KuduScanBatch::RowPtr row(*it);
-      cout << row.ToString() << endl;
+      if (FLAGS_show_value) {
+        cout << row.ToString() << endl;
+      }
       if (++count >= FLAGS_count && FLAGS_count > 0) {
         cout << "Scanned count(maybe not the total count in specified range): "
         << count << endl;
@@ -200,7 +202,7 @@ Status RowsScanner(const RunnerContext& context) {
 } // anonymous namespace
 
 unique_ptr<Mode> BuildScanMode() {
-  unique_ptr<Action> insert =
+  unique_ptr<Action> scan =
       ActionBuilder("table", &RowsScanner)
       .Description("Scan rows from an exist table")
       .ExtraDescription(
@@ -218,11 +220,12 @@ unique_ptr<Mode> BuildScanMode() {
       .AddOptionalParameter("included_lower_bound")
       .AddOptionalParameter("included_upper_bound")
       .AddOptionalParameter("count")
+      .AddOptionalParameter("show_value")
       .Build();
 
   return ModeBuilder("scan")
       .Description("Scan rows")
-      .AddAction(std::move(insert))
+      .AddAction(std::move(scan))
       .Build();
 }
 
