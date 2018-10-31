@@ -233,8 +233,11 @@ Status CopyTable(const RunnerContext& context) {
   size_t col_cnt = table_schema.num_columns();
 
   KuduScanner scanner(src_table.get());
-  RETURN_NOT_OK(scanner.SetFaultTolerant());
+  RETURN_NOT_OK(scanner.SetCacheBlocks(false));
+  // RETURN_NOT_OK(scanner.SetFaultTolerant());
   RETURN_NOT_OK(scanner.SetSelection(KuduClient::LEADER_ONLY));
+  RETURN_NOT_OK(scanner.SetReadMode(KuduScanner::READ_LATEST));
+  RETURN_NOT_OK(scanner.SetLimit(4096));
   if (!FLAGS_key_column_name.empty() && !FLAGS_key_column_type.empty()) {
     KuduColumnSchema::DataType type = KuduColumnSchema::StringToDataType(FLAGS_key_column_type);
     KuduValue *lower = nullptr;
