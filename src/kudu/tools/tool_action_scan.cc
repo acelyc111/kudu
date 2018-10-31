@@ -17,6 +17,8 @@
 
 #include <iostream>
 
+#include <glog/logging.h>
+
 #include "kudu/client/client.h"
 #include "kudu/client/value.h"
 #include "kudu/gutil/map-util.h"
@@ -25,6 +27,7 @@
 #include "kudu/tools/tool_action.h"
 #include "kudu/tools/tool_action_common.h"
 #include "kudu/util/monotime.h"
+#include "kudu/util/stopwatch.h"
 
 using kudu::client::KuduClient;
 using kudu::client::KuduClientBuilder;
@@ -96,8 +99,11 @@ Status ScanRows(const shared_ptr<KuduTable>& table,
   // To be guaranteed results are returned in primary key order, make the
   // scanner fault-tolerant. This also means the scanner can recover if,
   // for example, the server it is scanning fails in the middle of a scan.
-  RETURN_NOT_OK(scanner.SetFaultTolerant());
+  RETURN_NOT_OK(scanner.SetCacheBlocks(false));
+  // RETURN_NOT_OK(scanner.SetFaultTolerant());
   RETURN_NOT_OK(scanner.SetSelection(KuduClient::LEADER_ONLY));
+  RETURN_NOT_OK(scanner.SetReadMode(KuduScanner::READ_LATEST));
+  RETURN_NOT_OK(scanner.SetLimit(4096));
 
   if (!key_column_name.empty() && !key_column_type.empty()) {
     KuduColumnSchema::DataType type = KuduColumnSchema::StringToDataType(key_column_type);
@@ -147,6 +153,8 @@ Status ScanRows(const shared_ptr<KuduTable>& table,
   RETURN_NOT_OK(scanner.Open());
 
   int count = 0;
+  Stopwatch sw;
+  sw.start();
   KuduScanBatch batch;
   while (scanner.HasMoreRows()) {
     RETURN_NOT_OK(scanner.NextBatch(&batch));
@@ -161,8 +169,12 @@ Status ScanRows(const shared_ptr<KuduTable>& table,
         return Status::OK();
       }
     }
+    if (sw.elapsed().wall_seconds() >= 5) {
+      sw.start();
+      LOG(INFO) << count << " rows scanned";
+    }
   }
-  cout << "Total count: " << count << endl;
+  LOG(INFO) << "Total count: " << count;
 
   return Status::OK();
 }

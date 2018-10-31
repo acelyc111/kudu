@@ -39,6 +39,7 @@
 #include "kudu/tools/tool_action.h"
 #include "kudu/tools/tool_action_common.h"
 #include "kudu/util/status.h"
+#include "kudu/util/stopwatch.h"
 
 DECLARE_string(tables);
 DECLARE_string(key_column_name);
@@ -291,10 +292,11 @@ Status CopyTable(const RunnerContext& context) {
   RETURN_NOT_OK(session->SetFlushMode(KuduSession::AUTO_FLUSH_BACKGROUND));
 
   int count = 0;
+  Stopwatch sw;
+  sw.start();
   KuduScanBatch batch;
   while (scanner.HasMoreRows()) {
     RETURN_NOT_OK(scanner.NextBatch(&batch));
-    cout << "start to copy " << batch.NumRows() << " rows..." << endl;
     for (auto it = batch.begin(); it != batch.end(); ++it) {
       KuduScanBatch::RowPtr row(*it);
 
@@ -388,16 +390,23 @@ Status CopyTable(const RunnerContext& context) {
       RETURN_NOT_OK(session->Apply(insert.release()));
       ++count;
     }
-    if (!session->Flush().ok()) {
+    Status s = session->Flush();
+    if (!s.ok()) {
       std::vector<KuduError*> errors;
       session->GetPendingErrors(&errors, nullptr);
       for (auto& it : errors) {
         cout << it->status().ToString() << endl;
       }
+      return s;
+    }
+
+    if (sw.elapsed().wall_seconds() >= 5) {
+      sw.start();
+      LOG(INFO) << count << " rows scanned";
     }
   }
 
-  cout << "Total count: " << count << endl;
+  LOG(INFO) << "Total count: " << count;
 
   return Status::OK();
 }
