@@ -49,10 +49,10 @@ DEFINE_string(key_column_name, "",
               "to limit the lower and upper bounds when scan rows.");
 DEFINE_string(key_column_type, "",
               "Type of the above key column.");
-DEFINE_string(included_lower_bound, "",
-              "Included lower bound of the above key column.");
-DEFINE_string(included_upper_bound, "",
-              "Included upper bound of the above key column.");
+DEFINE_string(include_lower_bound, "",
+              "Include lower bound of the above key column.");
+DEFINE_string(exclude_upper_bound, "",
+              "Exclude upper bound of the above key column.");
 DEFINE_int64(count, 0,
              "Count limit for scan rows. <= 0 mean no limit.");
 DEFINE_bool(show_value, true,
@@ -90,7 +90,7 @@ Status DoesTableExist(const shared_ptr<KuduClient>& client,
 
 Status ScanRows(const shared_ptr<KuduTable>& table,
                 const string& key_column_name, const string& key_column_type,
-                const string& include_lower_bound, const string& include_upper_bound) {
+                const string& include_lower_bound, const string& exclude_upper_bound) {
   KuduScanner scanner(table.get());
 
   // To be guaranteed results are returned in primary key order, make the
@@ -111,16 +111,16 @@ Status ScanRows(const shared_ptr<KuduTable>& table,
       if (!include_lower_bound.empty()) {
         lower = KuduValue::FromInt(atoi64(include_lower_bound));
       }
-      if (!include_upper_bound.empty()) {
-        upper = KuduValue::FromInt(atoi64(include_upper_bound));
+      if (!exclude_upper_bound.empty()) {
+        upper = KuduValue::FromInt(atoi64(exclude_upper_bound));
       }
       break;
     case KuduColumnSchema::DataType::STRING:
       if (!include_lower_bound.empty()) {
         lower = KuduValue::CopyString(include_lower_bound);
       }
-      if (!include_upper_bound.empty()) {
-        upper = KuduValue::CopyString(include_upper_bound);
+      if (!exclude_upper_bound.empty()) {
+        upper = KuduValue::CopyString(exclude_upper_bound);
       }
       break;
     case KuduColumnSchema::DataType::FLOAT:
@@ -129,7 +129,7 @@ Status ScanRows(const shared_ptr<KuduTable>& table,
         lower = KuduValue::FromDouble(strtod(include_lower_bound.c_str(), nullptr));
       }
       if (!include_lower_bound.empty()) {
-        upper = KuduValue::FromDouble(strtod(include_upper_bound.c_str(), nullptr));
+        upper = KuduValue::FromDouble(strtod(exclude_upper_bound.c_str(), nullptr));
       }
       break;
     default:
@@ -141,7 +141,7 @@ Status ScanRows(const shared_ptr<KuduTable>& table,
     }
     if (upper) {
         RETURN_NOT_OK(scanner.AddConjunctPredicate(table->NewComparisonPredicate(
-                key_column_name, KuduPredicate::LESS_EQUAL, upper)));
+                key_column_name, KuduPredicate::LESS, upper)));
     }
   }
   RETURN_NOT_OK(scanner.Open());
@@ -194,7 +194,7 @@ Status RowsScanner(const RunnerContext& context) {
 
   // Scan some rows.
   RETURN_NOT_OK(ScanRows(table, FLAGS_key_column_name, FLAGS_key_column_type,
-                         FLAGS_included_lower_bound, FLAGS_included_upper_bound));
+                         FLAGS_include_lower_bound, FLAGS_exclude_upper_bound));
 
   return Status::OK();
 }
@@ -217,8 +217,8 @@ unique_ptr<Mode> BuildScanMode() {
           "to limit the lower and upper bounds when scan rows."})
       .AddOptionalParameter("key_column_name")
       .AddOptionalParameter("key_column_type")
-      .AddOptionalParameter("included_lower_bound")
-      .AddOptionalParameter("included_upper_bound")
+      .AddOptionalParameter("include_lower_bound")
+      .AddOptionalParameter("exclude_upper_bound")
       .AddOptionalParameter("count")
       .AddOptionalParameter("show_value")
       .Build();

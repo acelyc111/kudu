@@ -29,21 +29,23 @@
 #include "kudu/client/replica_controller-internal.h"
 #include "kudu/client/schema.h"
 #include "kudu/client/shared_ptr.h"
+#include "kudu/client/value.h"
 #include "kudu/client/write_op.h"
 #include "kudu/gutil/map-util.h"
 #include "kudu/gutil/stl_util.h"
 #include "kudu/gutil/strings/split.h"
 #include "kudu/gutil/strings/substitute.h"
+#include "kudu/gutil/strtoint.h"
 #include "kudu/tools/tool_action.h"
 #include "kudu/tools/tool_action_common.h"
 #include "kudu/util/status.h"
 
 DECLARE_string(tables);
-DECLARE_double(buffer_flush_watermark_pct);
-DECLARE_int32(buffer_size_bytes);
-DECLARE_int32(buffers_num);
-DECLARE_int32(error_buffer_size_bytes);
-DECLARE_int32(flush_per_n_rows);
+DECLARE_string(key_column_name);
+DECLARE_string(key_column_type);
+DECLARE_string(include_lower_bound);
+DECLARE_string(exclude_upper_bound);
+
 DEFINE_bool(modify_external_catalogs, true,
             "Whether to modify external catalogs, such as the Hive Metastore, "
             "when renaming or dropping a table.");
@@ -58,6 +60,7 @@ using client::KuduClientBuilder;
 using client::KuduColumnSchema;
 using client::KuduError;
 using client::KuduInsert;
+using client::KuduPredicate;
 using client::KuduScanToken;
 using client::KuduScanTokenBuilder;
 using client::KuduScanBatch;
@@ -68,6 +71,7 @@ using client::KuduSession;
 using client::KuduTable;
 using client::KuduTableAlterer;
 using client::KuduTableCreator;
+using client::KuduValue;
 using client::internal::ReplicaController;
 using std::cout;
 using std::endl;
@@ -231,6 +235,53 @@ Status CopyTable(const RunnerContext& context) {
   KuduScanner scanner(src_table.get());
   RETURN_NOT_OK(scanner.SetFaultTolerant());
   RETURN_NOT_OK(scanner.SetSelection(KuduClient::LEADER_ONLY));
+  if (!FLAGS_key_column_name.empty() && !FLAGS_key_column_type.empty()) {
+    KuduColumnSchema::DataType type = KuduColumnSchema::StringToDataType(FLAGS_key_column_type);
+    KuduValue *lower = nullptr;
+    KuduValue *upper = nullptr;
+    switch (type) {
+    case KuduColumnSchema::DataType::INT8:
+    case KuduColumnSchema::DataType::INT16:
+    case KuduColumnSchema::DataType::INT32:
+    case KuduColumnSchema::DataType::INT64:
+      if (!FLAGS_include_lower_bound.empty()) {
+        lower = KuduValue::FromInt(atoi64(FLAGS_include_lower_bound));
+      }
+      if (!FLAGS_exclude_upper_bound.empty()) {
+        upper = KuduValue::FromInt(atoi64(FLAGS_exclude_upper_bound));
+      }
+      break;
+    case KuduColumnSchema::DataType::STRING:
+      if (!FLAGS_include_lower_bound.empty()) {
+        lower = KuduValue::CopyString(FLAGS_include_lower_bound);
+      }
+      if (!FLAGS_exclude_upper_bound.empty()) {
+        upper = KuduValue::CopyString(FLAGS_exclude_upper_bound);
+      }
+      break;
+    case KuduColumnSchema::DataType::FLOAT:
+    case KuduColumnSchema::DataType::DOUBLE:
+      if (!FLAGS_include_lower_bound.empty()) {
+        lower = KuduValue::FromDouble(strtod(FLAGS_include_lower_bound.c_str(), nullptr));
+      }
+      if (!FLAGS_include_lower_bound.empty()) {
+        upper = KuduValue::FromDouble(strtod(FLAGS_exclude_upper_bound.c_str(), nullptr));
+      }
+      break;
+    default:
+      LOG(FATAL) << "Unhandled type " << type;
+    }
+    if (lower) {
+        cout << "limit FLAGS_key_column_name [" << FLAGS_include_lower_bound << endl;
+        RETURN_NOT_OK(scanner.AddConjunctPredicate(src_table->NewComparisonPredicate(
+                FLAGS_key_column_name, KuduPredicate::GREATER_EQUAL, lower)));
+    }
+    if (upper) {
+        cout << "limit FLAGS_key_column_name " << FLAGS_exclude_upper_bound << ")" << endl;
+        RETURN_NOT_OK(scanner.AddConjunctPredicate(src_table->NewComparisonPredicate(
+                FLAGS_key_column_name, KuduPredicate::LESS, upper)));
+    }
+  }
   RETURN_NOT_OK(scanner.Open());
 
   client::sp::shared_ptr<KuduSession> session(dst_client->NewSession());
@@ -398,6 +449,10 @@ unique_ptr<Mode> BuildTableMode() {
       .AddRequiredParameter({ kMasterAddressesArg, kMasterAddressesArgDesc })
       .AddRequiredParameter({ kTableNameArg, "Name of the table to copy" })
       .AddRequiredParameter({ kDestMasterAddressesArg, "target cluster master_addresses of this table copy to" })
+      .AddOptionalParameter("key_column_name")
+      .AddOptionalParameter("key_column_type")
+      .AddOptionalParameter("include_lower_bound")
+      .AddOptionalParameter("exclude_upper_bound")
       // TODO schema change suopport
       .Build();
 
