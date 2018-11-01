@@ -15,9 +15,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <atomic>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -38,6 +40,7 @@
 #include "kudu/gutil/strtoint.h"
 #include "kudu/tools/tool_action.h"
 #include "kudu/tools/tool_action_common.h"
+#include "kudu/util/monotime.h"
 #include "kudu/util/status.h"
 #include "kudu/util/stopwatch.h"
 
@@ -52,6 +55,7 @@ DEFINE_bool(modify_external_catalogs, true,
             "when renaming or dropping a table.");
 DEFINE_bool(list_tablets, false,
             "Include tablet and replica UUIDs in the output");
+DECLARE_int32(num_threads);
 
 namespace kudu {
 namespace tools {
@@ -74,9 +78,12 @@ using client::KuduTableAlterer;
 using client::KuduTableCreator;
 using client::KuduValue;
 using client::internal::ReplicaController;
+
 using std::cout;
 using std::endl;
+using std::map;
 using std::string;
+using std::thread;
 using std::unique_ptr;
 using std::vector;
 using strings::Split;
@@ -215,6 +222,143 @@ Status CreateTable(const RunnerContext& context) {
   return table_creator->Create();
 }
 
+std::atomic<uint64_t> total_count(0);
+volatile size_t worker_count = 0;
+
+void CopyThread(const RunnerContext& context, const KuduSchema& table_schema, const vector<KuduScanToken*>& tokens) {
+  // dst table
+  const string& dst_table_name = FindOrDie(context.required_args, kTableNameArg);
+  client::sp::shared_ptr<KuduClient> dst_client;
+  DCHECK_OK(CreateDestKuduClient(context, &dst_client));
+  client::sp::shared_ptr<KuduTable> dst_table;
+  DCHECK_OK(dst_client->OpenTable(dst_table_name, &dst_table));
+
+  client::sp::shared_ptr<KuduSession> session(dst_client->NewSession());
+  DCHECK_OK(session->SetFlushMode(KuduSession::AUTO_FLUSH_BACKGROUND));
+
+  for (auto token : tokens) {
+    KuduScanner *scanner_ptr;
+    DCHECK_OK(token->IntoKuduScanner(&scanner_ptr));
+    unique_ptr<KuduScanner> scanner(scanner_ptr);
+    DCHECK_OK(scanner->Open());
+
+    KuduScanBatch batch;
+    while (scanner->HasMoreRows()) {
+      DCHECK_OK(scanner->NextBatch(&batch));
+      for (auto it = batch.begin(); it != batch.end(); ++it) {
+        KuduScanBatch::RowPtr row(*it);
+        std::unique_ptr<KuduInsert> insert(dst_table->NewInsert());
+        KuduPartialRow* insert_row = insert->mutable_row();
+        for (int i = 0; i < table_schema.num_columns(); ++i) {
+          const KuduColumnSchema& col_schema = table_schema.Column(i);
+          const std::string& col_name = col_schema.name();
+          switch (col_schema.type()) {
+            case KuduColumnSchema::DataType::INT8: {
+              int8_t v;
+              if (row.GetInt8(col_name, &v).ok()) {
+                DCHECK_OK(insert_row->SetInt8(col_name, v));
+              }
+              break;
+            }
+            case KuduColumnSchema::DataType::INT16: {
+              int16_t v;
+              if (row.GetInt16(col_name, &v).ok()) {
+                DCHECK_OK(insert_row->SetInt16(col_name, v));
+              }
+              break;
+            }
+            case KuduColumnSchema::DataType::INT32: {
+              int32_t v;
+              if (row.GetInt32(col_name, &v).ok()) {
+                DCHECK_OK(insert_row->SetInt32(col_name, v));
+              }
+              break;
+            }
+            case KuduColumnSchema::DataType::INT64: {
+              int64_t v;
+              if (row.GetInt64(col_name, &v).ok()) {
+                DCHECK_OK(insert_row->SetInt64(col_name, v));
+              }
+              break;
+            }
+            case KuduColumnSchema::DataType::STRING: {
+              Slice v;
+              if (row.GetString(col_name, &v).ok()) {
+                DCHECK_OK(insert_row->SetString(col_name, v));
+              }
+              break;
+            }
+            case KuduColumnSchema::DataType::BOOL: {
+              bool v;
+              if (row.GetBool(col_name, &v).ok()) {
+                DCHECK_OK(insert_row->SetBool(col_name, v));
+              }
+              break;
+            }
+            case KuduColumnSchema::DataType::FLOAT: {
+              float v;
+              if (row.GetFloat(col_name, &v).ok()) {
+                DCHECK_OK(insert_row->SetFloat(col_name, v));
+              }
+              break;
+            }
+            case KuduColumnSchema::DataType::DOUBLE: {
+              double v;
+              if (row.GetDouble(col_name, &v).ok()) {
+                DCHECK_OK(insert_row->SetDouble(col_name, v));
+              }
+              break;
+            }
+            case KuduColumnSchema::DataType::BINARY: {
+              Slice v;
+              if (row.GetBinary(col_name, &v).ok()) {
+                DCHECK_OK(insert_row->SetBinary(col_name, v));
+              }
+              break;
+            }
+            case KuduColumnSchema::DataType::UNIXTIME_MICROS: {
+              int64_t v;
+              if (row.GetUnixTimeMicros(col_name, &v).ok()) {
+                DCHECK_OK(insert_row->SetUnixTimeMicros(col_name, v));
+              }
+              break;
+            }
+            case KuduColumnSchema::DataType::DECIMAL: {
+              int128_t v;
+              if (row.GetUnscaledDecimal(col_name, &v).ok()) {
+                DCHECK_OK(insert_row->SetUnscaledDecimal(col_name, v));
+              }
+              break;
+            }
+            default:
+              DCHECK(false);
+          }
+        }
+        DCHECK_OK(session->Apply(insert.release()));
+      }
+      Status s = session->Flush();
+      if (!s.ok()) {
+        std::vector<KuduError*> errors;
+        session->GetPendingErrors(&errors, nullptr);
+        for (auto& it : errors) {
+          if (!it->status().IsAlreadyPresent()) {
+            cout << it->status().ToString() << endl;
+            return;
+          }
+        }
+      }
+      total_count.fetch_add(batch.NumRows());
+    }
+  }
+}
+
+void MonitorThread() {
+    while (worker_count > 0) {
+        LOG(INFO) << "Scanned count: " << total_count.load() << endl;
+        SleepFor(MonoDelta::FromSeconds(5));
+    }
+}
+
 Status CopyTable(const RunnerContext& context) {
   // src table
   const string& src_table_name = FindOrDie(context.required_args, kTableNameArg);
@@ -223,22 +367,13 @@ Status CopyTable(const RunnerContext& context) {
   client::sp::shared_ptr<KuduTable> src_table;
   RETURN_NOT_OK(src_client->OpenTable(src_table_name, &src_table));
 
-  // dst table
-  const string& dst_table_name = src_table_name;
-  client::sp::shared_ptr<KuduClient> dst_client;
-  RETURN_NOT_OK(CreateDestKuduClient(context, &dst_client));
-  client::sp::shared_ptr<KuduTable> dst_table;
-  RETURN_NOT_OK(dst_client->OpenTable(dst_table_name, &dst_table));
-
-  const KuduSchema& table_schema = src_table->schema();
-  size_t col_cnt = table_schema.num_columns();
-
-  KuduScanner scanner(src_table.get());
-  RETURN_NOT_OK(scanner.SetCacheBlocks(false));
+  KuduScanTokenBuilder builder(src_table.get());
+  RETURN_NOT_OK(builder.SetCacheBlocks(false));
   // RETURN_NOT_OK(scanner.SetFaultTolerant());
-  RETURN_NOT_OK(scanner.SetSelection(KuduClient::LEADER_ONLY));
-  RETURN_NOT_OK(scanner.SetReadMode(KuduScanner::READ_LATEST));
-  RETURN_NOT_OK(scanner.SetLimit(4096));
+  RETURN_NOT_OK(builder.SetSelection(KuduClient::LEADER_ONLY));
+  RETURN_NOT_OK(builder.SetReadMode(KuduScanner::READ_LATEST));
+  // RETURN_NOT_OK(builder.SetLimit(4096));
+
   if (!FLAGS_key_column_name.empty() && !FLAGS_key_column_type.empty()) {
     KuduColumnSchema::DataType type = KuduColumnSchema::StringToDataType(FLAGS_key_column_type);
     KuduValue *lower = nullptr;
@@ -277,138 +412,41 @@ Status CopyTable(const RunnerContext& context) {
     }
     if (lower) {
         cout << "limit FLAGS_key_column_name [" << FLAGS_include_lower_bound << endl;
-        RETURN_NOT_OK(scanner.AddConjunctPredicate(src_table->NewComparisonPredicate(
+        RETURN_NOT_OK(builder.AddConjunctPredicate(src_table->NewComparisonPredicate(
                 FLAGS_key_column_name, KuduPredicate::GREATER_EQUAL, lower)));
     }
     if (upper) {
         cout << "limit FLAGS_key_column_name " << FLAGS_exclude_upper_bound << ")" << endl;
-        RETURN_NOT_OK(scanner.AddConjunctPredicate(src_table->NewComparisonPredicate(
+        RETURN_NOT_OK(builder.AddConjunctPredicate(src_table->NewComparisonPredicate(
                 FLAGS_key_column_name, KuduPredicate::LESS, upper)));
     }
   }
-  RETURN_NOT_OK(scanner.Open());
 
-  client::sp::shared_ptr<KuduSession> session(dst_client->NewSession());
-  RETURN_NOT_OK(session->SetFlushMode(KuduSession::AUTO_FLUSH_BACKGROUND));
+  const KuduSchema& table_schema = src_table->schema();
 
-  int count = 0;
-  Stopwatch sw;
-  sw.start();
-  KuduScanBatch batch;
-  while (scanner.HasMoreRows()) {
-    RETURN_NOT_OK(scanner.NextBatch(&batch));
-    for (auto it = batch.begin(); it != batch.end(); ++it) {
-      KuduScanBatch::RowPtr row(*it);
+  vector<KuduScanToken*> tokens;
+  ElementDeleter DeleteTable(&tokens);
+  RETURN_NOT_OK(builder.Build(&tokens));
 
-      std::unique_ptr<KuduInsert> insert(dst_table->NewInsert());
-      KuduPartialRow* insert_row = insert->mutable_row();
-      for (int i = 0; i < col_cnt; ++i) {
-        const KuduColumnSchema& col_schema = table_schema.Column(i);
-        switch (col_schema.type()) {
-          case KuduColumnSchema::DataType::INT8: {
-            int8_t v;
-            if (row.GetInt8(i, &v).ok()) {
-              RETURN_NOT_OK(insert_row->SetInt8(i, v));
-            }
-            break;
-          }
-          case KuduColumnSchema::DataType::INT16: {
-            int16_t v;
-            if (row.GetInt16(i, &v).ok()) {
-              RETURN_NOT_OK(insert_row->SetInt16(i, v));
-            }
-            break;
-          }
-          case KuduColumnSchema::DataType::INT32: {
-            int32_t v;
-            if (row.GetInt32(i, &v).ok()) {
-              RETURN_NOT_OK(insert_row->SetInt32(i, v));
-            }
-            break;
-          }
-          case KuduColumnSchema::DataType::INT64: {
-            int64_t v;
-            if (row.GetInt64(i, &v).ok()) {
-              RETURN_NOT_OK(insert_row->SetInt64(i, v));
-            }
-            break;
-          }
-          case KuduColumnSchema::DataType::STRING: {
-            Slice v;
-            if (row.GetString(i, &v).ok()) {
-              RETURN_NOT_OK(insert_row->SetString(i, v));
-            }
-            break;
-          }
-          case KuduColumnSchema::DataType::BOOL: {
-            bool v;
-            if (row.GetBool(i, &v).ok()) {
-              RETURN_NOT_OK(insert_row->SetBool(i, v));
-            }
-            break;
-          }
-          case KuduColumnSchema::DataType::FLOAT: {
-            float v;
-            if (row.GetFloat(i, &v).ok()) {
-              RETURN_NOT_OK(insert_row->SetFloat(i, v));
-            }
-            break;
-          }
-          case KuduColumnSchema::DataType::DOUBLE: {
-            double v;
-            if (row.GetDouble(i, &v).ok()) {
-              RETURN_NOT_OK(insert_row->SetDouble(i, v));
-            }
-            break;
-          }
-          case KuduColumnSchema::DataType::BINARY: {
-            Slice v;
-            if (row.GetBinary(i, &v).ok()) {
-              RETURN_NOT_OK(insert_row->SetBinary(i, v));
-            }
-            break;
-          }
-          case KuduColumnSchema::DataType::UNIXTIME_MICROS: {
-            int64_t v;
-            if (row.GetUnixTimeMicros(i, &v).ok()) {
-              RETURN_NOT_OK(insert_row->SetUnixTimeMicros(i, v));
-            }
-            break;
-          }
-          case KuduColumnSchema::DataType::DECIMAL: {
-            int128_t v;
-            if (row.GetUnscaledDecimal(i, &v).ok()) {
-              RETURN_NOT_OK(insert_row->SetUnscaledDecimal(i, v));
-            }
-            break;
-          }
-          default:
-            return Status::InvalidArgument("unknown data type: $1",
-                                           std::to_string(col_schema.type()));
-        }
-      }
-      RETURN_NOT_OK(session->Apply(insert.release()));
-      ++count;
-    }
-    Status s = session->Flush();
-    if (!s.ok()) {
-      std::vector<KuduError*> errors;
-      session->GetPendingErrors(&errors, nullptr);
-      for (auto& it : errors) {
-        if (!it->status().IsAlreadyPresent()) {
-          cout << it->status().ToString() << endl;
-          return s;
-        }
-      }
-    }
-
-    if (sw.elapsed().wall_seconds() >= 5) {
-      sw.start();
-      LOG(INFO) << count << " rows scanned";
-    }
+  map<int, vector<KuduScanToken*>> thread_tokens;
+  int i = 0;
+  for (auto token : tokens) {
+    thread_tokens[i++ % FLAGS_num_threads].push_back(token);
   }
 
-  LOG(INFO) << "Total count: " << count;
+  worker_count = FLAGS_num_threads;
+  vector<thread> threads;
+  for (int i = 0; i < FLAGS_num_threads; ++i) {
+      threads.emplace_back(&CopyThread, context, table_schema, thread_tokens[i]);
+  }
+  threads.emplace_back(&MonitorThread);
+
+  for (auto& t : threads) {
+    t.join();
+    --worker_count;
+  }
+
+  LOG(INFO) << "Total count: " << total_count;
 
   return Status::OK();
 }
