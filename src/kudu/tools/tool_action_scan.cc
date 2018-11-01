@@ -15,13 +15,16 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <atomic>
 #include <iostream>
+#include <thread>
 
 #include <glog/logging.h>
 
 #include "kudu/client/client.h"
 #include "kudu/client/value.h"
 #include "kudu/gutil/map-util.h"
+#include "kudu/gutil/stl_util.h"
 #include "kudu/gutil/strings/split.h"
 #include "kudu/gutil/strtoint.h"
 #include "kudu/tools/tool_action.h"
@@ -35,6 +38,8 @@ using kudu::client::KuduColumnSchema;
 using kudu::client::KuduPredicate;
 using kudu::client::KuduScanBatch;
 using kudu::client::KuduScanner;
+using kudu::client::KuduScanToken;
+using kudu::client::KuduScanTokenBuilder;
 using kudu::client::KuduTable;
 using kudu::client::KuduValue;
 using kudu::client::sp::shared_ptr;
@@ -43,7 +48,9 @@ using kudu::Status;
 
 using std::cout;
 using std::endl;
+using std::map;
 using std::string;
+using std::thread;
 using std::unique_ptr;
 using std::vector;
 
@@ -60,6 +67,7 @@ DEFINE_int64(count, 0,
              "Count limit for scan rows. <= 0 mean no limit.");
 DEFINE_bool(show_value, true,
             "Whether to show value of scanned items.");
+DECLARE_int32(num_threads);
 
 namespace kudu {
 namespace tools {
@@ -91,19 +99,51 @@ Status DoesTableExist(const shared_ptr<KuduClient>& client,
   return s;
 }
 
+std::atomic<uint64_t> total_count(0);
+volatile size_t worker_count = 0;
+
+void ScannerThread(const vector<KuduScanToken*>& tokens) {
+  for (auto token : tokens) {
+      KuduScanner *scanner_ptr;
+      DCHECK_OK(token->IntoKuduScanner(&scanner_ptr));
+      unique_ptr<KuduScanner> scanner(scanner_ptr);
+      DCHECK_OK(scanner->Open());
+
+      int count = 0;
+      KuduScanBatch batch;
+      while (scanner->HasMoreRows()) {
+          DCHECK_OK(scanner->NextBatch(&batch));
+          for (auto it = batch.begin(); it != batch.end(); ++it) {
+              KuduScanBatch::RowPtr row(*it);
+              if (FLAGS_show_value) {
+                  LOG(INFO) << row.ToString() << endl;
+              }
+          }
+          total_count.fetch_add(batch.NumRows());
+          if (total_count.load() >= FLAGS_count && FLAGS_count > 0) {   // TODO maybe larger than FLAGS_count
+              LOG(INFO) << "Scanned count(maybe not the total count in specified range): " << count << endl;
+              return;
+          }
+      }
+  }
+}
+
+void MonitorThread() {
+    while (worker_count > 0) {
+        LOG(INFO) << "Scanned count: " << total_count.load() << endl;
+        SleepFor(MonoDelta::FromSeconds(5));
+    }
+}
+
 Status ScanRows(const shared_ptr<KuduTable>& table,
                 const string& key_column_name, const string& key_column_type,
                 const string& include_lower_bound, const string& exclude_upper_bound) {
-  KuduScanner scanner(table.get());
-
-  // To be guaranteed results are returned in primary key order, make the
-  // scanner fault-tolerant. This also means the scanner can recover if,
-  // for example, the server it is scanning fails in the middle of a scan.
-  RETURN_NOT_OK(scanner.SetCacheBlocks(false));
+  KuduScanTokenBuilder builder(table.get());
+  RETURN_NOT_OK(builder.SetCacheBlocks(false));
   // RETURN_NOT_OK(scanner.SetFaultTolerant());
-  RETURN_NOT_OK(scanner.SetSelection(KuduClient::LEADER_ONLY));
-  RETURN_NOT_OK(scanner.SetReadMode(KuduScanner::READ_LATEST));
-  RETURN_NOT_OK(scanner.SetLimit(4096));
+  RETURN_NOT_OK(builder.SetSelection(KuduClient::LEADER_ONLY));
+  RETURN_NOT_OK(builder.SetReadMode(KuduScanner::READ_LATEST));
+  // RETURN_NOT_OK(builder.SetLimit(4096));
 
   if (!key_column_name.empty() && !key_column_type.empty()) {
     KuduColumnSchema::DataType type = KuduColumnSchema::StringToDataType(key_column_type);
@@ -142,39 +182,38 @@ Status ScanRows(const shared_ptr<KuduTable>& table,
       LOG(FATAL) << "Unhandled type " << type;
     }
     if (lower) {
-        RETURN_NOT_OK(scanner.AddConjunctPredicate(table->NewComparisonPredicate(
+        RETURN_NOT_OK(builder.AddConjunctPredicate(table->NewComparisonPredicate(
                 key_column_name, KuduPredicate::GREATER_EQUAL, lower)));
     }
     if (upper) {
-        RETURN_NOT_OK(scanner.AddConjunctPredicate(table->NewComparisonPredicate(
+        RETURN_NOT_OK(builder.AddConjunctPredicate(table->NewComparisonPredicate(
                 key_column_name, KuduPredicate::LESS, upper)));
     }
   }
-  RETURN_NOT_OK(scanner.Open());
 
-  int count = 0;
-  Stopwatch sw;
-  sw.start();
-  KuduScanBatch batch;
-  while (scanner.HasMoreRows()) {
-    RETURN_NOT_OK(scanner.NextBatch(&batch));
-    for (auto it = batch.begin(); it != batch.end(); ++it) {
-      KuduScanBatch::RowPtr row(*it);
-      if (FLAGS_show_value) {
-        cout << row.ToString() << endl;
-      }
-      if (++count >= FLAGS_count && FLAGS_count > 0) {
-        cout << "Scanned count(maybe not the total count in specified range): "
-        << count << endl;
-        return Status::OK();
-      }
-    }
-    if (sw.elapsed().wall_seconds() >= 5) {
-      sw.start();
-      LOG(INFO) << count << " rows scanned";
-    }
+  vector<KuduScanToken*> tokens;
+  ElementDeleter DeleteTable(&tokens);
+  RETURN_NOT_OK(builder.Build(&tokens));
+
+  map<int, vector<KuduScanToken*>> thread_tokens;
+  int i = 0;
+  for (auto token : tokens) {
+    thread_tokens[i++ % FLAGS_num_threads].push_back(token);
   }
-  LOG(INFO) << "Total count: " << count;
+
+  worker_count = FLAGS_num_threads;
+  vector<thread> threads;
+  for (int i = 0; i < FLAGS_num_threads; ++i) {
+      threads.emplace_back(&ScannerThread, thread_tokens[i]);
+  }
+  threads.emplace_back(&MonitorThread);
+
+  for (auto& t : threads) {
+    t.join();
+    --worker_count;
+  }
+
+  LOG(INFO) << "Total count: " << total_count;
 
   return Status::OK();
 }
