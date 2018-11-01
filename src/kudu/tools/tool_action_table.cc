@@ -200,7 +200,27 @@ Status ListTables(const RunnerContext& context) {
   return TableLister::ListTablets(Split(master_addresses_str, ","));
 }
 
-Status CreateTable(const RunnerContext& context) {
+Status CreateFenqunTable1(const RunnerContext& context) {
+  const string& table_name = FindOrDie(context.required_args, kTableNameArg);
+  client::sp::shared_ptr<KuduClient> client;
+  RETURN_NOT_OK(CreateKuduClient(context, &client));
+
+  std::string col1 = "distinct_id";
+  KuduSchema schema;
+  KuduSchemaBuilder b;
+  b.AddColumn(col1)->Type(KuduColumnSchema::STRING)->NotNull();
+  b.SetPrimaryKey({col1});
+  RETURN_NOT_OK(b.Build(&schema));
+
+  unique_ptr<KuduTableCreator> table_creator(client->NewTableCreator());
+  table_creator->table_name(table_name).schema(&schema);
+  table_creator->num_replicas(3);
+  table_creator->set_range_partition_columns({col1});
+
+  return table_creator->Create();
+}
+
+Status CreateFenqunTable2(const RunnerContext& context) {
   const string& table_name = FindOrDie(context.required_args, kTableNameArg);
   client::sp::shared_ptr<KuduClient> client;
   RETURN_NOT_OK(CreateKuduClient(context, &client));
@@ -488,9 +508,16 @@ unique_ptr<Mode> BuildTableMode() {
       .AddOptionalParameter("list_tablets")
       .Build();
 
-  unique_ptr<Action> create_fenqun_table =
-      ActionBuilder("create_fenqun_table", &CreateTable)
-      .Description("Create 'fenqun' table")
+  unique_ptr<Action> create_fenqun_table1 =
+      ActionBuilder("create_fenqun_table1", &CreateFenqunTable1)
+      .Description("Create 'fenqun1' table")
+      .AddRequiredParameter({ kMasterAddressesArg, kMasterAddressesArgDesc })
+      .AddRequiredParameter({ kTableNameArg, "Name of the table to create" })
+      .Build();
+
+  unique_ptr<Action> create_fenqun_table2 =
+      ActionBuilder("create_fenqun_table2", &CreateFenqunTable2)
+      .Description("Create 'fenqun2' table")
       .AddRequiredParameter({ kMasterAddressesArg, kMasterAddressesArgDesc })
       .AddRequiredParameter({ kTableNameArg, "Name of the table to create" })
       .Build();
@@ -514,7 +541,8 @@ unique_ptr<Mode> BuildTableMode() {
       .AddAction(std::move(rename_table))
       .AddAction(std::move(rename_column))
       .AddAction(std::move(list_tables))
-      .AddAction(std::move(create_fenqun_table))
+      .AddAction(std::move(create_fenqun_table1))
+      .AddAction(std::move(create_fenqun_table2))
       .AddAction(std::move(copy_table))
       .Build();
 }
