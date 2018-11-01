@@ -395,9 +395,11 @@ Status CopyTable(const RunnerContext& context) {
       std::vector<KuduError*> errors;
       session->GetPendingErrors(&errors, nullptr);
       for (auto& it : errors) {
-        cout << it->status().ToString() << endl;
+        if (!it->status().IsAlreadyPresent()) {
+          cout << it->status().ToString() << endl;
+          return s;
+        }
       }
-      return s;
     }
 
     if (sw.elapsed().wall_seconds() >= 5) {
