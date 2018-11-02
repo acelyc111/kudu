@@ -357,6 +357,8 @@ Status CheckFlush(const shared_ptr<KuduSession>& session, const Status& s) {
       return s;
     }
   }
+
+  return Status::OK();
 }
 
 void CopyThread(const RunnerContext& context, const KuduSchema& table_schema, const vector<KuduScanToken*>& tokens) {
@@ -458,22 +460,22 @@ Status AddPredicates(const shared_ptr<KuduTable>& table,
                      const string& include_lower_bound,
                      const string& exclude_upper_bound,
                      KuduScanTokenBuilder& builder) {
-  if (!column_name.empty()) {
-    boost::optional<KuduColumnSchema::DataType> type;
-    for (size_t i = 0; i < table->schema().num_columns(); ++i) {
-      if (table->schema().Column(i).name() == column_name) {
-        type = table->schema().Column(i).type();
-      }
-    }
+  if (column_name.empty()) {
+    return Status::OK();
+  }
 
-    if (type) {
+  for (size_t i = 0; i < table->schema().num_columns(); ++i) {
+    if (table->schema().Column(i).name() == column_name) {
       vector<KuduPredicate*> predicates;
-      RETURN_NOT_OK(NewComparisonPredicate(table, column_name, type.get(),
+      auto type = table->schema().Column(i).type();
+      RETURN_NOT_OK(NewComparisonPredicate(table, column_name, type,
                                            include_lower_bound, exclude_upper_bound,
                                            predicates));
       for (auto predicate : predicates) {
         RETURN_NOT_OK(builder.AddConjunctPredicate(predicate));
       }
+
+      return Status::OK();
     }
   }
 
