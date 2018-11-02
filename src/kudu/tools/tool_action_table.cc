@@ -587,7 +587,7 @@ Status ScanRows(const shared_ptr<KuduTable>& table, const string& key_column_nam
   return Status::OK();
 }
 
-Status RowsScanner(const RunnerContext& context) {
+Status ScanTable(const RunnerContext &context) {
   const string& table_name = FindOrDie(context.required_args, kTableNameArg);
   shared_ptr<KuduClient> client;
   RETURN_NOT_OK(CreateKuduClient(context, &client));
@@ -665,11 +665,11 @@ unique_ptr<Mode> BuildTableMode() {
       .Build();
 
   unique_ptr<Action> scan_table =
-      ActionBuilder("table", &RowsScanner)
-      .Description("Scan rows from an exist table")
+      ActionBuilder("scan", &ScanTable)
+      .Description("Scan rows from a table")
       .ExtraDescription(
           "Scan rows from an exist table, you can specify "
-          "one key column's lower and upper bounds.")
+          "one column's lower and upper bounds.")
       .AddRequiredParameter({ kMasterAddressesArg,
           "Comma-separated list of master addresses to run against. "
           "Addresses are in 'hostname:port' form where port may be omitted "
