@@ -45,11 +45,19 @@
 #include "kudu/util/stopwatch.h"
 
 DECLARE_string(tables);
-DECLARE_string(key_column_name);
-DECLARE_string(key_column_type);
-DECLARE_string(include_lower_bound);
-DECLARE_string(exclude_upper_bound);
-
+DEFINE_string(key_column_name, "",
+              "Key column name of the existing table, which will be used "
+              "to limit the lower and upper bounds when scan rows.");
+DEFINE_string(key_column_type, "",
+              "Type of the above key column.");
+DEFINE_string(include_lower_bound, "",
+              "Include lower bound of the above key column.");
+DEFINE_string(exclude_upper_bound, "",
+              "Exclude upper bound of the above key column.");
+DEFINE_int64(count, 0,
+             "Count limit for scan rows. <= 0 mean no limit.");
+DEFINE_bool(show_value, true,
+            "Whether to show value of scanned items.");
 DEFINE_bool(modify_external_catalogs, true,
             "Whether to modify external catalogs, such as the Hive Metastore, "
             "when renaming or dropping a table.");
@@ -78,6 +86,7 @@ using client::KuduTableAlterer;
 using client::KuduTableCreator;
 using client::KuduValue;
 using client::internal::ReplicaController;
+using client::sp::shared_ptr;
 
 using std::cout;
 using std::endl;
@@ -140,6 +149,9 @@ const char* const kNewTableNameArg = "new_table_name";
 const char* const kColumnNameArg = "column_name";
 const char* const kNewColumnNameArg = "new_column_name";
 const char* const kDestMasterAddressesArg = "dest_master_addresses";
+
+std::atomic<uint64_t> total_count(0);
+volatile size_t worker_count = 0;
 
 Status CreateKuduClient(const RunnerContext& context,
                         const char* const master_addresses_arg,
@@ -241,9 +253,6 @@ Status CreateFenqunTable2(const RunnerContext& context) {
 
   return table_creator->Create();
 }
-
-std::atomic<uint64_t> total_count(0);
-volatile size_t worker_count = 0;
 
 void CopyThread(const RunnerContext& context, const KuduSchema& table_schema, const vector<KuduScanToken*>& tokens) {
   // dst table
@@ -471,6 +480,169 @@ Status CopyTable(const RunnerContext& context) {
   return Status::OK();
 }
 
+Status CreateClient(const vector<string>& master_addrs,
+                           shared_ptr<KuduClient>* client) {
+  return KuduClientBuilder()
+      .master_server_addrs(master_addrs)
+      .default_admin_operation_timeout(MonoDelta::FromSeconds(20))
+      .Build(client);
+}
+
+Status DoesTableExist(const shared_ptr<KuduClient>& client,
+                      const string& table_name,
+                      bool *exists) {
+  shared_ptr<KuduTable> table;
+  Status s = client->OpenTable(table_name, &table);
+  if (s.ok()) {
+    *exists = true;
+  } else if (s.IsNotFound()) {
+    *exists = false;
+    s = Status::OK();
+  }
+  return s;
+}
+
+void ScannerThread(const vector<KuduScanToken*>& tokens) {
+  for (auto token : tokens) {
+      KuduScanner *scanner_ptr;
+      DCHECK_OK(token->IntoKuduScanner(&scanner_ptr));
+      unique_ptr<KuduScanner> scanner(scanner_ptr);
+      DCHECK_OK(scanner->Open());
+
+      int count = 0;
+      KuduScanBatch batch;
+      while (scanner->HasMoreRows()) {
+          DCHECK_OK(scanner->NextBatch(&batch));
+          for (auto it = batch.begin(); it != batch.end(); ++it) {
+              KuduScanBatch::RowPtr row(*it);
+              if (FLAGS_show_value) {
+                  LOG(INFO) << row.ToString() << endl;
+              }
+          }
+          total_count.fetch_add(batch.NumRows());
+          if (total_count.load() >= FLAGS_count && FLAGS_count > 0) {   // TODO maybe larger than FLAGS_count
+              LOG(INFO) << "Scanned count(maybe not the total count in specified range): " << count << endl;
+              return;
+          }
+      }
+  }
+}
+
+Status ScanRows(const shared_ptr<KuduTable>& table,
+                const string& key_column_name, const string& key_column_type,
+                const string& include_lower_bound, const string& exclude_upper_bound) {
+  KuduScanTokenBuilder builder(table.get());
+  RETURN_NOT_OK(builder.SetCacheBlocks(false));
+  // RETURN_NOT_OK(scanner.SetFaultTolerant());
+  RETURN_NOT_OK(builder.SetSelection(KuduClient::LEADER_ONLY));
+  RETURN_NOT_OK(builder.SetReadMode(KuduScanner::READ_LATEST));
+  // RETURN_NOT_OK(builder.SetLimit(4096));
+
+  if (!key_column_name.empty() && !key_column_type.empty()) {
+    KuduColumnSchema::DataType type = KuduColumnSchema::StringToDataType(key_column_type);
+    KuduValue *lower = nullptr;
+    KuduValue *upper = nullptr;
+    switch (type) {
+    case KuduColumnSchema::DataType::INT8:
+    case KuduColumnSchema::DataType::INT16:
+    case KuduColumnSchema::DataType::INT32:
+    case KuduColumnSchema::DataType::INT64:
+      if (!include_lower_bound.empty()) {
+        lower = KuduValue::FromInt(atoi64(include_lower_bound));
+      }
+      if (!exclude_upper_bound.empty()) {
+        upper = KuduValue::FromInt(atoi64(exclude_upper_bound));
+      }
+      break;
+    case KuduColumnSchema::DataType::STRING:
+      if (!include_lower_bound.empty()) {
+        lower = KuduValue::CopyString(include_lower_bound);
+      }
+      if (!exclude_upper_bound.empty()) {
+        upper = KuduValue::CopyString(exclude_upper_bound);
+      }
+      break;
+    case KuduColumnSchema::DataType::FLOAT:
+    case KuduColumnSchema::DataType::DOUBLE:
+      if (!include_lower_bound.empty()) {
+        lower = KuduValue::FromDouble(strtod(include_lower_bound.c_str(), nullptr));
+      }
+      if (!include_lower_bound.empty()) {
+        upper = KuduValue::FromDouble(strtod(exclude_upper_bound.c_str(), nullptr));
+      }
+      break;
+    default:
+      LOG(FATAL) << "Unhandled type " << type;
+    }
+    if (lower) {
+        RETURN_NOT_OK(builder.AddConjunctPredicate(table->NewComparisonPredicate(
+                key_column_name, KuduPredicate::GREATER_EQUAL, lower)));
+    }
+    if (upper) {
+        RETURN_NOT_OK(builder.AddConjunctPredicate(table->NewComparisonPredicate(
+                key_column_name, KuduPredicate::LESS, upper)));
+    }
+  }
+
+  vector<KuduScanToken*> tokens;
+  ElementDeleter DeleteTable(&tokens);
+  RETURN_NOT_OK(builder.Build(&tokens));
+
+  map<int, vector<KuduScanToken*>> thread_tokens;
+  int i = 0;
+  for (auto token : tokens) {
+    thread_tokens[i++ % FLAGS_num_threads].push_back(token);
+  }
+
+  worker_count = FLAGS_num_threads;
+  vector<thread> threads;
+  for (int i = 0; i < FLAGS_num_threads; ++i) {
+      threads.emplace_back(&ScannerThread, thread_tokens[i]);
+  }
+  threads.emplace_back(&MonitorThread);
+
+  for (auto& t : threads) {
+    t.join();
+    --worker_count;
+  }
+
+  LOG(INFO) << "Total count: " << total_count;
+
+  return Status::OK();
+}
+
+Status RowsScanner(const RunnerContext& context) {
+  const string& master_addresses_str =
+      FindOrDie(context.required_args, kMasterAddressesArg);
+
+  // Create kudu client.
+  vector<string> master_addrs(strings::Split(master_addresses_str, ","));
+  if (master_addrs.empty()) {
+    return Status::InvalidArgument(
+        "At least one master address must be specified");
+  }
+  shared_ptr<KuduClient> client;
+  RETURN_NOT_OK(CreateClient(master_addrs, &client));
+
+  const string& table_name =
+      FindOrDie(context.required_args, kTableNameArg);
+
+  // Check the table is exist.
+  bool exists = false;
+  RETURN_NOT_OK(DoesTableExist(client, table_name, &exists));
+  CHECK(exists);
+
+  // Open the table.
+  shared_ptr<KuduTable> table;
+  RETURN_NOT_OK(client->OpenTable(table_name, &table));
+
+  // Scan some rows.
+  RETURN_NOT_OK(ScanRows(table, FLAGS_key_column_name, FLAGS_key_column_type,
+                         FLAGS_include_lower_bound, FLAGS_exclude_upper_bound));
+
+  return Status::OK();
+}
+
 } // anonymous namespace
 
 unique_ptr<Mode> BuildTableMode() {
@@ -535,6 +707,27 @@ unique_ptr<Mode> BuildTableMode() {
       // TODO schema change suopport
       .Build();
 
+  unique_ptr<Action> scan_table =
+      ActionBuilder("table", &RowsScanner)
+      .Description("Scan rows from an exist table")
+      .ExtraDescription(
+          "Scan rows from an exist table, you can specify "
+          "one key column's lower and upper bounds.")
+      .AddRequiredParameter({ kMasterAddressesArg,
+          "Comma-separated list of master addresses to run against. "
+          "Addresses are in 'hostname:port' form where port may be omitted "
+          "if a master server listens at the default port." })
+      .AddRequiredParameter({ kTableNameArg,
+          "Key column name of the existing table, which will be used "
+          "to limit the lower and upper bounds when scan rows."})
+      .AddOptionalParameter("key_column_name")
+      .AddOptionalParameter("key_column_type")
+      .AddOptionalParameter("include_lower_bound")
+      .AddOptionalParameter("exclude_upper_bound")
+      .AddOptionalParameter("count")
+      .AddOptionalParameter("show_value")
+      .Build();
+
   return ModeBuilder("table")
       .Description("Operate on Kudu tables")
       .AddAction(std::move(delete_table))
@@ -544,6 +737,7 @@ unique_ptr<Mode> BuildTableMode() {
       .AddAction(std::move(create_fenqun_table1))
       .AddAction(std::move(create_fenqun_table2))
       .AddAction(std::move(copy_table))
+      .AddAction(std::move(scan_table))
       .Build();
 }
 
