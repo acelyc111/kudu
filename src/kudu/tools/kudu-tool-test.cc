@@ -438,7 +438,6 @@ TEST_F(ToolTest, TestHelpXML) {
       "pbc",
       "perf",
       "remote_replica",
-      "scan",
       "table",
       "tablet",
       "test",
@@ -585,12 +584,6 @@ TEST_F(ToolTest, TestModeHelp) {
     NO_FATALS(RunTestHelp("remote_replica", kRemoteReplicaModeRegexes));
   }
   {
-    const vector<string> kScanRegexes = {
-        "table.*Scan rows from an exist table",
-    };
-    NO_FATALS(RunTestHelp("scan", kScanRegexes));
-  }
-  {
     const vector<string> kTableModeRegexes = {
         "delete.*Delete a table",
         "rename_table.*Rename a table",
@@ -656,7 +649,6 @@ TEST_F(ToolTest, TestActionMissingRequiredArg) {
                                         "master_addresses"));
   NO_FATALS(RunActionMissingRequiredArg("local_replica cmeta rewrite_raft_config fake_id",
                                         "peers", /* variadic */ true));
-  NO_FATALS(RunActionMissingRequiredArg("scan table master.example.com", "table_name"));
 }
 
 TEST_F(ToolTest, TestFsCheck) {

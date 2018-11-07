@@ -587,34 +587,6 @@ std::string KuduColumnSchema::DataTypeToString(DataType type) {
   LOG(FATAL) << "Unhandled type " << type;
 }
 
-KuduColumnSchema::DataType KuduColumnSchema::StringToDataType(const std::string& type) {
-  std::string type_upper;
-  ToUpperCase(type, &type_upper);
-  if (type_upper == "INT8")
-      return INT8;
-  if (type_upper == "INT16")
-      return INT16;
-  if (type_upper == "INT32")
-      return INT32;
-  if (type_upper == "INT64")
-      return INT64;
-  if (type_upper == "STRING")
-      return STRING;
-  if (type_upper == "BOOL")
-      return BOOL;
-  if (type_upper == "FLOAT")
-      return FLOAT;
-  if (type_upper == "DOUBLE")
-      return DOUBLE;
-  if (type_upper == "BINARY")
-      return BINARY;
-  if (type_upper == "UNIXTIME_MICROS")
-      return UNIXTIME_MICROS;
-  if (type_upper == "DECIMAL")
-      return DECIMAL;
-  LOG(FATAL) << "Unhandled type " << type;
-}
-
 KuduColumnSchema::KuduColumnSchema(const std::string &name,
                                    DataType type,
                                    bool is_nullable,
