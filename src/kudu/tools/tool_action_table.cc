@@ -490,6 +490,8 @@ Status AddPredicates(const shared_ptr<KuduTable>& table,
       }
     }
   }
+
+  return Status::OK();
 }
 
 Status CopyTable(const RunnerContext& context) {
