@@ -44,19 +44,14 @@
 #include "kudu/util/monotime.h"
 #include "kudu/util/status.h"
 
-DEFINE_string(exclude_upper_bound, "",
-              "Exclude upper bound of the above key column.");
-DEFINE_string(include_lower_bound, "",
-              "Include lower bound of the above key column.");
-DEFINE_string(column_name, "",
-              "Column name of table, which will be used "
-              "to limit the lower and upper bounds when scan rows.");
 DEFINE_bool(list_tablets, false,
             "Include tablet and replica UUIDs in the output");
 DEFINE_bool(modify_external_catalogs, true,
             "Whether to modify external catalogs, such as the Hive Metastore, "
             "when renaming or dropping a table.");
 DECLARE_int32(num_threads);
+DEFINE_string(predicates, "",
+              "Query predicates on columns, e.g. col1:lower,upper;col2:,upper;col3:lower,;.");
 DEFINE_int64(scan_count, 0,
              "Count limit for scan rows. <= 0 mean no limit.");
 DEFINE_bool(show_value, true,
@@ -455,11 +450,11 @@ Status NewComparisonPredicate(const shared_ptr<KuduTable>& table,
   return Status::OK();
 }
 
-Status AddPredicates(const shared_ptr<KuduTable>& table,
-                     const string& column_name,
-                     const string& include_lower_bound,
-                     const string& exclude_upper_bound,
-                     KuduScanTokenBuilder& builder) {
+Status AddPredicate(const shared_ptr<KuduTable>& table,
+                    const string& column_name,
+                    const string& include_lower_bound,
+                    const string& exclude_upper_bound,
+                    KuduScanTokenBuilder& builder) {
   if (column_name.empty()) {
     return Status::OK();
   }
@@ -482,6 +477,21 @@ Status AddPredicates(const shared_ptr<KuduTable>& table,
   return Status::OK();
 }
 
+Status AddPredicates(const shared_ptr<KuduTable>& table,
+                     const string& predicates,
+                     KuduScanTokenBuilder& builder) {
+  vector<string> col_predicates = Split(predicates, ";", strings::SkipEmpty());
+  for (const auto& col_predicate : col_predicates) {
+    vector<string> predicate = Split(col_predicate, ":", strings::SkipEmpty());
+    if (predicate.size() == 2) {
+      vector<string> bounds = Split(predicate[1], ",", strings::AllowEmpty());
+      if (bounds.size() == 2) {
+        RETURN_NOT_OK(AddPredicate(table, predicate[0], bounds[0], bounds[1], builder));
+      }
+    }
+  }
+}
+
 Status CopyTable(const RunnerContext& context) {
   const string& src_table_name = FindOrDie(context.required_args, kTableNameArg);
   shared_ptr<KuduClient> src_client;
@@ -493,8 +503,7 @@ Status CopyTable(const RunnerContext& context) {
   RETURN_NOT_OK(builder.SetCacheBlocks(false));
   RETURN_NOT_OK(builder.SetSelection(KuduClient::LEADER_ONLY));
   RETURN_NOT_OK(builder.SetReadMode(KuduScanner::READ_LATEST));
-  RETURN_NOT_OK(AddPredicates(src_table, FLAGS_column_name,
-                              FLAGS_include_lower_bound, FLAGS_exclude_upper_bound, builder));
+  RETURN_NOT_OK(AddPredicates(src_table, FLAGS_predicates, builder));
 
   const KuduSchema& table_schema = src_table->schema();
 
@@ -551,14 +560,12 @@ void ScannerThread(const vector<KuduScanToken*>& tokens) {
   }
 }
 
-Status ScanRows(const shared_ptr<KuduTable>& table, const string& key_column_name,
-                const string& include_lower_bound, const string& exclude_upper_bound) {
+Status ScanRows(const shared_ptr<KuduTable>& table, const string& predicates) {
   KuduScanTokenBuilder builder(table.get());
   RETURN_NOT_OK(builder.SetCacheBlocks(false));
   RETURN_NOT_OK(builder.SetSelection(KuduClient::LEADER_ONLY));
   RETURN_NOT_OK(builder.SetReadMode(KuduScanner::READ_LATEST));
-  RETURN_NOT_OK(AddPredicates(table, key_column_name,
-                              include_lower_bound, exclude_upper_bound, builder));
+  RETURN_NOT_OK(AddPredicates(table, predicates, builder));
 
   vector<KuduScanToken*> tokens;
   ElementDeleter DeleteTable(&tokens);
@@ -595,8 +602,7 @@ Status ScanTable(const RunnerContext &context) {
   shared_ptr<KuduTable> table;
   RETURN_NOT_OK(client->OpenTable(table_name, &table));
 
-  RETURN_NOT_OK(ScanRows(table, FLAGS_column_name,
-                         FLAGS_include_lower_bound, FLAGS_exclude_upper_bound));
+  RETURN_NOT_OK(ScanRows(table, FLAGS_predicates));
 
   return Status::OK();
 }
@@ -658,9 +664,7 @@ unique_ptr<Mode> BuildTableMode() {
       .AddRequiredParameter({ kMasterAddressesArg, kMasterAddressesArgDesc })
       .AddRequiredParameter({ kTableNameArg, "Name of the table to copy" })
       .AddRequiredParameter({ kDestMasterAddressesArg, "target cluster master_addresses of this table copy to" })
-      .AddOptionalParameter("column_name")
-      .AddOptionalParameter("include_lower_bound")
-      .AddOptionalParameter("exclude_upper_bound")
+      .AddOptionalParameter("predicates")
       // TODO schema change suopport
       .Build();
 
@@ -677,9 +681,7 @@ unique_ptr<Mode> BuildTableMode() {
       .AddRequiredParameter({ kTableNameArg,
           "Key column name of the existing table, which will be used "
           "to limit the lower and upper bounds when scan rows."})
-      .AddOptionalParameter("column_name")
-      .AddOptionalParameter("include_lower_bound")
-      .AddOptionalParameter("exclude_upper_bound")
+      .AddOptionalParameter("predicates")
       .AddOptionalParameter("scan_count")
       .AddOptionalParameter("show_value")
       .Build();
