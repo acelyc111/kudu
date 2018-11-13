@@ -396,55 +396,85 @@ void MonitorThread() {
     }
 }
 
+KuduValue* ParseValue(KuduColumnSchema::DataType type,
+                      const string& str_value) {
+  switch (type) {
+    case KuduColumnSchema::DataType::INT8:
+    case KuduColumnSchema::DataType::INT16:
+    case KuduColumnSchema::DataType::INT32:
+    case KuduColumnSchema::DataType::INT64:
+      if (!str_value.empty()) {
+        return KuduValue::FromInt(atoi64(str_value));
+      }
+      break;
+    case KuduColumnSchema::DataType::STRING:
+      if (!str_value.empty()) {
+        return KuduValue::CopyString(str_value);
+      }
+      break;
+    case KuduColumnSchema::DataType::FLOAT:
+    case KuduColumnSchema::DataType::DOUBLE:
+      if (!str_value.empty()) {
+        return KuduValue::FromDouble(strtod(str_value.c_str(), nullptr));
+      }
+      break;
+    default:
+      CHECK(false) << Substitute("Unhandled type $0", type);
+  }
+}
+
+Status NewEqualPredicate(const shared_ptr<KuduTable>& table,
+                         const string& column_name,
+                         KuduColumnSchema::DataType type,
+                         const string& value,
+                         vector<KuduPredicate*>& predicates) {
+  KuduValue *equal_value = ParseValue(type, value);
+  predicates.push_back(table->NewComparisonPredicate(column_name,
+                                                     KuduPredicate::EQUAL,
+                                                     equal_value));
+
+  return Status::OK();
+}
+
 Status NewComparisonPredicate(const shared_ptr<KuduTable>& table,
                               const string& column_name,
                               KuduColumnSchema::DataType type,
                               const string& include_lower_bound,
                               const string& exclude_upper_bound,
                               vector<KuduPredicate*>& predicates) {
-  KuduValue *lower = nullptr;
-  KuduValue *upper = nullptr;
-  switch (type) {
-    case KuduColumnSchema::DataType::INT8:
-    case KuduColumnSchema::DataType::INT16:
-    case KuduColumnSchema::DataType::INT32:
-    case KuduColumnSchema::DataType::INT64:
-      if (!include_lower_bound.empty()) {
-        lower = KuduValue::FromInt(atoi64(include_lower_bound));
-      }
-      if (!exclude_upper_bound.empty()) {
-        upper = KuduValue::FromInt(atoi64(exclude_upper_bound));
-      }
-      break;
-    case KuduColumnSchema::DataType::STRING:
-      if (!include_lower_bound.empty()) {
-        lower = KuduValue::CopyString(include_lower_bound);
-      }
-      if (!exclude_upper_bound.empty()) {
-        upper = KuduValue::CopyString(exclude_upper_bound);
-      }
-      break;
-    case KuduColumnSchema::DataType::FLOAT:
-    case KuduColumnSchema::DataType::DOUBLE:
-      if (!include_lower_bound.empty()) {
-        lower = KuduValue::FromDouble(strtod(include_lower_bound.c_str(), nullptr));
-      }
-      if (!include_lower_bound.empty()) {
-        upper = KuduValue::FromDouble(strtod(exclude_upper_bound.c_str(), nullptr));
-      }
-      break;
-    default:
-      return Status::InvalidArgument(Substitute("Unhandled type $0", type));
+  KuduValue *lower = ParseValue(type, include_lower_bound);
+  KuduValue *upper = ParseValue(type, exclude_upper_bound);
+  predicates.push_back(table->NewComparisonPredicate(column_name,
+                                                     KuduPredicate::GREATER_EQUAL,
+                                                     lower));
+  predicates.push_back(table->NewComparisonPredicate(column_name,
+                                                     KuduPredicate::LESS,
+                                                     upper));
+
+  return Status::OK();
+}
+
+Status AddPredicate(const shared_ptr<KuduTable>& table,
+                    const string& column_name,
+                    const string& value,
+                    KuduScanTokenBuilder& builder) {
+  if (column_name.empty()) {
+    return Status::OK();
   }
-  if (lower) {
-    predicates.push_back(table->NewComparisonPredicate(column_name,
-                                                       KuduPredicate::GREATER_EQUAL,
-                                                       lower));
-  }
-  if (upper) {
-    predicates.push_back(table->NewComparisonPredicate(column_name,
-                                                       KuduPredicate::LESS,
-                                                       upper));
+
+  for (size_t i = 0; i < table->schema().num_columns(); ++i) {
+    if (table->schema().Column(i).name() == column_name) {
+      vector<KuduPredicate*> predicates;
+      auto type = table->schema().Column(i).type();
+      RETURN_NOT_OK(NewEqualPredicate(table, column_name, type,
+                                      value,
+                                      predicates));
+      for (auto predicate : predicates) {
+        RETURN_NOT_OK(builder.AddConjunctPredicate(predicate));
+      }
+
+      return Status::OK();
+    }
   }
 
   return Status::OK();
@@ -480,13 +510,17 @@ Status AddPredicate(const shared_ptr<KuduTable>& table,
 Status AddPredicates(const shared_ptr<KuduTable>& table,
                      const string& predicates,
                      KuduScanTokenBuilder& builder) {
-  vector<string> col_predicates = Split(predicates, ";", strings::SkipEmpty());
-  for (const auto& col_predicate : col_predicates) {
+  vector<string> column_predicates = Split(predicates, ";", strings::SkipEmpty());
+  for (const auto& col_predicate : column_predicates) {
     vector<string> predicate = Split(col_predicate, ":", strings::SkipEmpty());
     if (predicate.size() == 2) {
-      vector<string> bounds = Split(predicate[1], ",", strings::AllowEmpty());
-      if (bounds.size() == 2) {
-        RETURN_NOT_OK(AddPredicate(table, predicate[0], bounds[0], bounds[1], builder));
+      if (predicate[1].find(',') == string::npos) {
+        RETURN_NOT_OK(AddPredicate(table, predicate[0], predicate[1], builder));
+      } else {
+        vector<string> bounds = Split(predicate[1], ",", strings::AllowEmpty());
+        if (bounds.size() == 2) {
+          RETURN_NOT_OK(AddPredicate(table, predicate[0], bounds[0], bounds[1], builder));
+        }
       }
     }
   }
