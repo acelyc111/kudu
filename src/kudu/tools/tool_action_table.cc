@@ -44,6 +44,7 @@
 #include "kudu/util/monotime.h"
 #include "kudu/util/status.h"
 
+DECLARE_string(columns);
 DEFINE_bool(list_tablets, false,
             "Include tablet and replica UUIDs in the output");
 DEFINE_bool(modify_external_catalogs, true,
@@ -421,6 +422,8 @@ KuduValue* ParseValue(KuduColumnSchema::DataType type,
     default:
       CHECK(false) << Substitute("Unhandled type $0", type);
   }
+
+  return nullptr;
 }
 
 Status NewEqualPredicate(const shared_ptr<KuduTable>& table,
@@ -510,9 +513,9 @@ Status AddPredicate(const shared_ptr<KuduTable>& table,
 Status AddPredicates(const shared_ptr<KuduTable>& table,
                      const string& predicates,
                      KuduScanTokenBuilder& builder) {
-  vector<string> column_predicates = Split(predicates, ";", strings::SkipEmpty());
+  vector<string> column_predicates = Split(predicates, ";", strings::SkipWhitespace());
   for (const auto& col_predicate : column_predicates) {
-    vector<string> predicate = Split(col_predicate, ":", strings::SkipEmpty());
+    vector<string> predicate = Split(col_predicate, ":", strings::SkipWhitespace());
     if (predicate.size() == 2) {
       if (predicate[1].find(',') == string::npos) {
         RETURN_NOT_OK(AddPredicate(table, predicate[0], predicate[1], builder));
@@ -596,11 +599,13 @@ void ScannerThread(const vector<KuduScanToken*>& tokens) {
   }
 }
 
-Status ScanRows(const shared_ptr<KuduTable>& table, const string& predicates) {
+Status ScanRows(const shared_ptr<KuduTable>& table, const string& predicates, const string& columns) {
   KuduScanTokenBuilder builder(table.get());
   RETURN_NOT_OK(builder.SetCacheBlocks(false));
   RETURN_NOT_OK(builder.SetSelection(KuduClient::LEADER_ONLY));
   RETURN_NOT_OK(builder.SetReadMode(KuduScanner::READ_LATEST));
+  vector<string> projected_column_names = Split(columns, ",", strings::SkipWhitespace());
+  RETURN_NOT_OK(builder.SetProjectedColumnNames(projected_column_names));
   RETURN_NOT_OK(AddPredicates(table, predicates, builder));
 
   vector<KuduScanToken*> tokens;
@@ -638,7 +643,7 @@ Status ScanTable(const RunnerContext &context) {
   shared_ptr<KuduTable> table;
   RETURN_NOT_OK(client->OpenTable(table_name, &table));
 
-  RETURN_NOT_OK(ScanRows(table, FLAGS_predicates));
+  RETURN_NOT_OK(ScanRows(table, FLAGS_predicates, FLAGS_columns));
 
   return Status::OK();
 }
@@ -718,6 +723,7 @@ unique_ptr<Mode> BuildTableMode() {
           "Key column name of the existing table, which will be used "
           "to limit the lower and upper bounds when scan rows."})
       .AddOptionalParameter("predicates")
+      .AddOptionalParameter("columns")
       .AddOptionalParameter("scan_count")
       .AddOptionalParameter("show_value")
       .Build();
