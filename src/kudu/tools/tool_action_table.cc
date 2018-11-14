@@ -602,10 +602,13 @@ void ScannerThread(const vector<KuduScanToken*>& tokens) {
 Status ScanRows(const shared_ptr<KuduTable>& table, const string& predicates, const string& columns) {
   KuduScanTokenBuilder builder(table.get());
   RETURN_NOT_OK(builder.SetCacheBlocks(false));
+  RETURN_NOT_OK(builder.SetTimeoutMillis(30000));
   RETURN_NOT_OK(builder.SetSelection(KuduClient::LEADER_ONLY));
   RETURN_NOT_OK(builder.SetReadMode(KuduScanner::READ_LATEST));
   vector<string> projected_column_names = Split(columns, ",", strings::SkipWhitespace());
-  RETURN_NOT_OK(builder.SetProjectedColumnNames(projected_column_names));
+  if (!projected_column_names.empty()) {
+    RETURN_NOT_OK(builder.SetProjectedColumnNames(projected_column_names));
+  }
   RETURN_NOT_OK(AddPredicates(table, predicates, builder));
 
   vector<KuduScanToken*> tokens;
