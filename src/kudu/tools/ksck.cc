@@ -43,7 +43,6 @@
 #include "kudu/tools/tool_action_common.h"
 #include "kudu/util/atomic.h"
 #include "kudu/util/locks.h"
-#include "kudu/util/monotime.h"
 #include "kudu/util/string_case.h"
 #include "kudu/util/threadpool.h"
 
@@ -59,8 +58,6 @@ DEFINE_bool(checksum_scan, false,
 DEFINE_int32(fetch_replica_info_concurrency, 20,
              "Number of concurrent tablet servers to fetch replica info from.");
 
-DEFINE_bool(ignore_error_msg, false,
-            "Whether to ignore error message when run ksck");
 DEFINE_string(ksck_format, "plain_concise",
               "Output format for ksck. Available options are 'plain_concise', "
               "'plain_full', 'json_pretty', and 'json_compact'.\n"
@@ -446,9 +443,6 @@ Status Ksck::Run() {
         results_.error_messages, "checksum scan error");
   }
 
-  if (FLAGS_ignore_error_msg) {
-    return Status::OK();
-  }
   // Use a special-case error if there are auth errors. This makes it harder
   // for admins to miss that ksck isn't working right because they forgot to
   // (e.g.) sudo -u kudu when running ksck!

@@ -41,7 +41,6 @@
 #include "kudu/util/decimal_util.h"
 #include "kudu/util/compression/compression.pb.h"
 #include "kudu/util/slice.h"
-#include "kudu/util/string_case.h"
 
 MAKE_ENUM_LIMITS(kudu::client::KuduColumnStorageAttributes::EncodingType,
                  kudu::client::KuduColumnStorageAttributes::AUTO_ENCODING,
