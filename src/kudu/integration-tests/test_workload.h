@@ -199,6 +199,11 @@ class TestWorkload {
     return rows_inserted_.Load();
   }
 
+  // Declare how many rows to read when the workload is read only
+  void set_rows_inserted(int64_t n) {
+    rows_inserted_.Store(n);
+  }
+
   // Return the number of batches in which we have successfully inserted at
   // least one row.
   // NOTE: it is not safe to assume that this is exactly equal to the number
