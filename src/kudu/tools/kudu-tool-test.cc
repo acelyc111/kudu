@@ -588,6 +588,8 @@ TEST_F(ToolTest, TestModeHelp) {
         "rename_table.*Rename a table",
         "rename_column.*Rename a column",
         "list.*List tables",
+        "copy.*Copy a table data to another cluster",
+        "scan.*Scan rows from a table",
     };
     NO_FATALS(RunTestHelp("table", kTableModeRegexes));
   }
@@ -1512,6 +1514,7 @@ TEST_F(ToolTest, TestLoadgenAutoFlushBackgroundSequential) {
         "--num_rows_per_thread=2048",
         "--num_threads=4",
         "--run_scan",
+        "--run_cleanup",
         "--string_fixed=0123456789",
       },
       "bench_auto_flush_background_sequential"));
@@ -1528,7 +1531,9 @@ TEST_F(ToolTest, TestLoadgenAutoFlushBackgroundRandom) {
         "--num_rows_per_thread=16",
         "--num_threads=1",
         "--run_scan",
+        "--run_cleanup",
         "--string_len=8",
+        "--string_prefix=perf.",
         "--use_random",
       },
       "bench_auto_flush_background_random"));
@@ -1544,6 +1549,7 @@ TEST_F(ToolTest, TestLoadgenManualFlush) {
         "--num_rows_per_thread=4096",
         "--num_threads=3",
         "--run_scan",
+        "--run_cleanup",
         "--show_first_n_errors=3",
         "--string_len=16",
       },
@@ -1678,6 +1684,9 @@ TEST_F(ToolTest, TestNonRandomWorkloadLoadgen) {
     // Since we're using such large payloads, flush more frequently so the
     // client doesn't run out of memory.
     "--flush_per_n_rows=1",
+
+    // Keep the test data to avoid extra lookup.
+    "--run_cleanup=false",
   };
 
   // Partition the table so each thread inserts to a single range.
@@ -2128,6 +2137,8 @@ TEST_F(ToolTest, TestMasterList) {
 // (2)rename a table
 // (3)rename a column
 // (4)list tables
+// (5)copy a table
+// (6)scan a table
 TEST_F(ToolTest, TestDeleteTable) {
   NO_FATALS(StartExternalMiniCluster());
   shared_ptr<KuduClient> client;
@@ -2307,6 +2318,72 @@ TEST_F(ToolTest, TestListTables) {
     ProcessTables(i);
     ProcessTablets(i);
   }
+}
+
+TEST_F(ToolTest, TestCopyTable) {
+  NO_FATALS(StartExternalMiniCluster());
+  shared_ptr<KuduClient> client;
+  ASSERT_OK(cluster_->CreateClient(nullptr, &client));
+  string master_addr = cluster_->master()->bound_rpc_addr().ToString();
+
+  const string& kTableName = "kudu.table.copy.from";
+
+  // Create the src table and write some data to it.
+  TestWorkload ww(cluster_.get());
+  ww.set_table_name(kTableName);
+  ww.set_num_replicas(1);
+  ww.set_write_pattern(TestWorkload::INSERT_SEQUENTIAL_ROWS);
+  ww.Setup();
+  ww.Start();
+  ASSERT_EVENTUALLY([&](){
+    ASSERT_GE(ww.rows_inserted(), 10000);
+  });
+  ww.StopAndJoin();
+
+  const string& kDestTableName = "kudu.table.copy.to";
+
+  // Create the dst table without write any data to it.
+  TestWorkload rw(cluster_.get());
+  rw.set_table_name(kDestTableName);
+  rw.set_num_replicas(1);
+  rw.set_num_write_threads(0);
+  rw.set_rows_inserted(ww.rows_inserted());
+  rw.Setup();
+
+  NO_FATALS(RunActionStdoutNone(
+          Substitute("table copy $0 $1 $2 -target_table=$3",
+                  master_addr, kTableName, master_addr, kDestTableName)));
+
+  rw.Start();
+  // ensure the read thread has been started
+  SleepFor(MonoDelta::FromMilliseconds(10));
+  rw.StopAndJoin();
+}
+
+TEST_F(ToolTest, TestScanTable) {
+  NO_FATALS(StartExternalMiniCluster());
+  shared_ptr<KuduClient> client;
+  ASSERT_OK(cluster_->CreateClient(nullptr, &client));
+  string master_addr = cluster_->master()->bound_rpc_addr().ToString();
+
+  const string& kTableName = "kudu.table.scan";
+
+  // Create the src table and write some data to it.
+  TestWorkload ww(cluster_.get());
+  ww.set_table_name(kTableName);
+  ww.set_num_replicas(1);
+  ww.set_write_pattern(TestWorkload::INSERT_SEQUENTIAL_ROWS);
+  ww.Setup();
+  ww.Start();
+  ASSERT_EVENTUALLY([&](){
+    ASSERT_GE(ww.rows_inserted(), 10000);
+  });
+  ww.StopAndJoin();
+
+  string errout;
+  NO_FATALS((RunActionStderrString(
+              Substitute("table scan $0 $1", master_addr, kTableName), &errout)));
+  ASSERT_STR_CONTAINS(errout, Substitute("Total count: $0", ww.rows_inserted()));
 }
 
 Status CreateLegacyHmsTable(HmsClient* client,

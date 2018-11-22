@@ -256,6 +256,23 @@ enum class PrintMode {
   PLAIN_FULL,
 };
 
+// It's a convenient method to use `struct ... enum ..` here to keep
+// in a standalone namespace and support some bit operators on this type.
+struct PrintSections {
+  enum Values {
+    NONE = 0,
+    MASTER_SUMMARIES = 1 << 0,
+    TSERVER_SUMMARIES = 1 << 1,
+    VERSION_SUMMARIES = 1 << 2,
+    TABLET_SUMMARIES = 1 << 3,
+    TABLE_SUMMARIES = 1 << 4,
+    CHECKSUM_RESULTS = 1 << 5,
+    TOTAL_COUNT = 1 << 6,
+
+    DEFAULT_PRINT_SECTIONS = 0b01111111    // print all sections
+  };
+};
+
 typedef std::map<std::string, KsckConsensusState> KsckConsensusStateMap;
 
 // A flag and its value.
@@ -302,14 +319,14 @@ struct KsckResults {
   // Collected results of the checksum scan.
   KsckChecksumResults checksum_results;
 
-  // Print this KsckResults to 'out', according to the PrintMode 'mode'.
-  Status PrintTo(PrintMode mode, std::ostream& out);
+  // Print this KsckResults to 'out', according to the PrintMode 'mode' and sections 'sections'.
+  Status PrintTo(PrintMode mode, int sections, std::ostream& out);
 
-  // Print this KsckResults to 'out' in JSON format.
+  // Print this KsckResults to 'out' in JSON format, and printed sections are limited by 'sections'.
   // 'mode' must be PrintMode::JSON_PRETTY or PrintMode::JSON_COMPACT.
-  Status PrintJsonTo(PrintMode mode, std::ostream& out) const;
+  Status PrintJsonTo(PrintMode mode, int sections, std::ostream& out) const;
 
-  void ToPb(KsckResultsPB* pb) const;
+  void ToPb(KsckResultsPB* pb, int sections) const;
 };
 
 // Print a formatted health summary to 'out', given a list `summaries`
