@@ -751,6 +751,10 @@ string KuduSchema::ToString() const {
                  : "()";
 }
 
+void KuduSchema::ToUserKuduSchema() {
+  schema_->ToUserSchema();
+}
+
 KuduSchema KuduSchema::FromSchema(const Schema& schema) {
   return KuduSchema(schema);
 }

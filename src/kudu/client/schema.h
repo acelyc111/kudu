@@ -583,6 +583,11 @@ class KUDU_EXPORT KuduSchema {
   /// @return A string describing this schema.
   std::string ToString() const;
 
+  /// Convert to a user KuduSchema, which do not contains column ids.
+  ///
+  /// @return The converted KuduSchema
+  void ToUserKuduSchema() KUDU_NO_EXPORT;
+
   /// @cond PRIVATE_API
 
   /// Convert a Schema to a KuduSchema.

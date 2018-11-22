@@ -882,6 +882,12 @@ class Schema {
     return kColumnNotFound;
   }
 
+  void ToUserSchema() {
+    max_col_id_ = 0;
+    col_ids_.clear();
+    id_to_index_.clear();
+  }
+
  private:
   // Return a stringified version of the first 'num_columns' columns of the
   // row.
