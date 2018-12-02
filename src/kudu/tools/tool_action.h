@@ -316,6 +316,7 @@ std::unique_ptr<Mode> BuildMasterMode();
 std::unique_ptr<Mode> BuildPbcMode();
 std::unique_ptr<Mode> BuildPerfMode();
 std::unique_ptr<Mode> BuildRemoteReplicaMode();
+std::unique_ptr<Mode> BuildScanMode();
 std::unique_ptr<Mode> BuildTableMode();
 std::unique_ptr<Mode> BuildTabletMode();
 std::unique_ptr<Mode> BuildTestMode();

@@ -43,6 +43,11 @@
 #include "kudu/tools/tool_action_common.h"
 #include "kudu/util/atomic.h"
 #include "kudu/util/locks.h"
+<<<<<<< 921534c37e42114d6d2b33a518cb620a1bdd289e
+=======
+#include "kudu/util/monotime.h"
+#include "kudu/util/string_case.h"
+>>>>>>> [tools] add 'kudu scan table' tool, add ‘clenup’ option for 'kudu perf loadgen' (#2)
 #include "kudu/util/threadpool.h"
 
 #define PUSH_PREPEND_NOT_OK(s, statuses, msg) do { \
@@ -57,6 +62,8 @@ DEFINE_bool(checksum_scan, false,
 DEFINE_int32(fetch_replica_info_concurrency, 20,
              "Number of concurrent tablet servers to fetch replica info from.");
 
+DEFINE_bool(ignore_error_msg, false,
+            "Whether to ignore error message when run ksck");
 DEFINE_string(ksck_format, "plain_concise",
               "Output format for ksck. Available options are 'plain_concise', "
               "'plain_full', 'json_pretty', and 'json_compact'.\n"
@@ -388,6 +395,21 @@ const KsckResults& Ksck::results() const {
   return results_;
 }
 
+void Ksck::set_print_sections(std::vector<std::string> sections) {
+  print_sections_ = PrintSections::NONE;
+  for (const auto& section : sections) {
+    std::string section_upper;
+    ToUpperCase(section, &section_upper);
+    if (section_upper == "MASTER_SUMMARIES") print_sections_ |= PrintSections::MASTER_SUMMARIES;
+    if (section_upper == "TSERVER_SUMMARIES") print_sections_ |= PrintSections::TSERVER_SUMMARIES;
+    if (section_upper == "VERSION_SUMMARIES") print_sections_ |= PrintSections::VERSION_SUMMARIES;
+    if (section_upper == "TABLET_SUMMARIES") print_sections_ |= PrintSections::TABLET_SUMMARIES;
+    if (section_upper == "TABLE_SUMMARIES") print_sections_ |= PrintSections::TABLE_SUMMARIES;
+    if (section_upper == "CHECKSUM_RESULTS") print_sections_ |= PrintSections::CHECKSUM_RESULTS;
+    if (section_upper == "TOTAL_COUNT") print_sections_ |= PrintSections::TOTAL_COUNT;
+  }
+}
+
 Status Ksck::Run() {
   PUSH_PREPEND_NOT_OK(CheckMasterHealth(), results_.error_messages,
                       "error fetching info from masters");
@@ -428,6 +450,9 @@ Status Ksck::Run() {
         results_.error_messages, "checksum scan error");
   }
 
+  if (FLAGS_ignore_error_msg) {
+    return Status::OK();
+  }
   // Use a special-case error if there are auth errors. This makes it harder
   // for admins to miss that ksck isn't working right because they forgot to
   // (e.g.) sudo -u kudu when running ksck!
@@ -504,7 +529,7 @@ Status Ksck::PrintResults() {
     return Status::InvalidArgument("unknown ksck format (--ksck_format)",
                                    FLAGS_ksck_format);
   }
-  return results_.PrintTo(mode, *out_);
+  return results_.PrintTo(mode, print_sections_, *out_);
 }
 
 Status Ksck::RunAndPrintResults() {

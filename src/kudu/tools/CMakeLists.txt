@@ -111,6 +111,7 @@ add_executable(kudu
   tool_action_pbc.cc
   tool_action_perf.cc
   tool_action_remote_replica.cc
+  tool_action_scan.cc
   tool_action_table.cc
   tool_action_tablet.cc
   tool_action_test.cc
