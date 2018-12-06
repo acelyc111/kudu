@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <set>
 #include <sstream>
 #include <string>
@@ -403,9 +404,11 @@ class KsckTest : public KuduTest {
     return ksck_->RunAndPrintResults();
   }
 
-  const string KsckResultsToJsonString() {
+  const string KsckResultsToJsonString(int sections = PrintSections::ALL_SECTIONS) {
     ostringstream json_stream;
-    ksck_->results().PrintJsonTo(PrintMode::JSON_COMPACT, json_stream);
+    ksck_->results().PrintJsonTo(PrintMode::JSON_COMPACT,
+                                 sections,
+                                 json_stream);
     return json_stream.str();
   }
 
@@ -716,6 +719,56 @@ void CheckJsonVsChecksumResults(const JsonReader& r,
   }
 }
 
+void CheckJsonVsVersionSummaries(const JsonReader& r,
+                                 const string& key,
+                                 const KsckVersionToServersMap& ref_result) {
+  if (ref_result.empty()) {
+    EXPECT_JSON_FIELD_NOT_PRESENT(r, r.root(), key.c_str());
+    return;
+  }
+
+  vector<const rapidjson::Value*> version_servers_map;
+  EXTRACT_ARRAY_CHECK_SIZE(r, r.root(), key.c_str(), version_servers_map, ref_result.size());
+  auto version_servers = version_servers_map.begin();
+  for (const auto& ref_version_servers : ref_result) {
+    ASSERT_NE(version_servers, version_servers_map.end());
+    EXPECT_JSON_STRING_FIELD(r, *version_servers, "version", ref_version_servers.first);
+    vector<const rapidjson::Value *> servers;
+    EXTRACT_ARRAY_CHECK_SIZE(r, *version_servers, "servers", servers,
+                             ref_version_servers.second.size());
+    auto server = servers.begin();
+    for (const auto& ref_server : ref_version_servers.second) {
+      ASSERT_NE(server, servers.end());
+      EXPECT_EQ((*server)->GetString(), ref_server);
+      ++server;
+    }
+    ++version_servers;
+  }
+}
+
+void CheckJsonVsCountSummaries(const JsonReader& r,
+                               const string& key,
+                               const KsckResults* ref_result) {
+  if (!ref_result) {
+    EXPECT_JSON_FIELD_NOT_PRESENT(r, r.root(), key.c_str());
+    return;
+  }
+  vector<const rapidjson::Value*> count_results;
+  EXTRACT_ARRAY_CHECK_SIZE(r, r.root(), key.c_str(), count_results, 1);
+
+  EXPECT_JSON_INT_FIELD(r, count_results[0], "masters", ref_result->master_summaries.size());
+  EXPECT_JSON_INT_FIELD(r, count_results[0], "tservers", ref_result->tserver_summaries.size());
+  EXPECT_JSON_INT_FIELD(r, count_results[0], "tables", ref_result->table_summaries.size());
+  EXPECT_JSON_INT_FIELD(r, count_results[0], "tablets", ref_result->tablet_summaries.size());
+  int replica_count = std::accumulate(ref_result->tablet_summaries.begin(),
+                                      ref_result->tablet_summaries.end(),
+                                      0,
+                                      [](int acc, const KsckTabletSummary& ts) {
+                                        return acc + ts.replicas.size();
+                                      });
+  EXPECT_JSON_INT_FIELD(r, count_results[0], "replicas", replica_count);
+}
+
 void CheckJsonVsErrors(const JsonReader& r,
                        const string& key,
                        const vector<Status>& ref_errors) {
@@ -730,18 +783,76 @@ void CheckJsonVsErrors(const JsonReader& r,
   }
 }
 
-void CheckJsonStringVsKsckResults(const string& json, const KsckResults& results) {
+void CheckPlainStringSection(const string& plain, const string& header, bool present) {
+  if (present) {
+    ASSERT_STR_CONTAINS(plain, header);
+  } else {
+    ASSERT_STR_NOT_CONTAINS(plain, header);
+  }
+}
+
+void CheckPlainStringSections(const string& plain, int sections) {
+  CheckPlainStringSection(plain,
+                          "Master Summary\n",
+                          sections & PrintSections::Values::MASTER_SUMMARIES);
+  CheckPlainStringSection(plain,
+                          "Tablet Server Summary\n",
+                          sections & PrintSections::Values::TSERVER_SUMMARIES);
+  CheckPlainStringSection(plain,
+                          "Version Summary\n",
+                          sections & PrintSections::Values::VERSION_SUMMARIES);
+  CheckPlainStringSection(plain,
+                          "Tablet Summary\n",
+                          sections & PrintSections::Values::TABLET_SUMMARIES);
+  CheckPlainStringSection(plain,
+                          "Summary by table\n",
+                          sections & PrintSections::Values::TABLE_SUMMARIES);
+  CheckPlainStringSection(plain,
+                          "Checksum Summary\n",
+                          sections & PrintSections::Values::CHECKSUM_RESULTS);
+  CheckPlainStringSection(plain,
+                          "Total Count Summary\n",
+                          sections & PrintSections::Values::TOTAL_COUNT);
+}
+
+void CheckJsonStringVsKsckResults(const string& json,
+                                  const KsckResults& results,
+                                  int sections = PrintSections::ALL_SECTIONS) {
   JsonReader r(json);
   ASSERT_OK(r.Init());
 
-  CheckJsonVsServerHealthSummaries(r, "master_summaries", results.master_summaries);
+  CheckJsonVsServerHealthSummaries(r,
+                                   "master_summaries",
+                                   sections & PrintSections::Values::MASTER_SUMMARIES ?
+                                   results.master_summaries : vector<KsckServerHealthSummary>());
   CheckJsonVsMasterConsensus(r,
                              results.master_consensus_conflict,
-                             results.master_consensus_state_map);
-  CheckJsonVsServerHealthSummaries(r, "tserver_summaries", results.tserver_summaries);
-  CheckJsonVsTabletSummaries(r, "tablet_summaries", results.tablet_summaries);;
-  CheckJsonVsTableSummaries(r, "table_summaries", results.table_summaries);;
-  CheckJsonVsChecksumResults(r, "checksum_results", results.checksum_results);
+                             sections & PrintSections::Values::MASTER_SUMMARIES ?
+                             results.master_consensus_state_map : KsckConsensusStateMap());
+  CheckJsonVsServerHealthSummaries(r,
+                                   "tserver_summaries",
+                                   sections & PrintSections::Values::TSERVER_SUMMARIES ?
+                                   results.tserver_summaries : vector<KsckServerHealthSummary>());
+  CheckJsonVsVersionSummaries(r,
+                              "version_summaries",
+                              sections & PrintSections::Values::VERSION_SUMMARIES ?
+                              results.version_summaries : KsckVersionToServersMap());
+  CheckJsonVsTabletSummaries(r,
+                             "tablet_summaries",
+                             sections & PrintSections::Values::TABLET_SUMMARIES ?
+                             results.tablet_summaries : vector<KsckTabletSummary>());
+  CheckJsonVsTableSummaries(r,
+                            "table_summaries",
+                            sections & PrintSections::Values::TABLE_SUMMARIES ?
+                            results.table_summaries : vector<KsckTableSummary>());
+  CheckJsonVsChecksumResults(r,
+                             "checksum_results",
+                             sections & PrintSections::Values::CHECKSUM_RESULTS ?
+                             results.checksum_results : KsckChecksumResults());
+  CheckJsonVsCountSummaries(r,
+                            "count_summaries",
+                            sections & PrintSections::Values::TOTAL_COUNT ?
+                            &results : nullptr);
   CheckJsonVsErrors(r, "errors", results.error_messages);
 }
 
@@ -1621,6 +1732,35 @@ TEST_F(KsckTest, TestTabletServerLocation) {
     " ts-id-2 | <mock>  | HEALTHY | <none>\n");
 
   NO_FATALS(CheckJsonStringVsKsckResults(KsckResultsToJsonString(), ksck_->results()));
+}
+
+TEST_F(KsckTest, TestSectionFilter) {
+  std::map<int, std::string> sections = {
+          {PrintSections::Values::MASTER_SUMMARIES, "MASTER_SUMMARIES"},
+          {PrintSections::Values::TSERVER_SUMMARIES, "TSERVER_SUMMARIES"},
+          {PrintSections::Values::VERSION_SUMMARIES, "VERSION_SUMMARIES"},
+          {PrintSections::Values::TABLET_SUMMARIES, "TABLET_SUMMARIES"},
+          {PrintSections::Values::TABLE_SUMMARIES, "TABLE_SUMMARIES"},
+          {PrintSections::Values::CHECKSUM_RESULTS, "CHECKSUM_RESULTS"},
+          {PrintSections::Values::TOTAL_COUNT, "TOTAL_COUNT"}};
+  CreateOneTableOneTablet();
+  for (const auto& section : sections) {
+    if (section.first == PrintSections::Values::CHECKSUM_RESULTS) {
+      FLAGS_checksum_scan = true;
+    }
+    int selected_sections = section.first;
+    ksck_->set_print_sections({section.second});
+    err_stream_.str("");
+    err_stream_.clear();
+    ASSERT_OK(RunKsck());
+
+    // Check plain string output.
+    CheckPlainStringSections(err_stream_.str(), selected_sections);
+
+    // Check json string output.
+    const string& json_output = KsckResultsToJsonString(selected_sections);
+    CheckJsonStringVsKsckResults(json_output, ksck_->results(), selected_sections);
+  }
 }
 } // namespace tools
 } // namespace kudu
