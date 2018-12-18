@@ -167,6 +167,8 @@ class HdrHistogram {
   // TODO: implement
   //uint64_t CountBetweenValues(uint64_t low_value, uint64_t high_value) const;
 
+  bool Merge(const HdrHistogram& other);
+
  private:
   friend class AbstractHistogramIterator;
 

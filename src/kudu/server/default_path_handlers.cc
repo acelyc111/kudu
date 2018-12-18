@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <fstream>
 #include <memory>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -60,6 +61,7 @@
 #include "kudu/util/monotime.h"
 #include "kudu/util/process_memory.h"
 #include "kudu/util/status.h"
+#include "kudu/util/string_case.h"
 #include "kudu/util/web_callback_registry.h"
 
 #ifdef TCMALLOC_ENABLED
@@ -69,6 +71,7 @@
 using std::ifstream;
 using std::ostringstream;
 using std::shared_ptr;
+using std::set;
 using std::string;
 using std::vector;
 using strings::Substitute;
@@ -329,7 +332,11 @@ static void WriteMetricsAsJson(const MetricRegistry* const metrics,
                                Webserver::PrerenderedWebResponse* resp) {
   ostringstream* output = resp->output;
   const string* requested_metrics_param = FindOrNull(req.parsed_args, "metrics");
-  vector<string> requested_metrics;
+  const string* requested_tablet_ids_param = FindOrNull(req.parsed_args, "tablet_ids");
+  const string* requested_table_names_param = FindOrNull(req.parsed_args, "table_names");
+  set<string> requested_metrics;
+  set<string> requested_tablet_ids;
+  set<string> requested_table_names;
   MetricJsonOptions opts;
 
   {
@@ -339,6 +346,14 @@ static void WriteMetricsAsJson(const MetricRegistry* const metrics,
   {
     string arg = FindWithDefault(req.parsed_args, "include_schema", "false");
     opts.include_schema_info = ParseLeadingBoolValue(arg.c_str(), false);
+  }
+  {
+    string arg = FindWithDefault(req.parsed_args, "merge", "false");
+    opts.merge_by_table = ParseLeadingBoolValue(arg.c_str(), false);
+  }
+  {
+    string arg = FindWithDefault(req.parsed_args, "origin", "true");
+    opts.include_origin = ParseLeadingBoolValue(arg.c_str(), true);
   }
   JsonWriter::Mode json_mode;
   {
@@ -350,13 +365,40 @@ static void WriteMetricsAsJson(const MetricRegistry* const metrics,
   JsonWriter writer(output, json_mode);
 
   if (requested_metrics_param != nullptr) {
-    SplitStringUsing(*requested_metrics_param, ",", &requested_metrics);
-  } else {
+    string requested_metrics_param_uc;
+    ToUpperCase(*requested_metrics_param, &requested_metrics_param_uc);
+    SplitStringToSetUsing(requested_metrics_param_uc, ",", &requested_metrics);
+  }
+  if (requested_metrics.empty() || ContainsKey(requested_metrics, "*")) {
     // Default to including all metrics.
-    requested_metrics.emplace_back("*");
+    requested_metrics = {"*"};
   }
 
-  WARN_NOT_OK(metrics->WriteAsJson(&writer, requested_metrics, opts),
+  if (requested_tablet_ids_param != nullptr) {
+    string requested_tablet_ids_param_uc;
+    ToUpperCase(*requested_tablet_ids_param, &requested_tablet_ids_param_uc);
+    SplitStringToSetUsing(requested_tablet_ids_param_uc, ",", &requested_tablet_ids);
+  }
+  if (requested_tablet_ids.empty() || ContainsKey(requested_tablet_ids, "*")) {
+    // Default to including all ids.
+    requested_tablet_ids = {"*"};
+  }
+
+  if (requested_table_names_param != nullptr) {
+    string requested_table_names_param_uc;
+    ToUpperCase(*requested_table_names_param, &requested_table_names_param_uc);
+    SplitStringToSetUsing(requested_table_names_param_uc, ",", &requested_table_names);
+  }
+  if (requested_table_names.empty() || ContainsKey(requested_table_names, "*")) {
+    // Default to including all table_names.
+    requested_table_names = {"*"};
+  }
+
+  WARN_NOT_OK(metrics->WriteAsJson(&writer,
+                                   requested_metrics,
+                                   requested_tablet_ids,
+                                   requested_table_names,
+                                   opts),
               "Couldn't write JSON metrics over HTTP");
 }
 

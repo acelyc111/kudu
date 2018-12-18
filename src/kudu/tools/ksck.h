@@ -50,6 +50,7 @@ class MonoDelta;
 namespace rpc {
 class Messenger;
 } // namespace rpc
+}
 
 namespace tools {
 

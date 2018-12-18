@@ -324,6 +324,56 @@ uint64_t HdrHistogram::ValueAtPercentile(double percentile) const {
   return 0;
 }
 
+// Fixme: should keep a snaphot of 'other'
+bool HdrHistogram::Merge(const HdrHistogram& other) {
+  if (PREDICT_FALSE(highest_trackable_value_ != other.highest_trackable_value())) {
+    LOG(WARNING) << "highest_trackable_value_ not match.";
+    return false;
+  }
+
+  if (PREDICT_FALSE(num_significant_digits_ != other.num_significant_digits())) {
+    LOG(WARNING) << "num_significant_digits_ not match.";
+    return false;
+  }
+
+  DCHECK_EQ(counts_array_length_, other.counts_array_length_);
+  DCHECK_EQ(bucket_count_, other.bucket_count_);
+  DCHECK_EQ(sub_bucket_count_, other.sub_bucket_count_);
+  DCHECK_EQ(sub_bucket_half_count_magnitude_, other.sub_bucket_half_count_magnitude_);
+  DCHECK_EQ(sub_bucket_half_count_, other.sub_bucket_half_count_);
+  DCHECK_EQ(sub_bucket_mask_, other.sub_bucket_mask_);
+
+  NoBarrier_AtomicIncrement(&total_count_, other.total_count_);
+  NoBarrier_AtomicIncrement(&total_sum_, other.total_sum_);
+
+  // Update min, if needed.
+  {
+    Atomic64 min_val;
+    while (other.min_value_ < (min_val = MinValue())) {
+      Atomic64 old_val = NoBarrier_CompareAndSwap(&min_value_, min_val, other.min_value_);
+      if (PREDICT_TRUE(old_val == min_val)) break; // CAS success.
+    }
+  }
+
+  // Update max, if needed.
+  {
+    Atomic64 max_val;
+    while (other.max_value_ > (max_val = MaxValue())) {
+      Atomic64 old_val = NoBarrier_CompareAndSwap(&max_value_, max_val, other.max_value_);
+      if (PREDICT_TRUE(old_val == max_val)) break; // CAS success.
+    }
+  }
+
+  for (int i = 0; i < counts_array_length_; i++) {
+    Atomic64 count = NoBarrier_Load(&other.counts_[i]);
+    if (count > 0) {
+      NoBarrier_AtomicIncrement(&counts_[i], count);
+    }
+  }
+
+  return true;
+}
+
 ///////////////////////////////////////////////////////////////////////
 // AbstractHistogramIterator
 ///////////////////////////////////////////////////////////////////////

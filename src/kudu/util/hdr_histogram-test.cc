@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <algorithm>
 #include <cstdint>
 
 #include <gtest/gtest.h>
@@ -95,7 +96,7 @@ static void validate_percentiles(HdrHistogram* hist, uint64_t specified_max) {
   ASSERT_NEAR(expected_mean, hist->MeanValue(), 0.001);
   ASSERT_EQ(kExpectedCount, hist->TotalCount());
   ASSERT_EQ(10, hist->ValueAtPercentile(80));
-  ASSERT_EQ(kExpectedCount, hist->ValueAtPercentile(90));
+  ASSERT_EQ(100, hist->ValueAtPercentile(90));
   ASSERT_EQ(hist->LowestEquivalentValue(specified_max), hist->ValueAtPercentile(99));
   ASSERT_EQ(hist->LowestEquivalentValue(specified_max), hist->ValueAtPercentile(99.99));
   ASSERT_EQ(hist->LowestEquivalentValue(specified_max), hist->ValueAtPercentile(100));
@@ -111,6 +112,34 @@ TEST_F(HdrHistogramTest, PercentileAndCopyTest) {
   NO_FATALS(validate_percentiles(&copy, specified_max));
 
   ASSERT_EQ(hist.TotalSum(), copy.TotalSum());
+}
+
+void PopulateHistogram(HdrHistogram& histogram, uint64_t low, uint64_t high) {
+  for (uint64_t i = low; i <= high; i++) {
+    histogram.Increment(i);
+  }
+}
+
+TEST_F(HdrHistogramTest, MergeTest) {
+  uint64_t highest_val = 10000LU;
+
+  HdrHistogram hist(highest_val, kSigDigits);
+  HdrHistogram other(highest_val, kSigDigits);
+
+  PopulateHistogram(hist, 1, 100);
+  PopulateHistogram(other, 101, 250);
+  HdrHistogram old(hist);
+  hist.Merge(other);
+
+  ASSERT_EQ(hist.TotalCount(), old.TotalCount() + other.TotalCount());
+  ASSERT_EQ(hist.TotalSum(), old.TotalSum() + other.TotalSum());
+  ASSERT_EQ(hist.MinValue(), std::min(old.MinValue(), other.MinValue()));
+  ASSERT_EQ(hist.MaxValue(), std::max(old.MaxValue(), other.MaxValue()));
+  ASSERT_LE(hist.MeanValue() - (1 + 250) / 2.0, 1e-6);
+  ASSERT_EQ(hist.ValueAtPercentile(100.0), 250);
+  ASSERT_EQ(hist.ValueAtPercentile(99.0), (int)(99.0 * 250 / 100 + 0.5));
+  ASSERT_EQ(hist.ValueAtPercentile(95.0), (int)(95.0 * 250 / 100 + 0.5));
+  ASSERT_EQ(hist.ValueAtPercentile(50.0), (int)(50.0 * 250 / 100 + 0.5));
 }
 
 } // namespace kudu
