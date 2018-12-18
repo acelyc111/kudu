@@ -223,13 +223,18 @@
 //
 /////////////////////////////////////////////////////
 
+#include <string.h>
+
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <iosfwd>
 #include <limits>
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest_prod.h>
@@ -329,27 +334,22 @@ namespace kudu {
 
 class Counter;
 class CounterPrototype;
+class Histogram;
+class HistogramPrototype;
+class HistogramSnapshotPB;
+class Metric;
+class MetricEntity;
+class MetricEntityPrototype;
+class MetricRegistry;
+template <typename Sig>
+class Callback;
 
 template<typename T>
 class AtomicGauge;
-template <typename Sig>
-class Callback;
 template<typename T>
 class FunctionGauge;
 template<typename T>
 class GaugePrototype;
-
-class Metric;
-class MetricEntityPrototype;
-class MetricPrototype;
-class MetricRegistry;
-
-class Histogram;
-class HistogramPrototype;
-class HistogramSnapshotPB;
-
-class MetricEntity;
-
 } // namespace kudu
 
 // Forward-declare the generic 'server' entity type.
@@ -407,40 +407,36 @@ class MetricType {
 };
 
 struct MetricJsonOptions {
-  MetricJsonOptions() :
-    include_raw_histograms(false),
-    include_schema_info(false),
-    only_modified_in_or_after_epoch(0),
-    include_untouched_metrics(true),
-    include_entity_attributes(true) {
-  }
-
   // Include the raw histogram values and counts in the JSON output.
   // This allows consumers to do cross-server aggregation or window
   // data over time.
-  // Default: false
-  bool include_raw_histograms;
+  bool include_raw_histograms = false;
 
   // Include the metrics "schema" information (i.e description, label,
   // unit, etc).
-  // Default: false
-  bool include_schema_info;
+  bool include_schema_info = false;
 
   // Try to skip any metrics which have not been modified since before
   // the given epoch. The current epoch can be fetched using
   // Metric::current_epoch() and incremented using Metric::IncrementEpoch().
   //
   // Note that this is an inclusive bound.
-  int64_t only_modified_in_or_after_epoch;
+  int64_t only_modified_in_or_after_epoch = 0;
 
   // Whether to include metrics which have had no data recorded and thus have
   // a value of 0. Note that some metrics with the value 0 may still be included:
   // notably, gauges may be non-zero and then reset to zero, so seeing that
   // they are currently zero does not indicate they are "untouched".
-  bool include_untouched_metrics;
+  bool include_untouched_metrics = true;
 
   // Whether to include the attributes of each entity.
-  bool include_entity_attributes;
+  bool include_entity_attributes = true;
+
+  // Whether to merge original tablet level metrics into table level metrics.
+  bool merge_by_table = false;
+
+  // Whether to include original tablet level metrics.
+  bool include_origin = true;
 
   // A set of substrings to filter entity against, where empty matches all.
   //
@@ -486,6 +482,98 @@ class MetricEntityPrototype {
   DISALLOW_COPY_AND_ASSIGN(MetricEntityPrototype);
 };
 
+class MetricPrototype {
+ public:
+  // Simple struct to aggregate the arguments common to all prototypes.
+  // This makes constructor chaining a little less tedious.
+  struct CtorArgs {
+    CtorArgs(const char* entity_type,
+             const char* name,
+             const char* label,
+             MetricUnit::Type unit,
+             const char* description,
+             uint32_t flags = 0)
+      : entity_type_(entity_type),
+        name_(name),
+        label_(label),
+        unit_(unit),
+        description_(description),
+        flags_(flags) {
+    }
+
+    const char* const entity_type_;
+    const char* const name_;
+    const char* const label_;
+    const MetricUnit::Type unit_;
+    const char* const description_;
+    const uint32_t flags_;
+  };
+
+  const char* entity_type() const { return args_.entity_type_; }
+  const char* name() const { return args_.name_; }
+  const char* label() const { return args_.label_; }
+  MetricUnit::Type unit() const { return args_.unit_; }
+  const char* description() const { return args_.description_; }
+  virtual MetricType::Type type() const = 0;
+
+  // Writes the fields of this prototype to the given JSON writer.
+  void WriteFields(JsonWriter* writer,
+                   const MetricJsonOptions& opts) const;
+
+ protected:
+  explicit MetricPrototype(CtorArgs args);
+  virtual ~MetricPrototype() {
+  }
+
+  const CtorArgs args_;
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(MetricPrototype);
+};
+
+std::ostream& operator<<(std::ostream& o, const MetricPrototype& metric_prototype);
+
+struct MetricPrototypeHash {
+  size_t operator()(const MetricPrototype* metric_prototype) const {
+    return std::hash<const char*>()(metric_prototype->name());
+  }
+};
+
+struct MetricPrototypeEqual {
+  bool operator()(const MetricPrototype* first, const MetricPrototype* second) const {
+    return strcmp(first->name(), second->name()) == 0;
+  }
+};
+
+struct MetricCollectionEntity {
+  MetricCollectionEntity(std::string type, std::string id)
+    : type_(std::move(type)), id_(std::move(id)) {}
+  std::string type_;
+  std::string id_;
+};
+
+struct MetricCollectionEntityHash {
+  size_t operator()(const MetricCollectionEntity& entity) const {
+    return std::hash<std::string>()(entity.id_);
+  }
+};
+
+struct MetricCollectionEntityEqual {
+  bool operator()(const MetricCollectionEntity& first, const MetricCollectionEntity& second) const {
+    return first.type_ == second.type_ && first.id_ == second.id_;
+  }
+};
+
+typedef std::unordered_map<const MetricPrototype*,
+                           scoped_refptr<Metric>,
+                           MetricPrototypeHash,
+                           MetricPrototypeEqual> CollectMetrics;
+
+typedef std::unordered_map<MetricCollectionEntity,
+                           CollectMetrics,
+                           MetricCollectionEntityHash,
+                           MetricCollectionEntityEqual> MetricCollection;
+
 class MetricEntity : public RefCountedThreadSafe<MetricEntity> {
  public:
   typedef std::unordered_map<const MetricPrototype*, scoped_refptr<Metric> > MetricMap;
@@ -510,6 +598,11 @@ class MetricEntity : public RefCountedThreadSafe<MetricEntity> {
 
   // See MetricRegistry::WriteAsJson()
   Status WriteAsJson(JsonWriter* writer, const MetricJsonOptions& opts) const;
+
+  Status CollectTo(MetricCollection& collections,
+                   const std::set<std::string>& requested_metrics,
+                   const std::set<std::string>& requested_tablet_ids,
+                   const std::set<std::string>& requested_table_names) const;
 
   const MetricMap& UnsafeMetricsMapForTests() const { return metric_map_; }
 
@@ -584,6 +677,7 @@ class MetricEntity : public RefCountedThreadSafe<MetricEntity> {
 // See documentation at the top of this file for information on metrics ownership.
 class Metric : public RefCountedThreadSafe<Metric> {
  public:
+  virtual scoped_refptr<Metric> clone() const = 0;
   // All metrics must be able to render themselves as JSON.
   virtual Status WriteAsJson(JsonWriter* writer,
                              const MetricJsonOptions& opts) const = 0;
@@ -610,6 +704,8 @@ class Metric : public RefCountedThreadSafe<Metric> {
   // of hot metric updaters, so should only be done rarely (eg before dumping
   // metrics).
   static void IncrementEpoch();
+
+  virtual bool Merge(const scoped_refptr<Metric>& other) = 0;
 
  protected:
   explicit Metric(const MetricPrototype* prototype);
@@ -734,55 +830,6 @@ enum PrototypeFlags {
   EXPOSE_AS_COUNTER = 1 << 0
 };
 
-class MetricPrototype {
- public:
-  // Simple struct to aggregate the arguments common to all prototypes.
-  // This makes constructor chaining a little less tedious.
-  struct CtorArgs {
-    CtorArgs(const char* entity_type,
-             const char* name,
-             const char* label,
-             MetricUnit::Type unit,
-             const char* description,
-             uint32_t flags = 0)
-      : entity_type_(entity_type),
-        name_(name),
-        label_(label),
-        unit_(unit),
-        description_(description),
-        flags_(flags) {
-    }
-
-    const char* const entity_type_;
-    const char* const name_;
-    const char* const label_;
-    const MetricUnit::Type unit_;
-    const char* const description_;
-    const uint32_t flags_;
-  };
-
-  const char* entity_type() const { return args_.entity_type_; }
-  const char* name() const { return args_.name_; }
-  const char* label() const { return args_.label_; }
-  MetricUnit::Type unit() const { return args_.unit_; }
-  const char* description() const { return args_.description_; }
-  virtual MetricType::Type type() const = 0;
-
-  // Writes the fields of this prototype to the given JSON writer.
-  void WriteFields(JsonWriter* writer,
-                   const MetricJsonOptions& opts) const;
-
- protected:
-  explicit MetricPrototype(CtorArgs args);
-  virtual ~MetricPrototype() {
-  }
-
-  const CtorArgs args_;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(MetricPrototype);
-};
-
 // A description of a Gauge.
 template<typename T>
 class GaugePrototype : public MetricPrototype {
@@ -837,18 +884,22 @@ class Gauge : public Metric {
 class StringGauge : public Gauge {
  public:
   StringGauge(const GaugePrototype<std::string>* proto,
-              std::string initial_value);
+              std::string initial_value, std::set<std::string> initial_unique_values = {});
+  scoped_refptr<Metric> clone() const OVERRIDE;
   std::string value() const;
   void set_value(const std::string& value);
   virtual bool IsUntouched() const override {
     return false;
   }
+  bool Merge(const scoped_refptr<Metric>& other) OVERRIDE;
 
  protected:
   virtual void WriteValue(JsonWriter* writer) const OVERRIDE;
+  std::set<std::string> values() const;
  private:
   std::string value_;
-  mutable simple_spinlock lock_;  // Guards value_
+  std::set<std::string> unique_values_;
+  mutable simple_spinlock lock_;  // Guards value_ and unique_values_
   DISALLOW_COPY_AND_ASSIGN(StringGauge);
 };
 
@@ -859,6 +910,11 @@ class AtomicGauge : public Gauge {
   AtomicGauge(const GaugePrototype<T>* proto, T initial_value)
     : Gauge(proto),
       value_(initial_value) {
+  }
+  scoped_refptr<Metric> clone() const override {
+    scoped_refptr<Metric> m = new AtomicGauge(dynamic_cast<const GaugePrototype<T>*>(prototype_),
+                                              value());
+    return m;
   }
   T value() const {
     return static_cast<T>(value_.Load(kMemOrderRelease));
@@ -882,6 +938,12 @@ class AtomicGauge : public Gauge {
   }
   virtual bool IsUntouched() const override {
     return false;
+  }
+  bool Merge(const scoped_refptr<Metric>& other) override {
+    if (PREDICT_TRUE(this != other.get())) {
+      IncrementBy(dynamic_cast<AtomicGauge<T> *>(other.get())->value());
+    }
+    return true;
   }
  protected:
   virtual void WriteValue(JsonWriter* writer) const OVERRIDE {
@@ -953,6 +1015,12 @@ class FunctionGaugeDetacher {
 template <typename T>
 class FunctionGauge : public Gauge {
  public:
+  scoped_refptr<Metric> clone() const override {
+    scoped_refptr<Metric> m = new FunctionGauge(dynamic_cast<const GaugePrototype<T>*>(prototype_),
+                                                Callback<T()>(function_));
+    return m;
+  }
+
   T value() const {
     std::lock_guard<simple_spinlock> l(lock_);
     return function_.Run();
@@ -1002,6 +1070,14 @@ class FunctionGauge : public Gauge {
     return false;
   }
 
+  // value() will be constant after Merge()
+  bool Merge(const scoped_refptr<Metric>& other) override {
+    if (PREDICT_TRUE(this != other.get())) {
+      DetachToConstant(value() + dynamic_cast<FunctionGauge<T>*>(other.get())->value());
+    }
+    return true;
+  }
+
  private:
   friend class MetricEntity;
 
@@ -1043,6 +1119,11 @@ class CounterPrototype : public MetricPrototype {
 // across multiple servers, etc, which aren't appropriate in the case of gauges.
 class Counter : public Metric {
  public:
+  scoped_refptr<Metric> clone() const override {
+    scoped_refptr<Metric> m = new Counter(dynamic_cast<const CounterPrototype*>(prototype_));
+    dynamic_cast<Counter*>(m.get())->IncrementBy(value());
+    return m;
+  }
   int64_t value() const;
   void Increment();
   void IncrementBy(int64_t amount);
@@ -1053,8 +1134,16 @@ class Counter : public Metric {
     return value() == 0;
   }
 
+  bool Merge(const scoped_refptr<Metric>& other) override {
+    if (PREDICT_TRUE(this != other.get())) {
+      IncrementBy(dynamic_cast<Counter*>(other.get())->value());
+    }
+    return true;
+  }
+
  private:
   FRIEND_TEST(MetricsTest, SimpleCounterTest);
+  FRIEND_TEST(MetricsTest, SimpleCounterMergeTest);
   FRIEND_TEST(MultiThreadedMetricsTest, CounterIncrementTest);
   friend class MetricEntity;
 
@@ -1082,6 +1171,12 @@ class HistogramPrototype : public MetricPrototype {
 
 class Histogram : public Metric {
  public:
+  scoped_refptr<Metric> clone() const override {
+      scoped_refptr<Metric> m = new Histogram(dynamic_cast<const HistogramPrototype*>(prototype_),
+                                              *histogram_);
+      return m;
+  }
+
   // Increment the histogram for the given value.
   // 'value' must be non-negative.
   void Increment(int64_t value);
@@ -1114,10 +1209,17 @@ class Histogram : public Metric {
     return TotalCount() == 0;
   }
 
+  bool Merge(const scoped_refptr<Metric>& other) override {
+    if (PREDICT_TRUE(this != other.get())) {
+      return histogram_->Merge(*(dynamic_cast<Histogram*>(other.get())->histogram()));
+    }
+    return true;
+  }
+
  private:
-  FRIEND_TEST(MetricsTest, SimpleHistogramTest);
   friend class MetricEntity;
   explicit Histogram(const HistogramPrototype* proto);
+  Histogram(const HistogramPrototype* proto, const HdrHistogram& hdr_hist);
 
   const gscoped_ptr<HdrHistogram> histogram_;
   DISALLOW_COPY_AND_ASSIGN(Histogram);

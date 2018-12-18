@@ -170,6 +170,9 @@ class HdrHistogram {
 
   // Dump a formatted, multiline string describing this histogram to 'out'.
   void DumpHumanReadable(std::ostream* out) const;
+
+  bool Merge(const HdrHistogram& other);
+
  private:
   friend class AbstractHistogramIterator;
 
