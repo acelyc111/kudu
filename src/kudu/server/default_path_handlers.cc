@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <fstream>
 #include <memory>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -60,6 +61,7 @@
 #include "kudu/util/monotime.h"
 #include "kudu/util/process_memory.h"
 #include "kudu/util/status.h"
+#include "kudu/util/string_case.h"
 #include "kudu/util/web_callback_registry.h"
 
 #ifdef TCMALLOC_ENABLED
@@ -69,6 +71,7 @@
 using std::ifstream;
 using std::ostringstream;
 using std::shared_ptr;
+using std::set;
 using std::string;
 using std::vector;
 using strings::Substitute;
@@ -347,6 +350,8 @@ static void WriteMetricsAsJson(const MetricRegistry* const metrics,
   opts.entity_ids =  ParseArray(req.parsed_args, "ids");
   opts.entity_attrs = ParseArray(req.parsed_args, "attributes");
   opts.entity_metrics = ParseArray(req.parsed_args, "metrics");
+  opts.merge_by_table = ParseArray(req.parsed_args, "merge");
+  opts.include_origin = ParseArray(req.parsed_args, "origin");
 
   JsonWriter::Mode json_mode = ParseBool(req.parsed_args, "compact") ?
       JsonWriter::COMPACT : JsonWriter::PRETTY;
