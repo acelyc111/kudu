@@ -1,0 +1,603 @@
+{
+  "comments": [
+    {
+      "screen": "screen名称",
+      "graphs": [
+        {
+          "title": "graph名称",
+          "endpoints": ["机器名或者tag标识，tag之间用空格分隔"],
+          "counters": ["counters名称，多个用逗号分隔。可以使用模糊匹配，支持metric(metric和tags(可选)空格隔开)，精确匹配"],
+          "graph_type": "展示类型，endpoint视角为h，counters视角为k,组合视角为a",
+          "method": "绘图是否进行求和，求和填写sum，不求和填写空字符串",
+          "timespan": "展示的时间跨度，单位为秒"
+        }
+      ]
+    }
+  ],
+  "version": "20180827",
+  "counter_templates": {
+      "full": [
+          "metric=kudu-tserver-health service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=kudu-table-health service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=all_transactions_inflight service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=alter_schema_transactions_inflight service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=average_diskrowset_height service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=bloom_lookups_per_op_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=bloom_lookups service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=bytes_flushed service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=commit_wait_duration_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=compact_rs_duration_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=compact_rs_running service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=delta_file_lookups_per_op_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=delta_file_lookups service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=delta_major_compact_rs_duration_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=delta_major_compact_rs_running service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=delta_minor_compact_rs_duration_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=delta_minor_compact_rs_running service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=failed_elections_since_stable_leader service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=flush_dms_duration_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=flush_dms_running service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=flush_mrs_duration_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=flush_mrs_running service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=follower_memory_pressure_rejections service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=in_progress_ops service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=insertions_failed_dup_key service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=key_file_lookups_per_op_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=key_file_lookups service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=leader_memory_pressure_rejections service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=log_append_latency_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=log_bytes_logged service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=log_cache_num_ops service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=log_cache_size service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=log_entry_batches_per_group_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=log_gc_duration_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=log_gc_running service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=log_group_commit_latency_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=log_reader_bytes_read service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=log_reader_entries_read service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=log_reader_read_batch_latency_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=log_roll_latency_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=log_sync_latency_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=majority_done_ops service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=memrowset_size service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=mrs_lookups service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=num_rowsets_on_disk service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=on_disk_data_size service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=on_disk_size service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=op_prepare_queue_length_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=op_prepare_queue_time_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=op_prepare_run_time_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=ops_behind_leader service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=raft_term service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=replica_count service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=rows_deleted service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=rows_inserted service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=rows_updated service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=rows_upserted service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=scanner_bytes_returned service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=scanner_bytes_scanned_from_disk service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=scanner_cells_returned service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=scanner_cells_scanned_from_disk service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=scanner_rows_returned service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=scanner_rows_scanned service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=scans_started service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=snapshot_read_inflight_wait_duration_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=state service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=tablet_active_scanners service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=time_since_last_leader_heartbeat service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=transaction_memory_pressure_rejections service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=undo_delta_block_estimated_retained_bytes service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=undo_delta_block_gc_bytes_deleted service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=undo_delta_block_gc_delete_duration_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=undo_delta_block_gc_init_duration_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=undo_delta_block_gc_perform_duration_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=undo_delta_block_gc_running service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=upserts_as_updates service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=write_op_duration_client_propagated_consistency_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=write_op_duration_commit_wait_consistency_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=write_transactions_inflight service=kudu cluster=${cluster.name} level=${level} v=4"
+      ],
+      "table_ab": [
+        "metric=all_transactions_inflight service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=alter_schema_transactions_inflight service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=average_diskrowset_height service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=bloom_lookups_per_op_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=bloom_lookups service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=bytes_flushed service=kudu cluster=${cluster.name} level=${level} v=4"
+      ],
+      "table_c": [
+        "metric=commit_wait_duration_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=compact_rs_duration_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=compact_rs_running service=kudu cluster=${cluster.name} level=${level} v=4"
+      ],
+      "table_d": [
+        "metric=delta_file_lookups service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=delta_file_lookups_per_op_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=delta_major_compact_rs_duration_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=delta_major_compact_rs_running service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=delta_minor_compact_rs_duration_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=delta_minor_compact_rs_running service=kudu cluster=${cluster.name} level=${level} v=4"
+      ],
+      "table_f": [
+        "metric=failed_elections_since_stable_leader service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=flush_dms_duration_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=flush_dms_running service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=flush_mrs_duration_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=flush_mrs_running service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=follower_memory_pressure_rejections service=kudu cluster=${cluster.name} level=${level} v=4"
+      ],
+      "table_ghijk": [
+        "metric=in_progress_ops service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=insertions_failed_dup_key service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=key_file_lookups service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=key_file_lookups_per_op_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=kudu-table-health service=kudu cluster=${cluster.name} level=${level} v=4"
+      ],
+      "table_l": [
+        "metric=leader_memory_pressure_rejections service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=log_append_latency_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=log_bytes_logged service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=log_cache_num_ops service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=log_cache_size service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=log_entry_batches_per_group_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=log_gc_duration_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=log_gc_running service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=log_group_commit_latency_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=log_reader_bytes_read service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=log_reader_entries_read service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=log_reader_read_batch_latency_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=log_roll_latency_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=log_sync_latency_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=lth service=kudu cluster=${cluster.name} level=${level} v=4"
+      ],
+      "table_mn": [
+        "metric=majority_done_ops service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=memrowset_size service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=mrs_lookups service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=num_rowsets_on_disk service=kudu cluster=${cluster.name} level=${level} v=4"
+      ],
+      "table_o": [
+        "metric=on_disk_data_size service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=on_disk_size service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=op_prepare_queue_length_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=op_prepare_queue_time_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=op_prepare_run_time_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=ops_behind_leader service=kudu cluster=${cluster.name} level=${level} v=4"
+      ],
+      "table_r": [
+        "metric=raft_term service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=replica_count service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=rows_deleted service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=rows_inserted service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=rows_updated service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=rows_upserted service=kudu cluster=${cluster.name} level=${level} v=4"
+      ],
+      "table_s": [
+        "metric=scanner_bytes_returned service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=scanner_bytes_scanned_from_disk service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=scanner_cells_returned service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=scanner_cells_scanned_from_disk service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=scanner_rows_returned service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=scanner_rows_scanned service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=scans_started service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=snapshot_read_inflight_wait_duration_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=state service=kudu cluster=${cluster.name} level=${level} v=4"
+      ],
+      "table_u": [
+        "metric=undo_delta_block_estimated_retained_bytes service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=undo_delta_block_gc_bytes_deleted service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=undo_delta_block_gc_delete_duration_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=undo_delta_block_gc_init_duration_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=undo_delta_block_gc_perform_duration_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=undo_delta_block_gc_running service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=upserts_as_updates service=kudu cluster=${cluster.name} level=${level} v=4"
+      ],
+      "table_tw": [
+        "metric=tablet_active_scanners service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=time_since_last_leader_heartbeat service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=transaction_memory_pressure_rejections service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=write_op_duration_client_propagated_consistency_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=write_op_duration_commit_wait_consistency_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=write_transactions_inflight service=kudu cluster=${cluster.name} level=${level} v=4"
+      ],
+      "replica_count" : [
+          "metric=replica_count service=kudu cluster=${cluster.name} level=${level} v=4"
+      ],
+      "cluster" : [
+          "metric=kudu.success service=kudu level=${level}",
+          "metric=kudu.writeLatency service=kudu level=${level}",
+          "metric=kudu.scanLatency service=kudu level=${level}",
+          "metric=healthy_table_proportion service=kudu cluster=${cluster.name} level=${level} v=4"
+      ],
+      "cluster_stat" : [
+        "metric=masters_count service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=tservers_count service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=tables_count service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=tablets_count service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=replicas_count service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=on_disk_size service=kudu cluster=${cluster.name} level=${level} v=4",
+        "metric=on_disk_data_size service=kudu cluster=${cluster.name} level=${level} v=4"
+      ],
+      "sys" : [
+          "cpu.busy",
+          "load.15min",
+          "load.1min",
+          "load.5min",
+          "mem.memused",
+          "mem.memused.percent",
+          "net.if.in.bytes/iface=eth0",
+          "net.if.out.bytes/iface=eth0",
+          "net.if.total.dropped/iface=eth0",
+          "sys.ntp.offset/procname=chronyd"
+      ],
+      "disk_usage_percent" : [
+          "df.bytes.used.percent/fstype=ext4,mount=/home",
+          "df.bytes.used.percent/fstype=ext4,mount=/home/work/ssd1",
+          "df.bytes.used.percent/fstype=ext4,mount=/home/work/ssd2",
+          "df.bytes.used.percent/fstype=ext4,mount=/home/work/ssd3",
+          "df.bytes.used.percent/fstype=ext4,mount=/home/work/ssd4",
+          "df.bytes.used.percent/fstype=ext4,mount=/home/work/ssd5",
+          "df.bytes.used.percent/fstype=ext4,mount=/home/work/ssd6",
+          "df.bytes.used.percent/fstype=ext4,mount=/home/work/ssd7",
+          "df.bytes.used.percent/fstype=ext4,mount=/home/work/ssd8",
+          "df.bytes.used.percent/fstype=ext4,mount=/home/work/ssd9",
+          "df.bytes.used.percent/fstype=ext4,mount=/home/work/ssd10",
+          "df.bytes.used.percent/fstype=ext4,mount=/home/work/ssd11",
+          "df.bytes.used.percent/fstype=ext4,mount=/home/work/ssd12",
+          "df.bytes.used.percent/fstype=ext4,mount=/home/work/hdd1",
+          "df.bytes.used.percent/fstype=ext4,mount=/home/work/hdd2",
+          "df.bytes.used.percent/fstype=ext4,mount=/home/work/hdd3",
+          "df.bytes.used.percent/fstype=ext4,mount=/home/work/hdd4",
+          "df.bytes.used.percent/fstype=ext4,mount=/home/work/hdd5",
+          "df.bytes.used.percent/fstype=ext4,mount=/home/work/hdd6",
+          "df.bytes.used.percent/fstype=ext4,mount=/home/work/hdd7",
+          "df.bytes.used.percent/fstype=ext4,mount=/home/work/hdd8",
+          "df.bytes.used.percent/fstype=ext4,mount=/home/work/hdd9",
+          "df.bytes.used.percent/fstype=ext4,mount=/home/work/hdd10",
+          "df.bytes.used.percent/fstype=ext4,mount=/home/work/hdd11"
+      ],
+      "disk_usage_size" : [
+          "df.bytes.used/fstype=ext4,mount=/home",
+          "df.bytes.used/fstype=ext4,mount=/home/work/ssd1",
+          "df.bytes.used/fstype=ext4,mount=/home/work/ssd2",
+          "df.bytes.used/fstype=ext4,mount=/home/work/ssd3",
+          "df.bytes.used/fstype=ext4,mount=/home/work/ssd4",
+          "df.bytes.used/fstype=ext4,mount=/home/work/ssd5",
+          "df.bytes.used/fstype=ext4,mount=/home/work/ssd6",
+          "df.bytes.used/fstype=ext4,mount=/home/work/ssd7",
+          "df.bytes.used/fstype=ext4,mount=/home/work/ssd8",
+          "df.bytes.used/fstype=ext4,mount=/home/work/ssd9",
+          "df.bytes.used/fstype=ext4,mount=/home/work/ssd10",
+          "df.bytes.used/fstype=ext4,mount=/home/work/ssd11",
+          "df.bytes.used/fstype=ext4,mount=/home/work/ssd12",
+          "df.bytes.used/fstype=ext4,mount=/home/work/hdd1",
+          "df.bytes.used/fstype=ext4,mount=/home/work/hdd2",
+          "df.bytes.used/fstype=ext4,mount=/home/work/hdd3",
+          "df.bytes.used/fstype=ext4,mount=/home/work/hdd4",
+          "df.bytes.used/fstype=ext4,mount=/home/work/hdd5",
+          "df.bytes.used/fstype=ext4,mount=/home/work/hdd6",
+          "df.bytes.used/fstype=ext4,mount=/home/work/hdd7",
+          "df.bytes.used/fstype=ext4,mount=/home/work/hdd8",
+          "df.bytes.used/fstype=ext4,mount=/home/work/hdd9",
+          "df.bytes.used/fstype=ext4,mount=/home/work/hdd10",
+          "df.bytes.used/fstype=ext4,mount=/home/work/hdd11"
+      ],
+      "disk_io_util" : [
+          "disk.io.util/device=sdb",
+          "disk.io.util/device=sdc",
+          "disk.io.util/device=sdd",
+          "disk.io.util/device=sde",
+          "disk.io.util/device=sdf",
+          "disk.io.util/device=sdg",
+          "disk.io.util/device=sdh",
+          "disk.io.util/device=sdi",
+          "disk.io.util/device=sdj",
+          "disk.io.util/device=sdk",
+          "disk.io.util/device=sdl",
+          "disk.io.util/device=sdm",
+          "disk.io.util/device=nvme0n1",
+          "disk.io.util/device=nvme1n1",
+          "disk.io.util/device=nvme2n1",
+          "disk.io.util/device=nvme3n1",
+          "disk.io.util/device=nvme4n1",
+          "disk.io.util/device=nvme5n1",
+          "disk.io.util/device=xvda",
+          "disk.io.util/device=xvdb",
+          "disk.io.util/device=xvdc",
+          "disk.io.util/device=xvdd",
+          "disk.io.util/device=xvde",
+          "disk.io.util/device=xvdf",
+          "disk.io.util/device=vda",
+          "disk.io.util/device=vdb",
+          "disk.io.util/device=vdc",
+          "disk.io.util/device=vdd",
+          "disk.io.util/device=vde"
+      ]
+  },
+  "details": [
+    {
+      "screen": "${cluster.name} [cluster]",
+      "graphs": [
+        {
+          "title": "集群可用度",
+          "endpoints": ["${cluster.name}"],
+          "counters": {
+            "level": "cluster",
+            "template": "cluster"
+          },
+          "graph_type": "h",
+          "method": "",
+          "timespan": 86400
+        },
+        {
+          "title": "集群统计信息",
+          "endpoints": ["${cluster.name}"],
+          "counters": {
+            "level": "cluster",
+            "template": "cluster_stat"
+          },
+          "graph_type": "h",
+          "method": "",
+          "timespan": 86400
+        }
+      ]
+    },
+    {
+      "screen": "${cluster.name} [metrics_ab]",
+      "graphs": [
+        {
+          "title": "单表metrics",
+          "endpoints": ["${for.each.table}"],
+          "counters": {
+              "level": "table",
+              "template": "table_ab"
+          },
+          "graph_type": "h",
+          "method": "",
+          "timespan": 86400
+        }
+      ]
+    },
+    {
+      "screen": "${cluster.name} [metrics_c]",
+      "graphs": [
+        {
+          "title": "单表metrics",
+          "endpoints": ["${for.each.table}"],
+          "counters": {
+              "level": "table",
+              "template": "table_c"
+          },
+          "graph_type": "h",
+          "method": "",
+          "timespan": 86400
+        }
+      ]
+    },
+    {
+      "screen": "${cluster.name} [metrics_d]",
+      "graphs": [
+        {
+          "title": "单表metrics",
+          "endpoints": ["${for.each.table}"],
+          "counters": {
+              "level": "table",
+              "template": "table_d"
+          },
+          "graph_type": "h",
+          "method": "",
+          "timespan": 86400
+        }
+      ]
+    },
+    {
+      "screen": "${cluster.name} [metrics_f]",
+      "graphs": [
+        {
+          "title": "单表metrics",
+          "endpoints": ["${for.each.table}"],
+          "counters": {
+              "level": "table",
+              "template": "table_f"
+          },
+          "graph_type": "h",
+          "method": "",
+          "timespan": 86400
+        }
+      ]
+    },
+    {
+      "screen": "${cluster.name} [metrics_ghijk]",
+      "graphs": [
+        {
+          "title": "单表metrics",
+          "endpoints": ["${for.each.table}"],
+          "counters": {
+              "level": "table",
+              "template": "table_ghijk"
+          },
+          "graph_type": "h",
+          "method": "",
+          "timespan": 86400
+        }
+      ]
+    },
+    {
+      "screen": "${cluster.name} [metrics_l]",
+      "graphs": [
+        {
+          "title": "单表metrics",
+          "endpoints": ["${for.each.table}"],
+          "counters": {
+              "level": "table",
+              "template": "table_l"
+          },
+          "graph_type": "h",
+          "method": "",
+          "timespan": 86400
+        }
+      ]
+    },
+    {
+      "screen": "${cluster.name} [metrics_mn]",
+      "graphs": [
+        {
+          "title": "单表metrics",
+          "endpoints": ["${for.each.table}"],
+          "counters": {
+              "level": "table",
+              "template": "table_mn"
+          },
+          "graph_type": "h",
+          "method": "",
+          "timespan": 86400
+        }
+      ]
+    },
+    {
+      "screen": "${cluster.name} [metrics_o]",
+      "graphs": [
+        {
+          "title": "单表metrics",
+          "endpoints": ["${for.each.table}"],
+          "counters": {
+              "level": "table",
+              "template": "table_o"
+          },
+          "graph_type": "h",
+          "method": "",
+          "timespan": 86400
+        }
+      ]
+    },
+    {
+      "screen": "${cluster.name} [metrics_r]",
+      "graphs": [
+        {
+          "title": "单表metrics",
+          "endpoints": ["${for.each.table}"],
+          "counters": {
+              "level": "table",
+              "template": "table_r"
+          },
+          "graph_type": "h",
+          "method": "",
+          "timespan": 86400
+        }
+      ]
+    },
+    {
+      "screen": "${cluster.name} [metrics_s]",
+      "graphs": [
+        {
+          "title": "单表metrics",
+          "endpoints": ["${for.each.table}"],
+          "counters": {
+              "level": "table",
+              "template": "table_s"
+          },
+          "graph_type": "h",
+          "method": "",
+          "timespan": 86400
+        }
+      ]
+    },
+    {
+      "screen": "${cluster.name} [metrics_u]",
+      "graphs": [
+        {
+          "title": "单表metrics",
+          "endpoints": ["${for.each.table}"],
+          "counters": {
+              "level": "table",
+              "template": "table_u"
+          },
+          "graph_type": "h",
+          "method": "",
+          "timespan": 86400
+        }
+      ]
+    },
+    {
+      "screen": "${cluster.name} [metrics_tw]",
+      "graphs": [
+        {
+          "title": "单表metrics",
+          "endpoints": ["${for.each.table}"],
+          "counters": {
+              "level": "table",
+              "template": "table_tw"
+          },
+          "graph_type": "h",
+          "method": "",
+          "timespan": 86400
+        }
+      ]
+    },
+    {
+      "screen": "${cluster.name} [tserver]",
+      "graphs": [
+        {
+          "title": "单节点metrics",
+          "endpoints": ["${for.each.tserver}"],
+          "counters": {
+              "level": "host",
+              "template": "full"
+          },
+          "graph_type": "h",
+          "method": "",
+          "timespan": 86400
+        }
+      ]
+    },
+    {
+      "screen": "${cluster.name} [server-sys]",
+      "graphs": [
+        {
+          "title": "单节点sys指标",
+          "endpoints": ["${for.each.tserver}", "${for.each.master}"],
+          "counters": {
+              "level": "host",
+              "template": "sys"
+          },
+          "graph_type": "h",
+          "method": "",
+          "timespan": 86400
+        },
+        {
+          "title": "磁盘用量(百分比)",
+          "endpoints": ["${for.each.tserver}", "${for.each.master}"],
+          "counters": {
+              "level": "host",
+              "template": "disk_usage_percent"
+          },
+          "graph_type": "a",
+          "method": "",
+          "timespan": 86400
+        },
+        {
+          "title": "磁盘用量(占用空间)",
+          "endpoints": ["${for.each.tserver}", "${for.each.master}"],
+          "counters": {
+              "level": "host",
+              "template": "disk_usage_size"
+          },
+          "graph_type": "a",
+          "method": "",
+          "timespan": 86400
+        },
+        {
+          "title": "磁盘IO util",
+          "endpoints": ["${for.each.tserver}", "${for.each.master}"],
+          "counters": {
+              "level": "host",
+              "template": "disk_io_util"
+          },
+          "graph_type": "a",
+          "method": "",
+          "timespan": 86400
+        }
+      ]
+    }
+  ]
+}

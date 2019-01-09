@@ -1,0 +1,69 @@
+clusters_info:
+  c3prc-hadoop:
+    olap_version: 2
+    region: chnbj-idc
+    charge_type: share
+    instance: SSD
+    special_db_org:
+      mifi: CL3894
+      b2c: CL5281
+    master_addresses: c3-hadoop-kudu-prc-ct01.bj:18600,c3-hadoop-kudu-prc-ct02.bj:18600,c3-hadoop-kudu-prc-ct03.bj:18600
+  zjyprc-hadoop:
+    olap_version: 2
+    region: chnbj-idc
+    charge_type: share
+    instance: SSD
+    master_addresses: zjy-hadoop-prc-ct01.bj:14000,zjy-hadoop-prc-ct02.bj:14000,zjy-hadoop-prc-ct03.bj:14000
+  zjyprc-analysis:
+    olap_version: 2
+    region: chnbj-idc
+    charge_type: exclusive
+    instance: SSD
+    special_db_org:
+      kudu_demo: CL18605
+      ga_test: CL18605
+    master_addresses: zjy-hadoop-prc-ct01.bj:15000,zjy-hadoop-prc-ct02.bj:15000,zjy-hadoop-prc-ct03.bj:15000
+  azmbcommonprc-hadoop:
+    olap_version: 2
+    region: indmb-aws
+    charge_type: share
+    instance: SSD
+    master_addresses: mb1-hadoop-kudu-prc-ct01.awsind:14000,mb2-hadoop-kudu-prc-ct02.awsind:14000,mb3-hadoop-kudu-prc-ct03.awsind:14000
+  ksmosprc-xiaomi:
+    olap_version: 2
+    region: rusmos-ks
+    charge_type: share
+    instance: SSD
+    master_addresses: mos1-hadoop-kudu-prc-ct01.ksru:14000,mos1-hadoop-kudu-prc-ct02.ksru:14000,mos1-hadoop-kudu-prc-ct03.ksru:14000
+  alsgprc-xiaomi:
+    olap_version: 2
+    region: sg-ali
+    charge_type: share
+    instance: SSD
+    special_db_org:
+      b2c: CL5281
+    master_addresses: sgp1-hadoop-kudu-prc-ct01.alisgp:15000,sgp2-hadoop-kudu-prc-ct02.alisgp:15000,sgp2-hadoop-kudu-prc-ct03.alisgp:15000
+  tjwqstaging-hdd:
+    olap_version: 2
+    region: chnwq-ks
+    charge_type: public_share
+    instance: SSD
+    master_addresses: tj1-hadoop-kudu-tst-ct01.kscn:18600,tj1-hadoop-kudu-tst-ct02.kscn:18600,tj1-hadoop-kudu-tst-ct03.kscn:18600
+  tjwqtst-dev:
+    olap_version: 2
+    region: chnwq-ks
+    charge_type: public_share
+    instance: SSD
+    master_addresses: tj1-hadoop-kudu-tst-ct01.kscn:15000,tj1-hadoop-kudu-tst-ct02.kscn:15000,tj1-hadoop-kudu-tst-ct03.kscn:15000
+  c3tst-test:
+    olap_version: 2
+    region: chnbj-idc
+    charge_type: public_share
+    instance: HDD
+    master_addresses: c3-hadoop-kudu-prc-ct01.bj:15000,c3-hadoop-kudu-prc-ct02.bj:15000,c3-hadoop-kudu-prc-ct03.bj:15000
+  c3tst-dev:
+    olap_version: 2
+    region: chnbj-idc
+    charge_type: public_share
+    instance: HDD
+    master_addresses: c3-hadoop-kudu-prc-ct01.bj:18000,c3-hadoop-kudu-prc-ct02.bj:18000,c3-hadoop-kudu-prc-ct03.bj:18000
