@@ -729,16 +729,15 @@ class Schema {
 
   // Enum to configure how a Schema is stringified.
   enum ToStringMode {
+    BASE_INFO = 0,
     // Include column ids if this instance has them.
     WITH_COLUMN_IDS = 1 << 0,
     // Include column attributes.
     WITH_COLUMN_ATTRIBUTES = 1 << 1,
-
-    DEFAULT_MODE = WITH_COLUMN_IDS
   };
   // Stringify this Schema. This is not particularly efficient,
   // so should only be used when necessary for output.
-  std::string ToString(ToStringMode mode = ToStringMode::DEFAULT_MODE) const;
+  std::string ToString(ToStringMode mode = ToStringMode::WITH_COLUMN_IDS) const;
 
   // Return true if the schemas have exactly the same set of columns
   // and respective types.

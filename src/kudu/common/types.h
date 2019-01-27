@@ -805,7 +805,7 @@ class Variant {
       case INT64:        return std::to_string(numeric_.i64);
       case UINT64:       return std::to_string(numeric_.u64);
       case DECIMAL128:
-      case INT128:       return to_string(numeric_.i128);
+      case INT128:       return std::to_string(numeric_.i128);
       case FLOAT:        return std::to_string(numeric_.float_val);
       case DOUBLE:       return std::to_string(numeric_.double_val);
       case STRING:

@@ -747,7 +747,7 @@ void KuduSchema::GetPrimaryKeyColumnIndexes(vector<int>* indexes) const {
 }
 
 string KuduSchema::ToString() const {
-  return schema_ ? schema_->ToString(Schema::ToStringMode::WITHOUT_COLUMN_IDS)
+  return schema_ ? schema_->ToString(Schema::ToStringMode::BASE_INFO)
                  : "()";
 }
 

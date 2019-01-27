@@ -130,7 +130,7 @@ string ColumnSchema::TypeToString() const {
   ToUpperCase(type_name, &type_name);
   return Substitute("$0$1 $2",
                     type_name,
-                    type_attributes_.ToStringForType(type_info_->type()),
+                    type_attributes().ToStringForType(type_info()->type()),
                     is_nullable_ ? "NULLABLE" : "NOT NULL");
 }
 
