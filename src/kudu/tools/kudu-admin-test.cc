@@ -1711,9 +1711,9 @@ TEST_F(AdminCliTest, TestDescribeTable) {
   ASSERT_STR_CONTAINS(
       stdout,
       "(\n"
-      "    key INT32 NOT NULL AUTO_ENCODING DEFAULT_COMPRESSION - -,\n"
-      "    int_val INT32 NOT NULL AUTO_ENCODING DEFAULT_COMPRESSION - -,\n"
-      "    string_val STRING NULLABLE AUTO_ENCODING DEFAULT_COMPRESSION - -,\n"
+      "    key INT32 NOT NULL,\n"
+      "    int_val INT32 NOT NULL,\n"
+      "    string_val STRING NULLABLE,\n"
       "    PRIMARY KEY (key)\n"
       ")\n"
       "RANGE (key) (\n"
@@ -1793,7 +1793,8 @@ TEST_F(AdminCliTest, TestDescribeTable) {
     "table",
     "describe",
     cluster_->master()->bound_rpc_addr().ToString(),
-    kAnotherTableId
+    kAnotherTableId,
+    "-show_attributes=true"
   }, &stdout, &stderr);
   ASSERT_TRUE(s.ok()) << ToolRunInfo(s, stdout, stderr);
 

@@ -35,5 +35,11 @@ inline std::ostream& operator<<(std::ostream& os, const unsigned __int128& val) 
   return os;
 }
 
+inline string to_string(const __int128& val) {
+  std::stringstream ss;
+  ss << val;
+  return ss.str();
+}
+
 } // namespace std
 

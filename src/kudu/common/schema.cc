@@ -118,19 +118,24 @@ Status ColumnSchema::ApplyDelta(const ColumnSchemaDelta& col_delta) {
   return Status::OK();
 }
 
-string ColumnSchema::ToString() const {
-  return Substitute("$0 $1",
+string ColumnSchema::ToString(bool with_attributes) const {
+  return Substitute("$0 $1$2",
                     name_,
-                    TypeToString());
+                    TypeToString(),
+                    with_attributes ? "" : " " + AttrToString());
 }
 
 string ColumnSchema::TypeToString() const {
   string type_name = type_info_->name();
   ToUpperCase(type_name, &type_name);
-  return Substitute("$0$1 $2 $3 $4 $5",
+  return Substitute("$0$1 $2",
                     type_name,
                     type_attributes_.ToStringForType(type_info_->type()),
-                    is_nullable_ ? "NULLABLE" : "NOT NULL",
+                    is_nullable_ ? "NULLABLE" : "NOT NULL");
+}
+
+string ColumnSchema::AttrToString() const {
+  return Substitute("$0 $1 $2",
                     attributes_.ToString(),
                     has_read_default() ? read_default_->ToString() : "-",
                     has_write_default() ? write_default_->ToString() : "-");
@@ -403,13 +408,16 @@ string Schema::ToString(ToStringMode mode) const {
   }
 
   vector<string> col_strs;
-  if (has_column_ids() && mode != ToStringMode::WITHOUT_COLUMN_IDS) {
+  if (has_column_ids() && (mode & ToStringMode::WITH_COLUMN_IDS)) {
     for (int i = 0; i < cols_.size(); ++i) {
-      col_strs.push_back(Substitute("$0:$1", col_ids_[i], cols_[i].ToString()));
+      col_strs.push_back(
+          Substitute("$0:$1",
+                     col_ids_[i],
+                     cols_[i].ToString(mode & ToStringMode::WITH_COLUMN_ATTRIBUTES)));
     }
   } else {
     for (const ColumnSchema &col : cols_) {
-      col_strs.push_back(col.ToString());
+      col_strs.push_back(col.ToString(mode & ToStringMode::WITH_COLUMN_ATTRIBUTES));
     }
   }
 

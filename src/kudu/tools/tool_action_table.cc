@@ -57,6 +57,9 @@ DEFINE_bool(modify_external_catalogs, true,
             "when renaming or dropping a table.");
 DEFINE_bool(list_tablets, false,
             "Include tablet and replica UUIDs in the output");
+DEFINE_bool(show_attributes, false,
+            "Whether to show column attributes, including column encoding type, "
+            "compression type, and default read/write value.");
 
 namespace kudu {
 namespace tools {
@@ -407,6 +410,7 @@ unique_ptr<Mode> BuildTableMode() {
       .Description("Describe a table")
       .AddRequiredParameter({ kMasterAddressesArg, kMasterAddressesArgDesc })
       .AddRequiredParameter({ kTableNameArg, "Name of the table to describe" })
+      .AddOptionalParameter("show_attributes")
       .Build();
 
   unique_ptr<Action> list_tables =

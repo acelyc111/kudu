@@ -230,11 +230,15 @@ class ColumnSchema {
 
   // Return a string identifying this column, including its
   // name.
-  std::string ToString() const;
+  std::string ToString(bool with_attributes = false) const;
 
   // Same as above, but only including the type information.
   // For example, "STRING NOT NULL".
   std::string TypeToString() const;
+
+  // Same as above, but only including the attributes information.
+  // For example, "AUTO_ENCODING ZLIB 123 123".
+  std::string AttrToString() const;
 
   // Returns true if the column has a read default value
   bool has_read_default() const {
@@ -724,15 +728,17 @@ class Schema {
   }
 
   // Enum to configure how a Schema is stringified.
-  enum class ToStringMode {
+  enum ToStringMode {
     // Include column ids if this instance has them.
-    WITH_COLUMN_IDS,
-    // Do not include column ids.
-    WITHOUT_COLUMN_IDS,
+    WITH_COLUMN_IDS = 1 << 0,
+    // Include column attributes.
+    WITH_COLUMN_ATTRIBUTES = 1 << 1,
+
+    DEFAULT_MODE = WITH_COLUMN_IDS
   };
   // Stringify this Schema. This is not particularly efficient,
   // so should only be used when necessary for output.
-  std::string ToString(ToStringMode mode = ToStringMode::WITH_COLUMN_IDS) const;
+  std::string ToString(ToStringMode mode = ToStringMode::DEFAULT_MODE) const;
 
   // Return true if the schemas have exactly the same set of columns
   // and respective types.
