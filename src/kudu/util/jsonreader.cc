@@ -17,16 +17,19 @@
 
 #include "kudu/util/jsonreader.h"
 
-#include <ostream>
+#include <fstream>  // IWYU pragma: keep
 #include <utility>
 
 #include <glog/logging.h>
+#include <rapidjson/error/en.h>
+#include <rapidjson/istreamwrapper.h>
 #include <rapidjson/rapidjson.h>
 
 #include "kudu/gutil/port.h"
 #include "kudu/gutil/strings/substitute.h"
 
 using rapidjson::Value;
+using std::ifstream;
 using std::string;
 using std::vector;
 using strings::Substitute;
@@ -56,20 +59,7 @@ const char* const TypeToString(rapidjson::Type t) {
 }
 } // anonymous namespace
 
-JsonReader::JsonReader(string text) : text_(std::move(text)) {}
-
-JsonReader::~JsonReader() {
-}
-
-Status JsonReader::Init() {
-  document_.Parse<0>(text_.c_str());
-  if (document_.HasParseError()) {
-    return Status::Corruption("JSON text is corrupt", document_.GetParseError());
-  }
-  return Status::OK();
-}
-
-Status JsonReader::ExtractBool(const Value* object,
+Status JsonReaderBase::ExtractBool(const Value* object,
                                const char* field,
                                bool* result) const {
   const Value* val;
@@ -83,7 +73,7 @@ Status JsonReader::ExtractBool(const Value* object,
   return Status::OK();
 }
 
-Status JsonReader::ExtractInt32(const Value* object,
+Status JsonReaderBase::ExtractInt32(const Value* object,
                                 const char* field,
                                 int32_t* result) const {
   const Value* val;
@@ -97,7 +87,7 @@ Status JsonReader::ExtractInt32(const Value* object,
   return Status::OK();
 }
 
-Status JsonReader::ExtractUint32(const Value* object,
+Status JsonReaderBase::ExtractUint32(const Value* object,
                                  const char* field,
                                  uint32_t* result) const {
   const Value* val;
@@ -111,7 +101,7 @@ Status JsonReader::ExtractUint32(const Value* object,
   return Status::OK();
 }
 
-Status JsonReader::ExtractInt64(const Value* object,
+Status JsonReaderBase::ExtractInt64(const Value* object,
                                 const char* field,
                                 int64_t* result) const {
   const Value* val;
@@ -124,7 +114,7 @@ Status JsonReader::ExtractInt64(const Value* object,
   return Status::OK();
 }
 
-Status JsonReader::ExtractUint64(const Value* object,
+Status JsonReaderBase::ExtractUint64(const Value* object,
                                  const char* field,
                                  uint64_t* result) const {
   const Value* val;
@@ -137,9 +127,9 @@ Status JsonReader::ExtractUint64(const Value* object,
   return Status::OK();
 }
 
-Status JsonReader::ExtractDouble(const Value* object,
-                                 const char* field,
-                                 double* result) const {
+Status JsonReaderBase::ExtractDouble(const Value* object,
+                                     const char* field,
+                                     double* result) const {
   const Value* val;
   RETURN_NOT_OK(ExtractField(object, field, &val));
   if (PREDICT_FALSE(!val->IsDouble())) {
@@ -150,7 +140,7 @@ Status JsonReader::ExtractDouble(const Value* object,
   return Status::OK();
 }
 
-Status JsonReader::ExtractString(const Value* object,
+Status JsonReaderBase::ExtractString(const Value* object,
                                  const char* field,
                                  string* result) const {
   const Value* val;
@@ -167,7 +157,7 @@ Status JsonReader::ExtractString(const Value* object,
   return Status::OK();
 }
 
-Status JsonReader::ExtractObject(const Value* object,
+Status JsonReaderBase::ExtractObject(const Value* object,
                                  const char* field,
                                  const Value** result) const {
   const Value* val;
@@ -180,7 +170,7 @@ Status JsonReader::ExtractObject(const Value* object,
   return Status::OK();
 }
 
-Status JsonReader::ExtractObjectArray(const Value* object,
+Status JsonReaderBase::ExtractObjectArray(const Value* object,
                                       const char* field,
                                       vector<const Value*>* result) const {
   const Value* val;
@@ -195,13 +185,39 @@ Status JsonReader::ExtractObjectArray(const Value* object,
   return Status::OK();
 }
 
-Status JsonReader::ExtractField(const Value* object,
+Status JsonReaderBase::ExtractField(const Value* object,
                                 const char* field,
                                 const Value** result) const {
   if (field && PREDICT_FALSE(!object->HasMember(field))) {
     return Status::NotFound("Missing field", field);
   }
   *result = field ? &(*object)[field] : object;
+  return Status::OK();
+}
+
+JsonReader::JsonReader(string text) : text_(std::move(text)) {}
+
+Status JsonReader::Init() {
+  document_.Parse<0>(text_.c_str());
+  if (document_.HasParseError()) {
+    return Status::Corruption("JSON text is corrupt",
+                              rapidjson::GetParseError_En(document_.GetParseError()));
+  }
+  return Status::OK();
+}
+
+JsonFileReader::JsonFileReader(string filename)
+    : filename_(std::move(filename)) {}
+
+Status JsonFileReader::Init() {
+  ifstream ifs(filename_);
+  rapidjson::IStreamWrapper isw(ifs);
+
+  document_.ParseStream(isw);
+  if (document_.HasParseError()) {
+    return Status::Corruption("JSON text is corrupt",
+                              rapidjson::GetParseError_En(document_.GetParseError()));
+  }
   return Status::OK();
 }
 
