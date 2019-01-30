@@ -256,6 +256,7 @@ set(UTIL_LIBS
   pb_util_proto
   protobuf
   version_info_proto
+  wire_protocol_proto
   zlib)
 
 if(NOT APPLE)

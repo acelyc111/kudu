@@ -23,6 +23,8 @@
 
 #include "kudu/util/pb_util.h"
 
+#include <time.h>
+
 #include <algorithm>
 #include <cstddef>
 #include <deque>
@@ -48,6 +50,7 @@
 #include <google/protobuf/text_format.h>
 #include <google/protobuf/util/json_util.h>
 
+#include "kudu/common/wire_protocol.pb.h"
 #include "kudu/gutil/integral_types.h"
 #include "kudu/gutil/macros.h"
 #include "kudu/gutil/map-util.h"
@@ -55,6 +58,7 @@
 #include "kudu/gutil/strings/escaping.h"
 #include "kudu/gutil/strings/fastmem.h"
 #include "kudu/gutil/strings/substitute.h"
+#include "kudu/gutil/walltime.h"
 #include "kudu/util/coding.h"
 #include "kudu/util/coding-inl.h"
 #include "kudu/util/crc.h"
@@ -647,6 +651,19 @@ string SecureShortDebugString(const Message& msg) {
   }
 
   return debug_string;
+}
+
+std::string ParseStartTime(const ServerRegistrationPB& reg) {
+  string start_time;
+  if (reg.has_start_time()) {
+    // Convert epoch time to localtime.
+    StringAppendStrftime(&start_time, "%Y-%m-%d %H:%M:%S %Z",
+                         static_cast<time_t>(reg.start_time()), true);
+  } else {
+    start_time = "<unknown>";
+  }
+
+  return start_time;
 }
 
 

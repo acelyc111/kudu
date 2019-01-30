@@ -31,8 +31,12 @@
 #include <gtest/gtest_prod.h>
 
 #include "kudu/gutil/ref_counted.h"
-#include "kudu/util/mutex.h"
 #include "kudu/util/debug/trace_event_impl.h"
+#include "kudu/util/mutex.h"
+
+namespace kudu {
+class ServerRegistrationPB;
+}  // namespace kudu
 
 namespace google {
 namespace protobuf {
@@ -47,11 +51,11 @@ class SimpleDescriptorDatabase;
 namespace kudu {
 
 class Env;
+class RWFile;
 class RandomAccessFile;
 class SequentialFile;
 class Slice;
 class Status;
-class RWFile;
 class faststring;
 
 namespace pb_util {
@@ -115,6 +119,9 @@ std::string SecureDebugString(const google::protobuf::Message& msg);
 
 // Same as SecureDebugString() above, but equivalent to Message::ShortDebugString.
 std::string SecureShortDebugString(const google::protobuf::Message& msg);
+
+// Parse 'start_time' in ServerRegistrationPB, return localtime or '<unknown>'.
+std::string ParseStartTime(const ServerRegistrationPB& reg);
 
 // A protobuf "container" has the following format (all integers in
 // little-endian byte order).
