@@ -17,6 +17,8 @@
 
 #include "kudu/master/master_path_handlers.h"
 
+#include <time.h>
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -50,6 +52,7 @@
 #include "kudu/gutil/strings/join.h"
 #include "kudu/gutil/strings/numbers.h"
 #include "kudu/gutil/strings/substitute.h"
+#include "kudu/gutil/walltime.h"
 #include "kudu/master/catalog_manager.h"
 #include "kudu/master/master.h"
 #include "kudu/master/master.pb.h"
@@ -129,6 +132,12 @@ void MasterPathHandlers::HandleTabletServers(const Webserver::WebRequest& /*req*
                                      reg.http_addresses(0).port());
     }
     ts_json["time_since_hb"] = StringPrintf("%.1fs", desc->TimeSinceHeartbeat().ToSeconds());
+    // Convert epoch time to localtime.
+    string start_time;
+    StringAppendStrftime(&start_time, "%Y-%m-%d %H:%M:%S %Z",
+                         (time_t)reg.start_time(), true);
+    ts_json["start_time"] = start_time;
+    reg.clear_start_time();
     ts_json["registration"] = pb_util::SecureShortDebugString(reg);
     ts_json["location"] = desc->location().get_value_or("<none>");
     version_counts[reg.software_version()][desc->PresumedDead() ? 1 : 0]++;
@@ -458,7 +467,7 @@ void MasterPathHandlers::HandleMasters(const Webserver::WebRequest& /*req*/,
       continue;
     }
     EasyJson master_json = (*output)["masters"].PushBack(EasyJson::kObject);
-    const ServerRegistrationPB& reg = master.registration();
+    ServerRegistrationPB reg = master.registration();
     master_json["uuid"] = master.instance_id().permanent_uuid();
     if (!reg.http_addresses().empty()) {
       master_json["target"] = Substitute("$0://$1:$2/",
@@ -467,7 +476,13 @@ void MasterPathHandlers::HandleMasters(const Webserver::WebRequest& /*req*/,
                                          reg.http_addresses(0).port());
     }
     master_json["role"] = master.has_role() ? RaftPeerPB_Role_Name(master.role()) : "N/A";
-    master_json["registration"] = pb_util::SecureShortDebugString(master.registration());
+    // Convert epoch time to localtime.
+    string start_time;
+    StringAppendStrftime(&start_time, "%Y-%m-%d %H:%M:%S %Z",
+                         (time_t)reg.start_time(), true);
+    master_json["start_time"] = start_time;
+    reg.clear_start_time();
+    master_json["registration"] = pb_util::SecureShortDebugString(reg);
   }
 }
 
@@ -644,6 +659,11 @@ void MasterPathHandlers::HandleDumpEntities(const Webserver::WebRequest& /*req*/
 
     jw.String("version");
     jw.String(reg.software_version());
+
+    jw.String("start_time");
+    string time_str;
+    StringAppendStrftime(&time_str, "%Y-%m-%d %H:%M:%S %Z", (time_t)reg.start_time(), true);
+    jw.String(time_str);
 
     jw.EndObject();
   }

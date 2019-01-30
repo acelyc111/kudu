@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "kudu/tools/tool_action.h"
+#include <time.h>
 
 #include <algorithm>
 #include <iostream>
@@ -37,9 +37,11 @@
 #include "kudu/gutil/strings/split.h"
 #include "kudu/gutil/strings/stringpiece.h"
 #include "kudu/gutil/strings/substitute.h"
+#include "kudu/gutil/walltime.h"
 #include "kudu/master/master.h"
 #include "kudu/master/master.pb.h"
 #include "kudu/master/master.proxy.h"
+#include "kudu/tools/tool_action.h"
 #include "kudu/tools/tool_action_common.h"
 #include "kudu/util/status.h"
 
@@ -144,6 +146,13 @@ Status ListMasters(const RunnerContext& context) {
       for (const auto& master : masters) {
         values.push_back(master.registration().software_version());
       }
+    } else if (boost::iequals(column, "start_time")) {
+      for (const auto& master : masters) {
+        string time_str;
+        StringAppendStrftime(&time_str, "%Y-%m-%d %H:%M:%S %Z",
+                             (time_t)master.registration().start_time(), true);
+        values.emplace_back(time_str);
+      }
     } else {
       return Status::InvalidArgument("unknown column (--columns)", column);
     }
@@ -207,7 +216,8 @@ unique_ptr<Mode> BuildMasterMode() {
       .AddOptionalParameter("columns", string("uuid,rpc-addresses"),
                             string("Comma-separated list of master info fields to "
                                    "include in output.\nPossible values: uuid, "
-                                   "rpc-addresses, http-addresses, version, and seqno"))
+                                   "rpc-addresses, http-addresses, version, seqno "
+                                   "and start_time"))
       .AddOptionalParameter("format")
       .AddOptionalParameter("timeout_ms")
       .Build();

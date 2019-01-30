@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "kudu/tools/tool_action.h"
+#include <time.h>
 
 #include <iostream>
 #include <memory>
@@ -35,8 +35,10 @@
 #include "kudu/gutil/strings/split.h"
 #include "kudu/gutil/strings/stringpiece.h"
 #include "kudu/gutil/strings/substitute.h"
+#include "kudu/gutil/walltime.h"
 #include "kudu/master/master.pb.h"
 #include "kudu/master/master.proxy.h"
+#include "kudu/tools/tool_action.h"
 #include "kudu/tools/tool_action_common.h"
 #include "kudu/tserver/tablet_server.h"
 #include "kudu/util/status.h"
@@ -143,6 +145,13 @@ Status ListTServers(const RunnerContext& context) {
         string loc = server.location();
         values.emplace_back(loc.empty() ? "<none>" : std::move(loc));
       }
+    } else if (boost::iequals(column, "start_time")) {
+      for (const auto& server : servers) {
+        string time_str;
+        StringAppendStrftime(&time_str, "%Y-%m-%d %H:%M:%S %Z",
+                             (time_t)server.registration().start_time(), true);
+        values.emplace_back(time_str);
+      }
     } else {
       return Status::InvalidArgument("unknown column (--columns)", column);
     }
@@ -207,7 +216,7 @@ unique_ptr<Mode> BuildTServerMode() {
                             string("Comma-separated list of tserver info fields to "
                                    "include in output.\nPossible values: uuid, "
                                    "rpc-addresses, http-addresses, version, seqno, "
-                                   "and heartbeat"))
+                                   "heartbeat and start_time"))
       .AddOptionalParameter("format")
       .AddOptionalParameter("timeout_ms")
       .Build();
