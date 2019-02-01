@@ -328,11 +328,12 @@ TEST_F(MetricsTest, JsonPrintTest) {
   scoped_refptr<Counter> test_counter = METRIC_test_counter.Instantiate(entity_);
   test_counter->Increment();
   entity_->SetAttribute("test_attr", "attr_val");
+  entity_->SetAttribute("table_name", "table_name_val");
 
   // Generate the JSON.
   std::ostringstream out;
   JsonWriter writer(&out, JsonWriter::PRETTY);
-  ASSERT_OK(entity_->WriteAsJson(&writer, { "*" }, MetricJsonOptions()));
+  ASSERT_OK(entity_->WriteAsJson(&writer, { "*" }, { "*" }, { "*" }, MetricJsonOptions()));
 
   // Now parse it back out.
   JsonReader reader(out.str());
@@ -353,6 +354,9 @@ TEST_F(MetricsTest, JsonPrintTest) {
   string attr_value;
   ASSERT_OK(reader.ExtractString(attributes, "test_attr", &attr_value));
   ASSERT_EQ("attr_val", attr_value);
+  string table_name_value;
+  ASSERT_OK(reader.ExtractString(attributes, "table_name", &table_name_value));
+  ASSERT_EQ("table_name_val", table_name_value);
 
   // Verify that metric filtering matches on substrings.
   out.str("");
@@ -597,7 +601,7 @@ TEST_F(MetricsTest, TestDumpOnlyChanged) {
     opts.only_modified_in_or_after_epoch = since_epoch;
     std::ostringstream out;
     JsonWriter writer(&out, JsonWriter::COMPACT);
-    CHECK_OK(entity_->WriteAsJson(&writer, { "*" }, opts));
+    CHECK_OK(entity_->WriteAsJson(&writer, { "*" }, { "*" }, { "*" }, opts));
     return out.str();
   };
 
@@ -639,7 +643,7 @@ TEST_F(MetricsTest, TestDontDumpUntouched) {
   opts.include_untouched_metrics = false;
   std::ostringstream out;
   JsonWriter writer(&out, JsonWriter::COMPACT);
-  CHECK_OK(entity_->WriteAsJson(&writer, { "*" }, opts));
+  CHECK_OK(entity_->WriteAsJson(&writer, { "*" }, { "*" }, { "*" }, opts));
   // Untouched counters and histograms should not be included.
   ASSERT_STR_NOT_CONTAINS(out.str(), "test_counter");
   ASSERT_STR_NOT_CONTAINS(out.str(), "test_hist");

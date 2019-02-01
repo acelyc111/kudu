@@ -1106,10 +1106,10 @@ TYPED_TEST(TestTablet, TestMetricsInit) {
   MetricRegistry* registry = this->harness()->metrics_registry();
   std::ostringstream out;
   JsonWriter writer(&out, JsonWriter::PRETTY);
-  ASSERT_OK(registry->WriteAsJson(&writer, { "*" }, MetricJsonOptions()));
+  ASSERT_OK(registry->WriteAsJson(&writer, { "*" }, { "*" }, { "*" }, MetricJsonOptions()));
   // Open tablet, should still work
   this->harness()->Open();
-  ASSERT_OK(registry->WriteAsJson(&writer, { "*" }, MetricJsonOptions()));
+  ASSERT_OK(registry->WriteAsJson(&writer, { "*" }, { "*" }, { "*" }, MetricJsonOptions()));
 }
 
 // Test that we find the correct log segment size for different indexes.
