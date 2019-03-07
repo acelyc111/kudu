@@ -217,6 +217,55 @@ TEST_F(MetricsTest, SimpleFunctionGaugeTest) {
   ASSERT_EQ(2, gauge->value());
 }
 
+METRIC_DEFINE_gauge_int64(tablet, test_func_gauge_clone, "Test Function Gauge clone",
+                          MetricUnit::kOperations, "Description of Function Gauge clone");
+class FunctionGaugeOwner {
+public:
+  explicit FunctionGaugeOwner(const scoped_refptr<MetricEntity>& entity) {
+    METRIC_test_func_gauge_clone.InstantiateFunctionGauge(entity,
+       Bind(&FunctionGaugeOwner::Count, Unretained(this)))
+       ->AutoDetach(&metric_detacher_);
+  }
+
+  int64_t Count() {
+    return count_++;
+  }
+
+private:
+  int64_t count_ = 0;
+  FunctionGaugeDetacher metric_detacher_;
+};
+
+TEST_F(MetricsTest, SimpleFunctionGaugeCloneTest) {
+  std::unique_ptr<FunctionGaugeOwner> fgo(new FunctionGaugeOwner(entity_));
+  scoped_refptr<FunctionGauge<int64_t>> old_metric = down_cast<FunctionGauge<int64_t>*>(
+    entity_->FindOrNull(METRIC_test_func_gauge_clone).get());
+  ASSERT_EQ(0, old_metric->value());
+  ASSERT_EQ(1, old_metric->value());  // old_metric increased to 2.
+  // old_metric increased to 3, and new_metric stay at 2.
+  scoped_refptr<FunctionGauge<int64_t>> new_metric =
+      down_cast<FunctionGauge<int64_t>*>(old_metric->clone().get());
+  ASSERT_EQ(3, old_metric->value());
+  ASSERT_EQ(4, old_metric->value());
+  ASSERT_EQ(2, new_metric->value());
+  ASSERT_EQ(2, new_metric->value());
+}
+
+TEST_F(MetricsTest, ReleasableFunctionGaugeCloneTest) {
+  scoped_refptr<FunctionGauge<int64_t>> new_metric;
+  {
+    std::unique_ptr<FunctionGaugeOwner> fgo(new FunctionGaugeOwner(entity_));
+    scoped_refptr<FunctionGauge<int64_t>> old_metric = down_cast<FunctionGauge<int64_t>*>(
+      entity_->FindOrNull(METRIC_test_func_gauge_clone).get());
+    ASSERT_EQ(0, old_metric->value());
+    ASSERT_EQ(1, old_metric->value());  // old_metric increased to 2.
+    // old_metric increased to 3, and new_metric stay at 2.
+    new_metric = down_cast<FunctionGauge<int64_t>*>(old_metric->clone().get());
+  }
+  ASSERT_EQ(2, new_metric->value());
+  ASSERT_EQ(2, new_metric->value());
+}
+
 TEST_F(MetricsTest, SimpleFunctionGaugeMergeTest) {
   int metric_val = 1000;
   scoped_refptr<FunctionGauge<int64_t> > gauge =

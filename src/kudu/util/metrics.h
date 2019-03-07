@@ -972,7 +972,9 @@ class AtomicGauge : public Gauge {
 //
 // Example usage:
 //
-// METRIC_define_gauge_int64(my_metric, MetricUnit::kOperations, "My metric docs");
+// METRIC_DEFINE_gauge_int64(my_entity, my_metric, "My metric docs",
+//                           MetricUnit::kOperations,
+//                           "My metric docs for Kudu");
 // class MyClassWithMetrics {
 //  public:
 //   MyClassWithMetrics(const scoped_refptr<MetricEntity>& entity) {
@@ -1024,6 +1026,10 @@ class FunctionGauge : public Gauge {
   scoped_refptr<Metric> clone() const override {
     scoped_refptr<Metric> m = new FunctionGauge(dynamic_cast<const GaugePrototype<T>*>(prototype_),
                                                 Callback<T()>(function_));
+    // The bounded function is associated with another MetricEntity instance, here we don't know
+    // when it release, it's not safe to keep the function as a member, so it's needed to
+    // call DetachToCurrentValue() to make it safe.
+    dynamic_cast<FunctionGauge<T>*>(m.get())->DetachToCurrentValue();
     return m;
   }
 
