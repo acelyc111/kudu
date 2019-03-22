@@ -24,6 +24,7 @@
 #include <rapidjson/document.h>
 
 #include "kudu/gutil/macros.h"
+#include "kudu/gutil/port.h"
 #include "kudu/util/status.h"
 
 namespace kudu {
@@ -34,12 +35,12 @@ namespace kudu {
 // clients. That's because there's just no easy way to implement object and
 // array parsing otherwise. At most, this class aspires to be a simpler
 // error-handling wrapper for reading and parsing.
-class JsonReader {
- public:
-  explicit JsonReader(std::string text);
-  ~JsonReader();
+class JsonReaderBase {
+public:
+  JsonReaderBase() = default;
+  virtual ~JsonReaderBase() = default;
 
-  Status Init();
+  virtual Status Init() = 0;
 
   // Extractor methods.
   //
@@ -76,27 +77,52 @@ class JsonReader {
                        const char* field,
                        double* result) const;
 
-  // 'result' is only valid for as long as JsonReader is alive.
+  // 'result' is only valid for as long as JsonReaderBase is alive.
   Status ExtractObject(const rapidjson::Value* object,
                        const char* field,
                        const rapidjson::Value** result) const;
 
-  // 'result' is only valid for as long as JsonReader is alive.
+  // 'result' is only valid for as long as JsonReaderBase is alive.
   Status ExtractObjectArray(const rapidjson::Value* object,
                             const char* field,
                             std::vector<const rapidjson::Value*>* result) const;
 
   const rapidjson::Value* root() const { return &document_; }
 
- private:
+protected:
   Status ExtractField(const rapidjson::Value* object,
                       const char* field,
                       const rapidjson::Value** result) const;
 
-  std::string text_;
   rapidjson::Document document_;
 
+  DISALLOW_COPY_AND_ASSIGN(JsonReaderBase);
+};
+
+class JsonReader : public JsonReaderBase {
+public:
+  explicit JsonReader(std::string text);
+  ~JsonReader() OVERRIDE = default;
+
+  Status Init() OVERRIDE;
+
+private:
+  std::string text_;
+
   DISALLOW_COPY_AND_ASSIGN(JsonReader);
+};
+
+class JsonFileReader : public JsonReaderBase {
+public:
+  explicit JsonFileReader(std::string filename);
+  ~JsonFileReader() OVERRIDE = default;
+
+  Status Init() OVERRIDE;
+
+ private:
+  std::string filename_;
+
+  DISALLOW_COPY_AND_ASSIGN(JsonFileReader);
 };
 
 } // namespace kudu
