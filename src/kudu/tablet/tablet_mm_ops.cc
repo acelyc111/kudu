@@ -87,6 +87,10 @@ string TabletOpBase::LogPrefix() const {
   return tablet_->LogPrefix();
 }
 
+const std::string& TabletOpBase::table_id() const {
+  return tablet_->table_id();
+}
+
 ////////////////////////////////////////////////////////////
 // CompactRowSetsOp
 ////////////////////////////////////////////////////////////
@@ -262,12 +266,12 @@ void MajorDeltaCompactionOp::UpdateStats(MaintenanceOpStats* stats) {
   // cached stats.
   TabletMetrics* metrics = tablet_->metrics();
   if (metrics) {
-    int64_t new_num_mrs_flushed = metrics->flush_mrs_duration->TotalCount();
-    int64_t new_num_dms_flushed = metrics->flush_dms_duration->TotalCount();
-    int64_t new_num_rs_compacted = metrics->compact_rs_duration->TotalCount();
-    int64_t new_num_rs_minor_delta_compacted =
+    uint64_t new_num_mrs_flushed = metrics->flush_mrs_duration->TotalCount();
+    uint64_t new_num_dms_flushed = metrics->flush_dms_duration->TotalCount();
+    uint64_t new_num_rs_compacted = metrics->compact_rs_duration->TotalCount();
+    uint64_t new_num_rs_minor_delta_compacted =
         metrics->delta_minor_compact_rs_duration->TotalCount();
-    int64_t new_num_rs_major_delta_compacted =
+    uint64_t new_num_rs_major_delta_compacted =
         metrics->delta_major_compact_rs_duration->TotalCount();
     if (prev_stats_.valid() &&
         new_num_mrs_flushed == last_num_mrs_flushed_ &&
