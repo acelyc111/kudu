@@ -43,6 +43,8 @@ class TabletOpBase : public MaintenanceOp {
   std::string LogPrefix() const;
 
  protected:
+  const std::string& table_id() const OVERRIDE;
+
   Tablet* const tablet_;
 };
 
@@ -57,15 +59,15 @@ class CompactRowSetsOp : public TabletOpBase {
  public:
   explicit CompactRowSetsOp(Tablet* tablet);
 
-  virtual void UpdateStats(MaintenanceOpStats* stats) OVERRIDE;
+  void UpdateStats(MaintenanceOpStats* stats) OVERRIDE;
 
-  virtual bool Prepare() OVERRIDE;
+  bool Prepare() OVERRIDE;
 
-  virtual void Perform() OVERRIDE;
+  void Perform() OVERRIDE;
 
-  virtual scoped_refptr<Histogram> DurationHistogram() const OVERRIDE;
+  scoped_refptr<Histogram> DurationHistogram() const OVERRIDE;
 
-  virtual scoped_refptr<AtomicGauge<uint32_t> > RunningGauge() const OVERRIDE;
+  scoped_refptr<AtomicGauge<uint32_t> > RunningGauge() const OVERRIDE;
 
  private:
   mutable simple_spinlock lock_;
@@ -83,15 +85,15 @@ class MinorDeltaCompactionOp : public TabletOpBase {
  public:
   explicit MinorDeltaCompactionOp(Tablet* tablet);
 
-  virtual void UpdateStats(MaintenanceOpStats* stats) OVERRIDE;
+  void UpdateStats(MaintenanceOpStats* stats) OVERRIDE;
 
-  virtual bool Prepare() OVERRIDE;
+  bool Prepare() OVERRIDE;
 
-  virtual void Perform() OVERRIDE;
+  void Perform() OVERRIDE;
 
-  virtual scoped_refptr<Histogram> DurationHistogram() const OVERRIDE;
+  scoped_refptr<Histogram> DurationHistogram() const OVERRIDE;
 
-  virtual scoped_refptr<AtomicGauge<uint32_t> > RunningGauge() const OVERRIDE;
+  scoped_refptr<AtomicGauge<uint32_t> > RunningGauge() const OVERRIDE;
 
  private:
   mutable simple_spinlock lock_;
@@ -109,15 +111,15 @@ class MajorDeltaCompactionOp : public TabletOpBase {
  public:
   explicit MajorDeltaCompactionOp(Tablet* tablet);
 
-  virtual void UpdateStats(MaintenanceOpStats* stats) OVERRIDE;
+  void UpdateStats(MaintenanceOpStats* stats) OVERRIDE;
 
-  virtual bool Prepare() OVERRIDE;
+  bool Prepare() OVERRIDE;
 
-  virtual void Perform() OVERRIDE;
+  void Perform() OVERRIDE;
 
-  virtual scoped_refptr<Histogram> DurationHistogram() const OVERRIDE;
+  scoped_refptr<Histogram> DurationHistogram() const OVERRIDE;
 
-  virtual scoped_refptr<AtomicGauge<uint32_t> > RunningGauge() const OVERRIDE;
+  scoped_refptr<AtomicGauge<uint32_t> > RunningGauge() const OVERRIDE;
 
  private:
   mutable simple_spinlock lock_;
@@ -138,19 +140,19 @@ class UndoDeltaBlockGCOp : public TabletOpBase {
   // Estimates the number of bytes that may potentially be in ancient delta
   // undo blocks. Over time, as Perform() is invoked, this estimate gets more
   // accurate.
-  void UpdateStats(MaintenanceOpStats* stats) override;
+  void UpdateStats(MaintenanceOpStats* stats) OVERRIDE;
 
-  bool Prepare() override;
+  bool Prepare() OVERRIDE;
 
   // Deletes ancient history data from disk. This also initializes undo delta
   // blocks greedily (in a budgeted manner controlled by the
   // --undo_delta_block_gc_init_budget_millis gflag) that makes the estimate
   // performed in UpdateStats() more accurate.
-  void Perform() override;
+  void Perform() OVERRIDE;
 
-  scoped_refptr<Histogram> DurationHistogram() const override;
+  scoped_refptr<Histogram> DurationHistogram() const OVERRIDE;
 
-  scoped_refptr<AtomicGauge<uint32_t> > RunningGauge() const override;
+  scoped_refptr<AtomicGauge<uint32_t> > RunningGauge() const OVERRIDE;
 
  private:
   std::string LogPrefix() const;
