@@ -124,7 +124,6 @@ TabletReplica::TabletReplica(
     Callback<void(const std::string& reason)> mark_dirty_clbk)
     : meta_(DCHECK_NOTNULL(std::move(meta))),
       cmeta_manager_(DCHECK_NOTNULL(std::move(cmeta_manager))),
-      tablet_id_(meta_->tablet_id()),
       local_peer_pb_(std::move(local_peer_pb)),
       log_anchor_registry_(new LogAnchorRegistry()),
       apply_pool_(apply_pool),

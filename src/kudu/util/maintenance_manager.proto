@@ -26,29 +26,27 @@ message MaintenanceManagerStatusPB {
     // Number of times this operation is currently running.
     required uint32 running = 2;
     required bool runnable = 3;
-    required uint64 ram_anchored_bytes = 4;
+    required int64 ram_anchored_bytes = 4;
     required int64 logs_retained_bytes = 5;
     required double perf_improvement = 6;
   }
 
   message OpInstancePB {
-    required int64 thread_id = 1;
-    required string name = 2;
+    required bool as_privilege = 1;
+    required int64 thread_id = 2;
+    required string name = 3;
     // How long the op took to run. Only present if the instance completed.
-    optional int32 duration_millis = 3;
+    optional int32 duration_millis = 4;
     // Number of milliseconds since this operation started.
-    required int32 millis_since_start = 4;
+    required int32 millis_since_start = 5;
   }
 
-  // The next operation that would run.
-  optional MaintenanceOpPB best_op = 1;
-
   // List of all the operations.
-  repeated MaintenanceOpPB registered_operations = 2;
+  repeated MaintenanceOpPB registered_operations = 1;
 
   // This list isn't in order of anything. Can contain the same operation multiple times.
-  repeated OpInstancePB running_operations = 3;
+  repeated OpInstancePB running_operations = 2;
 
   // This list isn't in order of anything. Can contain the same operation multiple times.
-  repeated OpInstancePB completed_operations = 4;
+  repeated OpInstancePB completed_operations = 3;
 }

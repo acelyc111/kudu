@@ -18,7 +18,6 @@
 #include "kudu/util/maintenance_manager.h"
 
 #include <cinttypes>
-#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -33,6 +32,7 @@
 #include "kudu/gutil/dynamic_annotations.h"
 #include "kudu/gutil/map-util.h"
 #include "kudu/gutil/stringprintf.h"
+#include "kudu/gutil/strings/split.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/util/debug/trace_event.h"
 #include "kudu/util/debug/trace_logging.h"
@@ -49,7 +49,9 @@
 #include "kudu/util/trace.h"
 
 using std::pair;
+using std::set;
 using std::string;
+using strings::Split;
 using strings::Substitute;
 
 DEFINE_int32(maintenance_manager_num_threads, 1,
@@ -57,6 +59,14 @@ DEFINE_int32(maintenance_manager_num_threads, 1,
              "For spinning disks, the number of threads should "
              "not be above the number of devices.");
 TAG_FLAG(maintenance_manager_num_threads, stable);
+
+DEFINE_int32(maintenance_manager_privilege_num_threads, 1,
+             "Size of the maintenance manager thread pool for privilege OPs. "
+             "Maintenance OPs whose table id in --maintenance_manager_privilege_table_ids or "
+             "tablet id in --maintenance_manager_privilege_tablet_ids will be launched in this "
+             "privilege thread pool.");
+TAG_FLAG(maintenance_manager_privilege_num_threads, advanced);
+TAG_FLAG(maintenance_manager_privilege_num_threads, experimental);
 
 DEFINE_int32(maintenance_manager_polling_interval_ms, 250,
        "Polling interval for the maintenance manager scheduler, "
@@ -91,6 +101,18 @@ DEFINE_double(data_gc_prioritization_prob, 0.5,
              "such as delta compaction.");
 TAG_FLAG(data_gc_prioritization_prob, experimental);
 
+DEFINE_string(maintenance_manager_privilege_table_ids, "",
+              "Table ids to privilege launch for maintenance.");
+TAG_FLAG(maintenance_manager_privilege_table_ids, advanced);
+TAG_FLAG(maintenance_manager_privilege_table_ids, experimental);
+TAG_FLAG(maintenance_manager_privilege_table_ids, runtime);
+
+DEFINE_string(maintenance_manager_privilege_tablet_ids, "",
+              "Tablet ids to privilege launch for maintenance.");
+TAG_FLAG(maintenance_manager_privilege_tablet_ids, advanced);
+TAG_FLAG(maintenance_manager_privilege_tablet_ids, experimental);
+TAG_FLAG(maintenance_manager_privilege_tablet_ids, runtime);
+
 namespace kudu {
 
 MaintenanceOpStats::MaintenanceOpStats() {
@@ -124,20 +146,28 @@ void MaintenanceOp::Unregister() {
   manager_->UnregisterOp(this);
 }
 
+bool MaintenanceOp::IsPrivilege(const set<string>& privilege_table_id,
+                                const set<string>& privilege_tablet_id) const {
+  return ContainsKey(privilege_table_id, table_id())
+    || ContainsKey(privilege_tablet_id, tablet_id());
+}
+
 MaintenanceManagerStatusPB_OpInstancePB OpInstance::DumpToPB() const {
   MaintenanceManagerStatusPB_OpInstancePB pb;
+  pb.set_as_privilege(as_privilege);
   pb.set_thread_id(thread_id);
   pb.set_name(name);
   if (duration.Initialized()) {
-    pb.set_duration_millis(duration.ToMilliseconds());
+    pb.set_duration_millis(static_cast<int32_t>(duration.ToMilliseconds()));
   }
   MonoDelta delta(MonoTime::Now() - start_mono_time);
-  pb.set_millis_since_start(delta.ToMilliseconds());
+  pb.set_millis_since_start(static_cast<int32_t>(delta.ToMilliseconds()));
   return pb;
 }
 
 const MaintenanceManager::Options MaintenanceManager::kDefaultOptions = {
   .num_threads = 0,
+  .privilege_num_threads = 0,
   .polling_interval_ms = 0,
   .history_size = 0,
 };
@@ -147,12 +177,15 @@ MaintenanceManager::MaintenanceManager(const Options& options,
   : server_uuid_(std::move(server_uuid)),
     num_threads_(options.num_threads <= 0 ?
                  FLAGS_maintenance_manager_num_threads : options.num_threads),
+    privilege_num_threads_(options.privilege_num_threads <= 0 ?
+                 FLAGS_maintenance_manager_privilege_num_threads : options.privilege_num_threads),
     cond_(&lock_),
     shutdown_(false),
     polling_interval_ms_(options.polling_interval_ms <= 0 ?
           FLAGS_maintenance_manager_polling_interval_ms :
           options.polling_interval_ms),
     running_ops_(0),
+    running_privilege_ops_(0),
     completed_ops_count_(0),
     rand_(GetRandomSeed32()),
     memory_pressure_func_(&process_memory::UnderMemoryPressure) {
@@ -160,6 +193,10 @@ MaintenanceManager::MaintenanceManager(const Options& options,
                .set_min_threads(num_threads_)
                .set_max_threads(num_threads_)
                .Build(&thread_pool_));
+  CHECK_OK(ThreadPoolBuilder("PrivilegeMaintenanceMgr")
+               .set_min_threads(privilege_num_threads_)
+               .set_max_threads(privilege_num_threads_)
+               .Build(&privilege_thread_pool_));
   uint32_t history_size = options.history_size == 0 ?
                           FLAGS_maintenance_manager_history_size :
                           options.history_size;
@@ -264,8 +301,7 @@ void MaintenanceManager::RunSchedulerThread() {
     //    1) there are no free threads available to perform a maintenance op.
     // or 2) we just tried to schedule an op but found nothing to run.
     // However, if it's time to shut down, we want to do so immediately.
-    while ((running_ops_ >= num_threads_ || prev_iter_found_no_work || disabled_for_tests()) &&
-           !shutdown_) {
+    while (CouldNotLaunchNewOp(prev_iter_found_no_work)) {
       cond_.WaitFor(polling_interval);
       prev_iter_found_no_work = false;
     }
@@ -274,42 +310,51 @@ void MaintenanceManager::RunSchedulerThread() {
       return;
     }
 
-    // Find the best op.
-    auto best_op_and_why = FindBestOp();
-    auto* op = best_op_and_why.first;
-    const auto& note = best_op_and_why.second;
+    // TODO(yingchun): move it to SetFlag, callback once as a gflags setter handler.
+    UpdatePrivilegeIds();
 
     // If we found no work to do, then we should sleep before trying again to schedule.
     // Otherwise, we can go right into trying to find the next op.
-    prev_iter_found_no_work = (op == nullptr);
-    if (!op) {
-      VLOG_AND_TRACE_WITH_PREFIX("maintenance", 2)
-          << "No maintenance operations look worth doing.";
-      continue;
-    }
-
-    // Prepare the maintenance operation.
-    op->running_++;
-    running_ops_++;
-    guard.unlock();
-    bool ready = op->Prepare();
-    guard.lock();
-    if (!ready) {
-      LOG_WITH_PREFIX(INFO) << "Prepare failed for " << op->name()
-                            << ". Re-running scheduler.";
-      op->running_--;
-      running_ops_--;
-      op->cond_->Signal();
-      continue;
-    }
-
-    LOG_AND_TRACE_WITH_PREFIX("maintenance", INFO)
-        << Substitute("Scheduling $0: $1", op->name(), note);
-    // Run the maintenance operation.
-    Status s = thread_pool_->SubmitFunc(boost::bind(
-        &MaintenanceManager::LaunchOp, this, op));
-    CHECK(s.ok());
+    bool privilege_op_found = FindAndLaunchOp(&guard, MaintenanceType::kPrivilege);
+    bool common_op_found = FindAndLaunchOp(&guard, MaintenanceType::kCommon);
+    prev_iter_found_no_work = !common_op_found && !privilege_op_found;
   }
+}
+
+bool MaintenanceManager::FindAndLaunchOp(std::unique_lock<Mutex>* guard,
+                                         MaintenanceType type) {
+  // Find the best op.
+  auto best_op_and_why = FindBestOp(type);
+  auto* op = best_op_and_why.first;
+  const auto& note = best_op_and_why.second;
+
+  if (!op) {
+    VLOG_AND_TRACE_WITH_PREFIX("maintenance", 2)
+        << "No maintenance operations look worth doing.";
+    return false;
+  }
+
+  // Prepare the maintenance operation.
+  IncreaseOpCount(type, op);
+  guard->unlock();
+  bool ready = op->Prepare();
+  guard->lock();
+  if (!ready) {
+    LOG_WITH_PREFIX(INFO) << "Prepare failed for " << op->name()
+                          << ". Re-running scheduler.";
+    DecreaseOpCount(type, op);
+    op->cond_->Signal();
+    return true;
+  }
+
+  LOG_AND_TRACE_WITH_PREFIX("maintenance", INFO)
+      << Substitute("Scheduling $0: $1", op->name(), note);
+  // Run the maintenance operation.
+  auto& thread_pool = (type == MaintenanceType::kCommon ? thread_pool_ : privilege_thread_pool_);
+  Status s = thread_pool->SubmitFunc(boost::bind(&MaintenanceManager::LaunchOp, this, type, op));
+  CHECK(s.ok());
+
+  return true;
 }
 
 // Finding the best operation goes through four filters:
@@ -332,11 +377,10 @@ void MaintenanceManager::RunSchedulerThread() {
 // some sort of sliding priority between log retention and RAM usage. For example, is an Op that
 // frees 128MB of log retention and 12MB of RAM always better than an op that frees 12MB of log
 // retention and 128MB of RAM? Maybe a more holistic approach would be better.
-pair<MaintenanceOp*, string> MaintenanceManager::FindBestOp() {
+pair<MaintenanceOp*, string> MaintenanceManager::FindBestOp(MaintenanceType type) {
   TRACE_EVENT0("maintenance", "MaintenanceManager::FindBestOp");
 
-  size_t free_threads = num_threads_ - running_ops_;
-  if (free_threads == 0) {
+  if (!HasFreeThreads(type)) {
     return {nullptr, "no free threads"};
   }
 
@@ -358,6 +402,13 @@ pair<MaintenanceOp*, string> MaintenanceManager::FindBestOp() {
   for (auto& val : ops_) {
     MaintenanceOp* op(val.first);
     MaintenanceOpStats& stats(val.second);
+    // Privilege OPs can be submitted into both privilege and common thread pool, while
+    // common OPs can only be submitted into common thread pool.
+    if (type == MaintenanceType::kPrivilege && !op->IsPrivilege(privilege_table_ids_,
+                                                                privilege_tablet_ids_)) {
+      continue;
+    }
+
     VLOG_WITH_PREFIX(3) << "Considering MM op " << op->name();
     // Update op stats.
     stats.Clear();
@@ -456,9 +507,10 @@ pair<MaintenanceOp*, string> MaintenanceManager::FindBestOp() {
   return {nullptr, "no ops with positive improvement"};
 }
 
-void MaintenanceManager::LaunchOp(MaintenanceOp* op) {
+void MaintenanceManager::LaunchOp(MaintenanceType type, MaintenanceOp* op) {
   int64_t thread_id = Thread::CurrentThreadId();
   OpInstance op_instance;
+  op_instance.as_privilege = (type == MaintenanceType::kPrivilege);
   op_instance.thread_id = thread_id;
   op_instance.name = op->name();
   op_instance.start_mono_time = MonoTime::Now();
@@ -481,9 +533,7 @@ void MaintenanceManager::LaunchOp(MaintenanceOp* op) {
     completed_ops_count_++;
 
     op->DurationHistogram()->Increment(op_instance.duration.ToMilliseconds());
-
-    running_ops_--;
-    op->running_--;
+    DecreaseOpCount(type, op);
     op->cond_->Signal();
     cond_.Signal(); // Wake up scheduler.
   });
@@ -507,9 +557,6 @@ void MaintenanceManager::LaunchOp(MaintenanceOp* op) {
 void MaintenanceManager::GetMaintenanceManagerStatusDump(MaintenanceManagerStatusPB* out_pb) {
   DCHECK(out_pb != nullptr);
   std::lock_guard<Mutex> guard(lock_);
-  auto best_op_and_why = FindBestOp();
-  auto* best_op = best_op_and_why.first;
-
   for (const auto& val : ops_) {
     MaintenanceManagerStatusPB_MaintenanceOpPB* op_pb = out_pb->add_registered_operations();
     MaintenanceOp* op(val.first);
@@ -527,10 +574,6 @@ void MaintenanceManager::GetMaintenanceManagerStatusDump(MaintenanceManagerStatu
       op_pb->set_logs_retained_bytes(0);
       op_pb->set_perf_improvement(0.0);
     }
-
-    if (best_op == op) {
-      out_pb->mutable_best_op()->CopyFrom(*op_pb);
-    }
   }
 
   {
@@ -540,8 +583,9 @@ void MaintenanceManager::GetMaintenanceManagerStatusDump(MaintenanceManagerStatu
     }
   }
 
+  // The latest completed op will dump at first.
   for (int n = 1; n <= completed_ops_.size(); n++) {
-    int i = completed_ops_count_ - n;
+    int64_t i = completed_ops_count_ - n;
     if (i < 0) break;
     const auto& completed_op = completed_ops_[i % completed_ops_.size()];
 
@@ -553,6 +597,52 @@ void MaintenanceManager::GetMaintenanceManagerStatusDump(MaintenanceManagerStatu
 
 std::string MaintenanceManager::LogPrefix() const {
   return Substitute("P $0: ", server_uuid_);
+}
+
+bool MaintenanceManager::HasFreeThreads(MaintenanceType type) {
+  if (type == MaintenanceType::kCommon) {
+    return num_threads_ - running_ops_ > 0;
+  }
+
+  CHECK(type == MaintenanceType::kPrivilege);
+  return privilege_num_threads_ - running_privilege_ops_ > 0;
+}
+
+bool MaintenanceManager::CouldNotLaunchNewOp(bool prev_iter_found_no_work) {
+  return ((!HasFreeThreads(MaintenanceType::kPrivilege)
+    && !HasFreeThreads(MaintenanceType::kCommon))
+    || prev_iter_found_no_work || disabled_for_tests()) && !shutdown_;
+}
+
+void MaintenanceManager::UpdatePrivilegeIds() {
+  string table_ids;
+  if (google::GetCommandLineOption("maintenance_manager_privilege_table_ids", &table_ids)) {
+    privilege_table_ids_ = set<string>(Split(table_ids, ",", strings::SkipEmpty()));
+  }
+  string tablet_ids;
+  if (google::GetCommandLineOption("maintenance_manager_privilege_tablet_ids", &tablet_ids)) {
+    privilege_tablet_ids_ = set<string>(Split(tablet_ids, ",", strings::SkipEmpty()));
+  }
+}
+
+void MaintenanceManager::IncreaseOpCount(MaintenanceType type, MaintenanceOp *op) {
+  op->running_++;
+  if (type == MaintenanceType::kCommon) {
+    running_ops_++;
+  } else {
+    CHECK(type == MaintenanceType::kPrivilege);
+    running_privilege_ops_++;
+  }
+}
+
+void MaintenanceManager::DecreaseOpCount(MaintenanceType type, MaintenanceOp *op) {
+  op->running_--;
+  if (type == MaintenanceType::kCommon) {
+    running_ops_--;
+  } else {
+    CHECK(type == MaintenanceType::kPrivilege);
+    running_privilege_ops_--;
+  }
 }
 
 } // namespace kudu

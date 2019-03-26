@@ -629,6 +629,7 @@ void TabletServerPathHandlers::HandleMaintenanceManagerPage(const Webserver::Web
   for (const auto& op_pb : pb.completed_operations()) {
     EasyJson completed_op = completed_ops.PushBack(EasyJson::kObject);
     completed_op["name"] = op_pb.name();
+    completed_op["privilege"] = op_pb.as_privilege();
     completed_op["duration"] =
       HumanReadableElapsedTime::ToShortString(op_pb.duration_millis() / 1000.0);
     completed_op["time_since_start"] =
