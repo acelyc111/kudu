@@ -22,6 +22,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -154,6 +155,8 @@ class MaintenanceOpStats {
 
 // Represents an instance of a maintenance operation.
 struct OpInstance {
+  // Whether the instance is launched as a privilege OP.
+  bool as_privilege;
   // Id of thread the instance ran on.
   int64_t thread_id;
   // Name of operation.
@@ -229,7 +232,13 @@ class MaintenanceOp {
     cancel_.Store(true);
   }
 
+  bool IsPrivilege(const std::set<std::string>& privilege_table_id,
+                   const std::set<std::string>& privilege_tablet_id) const;
+
  private:
+  virtual const std::string& table_id() const = 0;
+  virtual const std::string& tablet_id() const = 0;
+
   DISALLOW_COPY_AND_ASSIGN(MaintenanceOp);
 
   // The name of the operation.  Op names must be unique.
@@ -271,8 +280,14 @@ class MaintenanceManager : public std::enable_shared_from_this<MaintenanceManage
  public:
   struct Options {
     int32_t num_threads;
+    int32_t privilege_num_threads;
     int32_t polling_interval_ms;
     uint32_t history_size;
+  };
+
+  enum class MaintenanceType {
+    kCommon = 0,
+    kPrivilege = 1,
   };
 
   MaintenanceManager(const Options& options, std::string server_uuid);
@@ -311,26 +326,42 @@ class MaintenanceManager : public std::enable_shared_from_this<MaintenanceManage
 
   void RunSchedulerThread();
 
+  bool FindAndLaunchOp(std::unique_lock<Mutex>* guard, MaintenanceType type);
+
   // Find the best op, or null if there is nothing we want to run.
   //
   // Returns the op, as well as a string explanation of why that op was chosen,
   // suitable for logging.
-  std::pair<MaintenanceOp*, std::string> FindBestOp();
+  std::pair<MaintenanceOp*, std::string> FindBestOp(MaintenanceType type);
 
-  void LaunchOp(MaintenanceOp* op);
+  void LaunchOp(MaintenanceType type, MaintenanceOp* op);
 
   std::string LogPrefix() const;
 
+  bool HasFreeThreads(MaintenanceType type);
+
+  bool CouldNotLaunchNewOp(bool prev_iter_found_no_work);
+
+  void UpdatePrivilegeIds();
+
+  void IncreaseOpCount(MaintenanceType type, MaintenanceOp *op);
+  void DecreaseOpCount(MaintenanceType type, MaintenanceOp *op);
+
   const std::string server_uuid_;
+  std::set<std::string> privilege_table_ids_;
+  std::set<std::string> privilege_tablet_ids_;
   const int32_t num_threads_;
+  const int32_t privilege_num_threads_;
   OpMapTy ops_; // Registered operations.
   Mutex lock_;
   scoped_refptr<kudu::Thread> monitor_thread_;
   gscoped_ptr<ThreadPool> thread_pool_;
+  gscoped_ptr<ThreadPool> privilege_thread_pool_;
   ConditionVariable cond_;
   bool shutdown_;
   int32_t polling_interval_ms_;
-  uint64_t running_ops_;
+  int32_t running_ops_;
+  int32_t running_privilege_ops_;
   // Vector used as a circular buffer for recently completed ops. Elements need to be added at
   // the completed_ops_count_ % the vector's size and then the count needs to be incremented.
   std::vector<OpInstance> completed_ops_;
