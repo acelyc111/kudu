@@ -19,6 +19,7 @@
 #include <iostream>
 #include <list>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -308,37 +309,47 @@ class PeriodicWebUIChecker {
  public:
   PeriodicWebUIChecker(const cluster::ExternalMiniCluster& cluster,
                        MonoDelta period,
-                       const std::string& tablet_id = "")
+                       const std::string& tablet_id = "",
+                       const std::set<std::string>& request_master_pages = { "*" },
+                       const std::set<std::string>& request_ts_pages = { "*" })
       : period_(period), is_running_(true) {
-    // List of master web pages to fetch.
-    const std::vector<std::string> master_pages = {
-      "/dump-entities",
-      "/masters",
-      "/mem-trackers",
-      "/metrics",
-      "/metrics?origin=false&merge=true",
-      "/stacks",
-      "/tables",
-      "/tablet-servers",
-      "/threadz",
-      "/threadz?group=all",
-    };
+    // List of master web pages to fetch
+    std::vector<std::string> master_pages;
+    if (ContainsKey(request_master_pages, "*")) {
+      master_pages.emplace_back("/dump-entities");
+      master_pages.emplace_back("/masters");
+      master_pages.emplace_back("/mem-trackers");
+      master_pages.emplace_back("/metrics");
+      master_pages.emplace_back("/metrics?origin=false&merge=true");
+      master_pages.emplace_back("/stacks");
+      master_pages.emplace_back("/tables");
+      master_pages.emplace_back("/tablet-servers");
+      master_pages.emplace_back("/threadz");
+      master_pages.emplace_back("/threadz?group=all");
+    } else {
+      master_pages = std::vector<std::string>(request_master_pages.begin(),
+                                              request_master_pages.end());
+    }
 
     // List of tserver web pages to fetch.
-    const std::vector<std::string> ts_pages = {
-      "/maintenance-manager",
-      "/mem-trackers",
-      "/metrics",
-      "/metrics?origin=false&merge=true",
-      "/scans",
-      "/stacks",
-      "/tablets",
-      "/threadz",
-      "/threadz?group=all",
-      tablet_id.empty()
+    std::vector<std::string> ts_pages;
+    if (ContainsKey(request_ts_pages, "*")) {
+      ts_pages.emplace_back("/maintenance-manager");
+      ts_pages.emplace_back("/mem-trackers");
+      ts_pages.emplace_back("/metrics");
+      ts_pages.emplace_back("/metrics?origin=false&merge=true");
+      ts_pages.emplace_back("/scans");
+      ts_pages.emplace_back("/stacks");
+      ts_pages.emplace_back("/tablets");
+      ts_pages.emplace_back("/threadz");
+      ts_pages.emplace_back("/threadz?group=all");
+      ts_pages.emplace_back(tablet_id.empty()
           ? "/transactions"
-          : strings::Substitute("/transactions?tablet_id=$0", tablet_id),
-    };
+          : strings::Substitute("/transactions?tablet_id=$0", tablet_id));
+    } else {
+      ts_pages = std::vector<std::string>(request_ts_pages.begin(),
+                                          request_ts_pages.end());
+    }
 
     // Generate list of urls for each master and tablet server
     for (int i = 0; i < cluster.num_masters(); i++) {
@@ -364,12 +375,16 @@ class PeriodicWebUIChecker {
                             &PeriodicWebUIChecker::CheckThread, this, &checker_));
   }
 
-  ~PeriodicWebUIChecker() {
+  void StopAndJoin() {
     LOG(INFO) << "Shutting down curl thread";
     is_running_.Store(false);
     if (checker_) {
       checker_->Join();
     }
+  }
+
+  ~PeriodicWebUIChecker() {
+    StopAndJoin();
   }
 
  private:

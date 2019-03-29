@@ -655,6 +655,12 @@ class MetricEntity : public RefCountedThreadSafe<MetricEntity> {
   // type defined within the metric prototype.
   void CheckInstantiation(const MetricPrototype* proto) const;
 
+  Status GetMetricsAndAttrs(const std::set<std::string>& requested_metrics,
+                            const std::set<std::string>& requested_tablet_ids,
+                            const std::set<std::string>& requested_table_names,
+                            MetricMap& metrics,
+                            AttributeMap& attrs) const;
+
   const MetricEntityPrototype* const prototype_;
   const std::string id_;
 
