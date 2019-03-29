@@ -31,12 +31,19 @@
 #include "kudu/util/histogram.pb.h"
 #include "kudu/util/status.h"
 #include "kudu/util/string_case.h"
+#include "kudu/util/trace.h"
 
 DEFINE_int32(metrics_retirement_age_ms, 120 * 1000,
              "The minimum number of milliseconds a metric will be kept for after it is "
              "no longer active. (Advanced option)");
 TAG_FLAG(metrics_retirement_age_ms, runtime);
 TAG_FLAG(metrics_retirement_age_ms, advanced);
+
+DEFINE_int32(metrics_merge_inject_duration_ms, 0,
+             "How much duration (in ms) to inject to merge metrics. "
+             "(For testing only!)");
+TAG_FLAG(metrics_merge_inject_duration_ms, runtime);
+TAG_FLAG(metrics_merge_inject_duration_ms, unsafe);
 
 // Process/server-wide metrics should go into the 'server' entity.
 // More complex applications will define other entities.
@@ -260,7 +267,9 @@ bool MatchMetricInSet(const string& metric_name,
 
 } // anonymous namespace
 
-Status MetricEntity::WriteAsJson(JsonWriter* writer, const MetricJsonOptions& opts) const {
+Status MetricEntity::GetMetricsAndAttrs(const MetricJsonOptions& opts,
+                                        MetricMap& metrics,
+                                        AttributeMap& attrs) const {
   // Filter the 'type'.
   if (!opts.entity_types.empty() && !MatchNameInList(prototype_->name(), opts.entity_types)) {
     return Status::OK();
@@ -268,15 +277,27 @@ Status MetricEntity::WriteAsJson(JsonWriter* writer, const MetricJsonOptions& op
 
   // Filter the 'id'.
   if (!opts.entity_ids.empty() && !MatchNameInList(id_, opts.entity_ids)) {
-  //if (!MatchMetricInSet(id_, requested_tablet_ids)) {
     return Status::OK();
   }
 
   MetricMap metrics;
   AttributeMap attrs;
+
+  if (!MatchMetricInSet(id(), requested_tablet_ids)) {
+    return Status::NotFound("empty metrics");
+  }
+
   {
     // Snapshot the metrics in this registry (not guaranteed to be a consistent snapshot)
     std::lock_guard<simple_spinlock> l(lock_);
+
+    // Inject latency for testing purposes.
+    if (PREDICT_FALSE(FLAGS_metrics_merge_inject_duration_ms > 0)) {
+      TRACE("Injecting $0ms of latency due to --metrics_merge_inject_duration_ms",
+            FLAGS_metrics_merge_inject_duration_ms);
+      SleepFor(MonoDelta::FromMilliseconds(FLAGS_metrics_merge_inject_duration_ms));
+    }
+
     attrs = attributes_;
     metrics = metric_map_;
   }
@@ -315,6 +336,24 @@ Status MetricEntity::WriteAsJson(JsonWriter* writer, const MetricJsonOptions& op
     }
   }
 
+  // If we had a filter, and we didn't either match this entity or any metrics inside
+  // it, don't print the entity at all.
+  if (metrics.empty()) {
+    return Status::NotFound("empty metrics");
+  }
+
+  return Status::OK();
+}
+
+Status MetricEntity::WriteAsJson(JsonWriter* writer, const MetricJsonOptions& opts) const {
+  MetricMap metrics;
+  AttributeMap attrs;
+  Status s = GetMetricsAndAttrs(opts, metrics, attrs);
+  if (!s.ok()) {
+    CHECK(s.IsNotFound());
+    return Status::OK();
+  }
+
   writer->StartObject();
 
   writer->String("type");
@@ -342,7 +381,7 @@ Status MetricEntity::WriteAsJson(JsonWriter* writer, const MetricJsonOptions& op
         continue;
       }
       WARN_NOT_OK(m->WriteAsJson(writer, opts),
-        strings::Substitute("Failed to write $0 as JSON", val.first->name()));
+                  strings::Substitute("Failed to write $0 as JSON", val.first->name()));
     }
   }
   writer->EndArray();
@@ -356,20 +395,21 @@ Status MetricEntity::CollectTo(MetricCollection& collections,
                                const std::set<std::string>& requested_metrics,
                                const std::set<std::string>& requested_tablet_ids,
                                const std::set<std::string>& requested_table_names) const {
-  // There are 2 types in kudu now, 'tablet' and 'server'.
-  bool tablet_metric = (strncmp(prototype_->name(), "tablet", strlen(prototype_->name())) == 0);
-  if (tablet_metric && !MatchMetricInSet(id(), requested_tablet_ids)) {
+  MetricMap metrics;
+  AttributeMap attrs;
+  Status s = GetMetricsAndAttrs(requested_metrics, requested_tablet_ids, requested_table_names,
+                                metrics, attrs);
+  if (!s.ok()) {
+    CHECK(s.IsNotFound());
     return Status::OK();
   }
-
-  // Snapshot the metrics in this registry (not guaranteed to be a consistent snapshot)
-  std::lock_guard<simple_spinlock> l(lock_);
-  AttributeMap attrs = attributes_;
 
   if (!MatchMetricInSet(attrs["table_name"], requested_table_names)) {
     return Status::OK();
   }
 
+  // There are 2 types in kudu now, 'tablet' and 'server'.
+  bool tablet_metric = (strncmp(prototype_->name(), "tablet", strlen(prototype_->name())) == 0);
   // May be 'table' or 'server'.
   std::string entity_type = tablet_metric ? "table" : prototype_->name();
   // May be table name, 'kudu.tabletserver' or 'kudu.master'.
@@ -378,18 +418,16 @@ Status MetricEntity::CollectTo(MetricCollection& collections,
   std::pair<typename MetricCollection::iterator, bool> ret =
       collections.insert(typename MetricCollection::value_type(e, CollectMetrics()));
   auto& table_collection = ret.first->second;
-  for (const auto& val : metric_map_) {
+  for (const auto& val : metrics) {
     const MetricPrototype* prototype = val.first;
     const scoped_refptr<Metric>& metric = val.second;
 
-    if (MatchMetricInSet(prototype->name(), requested_metrics)) {
-      scoped_refptr<Metric> entry = FindPtrOrNull(table_collection, prototype);
-      if (!entry) {
-        scoped_refptr<Metric> new_metric = metric->clone();
-        InsertOrDie(&table_collection, new_metric->prototype(), new_metric);
-      } else {
-        entry->Merge(metric);
-      }
+    scoped_refptr<Metric> entry = FindPtrOrNull(table_collection, prototype);
+    if (!entry) {
+      scoped_refptr<Metric> new_metric = metric->clone();
+      InsertOrDie(&table_collection, new_metric->prototype(), new_metric);
+    } else {
+      entry->Merge(metric);
     }
   }
 

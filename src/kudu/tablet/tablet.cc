@@ -159,6 +159,7 @@ DEFINE_int32(max_encoded_key_size_bytes, 16 * 1024,
              "result in an error.");
 TAG_FLAG(max_encoded_key_size_bytes, unsafe);
 
+DECLARE_int32(metrics_merge_inject_duration_ms);
 METRIC_DEFINE_entity(tablet);
 METRIC_DEFINE_gauge_size(tablet, memrowset_size, "MemRowSet Memory Usage",
                          kudu::MetricUnit::kBytes,
@@ -351,6 +352,13 @@ void Tablet::Shutdown() {
 
   std::lock_guard<rw_spinlock> lock(component_lock_);
   components_ = nullptr;
+  // Inject latency for testing purposes.
+  if (PREDICT_FALSE(FLAGS_metrics_merge_inject_duration_ms > 0)) {
+    TRACE("Injecting $0ms of latency due to --metrics_merge_inject_duration_ms",
+          FLAGS_metrics_merge_inject_duration_ms);
+    SleepFor(MonoDelta::FromMilliseconds(FLAGS_metrics_merge_inject_duration_ms));
+  }
+
   {
     std::lock_guard<simple_spinlock> l(state_lock_);
     set_state_unlocked(kShutdown);
