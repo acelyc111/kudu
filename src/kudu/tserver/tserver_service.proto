@@ -55,6 +55,10 @@ service TabletServerService {
   rpc Checksum(ChecksumRequestPB) returns (ChecksumResponsePB) {
     option (kudu.rpc.authz_method) = "AuthorizeClient";
   }
+
+  rpc CountRows(CountRowsRequestPB) returns (CountRowsResponsePB) {
+    option (kudu.rpc.authz_method) = "AuthorizeClient";
+  }
 }
 
 message ChecksumRequestPB {
