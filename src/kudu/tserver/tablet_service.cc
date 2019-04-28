@@ -2009,6 +2009,52 @@ void TabletServiceImpl::Checksum(const ChecksumRequestPB* req,
   context->RespondSuccess();
 }
 
+void TabletServiceImpl::CountRows(const CountRowsRequestPB* req,
+                                  CountRowsResponsePB* resp,
+                                  rpc::RpcContext* context) {
+  TRACE_EVENT0("tserver", "TabletServiceImpl::CountRows");
+  scoped_refptr<TabletReplica> replica;
+  if (!LookupRunningTabletReplicaOrRespond(server_->tablet_manager(), req->tablet_id(), resp,
+                                           context, &replica)) {
+    return;
+  }
+
+  TokenPB token;
+  if (FLAGS_tserver_enforce_access_control) {
+    if (!VerifyAuthzTokenOrRespond(server_->token_verifier(), *req, context, &token)) {
+      return;
+    }
+    const auto& privilege = token.authz().table_privilege();
+    if (!CheckMatchingTableIdOrRespond(privilege, replica->tablet_metadata()->table_id(),
+                                       "CountRows", context)) {
+      return;
+    }
+    unordered_set<ColumnId> authorized_column_ids;
+    if (!CheckMayHaveScanPrivilegesOrRespond(privilege, "CountRows",
+                                             &authorized_column_ids, context)) {
+      return;
+    }
+    // If the token doesn't have full scan privileges for the table, check
+    // for required privileges based on the count rows request.
+    if (!privilege.scan_privilege()) {
+      SetupErrorAndRespond(resp->mutable_error(),
+          Status::NotAuthorized("not authorized to CountRows"),
+          TabletServerErrorPB::NOT_AUTHORIZED,
+          context);
+      return;
+    }
+  }
+
+  uint64_t count = 0;
+  Status s = replica->tablet()->CountRows(&count);
+  if (PREDICT_FALSE(!s.ok())) {
+    SetupErrorAndRespond(resp->mutable_error(), s, TabletServerErrorPB::UNKNOWN_ERROR, context);
+    return;
+  }
+  resp->set_count(count);
+  context->RespondSuccess();
+}
+
 bool TabletServiceImpl::SupportsFeature(uint32_t feature) const {
   switch (feature) {
     case TabletServerFeatures::COLUMN_PREDICATES:

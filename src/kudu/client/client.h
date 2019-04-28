@@ -1996,6 +1996,8 @@ class KUDU_EXPORT KuduScanner {
   /// @return Result status of the operation (begin scanning).
   Status Open();
 
+  Status CountRows(uint64_t* count);
+
   /// Keep the current remote scanner alive.
   ///
   /// Keep the current remote scanner alive on the Tablet server for an

@@ -587,6 +587,22 @@ Status KuduScanner::Data::OpenTablet(const string& partition_key,
   return Status::OK();
 }
 
+Status KuduScanner::Data::CountRows(uint64_t* count) {
+  if (!open_) return Status::IllegalState("Scanner was not open.");
+
+  RpcController controller;
+  controller.set_timeout(configuration_.timeout());
+  tserver::CountRowsRequestPB request;
+  request.set_tablet_id(remote_->tablet_id());
+  tserver::CountRowsResponsePB response;
+  RETURN_NOT_OK(proxy_->CountRows(request, &response, &controller));
+  if (response.has_error()) {
+    return StatusFromPB(response.error().status());
+  }
+  *count = response.count();
+  return Status::OK();
+}
+
 Status KuduScanner::Data::KeepAlive() {
   if (!open_) return Status::IllegalState("Scanner was not open.");
   // If there is no scanner to keep alive, we still return Status::OK().

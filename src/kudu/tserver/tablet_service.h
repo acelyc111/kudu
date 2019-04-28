@@ -144,6 +144,10 @@ class TabletServiceImpl : public TabletServerServiceIf {
                         ChecksumResponsePB* resp,
                         rpc::RpcContext* context) OVERRIDE;
 
+  virtual void CountRows(const CountRowsRequestPB* req,
+                         CountRowsResponsePB* resp,
+                         rpc::RpcContext* context);
+
   bool SupportsFeature(uint32_t feature) const override;
 
   virtual void Shutdown() OVERRIDE;

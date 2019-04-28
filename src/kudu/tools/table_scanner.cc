@@ -475,13 +475,8 @@ void TableScanner::ScanData(const std::vector<kudu::client::KuduScanToken*>& tok
     CHECK_OK(scanner->Open());
 
     uint64_t count = 0;
-    while (scanner->HasMoreRows()) {
-      KuduScanBatch batch;
-      CHECK_OK(scanner->NextBatch(&batch));
-      count += batch.NumRows();
-      total_count_.IncrementBy(batch.NumRows());
-      cb(batch);
-    }
+    scanner->CountRows(&count);
+    total_count_.IncrementBy(count);
 
     sw.stop();
     if (out_) {

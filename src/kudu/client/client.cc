@@ -1491,6 +1491,10 @@ Status KuduScanner::Open() {
   return Status::OK();
 }
 
+Status KuduScanner::CountRows(uint64_t* count) {
+  return data_->CountRows(count);
+}
+
 Status KuduScanner::KeepAlive() {
   return data_->KeepAlive();
 }

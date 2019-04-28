@@ -461,6 +461,9 @@ enum TabletServerFeatures {
 
 message CountRowsRequestPB {
   required bytes tablet_id = 1;
+
+  // An authorization token with which to authorize this request.
+  optional security.SignedTokenPB authz_token = 2;
 }
 
 message CountRowsResponsePB {

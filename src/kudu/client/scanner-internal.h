@@ -165,6 +165,8 @@ class KuduScanner::Data {
                     const MonoTime& deadline,
                     std::set<std::string>* blacklist);
 
+  Status CountRows(uint64_t* count);
+
   Status KeepAlive();
 
   // Returns whether there may exist more tablets to scan.
