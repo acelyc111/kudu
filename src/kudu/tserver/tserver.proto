@@ -464,5 +464,8 @@ message CountRowsRequestPB {
 }
 
 message CountRowsResponsePB {
-  required uint64 count = 1;
+  // The error, if an error occurred with this request.
+  optional TabletServerErrorPB error = 1;
+
+  required uint64 count = 2;
 }
