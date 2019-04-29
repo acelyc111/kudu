@@ -166,6 +166,7 @@ string ConnectToMasterRpc::ToString() const {
 }
 
 void ConnectToMasterRpc::SendRpcCb(const Status& status) {
+  LOG(INFO) << "++++++status " << status.ToString();
   // NOTE: 'status' here may actually come from RpcRetrier::DelayedRetryCb if
   // retrying from DelayedRetry() below. If we successfully send an RPC, it
   // will be Status::OK.
@@ -177,6 +178,7 @@ void ConnectToMasterRpc::SendRpcCb(const Status& status) {
   rpc::RpcController* rpc = mutable_retrier()->mutable_controller();
   if (new_status.ok()) {
     new_status = rpc->status();
+    LOG(INFO) << "++++++new_status " << new_status.ToString();
     if (new_status.IsRemoteError()) {
       const ErrorStatusPB* err = rpc->error_response();
       // The UNAVAILABLE code is a broader counterpart of the SERVER_TOO_BUSY.
@@ -184,6 +186,7 @@ void ConnectToMasterRpc::SendRpcCb(const Status& status) {
       if (err && err->has_code() &&
           (err->code() == ErrorStatusPB::ERROR_SERVER_TOO_BUSY ||
            err->code() == ErrorStatusPB::ERROR_UNAVAILABLE)) {
+        LOG(INFO) << "++++++err " << err->code();
         mutable_retrier()->DelayedRetry(this, new_status);
         ignore_result(deleter.release());
         return;
@@ -224,6 +227,7 @@ void ConnectToMasterRpc::SendRpcCb(const Status& status) {
       new_status = Status::OK();
     } else {
       new_status = StatusFromPB(out_->error().status());
+      LOG(INFO) << "++++++new_status " << new_status.ToString();
     }
   }
   user_cb_.Run(new_status);

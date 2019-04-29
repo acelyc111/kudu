@@ -313,6 +313,7 @@ void OutboundCall::SetResponse(gscoped_ptr<CallResponse> resp) {
       return;
     }
     Status s = Status::RemoteError(err->message());
+    LOG(INFO) << "++++++s " << s.ToString();
     SetFailed(std::move(s), Phase::REMOTE_CALL, std::move(err));
   }
 }
@@ -351,6 +352,7 @@ void OutboundCall::SetFailed(Status status,
   DCHECK(!status.ok());
   DCHECK(phase == Phase::CONNECTION_NEGOTIATION || phase == Phase::REMOTE_CALL);
   {
+    LOG(INFO) << "++++++status " << status.ToString();
     std::lock_guard<simple_spinlock> l(lock_);
     status_ = std::move(status);
     error_pb_ = std::move(err_pb);

@@ -5848,25 +5848,27 @@ TEST_F(ClientTest, TestAuthenticationCredentialsRealUser) {
 
   // Try to connect without setting the user, which should fail
   // TODO(KUDU-2344): This should fail with NotAuthorized.
-  ASSERT_TRUE(cluster_->CreateClient(nullptr, &client_).IsRemoteError());
+  Status s = cluster_->CreateClient(nullptr, &client_);
+  LOG(INFO) << "+++++++++++++++++++++++++++++ " << s.ToString();
+  ASSERT_TRUE(s.IsRemoteError());
 
-  // Create a new client with the imported user name and smoke test it.
-  KuduClientBuilder client_builder;
-  string authn_creds;
-  AuthenticationCredentialsPB pb;
-  pb.set_real_user("token-user");
-  ASSERT_TRUE(pb.SerializeToString(&authn_creds));
-  client_builder.import_authentication_credentials(authn_creds);
-
-  // Recreate the client and open the table.
-  ASSERT_OK(cluster_->CreateClient(&client_builder, &client_));
-  ASSERT_OK(client_->OpenTable(client_table_->name(), &client_table_));
-
-  // Insert some rows and do a scan to force a new connection to the tablet servers.
-  NO_FATALS(InsertTestRows(client_table_.get(), FLAGS_test_scan_num_rows));
-  vector<string> rows;
-  KuduScanner scanner(client_table_.get());
-  ASSERT_OK(ScanToStrings(&scanner, &rows));
+//  // Create a new client with the imported user name and smoke test it.
+//  KuduClientBuilder client_builder;
+//  string authn_creds;
+//  AuthenticationCredentialsPB pb;
+//  pb.set_real_user("token-user");
+//  ASSERT_TRUE(pb.SerializeToString(&authn_creds));
+//  client_builder.import_authentication_credentials(authn_creds);
+//
+//  // Recreate the client and open the table.
+//  ASSERT_OK(cluster_->CreateClient(&client_builder, &client_));
+//  ASSERT_OK(client_->OpenTable(client_table_->name(), &client_table_));
+//
+//  // Insert some rows and do a scan to force a new connection to the tablet servers.
+//  NO_FATALS(InsertTestRows(client_table_.get(), FLAGS_test_scan_num_rows));
+//  vector<string> rows;
+//  KuduScanner scanner(client_table_.get());
+//  ASSERT_OK(ScanToStrings(&scanner, &rows));
 }
 
 // Test that clients that aren't authenticated as the appropriate user will be
