@@ -1222,6 +1222,12 @@ else()
   set(KRB5_REALM_OVERRIDE -Wl,-U,krb5_realm_override_loaded krb5_realm_override)
 endif()
 
+## yaml
+find_package(Yaml REQUIRED)
+include_directories(SYSTEM ${YAML_INCLUDE_DIR})
+ADD_THIRDPARTY_LIB(yaml
+  STATIC_LIB "${YAML_STATIC_LIB}")
+
 ## Boost
 
 # We use a custom cmake module and not cmake's FindBoost.

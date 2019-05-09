@@ -919,3 +919,23 @@ build_bison() {
   make -j$PARALLEL $EXTRA_MAKEFLAGS install
   popd
 }
+
+build_yaml() {
+  YAML_BDIR=$TP_BUILD_DIR/$YAML_NAME$MODE_SUFFIX
+  mkdir -p $YAML_BDIR
+  pushd $YAML_BDIR
+  rm -rf CMakeCache.txt CMakeFiles/
+  CFLAGS="$EXTRA_CFLAGS" \
+    CXXFLAGS="$EXTRA_CXXFLAGS" \
+    LDFLAGS="$EXTRA_LDFLAGS" \
+    LIBS="$EXTRA_LIBS" \
+    cmake \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DYAML_CPP_BUILD_TESTS=OFF \
+    -DYAML_CPP_BUILD_TOOLS=OFF \
+    -DCMAKE_INSTALL_PREFIX=$PREFIX \
+    -DYAML_CPP_INSTALL=ON \
+    $YAML_SOURCE
+  make -j$PARALLEL $EXTRA_MAKEFLAGS install
+  popd
+}
