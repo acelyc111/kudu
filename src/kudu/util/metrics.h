@@ -600,9 +600,7 @@ class MetricEntity : public RefCountedThreadSafe<MetricEntity> {
   Status WriteAsJson(JsonWriter* writer, const MetricJsonOptions& opts) const;
 
   Status CollectTo(MetricCollection& collections,
-                   const std::set<std::string>& requested_metrics,
-                   const std::set<std::string>& requested_tablet_ids,
-                   const std::set<std::string>& requested_table_names) const;
+                   const MetricJsonOptions& opts) const;
 
   const MetricMap& UnsafeMetricsMapForTests() const { return metric_map_; }
 
@@ -655,9 +653,7 @@ class MetricEntity : public RefCountedThreadSafe<MetricEntity> {
   // type defined within the metric prototype.
   void CheckInstantiation(const MetricPrototype* proto) const;
 
-  Status GetMetricsAndAttrs(const std::set<std::string>& requested_metrics,
-                            const std::set<std::string>& requested_tablet_ids,
-                            const std::set<std::string>& requested_table_names,
+  Status GetMetricsAndAttrs(const MetricJsonOptions& opts,
                             MetricMap& metrics,
                             AttributeMap& attrs) const;
 

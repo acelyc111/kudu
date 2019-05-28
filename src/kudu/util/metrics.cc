@@ -280,13 +280,6 @@ Status MetricEntity::GetMetricsAndAttrs(const MetricJsonOptions& opts,
     return Status::OK();
   }
 
-  MetricMap metrics;
-  AttributeMap attrs;
-
-  if (!MatchMetricInSet(id(), requested_tablet_ids)) {
-    return Status::NotFound("empty metrics");
-  }
-
   {
     // Snapshot the metrics in this registry (not guaranteed to be a consistent snapshot)
     std::lock_guard<simple_spinlock> l(lock_);
@@ -392,19 +385,12 @@ Status MetricEntity::WriteAsJson(JsonWriter* writer, const MetricJsonOptions& op
 }
 
 Status MetricEntity::CollectTo(MetricCollection& collections,
-                               const std::set<std::string>& requested_metrics,
-                               const std::set<std::string>& requested_tablet_ids,
-                               const std::set<std::string>& requested_table_names) const {
+                               const MetricJsonOptions& opts) const {
   MetricMap metrics;
   AttributeMap attrs;
-  Status s = GetMetricsAndAttrs(requested_metrics, requested_tablet_ids, requested_table_names,
-                                metrics, attrs);
+  Status s = GetMetricsAndAttrs(opts, metrics, attrs);
   if (!s.ok()) {
     CHECK(s.IsNotFound());
-    return Status::OK();
-  }
-
-  if (!MatchMetricInSet(attrs["table_name"], requested_table_names)) {
     return Status::OK();
   }
 
@@ -521,10 +507,7 @@ Status MetricRegistry::WriteAsJson(JsonWriter* writer, const MetricJsonOptions& 
   if (opts.merge_by_table) {
     MetricCollection collections;
     for (const auto& e : entities) {
-      WARN_NOT_OK(e.second->CollectTo(collections,
-                                      requested_metrics,
-                                      requested_tablet_ids,
-                                      requested_table_names),
+      WARN_NOT_OK(e.second->CollectTo(collections, opts),
                   Substitute("Failed to collect entity $0", e.second->id()));
     }
     WriteCollectionToJson(writer, collections, opts);
