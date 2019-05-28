@@ -115,14 +115,14 @@ DEFINE_double(fault_crash_before_flush_tablet_meta_after_flush_mrs, 0.0,
               "Fraction of the time, while flushing an MRS, to crash before flushing metadata");
 TAG_FLAG(fault_crash_before_flush_tablet_meta_after_flush_mrs, unsafe);
 
-DEFINE_int64(tablet_throttler_rpc_per_sec, 0,
-             "Maximum write RPC rate (op/s) allowed for a tablet, write RPC exceeding this "
-             "limit will be throttled. 0 means no limit.");
+DEFINE_uint64(tablet_throttler_rpc_per_sec, 0,
+              "Maximum write RPC rate (op/s) allowed for a tablet, write RPC exceeding this "
+              "limit will be throttled. 0 means no limit.");
 TAG_FLAG(tablet_throttler_rpc_per_sec, experimental);
 
-DEFINE_int64(tablet_throttler_bytes_per_sec, 0,
-             "Maximum write RPC IO rate (byte/s) allowed for a tablet, write RPC exceeding "
-             "this limit will be throttled. 0 means no limit.");
+DEFINE_uint64(tablet_throttler_bytes_per_sec, 0,
+              "Maximum write RPC IO rate (byte/s) allowed for a tablet, write RPC exceeding "
+              "this limit will be throttled. 0 means no limit.");
 TAG_FLAG(tablet_throttler_bytes_per_sec, experimental);
 
 DEFINE_double(tablet_throttler_burst_factor, 1.0f,

@@ -28,8 +28,8 @@
 #include "kudu/tablet/tablet.h"
 #include "kudu/util/monotime.h"
 
-DECLARE_int64(tablet_throttler_rpc_per_sec);
-DECLARE_int64(tablet_throttler_bytes_per_sec);
+DECLARE_uint64(tablet_throttler_rpc_per_sec);
+DECLARE_uint64(tablet_throttler_bytes_per_sec);
 
 namespace kudu {
 namespace tablet {
