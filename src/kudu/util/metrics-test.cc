@@ -407,7 +407,6 @@ TEST_F(MetricsTest, JsonPrintTest) {
   ASSERT_EQ("attr_val", attr_value);
 
   // Verify that metric filtering matches on substrings.
-<<<<<<< HEAD
   {
     out.str("");
     MetricJsonOptions opts;
@@ -484,42 +483,74 @@ TEST_F(MetricsTest, CollectTest) {
   opts.include_origin = false;
   opts.merge_by_table = true;
 
-  ASSERT_OK(registry_.WriteAsJson(&writer, {"*"}, {"*"}, {"*"}, opts));
-  CheckCollectOutput(out, {{"table_name_val", 11}, {"another_table_name", 100}});
+  {
+    out.str("");
+    MetricJsonOptions opts;
+    ASSERT_OK(registry_.WriteAsJson(&writer, opts));
+    CheckCollectOutput(out, {{"table_name_val", 11}, {"another_table_name", 100}});
+  }
 
   // Verify that metric filtering matches on substrings.
-  out.str("");
-  ASSERT_OK(registry_.WriteAsJson(&writer, {"COUNTER"}, {"*"}, {"*"}, opts));
-  CheckCollectOutput(out, {{"table_name_val", 11}, {"another_table_name", 100}});
+  {
+    out.str("");
+    MetricJsonOptions opts;
+    opts.entity_metrics.emplace_back("COUNTER");
+    ASSERT_OK(registry_.WriteAsJson(&writer, opts));
+    CheckCollectOutput(out, {{"table_name_val", 11}, {"another_table_name", 100}});
+  }
 
   // Verify that, if we filter for a metric that isn't in this entity, we get no result.
-  out.str("");
-  ASSERT_OK(registry_.WriteAsJson(&writer, {"NOT_A_MATCHING_METRIC"}, {"*"}, {"*"}, opts));
-  CheckCollectOutput(out, {});
+  {
+    out.str("");
+    MetricJsonOptions opts;
+    opts.entity_metrics.emplace_back("NOT_A_MATCHING_METRIC");
+    ASSERT_OK(registry_.WriteAsJson(&writer, opts));
+    CheckCollectOutput(out, {});
+  }
 
   // Verify that tablet_id filtering matches on substrings.
-  out.str("");
-  ASSERT_OK(registry_.WriteAsJson(&writer, {"*"}, {"TEST_TABLET"}, {"*"}, opts));
-  CheckCollectOutput(out, {{"table_name_val", 11}});
+  {
+    out.str("");
+    MetricJsonOptions opts;
+    opts.entity_ids.emplace_back("TEST_TABLET");
+    ASSERT_OK(registry_.WriteAsJson(&writer, opts));
+    CheckCollectOutput(out, {{"table_name_val", 11}});
+  }
 
-  out.str("");
-  ASSERT_OK(registry_.WriteAsJson(&writer, {"*"}, {"TEST_TABLET_FOR_MERGE"}, {"*"}, opts));
-  CheckCollectOutput(out, {{"table_name_val", 10}});
+  {
+    out.str("");
+    MetricJsonOptions opts;
+    opts.entity_ids.emplace_back("TEST_TABLET_FOR_MERGE");
+    ASSERT_OK(registry_.WriteAsJson(&writer, opts));
+    CheckCollectOutput(out, {{"table_name_val", 10}});
+  }
 
   // Verify that, if we filter for a tablet_id that doesn't match this entity, we get no result.
-  out.str("");
-  ASSERT_OK(registry_.WriteAsJson(&writer, {"*"}, {"not_a_matching_tablet_id"}, {"*"}, opts));
-  CheckCollectOutput(out, {});
+  {
+    out.str("");
+    MetricJsonOptions opts;
+    opts.entity_ids.emplace_back("not_a_matching_tablet_id");
+    ASSERT_OK(registry_.WriteAsJson(&writer, opts));
+    CheckCollectOutput(out, {});
+  }
 
   // Verify that table_name filtering matches on substrings.
-  out.str("");
-  ASSERT_OK(registry_.WriteAsJson(&writer, {"*"}, {"*"}, {"TABLE_NAME_VAL"}, opts));
-  CheckCollectOutput(out, {{"table_name_val", 11}});
+  {
+    out.str("");
+    MetricJsonOptions opts;
+    opts.entity_attrs.emplace_back("TABLE_NAME_VAL");
+    ASSERT_OK(registry_.WriteAsJson(&writer, opts));
+    CheckCollectOutput(out, {{"table_name_val", 11}});
+  }
 
   // Verify that, if we filter for a table_name that isn't in this entity, we get no result.
-  out.str("");
-  ASSERT_OK(registry_.WriteAsJson(&writer, {"*"}, {"*"}, {"NOT_A_MATCHING_TABLE_NAME"}, opts));
-  CheckCollectOutput(out, {});
+  {
+    out.str("");
+    MetricJsonOptions opts;
+    opts.entity_attrs.emplace_back("NOT_A_MATCHING_TABLE_NAME");
+    ASSERT_OK(registry_.WriteAsJson(&writer, opts));
+    CheckCollectOutput(out, {});
+  }
 }
 
 // Test that metrics are retired when they are no longer referenced.
@@ -706,7 +737,7 @@ TEST_F(MetricsTest, TestFilter) {
     attrs[attr1] = attr1_uuid;
     attrs[attr2] = attr2_uuid;
     scoped_refptr<MetricEntity> entity =
-        METRIC_ENTITY_test_entity.Instantiate(&registry_, id_uuid, attrs);
+        METRIC_ENTITY_tablet.Instantiate(&registry_, id_uuid, attrs);
     scoped_refptr<Counter> metric1 = METRIC_test_counter.Instantiate(entity);
     scoped_refptr<AtomicGauge<uint64_t>> metric2 = METRIC_test_gauge.Instantiate(entity, 0);
 
