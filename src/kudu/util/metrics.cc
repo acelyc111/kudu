@@ -31,7 +31,6 @@
 #include "kudu/util/histogram.pb.h"
 #include "kudu/util/status.h"
 #include "kudu/util/string_case.h"
-#include "kudu/util/trace.h"
 
 DEFINE_int32(metrics_retirement_age_ms, 120 * 1000,
              "The minimum number of milliseconds a metric will be kept for after it is "
@@ -343,7 +342,7 @@ Status MetricEntity::WriteAsJson(JsonWriter* writer, const MetricJsonOptions& op
   return Status::OK();
 }
 
-Status MetricEntity::CollectTo(MetricCollection& collections,
+Status MetricEntity::CollectTo(MetricCollection* collections,
                                const MetricJsonOptions& opts) const {
   MetricMap metrics;
   AttributeMap attrs;
@@ -361,7 +360,7 @@ Status MetricEntity::CollectTo(MetricCollection& collections,
   std::string entity_id = tablet_metric ? attrs["table_name"] : id();
   MetricCollectionEntity e(entity_type, entity_id);
   std::pair<typename MetricCollection::iterator, bool> ret =
-      collections.insert(typename MetricCollection::value_type(e, CollectMetrics()));
+      collections->insert(typename MetricCollection::value_type(e, CollectMetrics()));
   auto& table_collection = ret.first->second;
   for (const auto& val : metrics) {
     const MetricPrototype* prototype = val.first;
@@ -466,7 +465,7 @@ Status MetricRegistry::WriteAsJson(JsonWriter* writer, const MetricJsonOptions& 
   if (opts.merge_by_table) {
     MetricCollection collections;
     for (const auto& e : entities) {
-      WARN_NOT_OK(e.second->CollectTo(collections, opts),
+      WARN_NOT_OK(e.second->CollectTo(&collections, opts),
                   Substitute("Failed to collect entity $0", e.second->id()));
     }
     WriteCollectionToJson(writer, collections, opts);

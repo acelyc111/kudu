@@ -23,7 +23,6 @@
 #include <cstdint>
 #include <fstream>
 #include <memory>
-#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -61,7 +60,6 @@
 #include "kudu/util/monotime.h"
 #include "kudu/util/process_memory.h"
 #include "kudu/util/status.h"
-#include "kudu/util/string_case.h"
 #include "kudu/util/web_callback_registry.h"
 
 #ifdef TCMALLOC_ENABLED
@@ -71,7 +69,6 @@
 using std::ifstream;
 using std::ostringstream;
 using std::shared_ptr;
-using std::set;
 using std::string;
 using std::vector;
 using strings::Substitute;

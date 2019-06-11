@@ -16,6 +16,7 @@
 // under the License.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 #include <gtest/gtest.h>
@@ -114,9 +115,9 @@ TEST_F(HdrHistogramTest, PercentileAndCopyTest) {
   ASSERT_EQ(hist.TotalSum(), copy.TotalSum());
 }
 
-void PopulateHistogram(HdrHistogram& histogram, uint64_t low, uint64_t high) {
+void PopulateHistogram(HdrHistogram* histogram, uint64_t low, uint64_t high) {
   for (uint64_t i = low; i <= high; i++) {
-    histogram.Increment(i);
+    histogram->Increment(i);
   }
 }
 
@@ -126,8 +127,8 @@ TEST_F(HdrHistogramTest, MergeTest) {
   HdrHistogram hist(highest_val, kSigDigits);
   HdrHistogram other(highest_val, kSigDigits);
 
-  PopulateHistogram(hist, 1, 100);
-  PopulateHistogram(other, 101, 250);
+  PopulateHistogram(&hist, 1, 100);
+  PopulateHistogram(&other, 101, 250);
   HdrHistogram old(hist);
   hist.Merge(other);
 
@@ -137,9 +138,9 @@ TEST_F(HdrHistogramTest, MergeTest) {
   ASSERT_EQ(hist.MaxValue(), std::max(old.MaxValue(), other.MaxValue()));
   ASSERT_LE(hist.MeanValue() - (1 + 250) / 2.0, 1e-6);
   ASSERT_EQ(hist.ValueAtPercentile(100.0), 250);
-  ASSERT_EQ(hist.ValueAtPercentile(99.0), (int)(99.0 * 250 / 100 + 0.5));
-  ASSERT_EQ(hist.ValueAtPercentile(95.0), (int)(95.0 * 250 / 100 + 0.5));
-  ASSERT_EQ(hist.ValueAtPercentile(50.0), (int)(50.0 * 250 / 100 + 0.5));
+  ASSERT_EQ(hist.ValueAtPercentile(99.0), lround(99.0 * 250 / 100));
+  ASSERT_EQ(hist.ValueAtPercentile(95.0), lround(95.0 * 250 / 100));
+  ASSERT_EQ(hist.ValueAtPercentile(50.0), lround(50.0 * 250 / 100));
 }
 
 } // namespace kudu

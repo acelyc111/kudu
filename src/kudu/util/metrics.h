@@ -599,7 +599,7 @@ class MetricEntity : public RefCountedThreadSafe<MetricEntity> {
   // See MetricRegistry::WriteAsJson()
   Status WriteAsJson(JsonWriter* writer, const MetricJsonOptions& opts) const;
 
-  Status CollectTo(MetricCollection& collections,
+  Status CollectTo(MetricCollection* collections,
                    const MetricJsonOptions& opts) const;
 
   const MetricMap& UnsafeMetricsMapForTests() const { return metric_map_; }

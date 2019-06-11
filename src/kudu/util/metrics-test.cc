@@ -19,6 +19,7 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <ostream>
 #include <string>
 #include <unordered_map>
@@ -33,6 +34,7 @@
 
 #include "kudu/gutil/bind.h"
 #include "kudu/gutil/bind_helpers.h"
+#include "kudu/gutil/casts.h"
 #include "kudu/gutil/map-util.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/util/hdr_histogram.h"
@@ -346,7 +348,7 @@ TEST_F(MetricsTest, SimpleHistogramTest) {
   ASSERT_EQ(4, hist->histogram()->MaxValue());
   ASSERT_EQ(2, hist->histogram()->TotalCount());
   ASSERT_EQ(6, hist->histogram()->TotalSum());
-  // TODO: Test coverage needs to be improved a lot.
+  // TODO(yingchun): Test coverage needs to be improved a lot.
 }
 
 TEST_F(MetricsTest, SimpleHistogramMergeTest) {

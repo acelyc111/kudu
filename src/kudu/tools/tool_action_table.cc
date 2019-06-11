@@ -17,10 +17,7 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <stdlib.h>
-
 #include <iostream>
-#include <map>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -30,7 +27,6 @@
 #include <gflags/gflags.h>
 #include <gflags/gflags_declare.h>
 #include <rapidjson/document.h>
-#include <glog/logging.h>
 
 #include "kudu/client/client.h"
 #include "kudu/client/replica_controller-internal.h"
@@ -41,8 +37,6 @@
 #include "kudu/client/value.h"
 #include "kudu/common/partition.h"
 #include "kudu/common/schema.h"
-#include "kudu/client/write_op.h"
-#include "kudu/common/partial_row.h"
 #include "kudu/gutil/map-util.h"
 #include "kudu/gutil/stl_util.h"
 #include "kudu/gutil/strings/join.h"
@@ -52,10 +46,6 @@
 #include "kudu/tools/tool_action.h"
 #include "kudu/tools/tool_action_common.h"
 #include "kudu/util/jsonreader.h"
-#include "kudu/util/atomic.h"
-#include "kudu/util/int128.h"
-#include "kudu/util/monotime.h"
-#include "kudu/util/slice.h"
 #include "kudu/util/status.h"
 
 using kudu::client::KuduClient;
