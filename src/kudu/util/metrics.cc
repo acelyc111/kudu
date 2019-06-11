@@ -39,12 +39,6 @@ DEFINE_int32(metrics_retirement_age_ms, 120 * 1000,
 TAG_FLAG(metrics_retirement_age_ms, runtime);
 TAG_FLAG(metrics_retirement_age_ms, advanced);
 
-DEFINE_int32(metrics_merge_inject_duration_ms, 0,
-             "How much duration (in ms) to inject to merge metrics. "
-             "(For testing only!)");
-TAG_FLAG(metrics_merge_inject_duration_ms, runtime);
-TAG_FLAG(metrics_merge_inject_duration_ms, unsafe);
-
 // Process/server-wide metrics should go into the 'server' entity.
 // More complex applications will define other entities.
 METRIC_DEFINE_entity(server);
@@ -81,7 +75,7 @@ void WriteCollectionToJson(JsonWriter* writer,
     for (const auto& val : collection.second) {
       const auto& m = val.second;
       WARN_NOT_OK(m->WriteAsJson(writer, opts),
-                  strings::Substitute("Failed to write $0 as JSON", val.first));
+                  Substitute("Failed to write $0 as JSON", val.first));
     }
     writer->EndArray();
 
@@ -241,58 +235,29 @@ bool MatchNameInList(const string& name, const vector<string>& names) {
   return false;
 }
 
-// Requires: elements in 'match_params' are all in upper case.
-bool MatchMetricInSet(const string& metric_name,
-                      const set<string>& match_params) {
-  // Handle wildcard.
-  if (ContainsKey(match_params, "*")) {
-    return true;
-  }
-
-  // Full match.
-  string metric_name_uc;
-  ToUpperCase(metric_name, &metric_name_uc);
-  if (ContainsKey(match_params, metric_name_uc)) {
-    return true;
-  }
-
-  // Substring match.
-  for (const string& param : match_params) {
-    if (metric_name_uc.find(param) != std::string::npos) {
-      return true;
-    }
-  }
-  return false;
-}
-
 } // anonymous namespace
 
 Status MetricEntity::GetMetricsAndAttrs(const MetricJsonOptions& opts,
-                                        MetricMap& metrics,
-                                        AttributeMap& attrs) const {
+                                        MetricMap* metrics,
+                                        AttributeMap* attrs) const {
+  CHECK(metrics);
+  CHECK(attrs);
+
   // Filter the 'type'.
   if (!opts.entity_types.empty() && !MatchNameInList(prototype_->name(), opts.entity_types)) {
-    return Status::OK();
+    return Status::NotFound("empty metrics");
   }
 
   // Filter the 'id'.
   if (!opts.entity_ids.empty() && !MatchNameInList(id_, opts.entity_ids)) {
-    return Status::OK();
+    return Status::NotFound("empty metrics");
   }
 
   {
     // Snapshot the metrics in this registry (not guaranteed to be a consistent snapshot)
     std::lock_guard<simple_spinlock> l(lock_);
-
-    // Inject latency for testing purposes.
-    if (PREDICT_FALSE(FLAGS_metrics_merge_inject_duration_ms > 0)) {
-      TRACE("Injecting $0ms of latency due to --metrics_merge_inject_duration_ms",
-            FLAGS_metrics_merge_inject_duration_ms);
-      SleepFor(MonoDelta::FromMilliseconds(FLAGS_metrics_merge_inject_duration_ms));
-    }
-
-    attrs = attributes_;
-    metrics = metric_map_;
+    *attrs = attributes_;
+    *metrics = metric_map_;
   }
 
   // Filter the 'attributes'.
@@ -301,8 +266,8 @@ Status MetricEntity::GetMetricsAndAttrs(const MetricJsonOptions& opts,
     DCHECK(opts.entity_attrs.size() % 2 == 0);
     for (int i = 0; i < opts.entity_attrs.size(); i += 2) {
       // The attr_key can't be found or the attr_val can't be matched.
-      AttributeMap::const_iterator it = attrs.find(opts.entity_attrs[i]);
-      if (it == attrs.end() || !MatchNameInList(it->second, { opts.entity_attrs[i+1] })) {
+      AttributeMap::const_iterator it = attrs->find(opts.entity_attrs[i]);
+      if (it == attrs->end() || !MatchNameInList(it->second, { opts.entity_attrs[i+1] })) {
         continue;
       }
       match_attrs = true;
@@ -310,29 +275,23 @@ Status MetricEntity::GetMetricsAndAttrs(const MetricJsonOptions& opts,
     }
     // None of them match.
     if (!match_attrs) {
-      return Status::OK();
+      return Status::NotFound("empty metrics");
     }
   }
 
   // Filter the 'metrics'.
   if (!opts.entity_metrics.empty()) {
-    for (auto metric = metrics.begin(); metric != metrics.end();) {
+    for (auto metric = metrics->begin(); metric != metrics->end();) {
       if (!MatchNameInList(metric->first->name(), opts.entity_metrics)) {
-        metric = metrics.erase(metric);
+        metric = metrics->erase(metric);
       } else {
         ++metric;
       }
     }
     // None of them match.
-    if (metrics.empty()) {
-      return Status::OK();
+    if (metrics->empty()) {
+      return Status::NotFound("empty metrics");
     }
-  }
-
-  // If we had a filter, and we didn't either match this entity or any metrics inside
-  // it, don't print the entity at all.
-  if (metrics.empty()) {
-    return Status::NotFound("empty metrics");
   }
 
   return Status::OK();
@@ -341,7 +300,7 @@ Status MetricEntity::GetMetricsAndAttrs(const MetricJsonOptions& opts,
 Status MetricEntity::WriteAsJson(JsonWriter* writer, const MetricJsonOptions& opts) const {
   MetricMap metrics;
   AttributeMap attrs;
-  Status s = GetMetricsAndAttrs(opts, metrics, attrs);
+  Status s = GetMetricsAndAttrs(opts, &metrics, &attrs);
   if (!s.ok()) {
     CHECK(s.IsNotFound());
     return Status::OK();
@@ -374,7 +333,7 @@ Status MetricEntity::WriteAsJson(JsonWriter* writer, const MetricJsonOptions& op
         continue;
       }
       WARN_NOT_OK(m->WriteAsJson(writer, opts),
-                  strings::Substitute("Failed to write $0 as JSON", val.first->name()));
+                  Substitute("Failed to write $0 as JSON", val.first->name()));
     }
   }
   writer->EndArray();
@@ -388,7 +347,7 @@ Status MetricEntity::CollectTo(MetricCollection& collections,
                                const MetricJsonOptions& opts) const {
   MetricMap metrics;
   AttributeMap attrs;
-  Status s = GetMetricsAndAttrs(opts, metrics, attrs);
+  Status s = GetMetricsAndAttrs(opts, &metrics, &attrs);
   if (!s.ok()) {
     CHECK(s.IsNotFound());
     return Status::OK();

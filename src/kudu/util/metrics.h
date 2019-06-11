@@ -654,8 +654,8 @@ class MetricEntity : public RefCountedThreadSafe<MetricEntity> {
   void CheckInstantiation(const MetricPrototype* proto) const;
 
   Status GetMetricsAndAttrs(const MetricJsonOptions& opts,
-                            MetricMap& metrics,
-                            AttributeMap& attrs) const;
+                            MetricMap* metrics,
+                            AttributeMap* attrs) const;
 
   const MetricEntityPrototype* const prototype_;
   const std::string id_;

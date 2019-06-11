@@ -453,11 +453,11 @@ TEST_F(MetricsTest, JsonPrintTest) {
 }
 
 void CheckCollectOutput(const std::ostringstream& out,
-                        std::map<std::string, int> expect_table_counters) {
+                        std::map<std::string, int>&& expect_table_counters) {
   JsonReader reader(out.str());
   ASSERT_OK(reader.Init());
 
-  vector<const rapidjson::Value *> tables;
+  vector<const rapidjson::Value*> tables;
   ASSERT_OK(reader.ExtractObjectArray(reader.root(), nullptr, &tables));
   ASSERT_EQ(expect_table_counters.size(), tables.size());
   for (const auto& table : tables) {
@@ -497,77 +497,92 @@ TEST_F(MetricsTest, CollectTest) {
   // Generate the JSON.
   std::ostringstream out;
   JsonWriter writer(&out, JsonWriter::PRETTY);
-  MetricJsonOptions opts;
-  opts.include_origin = false;
-  opts.merge_by_table = true;
 
   {
     out.str("");
     MetricJsonOptions opts;
+    opts.include_origin = false;
+    opts.merge_by_table = true;
     ASSERT_OK(registry_.WriteAsJson(&writer, opts));
-    CheckCollectOutput(out, {{"table_name_val", 11}, {"another_table_name", 100}});
+    NO_FATALS(CheckCollectOutput(out, {{"table_name_val", 11}, {"another_table_name", 100}}));
   }
 
   // Verify that metric filtering matches on substrings.
   {
     out.str("");
     MetricJsonOptions opts;
+    opts.include_origin = false;
+    opts.merge_by_table = true;
     opts.entity_metrics.emplace_back("COUNTER");
     ASSERT_OK(registry_.WriteAsJson(&writer, opts));
-    CheckCollectOutput(out, {{"table_name_val", 11}, {"another_table_name", 100}});
+    NO_FATALS(CheckCollectOutput(out, {{"table_name_val", 11}, {"another_table_name", 100}}));
   }
 
   // Verify that, if we filter for a metric that isn't in this entity, we get no result.
   {
     out.str("");
     MetricJsonOptions opts;
+    opts.include_origin = false;
+    opts.merge_by_table = true;
     opts.entity_metrics.emplace_back("NOT_A_MATCHING_METRIC");
     ASSERT_OK(registry_.WriteAsJson(&writer, opts));
-    CheckCollectOutput(out, {});
+    NO_FATALS(CheckCollectOutput(out, {}));
   }
 
   // Verify that tablet_id filtering matches on substrings.
   {
     out.str("");
     MetricJsonOptions opts;
+    opts.include_origin = false;
+    opts.merge_by_table = true;
     opts.entity_ids.emplace_back("TEST_TABLET");
     ASSERT_OK(registry_.WriteAsJson(&writer, opts));
-    CheckCollectOutput(out, {{"table_name_val", 11}});
+    NO_FATALS(CheckCollectOutput(out, {{"table_name_val", 11}}));
   }
 
   {
     out.str("");
     MetricJsonOptions opts;
+    opts.include_origin = false;
+    opts.merge_by_table = true;
     opts.entity_ids.emplace_back("TEST_TABLET_FOR_MERGE");
     ASSERT_OK(registry_.WriteAsJson(&writer, opts));
-    CheckCollectOutput(out, {{"table_name_val", 10}});
+    NO_FATALS(CheckCollectOutput(out, {{"table_name_val", 10}}));
   }
 
   // Verify that, if we filter for a tablet_id that doesn't match this entity, we get no result.
   {
     out.str("");
     MetricJsonOptions opts;
+    opts.include_origin = false;
+    opts.merge_by_table = true;
     opts.entity_ids.emplace_back("not_a_matching_tablet_id");
     ASSERT_OK(registry_.WriteAsJson(&writer, opts));
-    CheckCollectOutput(out, {});
+    NO_FATALS(CheckCollectOutput(out, {}));
   }
 
   // Verify that table_name filtering matches on substrings.
   {
     out.str("");
     MetricJsonOptions opts;
+    opts.include_origin = false;
+    opts.merge_by_table = true;
+    opts.entity_attrs.emplace_back("table_name");
     opts.entity_attrs.emplace_back("TABLE_NAME_VAL");
     ASSERT_OK(registry_.WriteAsJson(&writer, opts));
-    CheckCollectOutput(out, {{"table_name_val", 11}});
+    NO_FATALS(CheckCollectOutput(out, {{"table_name_val", 11}}));
   }
 
   // Verify that, if we filter for a table_name that isn't in this entity, we get no result.
   {
     out.str("");
     MetricJsonOptions opts;
+    opts.include_origin = false;
+    opts.merge_by_table = true;
+    opts.entity_attrs.emplace_back("table_name");
     opts.entity_attrs.emplace_back("NOT_A_MATCHING_TABLE_NAME");
     ASSERT_OK(registry_.WriteAsJson(&writer, opts));
-    CheckCollectOutput(out, {});
+    NO_FATALS(CheckCollectOutput(out, {}));
   }
 }
 
@@ -779,7 +794,7 @@ TEST_F(MetricsTest, TestFilter) {
       ASSERT_EQ("[]", out.str());
     }
     {
-      const string entity_type = "test_entity";
+      const string entity_type = "tablet";
       std::ostringstream out;
       MetricJsonOptions opts;
       opts.entity_types = { entity_type };
@@ -787,7 +802,7 @@ TEST_F(MetricsTest, TestFilter) {
       ASSERT_OK(registry_.WriteAsJson(&w, opts));
       rapidjson::Document d;
       d.Parse<0>(out.str().c_str());
-      ASSERT_EQ(kNum + 1, d.Size());
+      ASSERT_EQ(kNum + 3, d.Size());
       ASSERT_EQ(entity_type, d[rand.Next() % kNum]["type"].GetString());
     }
   }
@@ -872,7 +887,7 @@ TEST_F(MetricsTest, TestFilter) {
     ASSERT_OK(registry_.WriteAsJson(&w, MetricJsonOptions()));
     rapidjson::Document d;
     d.Parse<0>(out.str().c_str());
-    ASSERT_EQ(kNum + 1, d.Size());
+    ASSERT_EQ(kNum + 3, d.Size());
   }
 }
 
