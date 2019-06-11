@@ -323,9 +323,10 @@ void AddDefaultPathHandlers(Webserver* webserver) {
   AddPprofPathHandlers(webserver);
 }
 
-static bool ParseBool(const Webserver::ArgumentMap& args, const string& key) {
-  string arg = FindWithDefault(args, key, "false");
-  return ParseLeadingBoolValue(arg.c_str(), false);
+static bool ParseBool(const Webserver::ArgumentMap& args, const string& key,
+                      bool default_val = false) {
+  string arg = FindWithDefault(args, key, default_val ? "true" : "false");
+  return ParseLeadingBoolValue(arg.c_str(), default_val);
 }
 
 static vector<string> ParseArray(const Webserver::ArgumentMap& args, const string& key) {
@@ -343,6 +344,8 @@ static void WriteMetricsAsJson(const MetricRegistry* const metrics,
   MetricJsonOptions opts;
   opts.include_raw_histograms = ParseBool(req.parsed_args, "include_raw_histograms");
   opts.include_schema_info = ParseBool(req.parsed_args, "include_schema");
+  opts.merge_by_table = ParseBool(req.parsed_args, "merge");
+  opts.include_origin = ParseBool(req.parsed_args, "origin", true);
   opts.entity_types = ParseArray(req.parsed_args, "types");
   opts.entity_ids =  ParseArray(req.parsed_args, "ids");
   opts.entity_attrs = ParseArray(req.parsed_args, "attributes");
