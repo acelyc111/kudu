@@ -256,7 +256,6 @@ class TabletReplica : public RefCountedThreadSafe<TabletReplica>,
     return log_anchor_registry_;
   }
 
-  const std::string& table_id() const { return meta_->table_id(); }
   const std::string& tablet_id() const { return meta_->tablet_id(); }
 
   // Convenience method to return the permanent_uuid of this peer.

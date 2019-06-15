@@ -654,6 +654,7 @@ Status ColumnPredicateFromPB(const Schema& schema,
 }
 
 const char kTableHistoryMaxAgeSec[] = "kudu.table.history_max_age_sec";
+const char kTableMaintenancePriority[] = "kudu.table.maintenance_priority";
 Status ExtraConfigPBToMap(const TableExtraConfigPB& pb, map<string, string>* configs) {
   Map<string, string> tmp;
   RETURN_NOT_OK(ExtraConfigPBToPBMap(pb, &tmp));
@@ -675,6 +676,14 @@ Status ExtraConfigPBFromPBMap(const Map<string, string>& configs, TableExtraConf
         }
         result.set_history_max_age_sec(history_max_age_sec);
       }
+    } else if (name == kTableMaintenancePriority) {
+      if (!value.empty()) {
+        int32_t maintenance_priority;
+        if (!safe_strto32(value, &maintenance_priority)) {
+          return Status::InvalidArgument(Substitute("Unable to parse $0", name), value);
+        }
+        result.set_maintenance_priority(maintenance_priority);
+      }
     } else {
       LOG(WARNING) << "Unknown extra configuration property: " << name;
     }
@@ -687,6 +696,9 @@ Status ExtraConfigPBToPBMap(const TableExtraConfigPB& pb, Map<string, string>* c
   Map<string, string> result;
   if (pb.has_history_max_age_sec()) {
     result[kTableHistoryMaxAgeSec] = std::to_string(pb.history_max_age_sec());
+  }
+  if (pb.has_maintenance_priority()) {
+    result[kTableMaintenancePriority] = std::to_string(pb.maintenance_priority());
   }
   *configs = std::move(result);
   return Status::OK();
