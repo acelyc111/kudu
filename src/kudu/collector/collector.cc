@@ -24,20 +24,9 @@
 
 #include <glog/logging.h>
 
-#include "kudu/cfile/block_cache.h"
-#include "kudu/fs/error_manager.h"
-#include "kudu/fs/fs_manager.h"
 #include "kudu/gutil/bind.h"
 #include "kudu/gutil/bind_helpers.h"
 #include "kudu/gutil/strings/substitute.h"
-#include "kudu/rpc/service_if.h"
-#include "kudu/tserver/heartbeater.h"
-#include "kudu/tserver/scanners.h"
-#include "kudu/tserver/tablet_copy_service.h"
-#include "kudu/tserver/tablet_service.h"
-#include "kudu/tserver/ts_tablet_manager.h"
-#include "kudu/tserver/tserver_path_handlers.h"
-#include "kudu/util/maintenance_manager.h"
 #include "kudu/util/net/dns_resolver.h"
 #include "kudu/util/net/net_util.h"
 #include "kudu/util/status.h"
@@ -51,8 +40,7 @@ namespace collector {
 Collector::Collector(const CollectorOptions& opts)
   : KuduServer("Collector", opts, "collector"),
     initted_(false),
-    opts_(opts),
-    path_handlers_(new TabletServerPathHandlers(this)) {
+    opts_(opts) {
 }
 
 Collector::~Collector() {

@@ -41,8 +41,6 @@ namespace kudu {
 namespace collector {
 
 CollectorOptions::CollectorOptions() {
-  rpc_opts.default_port = TabletServer::kDefaultPort;
-
   Status s = HostPort::ParseStrings(FLAGS_collector_master_addrs,
                                     master::Master::kDefaultPort,
                                     &master_addresses);

@@ -24,8 +24,8 @@ set(COLLECTOR_SRCS
   collector_options.cc
 )
 
-add_library(collector ${TSERVER_SRCS})
-target_link_libraries(tserver
+add_library(collector ${COLLECTOR_SRCS})
+target_link_libraries(collector
   kserver
   log
   security

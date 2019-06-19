@@ -24,8 +24,8 @@
 
 #include "kudu/gutil/macros.h"
 #include "kudu/gutil/strings/substitute.h"
-#include "kudu/tserver/tablet_server.h"
-#include "kudu/tserver/tablet_server_options.h"
+#include "kudu/collector/collector.h"
+#include "kudu/collector/collector_options.h"
 #include "kudu/util/fault_injection.h"
 #include "kudu/util/flag_tags.h"
 #include "kudu/util/flags.h"
@@ -55,16 +55,14 @@ static int CollectorMain(int argc, char** argv) {
 
   LOG(INFO) << "Collector non-default flags:\n"
             << nondefault_flags << '\n'
-            << "Tablet server version:\n"
+            << "Collector version:\n"
             << VersionInfo::GetAllVersionInfo();
 
   CollectorOptions opts;
-  TabletServer server(opts);
-  CHECK_OK(server.Init());
+  Collector collector(opts);
+  CHECK_OK(collector.Init());
 
-  MAYBE_FAULT(FLAGS_fault_before_start);
-
-  CHECK_OK(server.Start());
+  CHECK_OK(collector.Start());
 
   while (true) {
     SleepFor(MonoDelta::FromSeconds(60));
