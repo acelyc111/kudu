@@ -23,14 +23,17 @@
 #include "kudu/gutil/atomicops.h"
 #include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/macros.h"
-#include "kudu/kserver/kserver.h"
+#include "kudu/server/server_base.h"
 #include "kudu/collector/collector_options.h"
 #include "kudu/util/status.h"
 
 namespace kudu {
+
+class DnsResolver;
+
 namespace collector {
 
-class Collector : public kserver::KuduServer {
+class Collector {
  public:
   explicit Collector(const CollectorOptions& opts);
   ~Collector();
@@ -40,18 +43,31 @@ class Collector : public kserver::KuduServer {
   // Some initialization tasks are asynchronous, such as the bootstrapping
   // of tablets. Caller can block, waiting for the initialization to fully
   // complete by calling WaitInited().
-  Status Init() override;
+  Status Init();
 
-  Status Start() override;
-  void Shutdown() override;
+  Status Start();
+  void Shutdown();
+
+  DnsResolver* dns_resolver() { return dns_resolver_.get(); }
 
   std::string ToString() const;
 
  private:
+  // Start thread to remove excess glog and minidump files.
+  Status StartExcessLogFileDeleterThread();
+  void ExcessLogFileDeleterThread();
+
   bool initted_;
 
   // The options passed at construction time.
   const CollectorOptions opts_;
+
+  CountDownLatch stop_background_threads_latch_;
+
+  // Utility object for DNS name resolutions.
+  std::unique_ptr<DnsResolver> dns_resolver_;
+
+  scoped_refptr<Thread> excess_log_deleter_thread_;
 
   DISALLOW_COPY_AND_ASSIGN(Collector);
 };

@@ -27,9 +27,18 @@
 #include "kudu/gutil/bind.h"
 #include "kudu/gutil/bind_helpers.h"
 #include "kudu/gutil/strings/substitute.h"
+#include "kudu/security/init.h"
+#include "kudu/security/security_flags.h"
+#include "kudu/util/logging.h"
 #include "kudu/util/net/dns_resolver.h"
 #include "kudu/util/net/net_util.h"
 #include "kudu/util/status.h"
+
+DECLARE_int32(dns_resolver_max_threads_num);
+DECLARE_uint32(dns_resolver_cache_capacity_mb);
+DECLARE_uint32(dns_resolver_cache_ttl_sec);
+DECLARE_string(principal);
+DECLARE_string(keytab_file);
 
 using std::string;
 using std::vector;
@@ -38,9 +47,13 @@ namespace kudu {
 namespace collector {
 
 Collector::Collector(const CollectorOptions& opts)
-  : KuduServer("Collector", opts, "collector"),
-    initted_(false),
-    opts_(opts) {
+  : initted_(false),
+    opts_(opts),
+    stop_background_threads_latch_(1),
+    dns_resolver_(new DnsResolver(
+        FLAGS_dns_resolver_max_threads_num,
+        FLAGS_dns_resolver_cache_capacity_mb * 1024 * 1024,
+        MonoDelta::FromSeconds(FLAGS_dns_resolver_cache_ttl_sec))) {
 }
 
 Collector::~Collector() {
@@ -50,6 +63,27 @@ Collector::~Collector() {
 string Collector::ToString() const {
   return "Collector";
 }
+
+Status Collector::StartExcessLogFileDeleterThread() {
+  // Try synchronously deleting excess log files once at startup to make sure it
+  // works, then start a background thread to continue deleting them in the
+  // future. Same with minidumps.
+  if (!FLAGS_logtostderr) {
+    RETURN_NOT_OK_PREPEND(DeleteExcessLogFiles(opts_.env),
+                          "Unable to delete excess log files");
+  }
+  return Thread::Create("server", "excess-log-deleter", &Collector::ExcessLogFileDeleterThread,
+                        this, &excess_log_deleter_thread_);
+}
+
+void Collector::ExcessLogFileDeleterThread() {
+  // How often to attempt to clean up excess glog and minidump files.
+  const MonoDelta kWait = MonoDelta::FromSeconds(60);
+  while (!stop_background_threads_latch_.WaitUntil(MonoTime::Now() + kWait)) {
+    WARN_NOT_OK(DeleteExcessLogFiles(opts_.env), "Unable to delete excess log files");
+  }
+}
+
 
 Status Collector::Init() {
   CHECK(!initted_);
@@ -77,7 +111,8 @@ Status Collector::Init() {
                             addr.ToString()));
   }
 
-  RETURN_NOT_OK(KuduServer::Init());
+  RETURN_NOT_OK(security::InitKerberosForServer(FLAGS_principal, FLAGS_keytab_file));
+  RETURN_NOT_OK(StartExcessLogFileDeleterThread());
 
   initted_ = true;
   return Status::OK();
@@ -86,7 +121,6 @@ Status Collector::Init() {
 Status Collector::Start() {
   CHECK(initted_);
 
-  RETURN_NOT_OK(KuduServer::Start());
   google::FlushLogFiles(google::INFO); // Flush the startup messages.
 
   return Status::OK();
@@ -97,8 +131,12 @@ void Collector::Shutdown() {
     string name = ToString();
     LOG(INFO) << name << " shutting down...";
 
-    // 1. Shut down generic subsystems.
-    KuduServer::Shutdown();
+    // Next, shut down remaining server components.
+    stop_background_threads_latch_.CountDown();
+
+    if (excess_log_deleter_thread_) {
+      excess_log_deleter_thread_->Join();
+    }
 
     LOG(INFO) << name << " shutdown complete.";
   }
