@@ -19,6 +19,8 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <bits/unordered_map.h>
+#include <unordered_map>
 
 #include "kudu/gutil/atomicops.h"
 #include "kudu/gutil/gscoped_ptr.h"
@@ -53,11 +55,29 @@ class Collector {
   std::string ToString() const;
 
  private:
+  // Start thread to update nodes in the cluster.
+  Status StartNodesUpdaterThread();
+  void NodesUpdaterThread();
+  Status UpdateNodes();
+
+  // Start thread to collect metrics from servers.
+  Status StartMetricCollectorThread();
+  void MetricCollectorThread();
+  Status CollectMetrics();
+
   // Start thread to remove excess glog and minidump files.
   Status StartExcessLogFileDeleterThread();
   void ExcessLogFileDeleterThread();
 
+  Status InitMetrics(const std::string& tserver_http_addr);
+
+  Status GetMetrics(const std::string& tserver_http_addr, string* result);
+
   bool initted_;
+
+  std::string master_addrs_;
+  std::vector<std::string> tserver_http_addrs_;
+  std::unordered_map<std::string, std::string> type_by_metric_name_;
 
   // The options passed at construction time.
   const CollectorOptions opts_;
@@ -67,6 +87,8 @@ class Collector {
   // Utility object for DNS name resolutions.
   std::unique_ptr<DnsResolver> dns_resolver_;
 
+  scoped_refptr<Thread> nodes_updater_thread_;
+  scoped_refptr<Thread> metric_collector_thread_;
   scoped_refptr<Thread> excess_log_deleter_thread_;
 
   DISALLOW_COPY_AND_ASSIGN(Collector);

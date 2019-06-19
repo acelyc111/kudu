@@ -22,6 +22,7 @@
 set(COLLECTOR_SRCS
   collector.cc
   collector_options.cc
+  tool_util.cc
 )
 
 add_library(collector ${COLLECTOR_SRCS})
