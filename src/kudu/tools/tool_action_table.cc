@@ -15,8 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <stdlib.h>
-
 #include <algorithm>
 #include <cstdint>
 #include <functional>

@@ -28,6 +28,10 @@
 
 namespace kudu {
 
+namespace collector {
+class MetricsCollector;
+}  // namespace collector
+
 // Wraps the JSON parsing functionality of rapidjson::Document.
 //
 // Unlike JsonWriter, this class does not hide rapidjson internals from
@@ -93,6 +97,8 @@ class JsonReader {
   const rapidjson::Value* root() const { return &document_; }
 
  private:
+  friend class collector::MetricsCollector;
+
   Status ExtractField(const rapidjson::Value* object,
                       const char* field,
                       const rapidjson::Value** result) const;

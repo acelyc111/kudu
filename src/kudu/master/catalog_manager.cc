@@ -61,6 +61,7 @@
 #include <boost/optional/optional.hpp>
 #include <boost/optional/optional_io.hpp> // IWYU pragma: keep
 #include <gflags/gflags.h>
+#include <gflags/gflags_declare.h>
 #include <glog/logging.h>
 #include <google/protobuf/arena.h>
 #include <google/protobuf/stubs/common.h>
