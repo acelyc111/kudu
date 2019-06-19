@@ -47,7 +47,7 @@ TabletServerOptions::TabletServerOptions() {
                                     master::Master::kDefaultPort,
                                     &master_addresses);
   if (!s.ok()) {
-    LOG(FATAL) << "Couldn't parse tablet_server_master_addrs flag: " << s.ToString();
+    LOG(FATAL) << "Couldn't parse tserver_master_addrs flag: " << s.ToString();
   }
 }
 
