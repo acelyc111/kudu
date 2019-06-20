@@ -314,7 +314,7 @@ Status Collector::ParseTableMetrics(const JsonReader& r,
       continue;
     }
     if (*known_type == "GAUGE" || *known_type ==  "COUNTER") {
-      int64_t result;
+      int64_t result = 0;
       MetricValueType type = GetMetricValueType(name);
       switch (type) {
         case MetricValueType::kString:
@@ -352,34 +352,6 @@ Status Collector::ParseTableMetrics(const JsonReader& r,
 
 Status Collector::ParseTabletMetrics(const JsonReader& r,
                                      const rapidjson::Value* entity) {
-  vector<const Value*> metrics;
-  CHECK_OK(r.ExtractObjectArray(entity, "metrics", &metrics));
-  for (const Value* metric : metrics) {
-    string name;
-    CHECK_OK(r.ExtractString(metric, "name", &name));
-    const auto* known_type = FindOrNull(type_by_metric_name_, name);
-    if (!known_type) {
-      continue;
-    }
-    if (*known_type == "GAUGE" || *known_type ==  "COUNTER") {
-      int64_t result;
-      MetricValueType type = GetMetricValueType(name);
-      switch (type) {
-        case MetricValueType::kString:
-          CHECK_OK(GetStringMetricValue(r, metric, name, &result));
-          break;
-        case MetricValueType::kInt:
-          CHECK_OK(GetIntMetricValue(r, metric, name, &result));
-          break;
-        default:
-          LOG(FATAL) << "Unknown type, metrics nameL " << name;
-      }
-    } else if (*known_type == "HISTOGRAM") {
-
-    } else {
-
-    }
-  }
   return Status::OK();
 }
 
@@ -410,6 +382,7 @@ Status Collector::GetAndMergeMetrics(const std::string& url) {
     } else if (entity_type == "tablet") {
       ParseTabletMetrics(r, entity);
     } else {
+      LOG(FATAL) << "Unknown entity_type: " << entity_type;
     }
   }
   return Status::OK();
