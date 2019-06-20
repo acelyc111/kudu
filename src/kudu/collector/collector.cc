@@ -204,7 +204,7 @@ Status Collector::InitMetrics(const std::string& url) {
 }
 
 Status Collector::InitFilters() {
-  std::unordered_map<std::string, std::set<std::string>> entity_values_filter_by_entity_name;
+  unordered_map<string, set<string>> entity_values_filter_by_entity_name;
   vector<string> attribute_values_by_name =
       Split(FLAGS_collector_attributes, ";", strings::SkipEmpty());
   for (const auto& seg : attribute_values_by_name) {
@@ -212,9 +212,9 @@ Status Collector::InitFilters() {
     CHECK_EQ(key_and_values.size(), 2);
     vector<string> values = Split(key_and_values[1], ",", strings::SkipEmpty());
     CHECK_GT(values.size(), 0);
-    auto it = entity_values_filter_by_entity_name.emplace(key_and_values[0]).first;
+    auto& attrs = entity_values_filter_by_entity_name.insert(std::make_pair(key_and_values[0], set<string>())).first->second;
     for (const auto& value : values) {
-      it->second.emplace(value);
+      attrs.emplace(value);
     }
   }
   entity_values_filter_by_entity_name_.swap(entity_values_filter_by_entity_name);
@@ -230,9 +230,10 @@ Status Collector::UpdateThreadPool(uint32_t thread_count) {
       .set_max_threads(thread_count)
       .set_idle_timeout(MonoDelta::FromMilliseconds(1))
       .Build(&host_metric_collector_thread_pool_));
+  return Status::OK();
 }
 
-MetricValueType Collector::GetMetricValueType(const std::string& metric_name) {
+Collector::MetricValueType Collector::GetMetricValueType(const std::string& metric_name) {
   if (ContainsKey(string_value_metrics_, metric_name)) {
     return MetricValueType::kString;
   }
@@ -292,11 +293,16 @@ Status Collector::ParseTableMetrics(const JsonReader& r,
                                     Metrics* host_metrics,
                                     TablesHistMetrics* tables_hist_metrics,
                                     HistMetrics* host_hist_metrics) {
+  CHECK(tables_metrics);
+  CHECK(host_metrics);
+  CHECK(tables_hist_metrics);
+  CHECK(host_hist_metrics);
   string table_name;
   CHECK_OK(r.ExtractString(entity, "id", &table_name));
-  CHECK(!ContainsKey(tables_metrics, table_name));
-  auto table_metrics = tables_metrics->insert(table_name, {}).first;
-  auto table_hist_metrics = tables_hist_metrics->insert(table_name, {}).first;
+  CHECK(!ContainsKey(*tables_metrics, table_name));
+  CHECK(!ContainsKey(*tables_hist_metrics, table_name));
+  auto& table_metrics = tables_metrics->insert(std::make_pair(table_name, Metrics())).first->second;
+  auto& table_hist_metrics = tables_hist_metrics->insert(std::make_pair(table_name, HistMetrics())).first->second;
 
   vector<const Value*> metrics;
   CHECK_OK(r.ExtractObjectArray(entity, "metrics", &metrics));
@@ -321,8 +327,8 @@ Status Collector::ParseTableMetrics(const JsonReader& r,
           LOG(FATAL) << "Unknown type, metrics name: " << name;
       }
       CHECK(!ContainsKey(table_metrics, name));
-      table_metrics.insert(name, result);
-      auto& host_metric = LookupOrInsertNew(host_metrics, name);
+      table_metrics.insert({{name, result}});
+      auto& host_metric = host_metrics->insert(std::make_pair(name, 0)).first->second;
       host_metric += result;
     } else if (*known_type == "HISTOGRAM") {
       for (const auto& percentile : rigister_percentiles_) {
@@ -332,14 +338,16 @@ Status Collector::ParseTableMetrics(const JsonReader& r,
         int64_t value;
         CHECK_OK(r.ExtractInt64(metric, percentile.c_str(), &value));
         CHECK(!ContainsKey(table_hist_metrics, hist_metric_name));
-        table_hist_metrics.insert(hist_metric_name, {SimpleHistogram(total_count, value)});
-        auto& host_hist_metric = LookupOrInsertNew(host_hist_metrics, hist_metric_name);
+        table_hist_metrics.insert({{hist_metric_name, {SimpleHistogram(total_count, value)}}});
+        std::vector<SimpleHistogram> tmp({SimpleHistogram(total_count, value)});
+        auto& host_hist_metric = host_hist_metrics->insert(std::make_pair(hist_metric_name, tmp)).first->second;
         host_hist_metric.emplace_back(SimpleHistogram(total_count, value));
       }
     } else {
       LOG(FATAL) << "Unknown metric type: " << *known_type;
     }
   }
+  return Status::OK();
 }
 
 Status Collector::ParseTabletMetrics(const JsonReader& r,
@@ -372,6 +380,7 @@ Status Collector::ParseTabletMetrics(const JsonReader& r,
 
     }
   }
+  return Status::OK();
 }
 
 Status Collector::GetAndMergeMetrics(const std::string& url) {
