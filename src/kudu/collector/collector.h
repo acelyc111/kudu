@@ -21,11 +21,15 @@
 #include <string>
 #include <unordered_map>
 
+#include <rapidjson/document.h>
+
 #include "kudu/gutil/atomicops.h"
 #include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/macros.h"
 #include "kudu/server/server_base.h"
 #include "kudu/collector/collector_options.h"
+#include "kudu/util/jsonreader.h"
+#include "kudu/util/threadpool.h"
 #include "kudu/util/status.h"
 
 namespace kudu {
@@ -54,6 +58,16 @@ class Collector {
   std::string ToString() const;
 
  private:
+  typedef std::unordered_map<std::string, int64_t> Metrics;
+  typedef std::unordered_map<std::string, Metrics> TablesMetrics;
+  struct SimpleHistogram {
+    int64_t count;
+    int64_t value;
+    SimpleHistogram(int64_t c, int64_t v) : count(c), value(v) {
+    }
+  };
+  typedef std::unordered_map<std::string, std::vector<SimpleHistogram>> HistMetrics;
+  typedef std::unordered_map<std::string, HistMetrics> TablesHistMetrics;
   // Start thread to update nodes in the cluster.
   Status StartNodesUpdaterThread();
   void NodesUpdaterThread();
@@ -68,15 +82,48 @@ class Collector {
   Status StartExcessLogFileDeleterThread();
   void ExcessLogFileDeleterThread();
 
-  Status InitMetrics(const std::string& tserver_http_addr);
+  Status InitMetrics(const std::string& url);
+  Status InitFilters();
 
-  Status GetMetrics(const std::string& tserver_http_addr, std::string* result);
+  Status GetAndMergeMetrics(const std::string& url);
+  Status GetMetrics(const std::string& url, std::string* resp);
+  Status ParseServerMetrics(const JsonReader& r,
+                            const rapidjson::Value* entity);
+  Status ParseTableMetrics(const JsonReader& r,
+                           const rapidjson::Value* entity,
+                           TablesMetrics* tables_metrics,
+                           Metrics* host_metrics,
+                           TablesHistMetrics* tables_hist_metrics,
+                           HistMetrics* host_hist_metrics);
+  Status ParseTabletMetrics(const JsonReader& r,
+                            const rapidjson::Value* entity);
+  enum class MetricValueType {
+    kInt = 0,
+    kString
+  };
+  bool FilterByAttribute(const JsonReader& r,
+                         const rapidjson::Value* entity);
+  MetricValueType GetMetricValueType(const std::string& metric_name);
+  Status GetIntMetricValue(const JsonReader& r,
+                           const rapidjson::Value* metric,
+                           const std::string& metric_name,
+                           int64_t* result);
+  Status GetStringMetricValue(const JsonReader& r,
+                              const rapidjson::Value* metric,
+                              const std::string& metric_name,
+                              int64_t* result);
 
-  bool initted_;
+  Status UpdateThreadPool(uint32_t thread_count);
+
+  static const std::set<std::string> string_value_metrics_;
+  static const std::set<std::string> rigister_percentiles_;
+
+  bool initialized_;
 
   std::string master_addrs_;
   std::vector<std::string> tserver_http_addrs_;
   std::unordered_map<std::string, std::string> type_by_metric_name_;
+  std::unordered_map<std::string, std::set<std::string>> entity_values_filter_by_entity_name_;
 
   // The options passed at construction time.
   const CollectorOptions opts_;
@@ -89,6 +136,7 @@ class Collector {
   scoped_refptr<Thread> nodes_updater_thread_;
   scoped_refptr<Thread> metric_collector_thread_;
   scoped_refptr<Thread> excess_log_deleter_thread_;
+  gscoped_ptr<ThreadPool> host_metric_collector_thread_pool_;
 
   DISALLOW_COPY_AND_ASSIGN(Collector);
 };
