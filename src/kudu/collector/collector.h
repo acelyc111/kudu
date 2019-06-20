@@ -19,7 +19,6 @@
 #include <cstdint>
 #include <memory>
 #include <string>
-#include <bits/unordered_map.h>
 #include <unordered_map>
 
 #include "kudu/gutil/atomicops.h"
@@ -71,7 +70,7 @@ class Collector {
 
   Status InitMetrics(const std::string& tserver_http_addr);
 
-  Status GetMetrics(const std::string& tserver_http_addr, string* result);
+  Status GetMetrics(const std::string& tserver_http_addr, std::string* result);
 
   bool initted_;
 

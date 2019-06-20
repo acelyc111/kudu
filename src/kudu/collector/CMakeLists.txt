@@ -27,6 +27,7 @@ set(COLLECTOR_SRCS
 
 add_library(collector ${COLLECTOR_SRCS})
 target_link_libraries(collector
+  kudu_curl_util
   kserver
   log
   security
