@@ -85,7 +85,7 @@ class Collector {
   Status InitMetrics(const std::string& url);
   Status InitFilters();
 
-  Status GetAndMergeMetrics(const std::string& url, string* host_name);
+  Status GetAndMergeMetrics(const std::string& url);
   Status GetMetrics(const std::string& url, std::string* resp);
   Status ParseServerMetrics(const JsonReader& r,
                             const rapidjson::Value* entity);

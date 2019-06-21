@@ -144,7 +144,7 @@ void Collector::MetricCollectorThread() {
     MicrosecondsInt64 start = GetCurrentTimeMicros();
     WARN_NOT_OK(CollectMetrics(), "Unable to collect metrics");
     MicrosecondsInt64 cost = GetCurrentTimeMicros() - start;
-    wait = MonoDelta::FromMicroseconds(std::max(10, FLAGS_collector_metrics_collect_interval - cost));
+    wait = MonoDelta::FromMicroseconds(std::max(10L, FLAGS_collector_metrics_collect_interval - cost));
   }
 }
 
