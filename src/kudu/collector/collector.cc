@@ -17,6 +17,8 @@
 
 #include "kudu/collector/collector.h"
 
+#include <algorithm>
+#include <list>
 #include <ostream>
 #include <set>
 #include <type_traits>
@@ -31,6 +33,7 @@
 #include "kudu/gutil/bind_helpers.h"
 #include "kudu/gutil/strings/split.h"
 #include "kudu/gutil/strings/substitute.h"
+#include "kudu/gutil/walltime.h"
 #include "kudu/security/init.h"
 #include "kudu/security/security_flags.h"
 #include "kudu/util/logging.h"
@@ -38,8 +41,12 @@
 #include "kudu/util/net/net_util.h"
 #include "kudu/util/status.h"
 
+DEFINE_int32(collector_metrics_collect_interval, 60,
+             "Number of interval seconds to get metrics");
 DEFINE_int64(collector_timeout_sec, 10,
              "Number of seconds to wait for a master/tserver to return metrics");
+DEFINE_string(collector_cluster_name, "",
+              "Cluster name");
 DEFINE_string(collector_metrics, "",
               "Metrics to collect (comma-separated list of metric names)");
 DEFINE_string(collector_attributes, "",
@@ -55,6 +62,7 @@ DECLARE_string(principal);
 DECLARE_string(keytab_file);
 
 using rapidjson::Value;
+using std::list;
 using std::set;
 using std::string;
 using std::vector;
@@ -130,9 +138,13 @@ Status Collector::StartMetricCollectorThread() {
 }
 
 void Collector::MetricCollectorThread() {
-  const MonoDelta kWait = MonoDelta::FromSeconds(60);
-  while (!stop_background_threads_latch_.WaitFor(kWait)) {
+  const MonoDelta kInterval = MonoDelta::FromSeconds(FLAGS_collector_metrics_collect_interval);
+  MonoDelta wait = kInterval;
+  while (!stop_background_threads_latch_.WaitFor(wait)) {
+    MicrosecondsInt64 start = GetCurrentTimeMicros();
     WARN_NOT_OK(CollectMetrics(), "Unable to collect metrics");
+    MicrosecondsInt64 cost = GetCurrentTimeMicros() - start;
+    wait = MonoDelta::FromMicroseconds(std::max(10, FLAGS_collector_metrics_collect_interval - cost));
   }
 }
 
@@ -355,7 +367,30 @@ Status Collector::ParseTabletMetrics(const JsonReader& r,
   return Status::OK();
 }
 
-Status Collector::GetAndMergeMetrics(const std::string& url) {
+string Collector::ExtractHostName(const string& url) {
+  size_t pos = url.find(':');
+  if (pos == string::npos) {
+    return url;
+  }
+  return url.substr(0, pos - 1);
+}
+
+Collector::FalconItem Collector::ContructFalconItem(std::string endpoint,
+                                std::string metric,
+                                std::string level,
+                                uint64_t timestamp,
+                                int64_t value,
+                                std::string counter_type,
+                                std::string extra_tags) {
+  return FalconItem(endpoint, metric,
+                    Substitute("service=kudu,cluster=$0,level=$1,v=4$2",
+                               FLAGS_collector_cluster_name, level, extra_tags),
+                    timestamp,
+                    FLAGS_collector_metrics_collect_interval,
+                    value, counter_type);
+}
+
+Status Collector::GetAndMergeMetrics(const string& url) {
   string resp;
   RETURN_NOT_OK(GetMetrics(url, &resp));
   JsonReader r(resp);
@@ -385,6 +420,43 @@ Status Collector::GetAndMergeMetrics(const std::string& url) {
       LOG(FATAL) << "Unknown entity_type: " << entity_type;
     }
   }
+
+  string host_name = ExtractHostName(url);
+  list<FalconItem> falcon_items;
+  // Host table level
+  // Not needed if entity_type == "table"
+
+  // Host level
+  for (const auto& host_metric : host_metrics) {
+    falcon_items.emplace_back(
+        ContructFalconItem(host_name,
+                           host_metric.first,
+                           "host",
+                           static_cast<uint64_t>(WallTime_Now()),
+                           host_metric.second,
+                           type_by_metric_name_[host_metric.first]));
+  }
+  for (const auto& host_hist_metric : host_hist_metrics) {
+    int64_t total_count = 0;
+    int64_t total_value = 0;
+    for (const auto& hist : host_hist_metric.second) {
+      total_count += hist.count;
+      total_value += hist.count * hist.value;
+    }
+    int64_t value = 0;
+    if (total_count != 0) {
+      value = total_value / total_count;
+    }
+
+    falcon_items.emplace_back(
+        ContructFalconItem(host_name,
+                           host_hist_metric.first,
+                           "host",
+                           static_cast<uint64_t>(WallTime_Now()),
+                           value,
+                           type_by_metric_name_[host_hist_metric.first]));
+  }
+
   return Status::OK();
 }
 

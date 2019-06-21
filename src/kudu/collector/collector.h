@@ -85,7 +85,7 @@ class Collector {
   Status InitMetrics(const std::string& url);
   Status InitFilters();
 
-  Status GetAndMergeMetrics(const std::string& url);
+  Status GetAndMergeMetrics(const std::string& url, string* host_name);
   Status GetMetrics(const std::string& url, std::string* resp);
   Status ParseServerMetrics(const JsonReader& r,
                             const rapidjson::Value* entity);
@@ -97,6 +97,35 @@ class Collector {
                            HistMetrics* host_hist_metrics);
   Status ParseTabletMetrics(const JsonReader& r,
                             const rapidjson::Value* entity);
+
+  std::string ExtractHostName(const std::string& url);
+  struct FalconItem {
+    FalconItem(std::string ep, std::string m, std::string t,
+               uint64_t ts, int32_t s, int64_t v, std::string ct)
+    : endpoint(std::move(ep)),
+      metric(std::move(m)),
+      tags(std::move(t)),
+      timestamp(ts),
+      step(s),
+      value(v),
+      counterType(std::move(ct)) {
+    }
+    std::string endpoint;
+    std::string metric;
+    std::string tags;
+    uint64_t timestamp;
+    int32_t step;
+    int64_t value;
+    std::string counterType;
+  };
+  FalconItem ContructFalconItem(std::string endpoint,
+                                std::string metric,
+                                std::string level,
+                                uint64_t timestamp,
+                                int64_t value,
+                                std::string counter_type,
+                                std::string extra_tags = "");
+
   enum class MetricValueType {
     kInt = 0,
     kString
