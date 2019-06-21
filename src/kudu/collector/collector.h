@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cstdint>
+#include <list>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -108,7 +109,7 @@ class Collector {
       timestamp(ts),
       step(s),
       value(v),
-      counterType(std::move(ct)) {
+      counter_type(std::move(ct)) {
     }
     std::string endpoint;
     std::string metric;
@@ -116,7 +117,7 @@ class Collector {
     uint64_t timestamp;
     int32_t step;
     int64_t value;
-    std::string counterType;
+    std::string counter_type;
   };
   FalconItem ContructFalconItem(std::string endpoint,
                                 std::string metric,
@@ -125,6 +126,8 @@ class Collector {
                                 int64_t value,
                                 std::string counter_type,
                                 std::string extra_tags = "");
+  Status ConvertToString(const std::list<FalconItem>& falcon_items, std::string* data);
+  Status Push(const std::list<FalconItem>& falcon_items);
 
   enum class MetricValueType {
     kInt = 0,

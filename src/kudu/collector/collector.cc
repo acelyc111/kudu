@@ -18,7 +18,6 @@
 #include "kudu/collector/collector.h"
 
 #include <algorithm>
-#include <list>
 #include <ostream>
 #include <set>
 #include <type_traits>
@@ -52,6 +51,8 @@ DEFINE_string(collector_metrics, "",
 DEFINE_string(collector_attributes, "",
               "Entity attributes to collect (semicolon-separated list of entity attribute "
               "name and values). e.g. attr_name1:attr_val1,attr_val2;attr_name2:attr_val3");
+DEFINE_string(falcon_url, "http://127.0.0.1:1988/v1/push",
+              "The falcon url to push metrics to");
 DEFINE_bool(collector_local_stat, false,
             "Whether to calculate statistics on local host");
 
@@ -275,6 +276,47 @@ Status Collector::GetStringMetricValue(const JsonReader& r,
     }
   }
   return Status::OK();
+}
+
+Status Collector::ConvertToString(const list<FalconItem>& falcon_items, string* data) {
+  CHECK(data);
+  if (falcon_items.empty()) {
+    return Status::InvalidArgument("Empty data");
+  }
+  std::ostringstream str;
+  JsonWriter jw(&str, JsonWriter::COMPACT);
+  jw.StartArray();
+  for (const auto& falcon_item : falcon_items) {
+    jw.StartObject();
+    jw.String("endpoint");
+    jw.String(falcon_item.endpoint);
+    jw.String("metric");
+    jw.String(falcon_item.metric);
+    jw.String("timestamp");
+    jw.Uint64(falcon_item.timestamp);
+    jw.String("step");
+    jw.Int(falcon_item.step);
+    jw.String("value");
+    jw.Int64(falcon_item.value);
+    jw.String("counterType");
+    jw.String(falcon_item.counter_type);
+    jw.String("tags");
+    jw.String(falcon_item.tags);
+    jw.EndObject();
+  }
+  jw.EndArray();
+  *data = str.str();
+  return Status::OK();
+}
+
+Status Collector::Push(const list<Collector::FalconItem>& falcon_items) {
+  string data;
+  RETURN_NOT_OK(ConvertToString(falcon_items, &data));
+  LOG(INFO) << data;
+
+  EasyCurl curl;
+  faststring dst;
+  RETURN_NOT_OK(curl.PostToURL(FLAGS_falcon_url, data, &dst));
 }
 
 bool Collector::FilterByAttribute(const JsonReader& r,
