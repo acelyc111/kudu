@@ -40,7 +40,7 @@
 #include "kudu/util/net/net_util.h"
 #include "kudu/util/status.h"
 
-DEFINE_int32(collector_metrics_collect_interval, 60,
+DEFINE_int32(collector_metrics_collect_interval_sec, 60,
              "Number of interval seconds to get metrics");
 DEFINE_int64(collector_timeout_sec, 10,
              "Number of seconds to wait for a master/tserver to return metrics");
@@ -132,6 +132,7 @@ Status Collector::UpdateNodes() {
   for (const Value* v : objs) {
     string http_address;
     CHECK_OK(r.ExtractString(v, "http-addresses", &http_address));
+    LOG(WARNING) << http_address;
     tserver_http_addrs.emplace_back(http_address);
   }
   tserver_http_addrs_.swap(tserver_http_addrs);
@@ -145,18 +146,21 @@ Status Collector::StartMetricCollectorThread() {
 }
 
 void Collector::MetricCollectorThread() {
-  const MonoDelta kInterval = MonoDelta::FromSeconds(FLAGS_collector_metrics_collect_interval);
+  const MonoDelta kInterval = MonoDelta::FromSeconds(FLAGS_collector_metrics_collect_interval_sec);
   MonoDelta wait = kInterval;
-  while (!stop_background_threads_latch_.WaitFor(wait)) {
+  do {
     MicrosecondsInt64 start = GetCurrentTimeMicros();
     WARN_NOT_OK(CollectMetrics(), "Unable to collect metrics");
     MicrosecondsInt64 cost = GetCurrentTimeMicros() - start;
-    wait = MonoDelta::FromMicroseconds(std::max(10L, FLAGS_collector_metrics_collect_interval - cost));
-  }
+    LOG(WARNING) << "CollectMetrics cost seconds: " << cost / 1e6;
+    wait = MonoDelta::FromSeconds(
+        std::max(10.0, FLAGS_collector_metrics_collect_interval_sec - cost / 1e6));
+  } while (!stop_background_threads_latch_.WaitFor(wait));
+  LOG(WARNING) << "MetricCollectorThread exit";
 }
 
 Status Collector::CollectMetrics() {
-  RETURN_NOT_OK(UpdateThreadPool(tserver_http_addrs_.size()));
+  //RETURN_NOT_OK(UpdateThreadPool(tserver_http_addrs_.size()));
   string parameters = "/metrics?compact=1";
   if (!FLAGS_collector_metrics.empty()) {
     parameters += "&metrics=" + FLAGS_collector_metrics;
@@ -219,6 +223,7 @@ Status Collector::InitMetrics(const std::string& url) {
     }
   }
   type_by_metric_name_.swap(type_by_metric_name);
+  LOG(WARNING) << "type_by_metric_name size: " << type_by_metric_name.size();
   return Status::OK();
 }
 
@@ -241,10 +246,15 @@ Status Collector::InitFilters() {
 }
 
 Status Collector::UpdateThreadPool(uint32_t thread_count) {
-  if (host_metric_collector_thread_pool_->num_threads() == thread_count) {
+  if (host_metric_collector_thread_pool_ &&
+      host_metric_collector_thread_pool_->num_threads() == thread_count) {
     return Status::OK();
   }
-  host_metric_collector_thread_pool_->Shutdown();
+
+  if (host_metric_collector_thread_pool_) {
+    host_metric_collector_thread_pool_->Shutdown();
+  }
+
   RETURN_NOT_OK(ThreadPoolBuilder("host_metric_collector")
       .set_max_threads(thread_count)
       .set_idle_timeout(MonoDelta::FromMilliseconds(1))
@@ -318,11 +328,11 @@ Status Collector::ConvertToString(const list<FalconItem>& falcon_items, string* 
 Status Collector::Push(const list<Collector::FalconItem>& falcon_items) {
   string data;
   RETURN_NOT_OK(ConvertToString(falcon_items, &data));
-  LOG(INFO) << data;
+  //LOG(INFO) << data;
 
   EasyCurl curl;
   faststring dst;
-  RETURN_NOT_OK(curl.PostToURL(FLAGS_falcon_url, data, &dst));
+  //RETURN_NOT_OK(curl.PostToURL(FLAGS_falcon_url, data, &dst));
   return Status::OK();
 }
 
@@ -374,7 +384,7 @@ Status Collector::ParseTableMetrics(const JsonReader& r,
     if (!known_type) {
       continue;
     }
-    if (*known_type == "GAUGE" || *known_type ==  "COUNTER") {
+    if (*known_type == "gauge" || *known_type ==  "counter") {
       int64_t result = 0;
       MetricValueType type = GetMetricValueType(name);
       switch (type) {
@@ -391,7 +401,7 @@ Status Collector::ParseTableMetrics(const JsonReader& r,
       table_metrics.insert({{name, result}});
       auto& host_metric = host_metrics->insert(std::make_pair(name, 0)).first->second;
       host_metric += result;
-    } else if (*known_type == "HISTOGRAM") {
+    } else if (*known_type == "histogram") {
       for (const auto& percentile : rigister_percentiles_) {
         string hist_metric_name = name + percentile;
         int64_t total_count;
@@ -435,7 +445,7 @@ Collector::FalconItem Collector::ContructFalconItem(std::string endpoint,
                     Substitute("service=kudu,cluster=$0,level=$1,v=4$2",
                                FLAGS_collector_cluster_name, level, extra_tags),
                     timestamp,
-                    FLAGS_collector_metrics_collect_interval,
+                    FLAGS_collector_metrics_collect_interval_sec,
                     value, counter_type);
 }
 
@@ -506,6 +516,8 @@ Status Collector::GetAndMergeMetrics(const string& url) {
                            type_by_metric_name_[host_hist_metric.first]));
   }
 
+  Push(falcon_items);
+
   return Status::OK();
 }
 
@@ -513,9 +525,10 @@ Status Collector::GetMetrics(const std::string& url, string* resp) {
   CHECK(resp);
   EasyCurl curl;
   faststring dst;
-  LOG(ERROR) << "url: " << url;
+  LOG(WARNING) << "url: " << url;
   RETURN_NOT_OK(curl.FetchURL(url, &dst));
   *resp = dst.ToString();
+  LOG(WARNING) << "got";
   return Status::OK();
 }
 
@@ -536,15 +549,23 @@ Status Collector::Init() {
 
   RETURN_NOT_OK(security::InitKerberosForServer(FLAGS_principal, FLAGS_keytab_file));
 
+  LOG(WARNING) << "0";
   RETURN_NOT_OK(UpdateNodes());
   CHECK(!tserver_http_addrs_.empty());
+  LOG(WARNING) << "1";
   RETURN_NOT_OK(InitMetrics(tserver_http_addrs_[0] + "/metrics?include_schema=1"));
+  LOG(WARNING) << "2";
   RETURN_NOT_OK(UpdateThreadPool(tserver_http_addrs_.size()));
+  LOG(WARNING) << "3";
   RETURN_NOT_OK(InitFilters());
+  LOG(WARNING) << "4";
 
   RETURN_NOT_OK(StartExcessLogFileDeleterThread());
+  LOG(WARNING) << "5";
   RETURN_NOT_OK(StartNodesUpdaterThread());
+  LOG(WARNING) << "6";
   RETURN_NOT_OK(StartMetricCollectorThread());
+  LOG(WARNING) << "7";
 
   initialized_ = true;
   return Status::OK();
