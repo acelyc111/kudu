@@ -117,7 +117,13 @@ Status Collector::UpdateNodes() {
   };
   string tool_stdout;
   string tool_stderr;
-  RETURN_NOT_OK(RunKuduTool(args, &tool_stdout, &tool_stderr));
+  Status s = RunKuduTool(args, &tool_stdout, &tool_stderr);
+  if (!s.ok()) {
+    LOG(ERROR) << "status: " << s.ToString();
+    LOG(ERROR) << "out: " << tool_stdout;
+    LOG(ERROR) << "error: " << tool_stderr;
+    return s;
+  }
   JsonReader r(tool_stdout);
   RETURN_NOT_OK(r.Init());
   vector<const Value*> objs;
@@ -317,6 +323,7 @@ Status Collector::Push(const list<Collector::FalconItem>& falcon_items) {
   EasyCurl curl;
   faststring dst;
   RETURN_NOT_OK(curl.PostToURL(FLAGS_falcon_url, data, &dst));
+  return Status::OK();
 }
 
 bool Collector::FilterByAttribute(const JsonReader& r,
@@ -506,6 +513,7 @@ Status Collector::GetMetrics(const std::string& url, string* resp) {
   CHECK(resp);
   EasyCurl curl;
   faststring dst;
+  LOG(ERROR) << "url: " << url;
   RETURN_NOT_OK(curl.FetchURL(url, &dst));
   *resp = dst.ToString();
   return Status::OK();
@@ -530,7 +538,7 @@ Status Collector::Init() {
 
   RETURN_NOT_OK(UpdateNodes());
   CHECK(!tserver_http_addrs_.empty());
-  RETURN_NOT_OK(InitMetrics(tserver_http_addrs_[0] + "&include_schema=1"));
+  RETURN_NOT_OK(InitMetrics(tserver_http_addrs_[0] + "/metrics?include_schema=1"));
   RETURN_NOT_OK(UpdateThreadPool(tserver_http_addrs_.size()));
   RETURN_NOT_OK(InitFilters());
 
