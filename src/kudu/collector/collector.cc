@@ -39,6 +39,8 @@
 #include "kudu/util/net/dns_resolver.h"
 #include "kudu/util/net/net_util.h"
 #include "kudu/util/status.h"
+#include "kudu/util/string_case.h"
+#include "kudu/util/zlib.h"
 
 DEFINE_int32(collector_metrics_collect_interval_sec, 60,
              "Number of interval seconds to get metrics");
@@ -168,13 +170,47 @@ Status Collector::CollectMetrics() {
   if (!FLAGS_collector_local_stat) {
     parameters += "&origin=false&merge=true";
   }
-  for (const auto& tserver_http_addr : tserver_http_addrs_) {
+  vector<TablesMetrics> hosts_tables_metrics(tserver_http_addrs_.size());
+  vector<TablesHistMetrics> hosts_tables_hist_metrics(tserver_http_addrs_.size());
+  for (int i = 0; i < tserver_http_addrs_.size(); ++i) {
     RETURN_NOT_OK(host_metric_collector_thread_pool_->SubmitFunc(
       boost::bind(&Collector::GetAndMergeMetrics,
                   this,
-                  tserver_http_addr + parameters)));
+                  tserver_http_addrs_[i] + parameters,
+                  &hosts_tables_metrics[i],
+                  &hosts_tables_hist_metrics[i])));
   }
   host_metric_collector_thread_pool_->Wait();
+
+  TablesMetrics tables_metrics;
+  for (const auto& host_tables_metrics : hosts_tables_metrics) {
+    for (const auto& host_table_metrics : host_tables_metrics) {
+      const auto& table_name = host_table_metrics.first;
+      auto& table_metrics = tables_metrics.insert(std::make_pair(table_name, Metrics())).first->second;
+      for (const auto& host_table_metric : host_table_metrics.second) {
+        const auto& metric = host_table_metric.first;
+        const auto& value = host_table_metric.second;
+        auto& table_metric = table_metrics.insert(std::make_pair(metric, value)).first->second;
+        // TODO may new insert
+        table_metric += value;
+      }
+    }
+  }
+  TablesHistMetrics tables_hist_metrics;
+  for (const auto& host_tables_hist_metrics : hosts_tables_hist_metrics) {
+    for (const auto& host_table_hist_metrics : host_tables_hist_metrics) {
+      const auto& table_name = host_table_hist_metrics.first;
+      auto& table_hist_metrics = tables_hist_metrics.insert(std::make_pair(table_name, HistMetrics())).first->second;
+      for (const auto& host_table_hist_metric : host_table_hist_metrics.second) {
+        const auto& metric = host_table_hist_metric.first;
+        const auto& value = host_table_hist_metric.second;
+        vector<SimpleHistogram> tmp({value});
+        auto& table_hist_metric = table_hist_metrics.insert(std::make_pair(metric, tmp)).first->second;
+        // TODO may new insert
+        table_hist_metric.push_back(value[0]);
+      }
+    }
+  }
   return Status::OK();
 }
 
@@ -219,7 +255,9 @@ Status Collector::InitMetrics(const std::string& url) {
       CHECK_OK(r.ExtractString(metric, "name", &name));
       string type;
       CHECK_OK(r.ExtractString(metric, "type", &type));
-      type_by_metric_name.emplace(name, type);
+      string upper_type;
+      ToUpperCase(type, &upper_type);
+      type_by_metric_name.emplace(name, upper_type);
     }
   }
   type_by_metric_name_.swap(type_by_metric_name);
@@ -326,6 +364,7 @@ Status Collector::ConvertToString(const list<FalconItem>& falcon_items, string* 
 }
 
 Status Collector::Push(const list<Collector::FalconItem>& falcon_items) {
+  LOG(INFO) << "falcon_items size: " << falcon_items.size();
   string data;
   RETURN_NOT_OK(ConvertToString(falcon_items, &data));
   //LOG(INFO) << data;
@@ -384,7 +423,7 @@ Status Collector::ParseTableMetrics(const JsonReader& r,
     if (!known_type) {
       continue;
     }
-    if (*known_type == "gauge" || *known_type ==  "counter") {
+    if (*known_type == "GAUGE" || *known_type ==  "COUNTER") {
       int64_t result = 0;
       MetricValueType type = GetMetricValueType(name);
       switch (type) {
@@ -401,18 +440,18 @@ Status Collector::ParseTableMetrics(const JsonReader& r,
       table_metrics.insert({{name, result}});
       auto& host_metric = host_metrics->insert(std::make_pair(name, 0)).first->second;
       host_metric += result;
-    } else if (*known_type == "histogram") {
+    } else if (*known_type == "HISTOGRAM") {
       for (const auto& percentile : rigister_percentiles_) {
-        string hist_metric_name = name + percentile;
+        string hist_metric_name = name + "_" + percentile;
         int64_t total_count;
         CHECK_OK(r.ExtractInt64(metric, "total_count", &total_count));
         int64_t value;
         CHECK_OK(r.ExtractInt64(metric, percentile.c_str(), &value));
         CHECK(!ContainsKey(table_hist_metrics, hist_metric_name));
         table_hist_metrics.insert({{hist_metric_name, {SimpleHistogram(total_count, value)}}});
-        std::vector<SimpleHistogram> tmp({SimpleHistogram(total_count, value)});
+        vector<SimpleHistogram> tmp({SimpleHistogram(total_count, value)});
         auto& host_hist_metric = host_hist_metrics->insert(std::make_pair(hist_metric_name, tmp)).first->second;
-        host_hist_metric.emplace_back(SimpleHistogram(total_count, value));
+        host_hist_metric.emplace_back(tmp[0]);
       }
     } else {
       LOG(FATAL) << "Unknown metric type: " << *known_type;
@@ -449,7 +488,12 @@ Collector::FalconItem Collector::ContructFalconItem(std::string endpoint,
                     value, counter_type);
 }
 
-Status Collector::GetAndMergeMetrics(const string& url) {
+Status Collector::GetAndMergeMetrics(const string& url,
+                                     TablesMetrics* tables_metrics,
+                                     TablesHistMetrics* tables_hist_metrics) {
+  CHECK(tables_metrics);
+  CHECK(tables_hist_metrics);
+
   string resp;
   RETURN_NOT_OK(GetMetrics(url, &resp));
   JsonReader r(resp);
@@ -457,9 +501,7 @@ Status Collector::GetAndMergeMetrics(const string& url) {
   vector<const Value*> entities;
   RETURN_NOT_OK(r.ExtractObjectArray(r.root(), nullptr, &entities));
 
-  TablesMetrics tables_metrics;
   Metrics host_metrics;
-  TablesHistMetrics tables_hist_metrics;
   HistMetrics host_hist_metrics;
   for (const Value* entity : entities) {
     if (FilterByAttribute(r, entity)) {
@@ -471,8 +513,8 @@ Status Collector::GetAndMergeMetrics(const string& url) {
       ParseServerMetrics(r, entity);
     } else if (entity_type == "table") {
       ParseTableMetrics(r, entity,
-                        &tables_metrics, &host_metrics,
-                        &tables_hist_metrics, &host_hist_metrics);
+                        tables_metrics, &host_metrics,
+                        tables_hist_metrics, &host_hist_metrics);
     } else if (entity_type == "tablet") {
       ParseTabletMetrics(r, entity);
     } else {
@@ -513,7 +555,7 @@ Status Collector::GetAndMergeMetrics(const string& url) {
                            "host",
                            static_cast<uint64_t>(WallTime_Now()),
                            value,
-                           type_by_metric_name_[host_hist_metric.first]));
+                           "GAUGE"));
   }
 
   Push(falcon_items);
@@ -526,9 +568,13 @@ Status Collector::GetMetrics(const std::string& url, string* resp) {
   EasyCurl curl;
   faststring dst;
   LOG(WARNING) << "url: " << url;
-  RETURN_NOT_OK(curl.FetchURL(url, &dst));
-  *resp = dst.ToString();
-  LOG(WARNING) << "got";
+  MicrosecondsInt64 start = GetCurrentTimeMicros();
+  RETURN_NOT_OK(curl.FetchURL(url, &dst, {"Accept-Encoding: gzip"}));
+  std::ostringstream oss;
+  RETURN_NOT_OK(zlib::Uncompress(Slice(dst.ToString()), &oss));
+  *resp = oss.str();
+  MicrosecondsInt64 cost = GetCurrentTimeMicros() - start;
+  LOG(WARNING) << "GetMetrics cost seconds: " << cost / 1e6;
   return Status::OK();
 }
 
