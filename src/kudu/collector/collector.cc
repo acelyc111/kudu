@@ -211,6 +211,45 @@ Status Collector::CollectMetrics() {
       }
     }
   }
+
+  // Table level
+  list<FalconItem> falcon_items;
+  for (const auto& table_metrics : tables_metrics) {
+    for (const auto& table_metric : table_metrics.second) {
+      falcon_items.emplace_back(
+          ContructFalconItem(table_metrics.first,
+                             table_metric.first,
+                             "table",
+                             static_cast<uint64_t>(WallTime_Now()),
+                             table_metric.second,
+                             type_by_metric_name_[table_metric.first]));
+    }
+  }
+  for (const auto& table_hist_metrics : tables_hist_metrics) {
+    for (const auto& table_hist_metric : table_hist_metrics.second) {
+      int64_t total_count = 0;
+      int64_t total_value = 0;
+      for (const auto& hist : table_hist_metric.second) {
+        total_count += hist.count;
+        total_value += hist.count * hist.value;
+      }
+      int64_t value = 0;
+      if (total_count != 0) {
+        value = total_value / total_count;
+      }
+
+      falcon_items.emplace_back(
+          ContructFalconItem(table_hist_metrics.first,
+                             table_hist_metric.first,
+                             "host",
+                             static_cast<uint64_t>(WallTime_Now()),
+                             value,
+                             "GAUGE"));
+    }
+  }
+
+  Push(falcon_items);
+
   return Status::OK();
 }
 
