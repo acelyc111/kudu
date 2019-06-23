@@ -663,6 +663,14 @@ Status ExtraConfigPBToMap(const TableExtraConfigPB& pb, map<string, string>* con
   return Status::OK();
 }
 
+Status ParseIntConfig(const std::string &name, const std::string &value, int32_t *result) {
+  CHECK(result);
+  if (!safe_strto32(value, result)) {
+    return Status::InvalidArgument(Substitute("Unable to parse $0", name), value);
+  }
+  return Status::OK();
+}
+
 Status ExtraConfigPBFromPBMap(const Map<string, string>& configs, TableExtraConfigPB* pb) {
   TableExtraConfigPB result;
   for (const auto& config : configs) {
@@ -671,17 +679,13 @@ Status ExtraConfigPBFromPBMap(const Map<string, string>& configs, TableExtraConf
     if (name == kTableHistoryMaxAgeSec) {
       if (!value.empty()) {
         int32_t history_max_age_sec;
-        if (!safe_strto32(value, &history_max_age_sec)) {
-          return Status::InvalidArgument(Substitute("Unable to parse $0", name), value);
-        }
+        RETURN_NOT_OK(ParseIntConfig(name, value, &history_max_age_sec));
         result.set_history_max_age_sec(history_max_age_sec);
       }
     } else if (name == kTableMaintenancePriority) {
       if (!value.empty()) {
         int32_t maintenance_priority;
-        if (!safe_strto32(value, &maintenance_priority)) {
-          return Status::InvalidArgument(Substitute("Unable to parse $0", name), value);
-        }
+        RETURN_NOT_OK(ParseIntConfig(name, value, &maintenance_priority));
         result.set_maintenance_priority(maintenance_priority);
       }
     } else {
