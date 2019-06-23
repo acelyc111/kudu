@@ -663,7 +663,7 @@ Status ExtraConfigPBToMap(const TableExtraConfigPB& pb, map<string, string>* con
   return Status::OK();
 }
 
-Status ParseIntConfig(const std::string &name, const std::string &value, int32_t *result) {
+Status ParseIntConfig(const std::string& name, const std::string& value, int32_t* result) {
   CHECK(result);
   if (!safe_strto32(value, result)) {
     return Status::InvalidArgument(Substitute("Unable to parse $0", name), value);

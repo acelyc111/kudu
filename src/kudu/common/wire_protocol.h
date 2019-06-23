@@ -150,8 +150,8 @@ Status ExtraConfigPBToMap(const TableExtraConfigPB& pb,
 Status ExtraConfigPBFromPBMap(const google::protobuf::Map<std::string, std::string>& configs,
                               TableExtraConfigPB* pb);
 
-// Parse
-Status ParseIntConfig(const std::string &name, const std::string &value, int32_t* result);
+// Parse int type value from 'value', and store in 'result' when succeed.
+Status ParseIntConfig(const std::string& name, const std::string& value, int32_t* result);
 
 // Convert a extra configuration properties protobuf to protobuf::map.
 Status ExtraConfigPBToPBMap(const TableExtraConfigPB& pb,
