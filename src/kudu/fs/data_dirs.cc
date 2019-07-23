@@ -98,6 +98,10 @@ DEFINE_bool(fs_lock_data_dirs, true,
 TAG_FLAG(fs_lock_data_dirs, unsafe);
 TAG_FLAG(fs_lock_data_dirs, evolving);
 
+DEFINE_bool(fs_data_dirs_selection_prefer_tablet_count, true,
+            "When select data directories for a tablet, whether prefer to select the one with less "
+            "tablet count, otherwise select the one with more free disk space.");
+
 METRIC_DEFINE_gauge_uint64(server, data_dirs_failed,
                            "Data Directories Failed",
                            kudu::MetricUnit::kDataDirectories,
@@ -223,7 +227,8 @@ DataDir::DataDir(Env* env,
       metadata_file_(std::move(metadata_file)),
       pool_(std::move(pool)),
       is_shutdown_(false),
-      is_full_(false) {
+      is_full_(false),
+      free_bytes_(0) {
 }
 
 DataDir::~DataDir() {
@@ -253,7 +258,7 @@ void DataDir::WaitOnClosures() {
   pool_->Wait();
 }
 
-Status DataDir::RefreshIsFull(RefreshMode mode) {
+Status DataDir::RefreshUsage(RefreshMode mode) {
   switch (mode) {
     case RefreshMode::EXPIRED_ONLY: {
       std::lock_guard<simple_spinlock> l(lock_);
@@ -266,26 +271,31 @@ Status DataDir::RefreshIsFull(RefreshMode mode) {
       FALLTHROUGH_INTENDED; // Root was previously full, check again.
     }
     case RefreshMode::ALWAYS: {
+      uint64_t free_bytes = 0;
       Status s = env_util::VerifySufficientDiskSpace(
-          env_, dir_, 0, FLAGS_fs_data_dirs_reserved_bytes);
-      bool is_full_new;
-      if (PREDICT_FALSE(s.IsIOError() && s.posix_code() == ENOSPC)) {
+          env_, dir_, 0, FLAGS_fs_data_dirs_reserved_bytes, &free_bytes);
+      bool is_full_new = false;
+      if (PREDICT_FALSE(s.IsIOError())) {
+        if (s.posix_code() != ENOSPC) {
+          // Catch other types of IOErrors, etc.
+          RETURN_NOT_OK_PREPEND(s, "Could not refresh fullness");
+        }
+
+        is_full_new = true;
+        s = Status::OK();
         LOG(WARNING) << Substitute(
             "Insufficient disk space under path $0: creation of new data "
             "blocks under this path can be retried after $1 seconds: $2",
             dir_, FLAGS_fs_data_dirs_full_disk_cache_seconds, s.ToString());
-        s = Status::OK();
-        is_full_new = true;
-      } else {
-        is_full_new = false;
       }
-      RETURN_NOT_OK_PREPEND(s, "Could not refresh fullness"); // Catch other types of IOErrors, etc.
+
       {
         std::lock_guard<simple_spinlock> l(lock_);
         if (metrics_ && is_full_ != is_full_new) {
           metrics_->data_dirs_full->IncrementBy(is_full_new ? 1 : -1);
         }
         is_full_ = is_full_new;
+        free_bytes_ = free_bytes;
         last_check_is_full_ = MonoTime::Now();
       }
       break;
@@ -299,8 +309,6 @@ Status DataDir::RefreshIsFull(RefreshMode mode) {
 ////////////////////////////////////////////////////////////
 // DataDirGroup
 ////////////////////////////////////////////////////////////
-
-DataDirGroup::DataDirGroup() {}
 
 DataDirGroup::DataDirGroup(vector<int> uuid_indices)
     : uuid_indices_(std::move(uuid_indices)) {}
@@ -846,7 +854,7 @@ Status DataDirManager::Open() {
   idx_by_uuid_.swap(idx_by_uuid);
   data_dir_by_uuid_idx_.swap(dd_by_uuid_idx);
   uuid_idx_by_data_dir_.swap(uuid_idx_by_dd);
-  tablets_by_uuid_idx_map_.swap(tablets_by_uuid_idx_map);
+  tablets_by_uuid_idx_.swap(tablets_by_uuid_idx_map);
   failed_data_dirs_.swap(failed_data_dirs);
   uuid_by_root_.swap(uuid_by_root);
 
@@ -860,7 +868,7 @@ Status DataDirManager::Open() {
     if (ContainsKey(failed_data_dirs_, uuid_idx)) {
       continue;
     }
-    Status refresh_status = dd->RefreshIsFull(DataDir::RefreshMode::ALWAYS);
+    Status refresh_status = dd->RefreshUsage(DataDir::RefreshMode::ALWAYS);
     if (PREDICT_FALSE(!refresh_status.ok())) {
       if (refresh_status.IsDiskFailure()) {
         RETURN_NOT_OK(MarkDataDirFailed(uuid_idx, refresh_status.ToString()));
@@ -879,7 +887,7 @@ Status DataDirManager::LoadDataDirGroupFromPB(const std::string& tablet_id,
   DataDirGroup group_from_pb;
   RETURN_NOT_OK_PREPEND(group_from_pb.LoadFromPB(idx_by_uuid_, pb), Substitute(
       "could not load data dir group for tablet $0", tablet_id));
-  DataDirGroup* other = InsertOrReturnExisting(&group_by_tablet_map_,
+  DataDirGroup* other = InsertOrReturnExisting(&group_by_tablet_,
                                                tablet_id,
                                                group_from_pb);
   if (other != nullptr) {
@@ -888,7 +896,7 @@ Status DataDirManager::LoadDataDirGroupFromPB(const std::string& tablet_id,
         tablet_id));
   }
   for (int uuid_idx : group_from_pb.uuid_indices()) {
-    InsertOrDie(&FindOrDie(tablets_by_uuid_idx_map_, uuid_idx), tablet_id);
+    InsertOrDie(&FindOrDie(tablets_by_uuid_idx_, uuid_idx), tablet_id);
   }
   return Status::OK();
 }
@@ -896,23 +904,24 @@ Status DataDirManager::LoadDataDirGroupFromPB(const std::string& tablet_id,
 Status DataDirManager::CreateDataDirGroup(const string& tablet_id,
                                           DirDistributionMode mode) {
   std::lock_guard<percpu_rwlock> write_lock(dir_group_lock_);
-  if (ContainsKey(group_by_tablet_map_, tablet_id)) {
+  if (ContainsKey(group_by_tablet_, tablet_id)) {
     return Status::AlreadyPresent("Tried to create directory group for tablet but one is already "
                                   "registered", tablet_id);
-  }
-  // Adjust the disk group size to fit within the total number of data dirs.
-  int group_target_size;
-  if (FLAGS_fs_target_data_dirs_per_tablet == 0) {
-    group_target_size = data_dirs_.size();
-  } else {
-    group_target_size = std::min(FLAGS_fs_target_data_dirs_per_tablet,
-                                 static_cast<int>(data_dirs_.size()));
   }
   vector<int> group_indices;
   if (mode == DirDistributionMode::ACROSS_ALL_DIRS) {
     // If using all dirs, add all regardless of directory state.
     AppendKeysFromMap(data_dir_by_uuid_idx_, &group_indices);
   } else {
+    // TODO(yingchun): refactor as a function.
+    // Adjust the disk group size to fit within the total number of data dirs.
+    int group_target_size;
+    if (FLAGS_fs_target_data_dirs_per_tablet == 0) {
+      group_target_size = data_dirs_.size();
+    } else {
+      group_target_size = std::min(FLAGS_fs_target_data_dirs_per_tablet,
+                                   static_cast<int>(data_dirs_.size()));
+    }
     // Randomly select directories, giving preference to those with fewer tablets.
     if (PREDICT_FALSE(!failed_data_dirs_.empty())) {
       group_target_size = std::min(group_target_size,
@@ -939,31 +948,29 @@ Status DataDirManager::CreateDataDirGroup(const string& tablet_id,
       LOG(INFO) << msg;
     }
   }
-  InsertOrDie(&group_by_tablet_map_, tablet_id, DataDirGroup(group_indices));
+  InsertOrDie(&group_by_tablet_, tablet_id, DataDirGroup(group_indices));
   for (int uuid_idx : group_indices) {
-    InsertOrDie(&FindOrDie(tablets_by_uuid_idx_map_, uuid_idx), tablet_id);
+    InsertOrDie(&FindOrDie(tablets_by_uuid_idx_, uuid_idx), tablet_id);
   }
   return Status::OK();
 }
 
 Status DataDirManager::GetNextDataDir(const CreateBlockOptions& opts, DataDir** dir) {
   shared_lock<rw_spinlock> lock(dir_group_lock_.get_lock());
-  const vector<int>* group_uuid_indices;
-  vector<int> valid_uuid_indices;
+  vector<int> group_uuid_indices;
   DataDirGroup* group = nullptr;
   if (PREDICT_TRUE(!opts.tablet_id.empty())) {
     // Get the data dir group for the tablet.
-    group = FindOrNull(group_by_tablet_map_, opts.tablet_id);
-    if (group == nullptr) {
+    group = FindOrNull(group_by_tablet_, opts.tablet_id);
+    if (PREDICT_FALSE(group == nullptr)) {
       return Status::NotFound("Tried to get directory but no directory group "
                               "registered for tablet", opts.tablet_id);
     }
     if (PREDICT_TRUE(failed_data_dirs_.empty())) {
-      group_uuid_indices = &group->uuid_indices();
+      group_uuid_indices = group->uuid_indices();
     } else {
-      RemoveUnhealthyDataDirsUnlocked(group->uuid_indices(), &valid_uuid_indices);
-      group_uuid_indices = &valid_uuid_indices;
-      if (valid_uuid_indices.empty()) {
+      RemoveUnhealthyDataDirsUnlocked(group->uuid_indices(), &group_uuid_indices);
+      if (group_uuid_indices.empty()) {
         return Status::IOError("No healthy directories exist in tablet's "
                                "directory group", opts.tablet_id, ENODEV);
       }
@@ -972,61 +979,63 @@ Status DataDirManager::GetNextDataDir(const CreateBlockOptions& opts, DataDir** 
     // This should only be reached by some tests; in cases where there is no
     // natural tablet_id, select a data dir from any of the directories.
     CHECK(IsGTest());
-    AppendKeysFromMap(data_dir_by_uuid_idx_, &valid_uuid_indices);
-    group_uuid_indices = &valid_uuid_indices;
+    AppendKeysFromMap(data_dir_by_uuid_idx_, &group_uuid_indices);
   }
-  vector<int> random_indices(group_uuid_indices->size());
-  iota(random_indices.begin(), random_indices.end(), 0);
-  shuffle(random_indices.begin(), random_indices.end(), default_random_engine(rng_.Next()));
 
-  // Randomly select a member of the group that is not full.
-  for (int i : random_indices) {
-    int uuid_idx = (*group_uuid_indices)[i];
-    DataDir* candidate = FindOrDie(data_dir_by_uuid_idx_, uuid_idx);
-    Status s = candidate->RefreshIsFull(DataDir::RefreshMode::EXPIRED_ONLY);
+  int healthy_dir_count = group_uuid_indices.size();
+  for (auto it = group_uuid_indices.begin(); it != group_uuid_indices.end(); ) {
+    DataDir* candidate = FindOrDie(data_dir_by_uuid_idx_, *it);
+    Status s = candidate->RefreshUsage(DataDir::RefreshMode::EXPIRED_ONLY);
     WARN_NOT_OK(s, Substitute("failed to refresh fullness of $0", candidate->dir()));
-    if (s.ok() && !candidate->is_full()) {
-      *dir = candidate;
-      return Status::OK();
+    if (PREDICT_FALSE(!s.ok() || candidate->is_full())) {
+      it = group_uuid_indices.erase(it);
+    } else {
+      ++it;
     }
   }
 
   // All healthy directories are full. Return an error.
-  if (PREDICT_TRUE(!opts.tablet_id.empty())) {
-    DCHECK(group);
-    size_t num_total = group->uuid_indices().size();
-    size_t num_full = valid_uuid_indices.size();
-    size_t num_failed = num_total - num_full;
+  if (PREDICT_FALSE(group_uuid_indices.empty())) {
+    if (PREDICT_TRUE(!opts.tablet_id.empty())) {
+      DCHECK(group);
+      return Status::IOError(
+          Substitute("No directories available in $0's directory group ($1 dirs "
+                     "total, $2 failed, $3 full)",
+                     opts.tablet_id,
+                     group->uuid_indices().size(),
+                     failed_data_dirs_.size(),
+                     healthy_dir_count),
+          "", ENOSPC);
+    }
+
     return Status::IOError(
-        Substitute("No directories available in $0's directory group ($1 dirs "
-                   "total, $2 failed, $3 full)",
-                   opts.tablet_id, num_total, num_failed, num_full),
+        Substitute("No directories available ($0 dirs, all of which are full)",
+                   healthy_dir_count),
         "", ENOSPC);
   }
 
-  return Status::IOError(
-      Substitute("No directories available ($0 dirs, all of which are full)",
-                 valid_uuid_indices.size()),
-      "", ENOSPC);
+  int select_uuid_index = PopLessLoadDir(group_uuid_indices);
+  *dir = FindOrDie(data_dir_by_uuid_idx_, select_uuid_index);
+  return Status::OK();
 }
 
 void DataDirManager::DeleteDataDirGroup(const std::string& tablet_id) {
   std::lock_guard<percpu_rwlock> lock(dir_group_lock_);
-  DataDirGroup* group = FindOrNull(group_by_tablet_map_, tablet_id);
+  DataDirGroup* group = FindOrNull(group_by_tablet_, tablet_id);
   if (group == nullptr) {
     return;
   }
   // Remove the tablet_id from every data dir in its group.
   for (int uuid_idx : group->uuid_indices()) {
-    FindOrDie(tablets_by_uuid_idx_map_, uuid_idx).erase(tablet_id);
+    FindOrDie(tablets_by_uuid_idx_, uuid_idx).erase(tablet_id);
   }
-  group_by_tablet_map_.erase(tablet_id);
+  group_by_tablet_.erase(tablet_id);
 }
 
 Status DataDirManager::GetDataDirGroupPB(const string& tablet_id,
                                          DataDirGroupPB* pb) const {
   shared_lock<rw_spinlock> lock(dir_group_lock_.get_lock());
-  const DataDirGroup* group = FindOrNull(group_by_tablet_map_, tablet_id);
+  const DataDirGroup* group = FindOrNull(group_by_tablet_, tablet_id);
   if (group == nullptr) {
     return Status::NotFound(Substitute(
         "could not find data dir group for tablet $0", tablet_id));
@@ -1043,7 +1052,7 @@ void DataDirManager::GetDirsForGroupUnlocked(int target_size,
     if (ContainsKey(failed_data_dirs_, e.first)) {
       continue;
     }
-    Status s = e.second->RefreshIsFull(DataDir::RefreshMode::ALWAYS);
+    Status s = e.second->RefreshUsage(DataDir::RefreshMode::ALWAYS);
     WARN_NOT_OK(s, Substitute("failed to refresh fullness of $0", e.second->dir()));
     if (s.ok() && !e.second->is_full()) {
       // TODO(awong): If a disk is unhealthy at the time of group creation, the
@@ -1053,17 +1062,34 @@ void DataDirManager::GetDirsForGroupUnlocked(int target_size,
     }
   }
   while (group_indices->size() < target_size && !candidate_indices.empty()) {
-    shuffle(candidate_indices.begin(), candidate_indices.end(), default_random_engine(rng_.Next()));
-    if (candidate_indices.size() == 1 ||
-        FindOrDie(tablets_by_uuid_idx_map_, candidate_indices[0]).size() <
-            FindOrDie(tablets_by_uuid_idx_map_, candidate_indices[1]).size()) {
-      group_indices->push_back(candidate_indices[0]);
-      candidate_indices.erase(candidate_indices.begin());
-    } else {
-      group_indices->push_back(candidate_indices[1]);
-      candidate_indices.erase(candidate_indices.begin() + 1);
-    }
+    group_indices->push_back(PopLessLoadDir(candidate_indices));
   }
+}
+
+int DataDirManager::PopLessLoadDir(vector<int>& candidate_indices) const {
+  DCHECK(!candidate_indices.empty());
+
+  int uuid_index;
+  if (candidate_indices.size() == 1) {
+    uuid_index = candidate_indices[0];
+    candidate_indices.clear();
+    return uuid_index;
+  }
+
+  int candidate_index;
+  shuffle(candidate_indices.begin(), candidate_indices.end(), default_random_engine(rng_.Next()));
+  if (FLAGS_fs_data_dirs_selection_prefer_tablet_count) {
+    // Select DataDir with less tablet count.
+    candidate_index = (FindOrDie(tablets_by_uuid_idx_, candidate_indices[0]).size() <
+        FindOrDie(tablets_by_uuid_idx_, candidate_indices[1]).size()) ? 0 : 1;
+  } else {
+    // Select DataDir with less space usage.
+    candidate_index = (FindOrDie(data_dir_by_uuid_idx_, candidate_indices[0])->used_percentage() <
+        FindOrDie(data_dir_by_uuid_idx_, candidate_indices[1])->used_percentage()) ? 0 : 1;
+  }
+  uuid_index = candidate_indices[candidate_index];
+  candidate_indices.erase(candidate_indices.begin() + candidate_index);
+  return uuid_index;
 }
 
 DataDir* DataDirManager::FindDataDirByUuidIndex(int uuid_idx) const {
@@ -1094,7 +1120,7 @@ bool DataDirManager::FindUuidByRoot(const string& root, string* uuid) const {
 set<string> DataDirManager::FindTabletsByDataDirUuidIdx(int uuid_idx) const {
   DCHECK_LT(uuid_idx, data_dirs_.size());
   shared_lock<rw_spinlock> lock(dir_group_lock_.get_lock());
-  const set<string>* tablet_set_ptr = FindOrNull(tablets_by_uuid_idx_map_, uuid_idx);
+  const set<string>* tablet_set_ptr = FindOrNull(tablets_by_uuid_idx_, uuid_idx);
   if (tablet_set_ptr) {
     return *tablet_set_ptr;
   }
@@ -1146,7 +1172,7 @@ Status DataDirManager::MarkDataDirFailed(int uuid_idx, const string& error_messa
     if (metrics_) {
       metrics_->data_dirs_failed->IncrementBy(1);
     }
-    string error_prefix = "";
+    string error_prefix;
     if (!error_message.empty()) {
       error_prefix = Substitute("$0: ", error_message);
     }
@@ -1173,10 +1199,8 @@ bool DataDirManager::IsTabletInFailedDir(const string& tablet_id) const {
 
 void DataDirManager::RemoveUnhealthyDataDirsUnlocked(const vector<int>& uuid_indices,
                                                      vector<int>* healthy_indices) const {
-  if (PREDICT_TRUE(failed_data_dirs_.empty())) {
-    return;
-  }
-  healthy_indices->clear();
+  DCHECK(!failed_data_dirs_.empty());
+  DCHECK(healthy_indices->empty());
   for (int uuid_idx : uuid_indices) {
     DCHECK_LT(uuid_idx, data_dirs_.size());
     if (!ContainsKey(failed_data_dirs_, uuid_idx)) {

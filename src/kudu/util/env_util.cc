@@ -128,7 +128,8 @@ static void OverrideBytesFreeWithTestingFlags(const string& path, int64_t* bytes
 }
 
 Status VerifySufficientDiskSpace(Env *env, const std::string& path,
-                                 int64_t requested_bytes, int64_t reserved_bytes) {
+                                 int64_t requested_bytes, int64_t reserved_bytes,
+                                 uint64_t* free_bytes) {
   const int64_t kOnePercentReservation = -1;
   DCHECK_GE(requested_bytes, 0);
 
@@ -148,6 +149,10 @@ Status VerifySufficientDiskSpace(Env *env, const std::string& path,
   // If they requested a one percent reservation, calculate what that is in bytes.
   if (reserved_bytes == kOnePercentReservation) {
     reserved_bytes = space_info.capacity_bytes / 100;
+  }
+
+  if (free_bytes) {
+    *free_bytes = available_bytes;
   }
 
   if (available_bytes - requested_bytes < reserved_bytes) {

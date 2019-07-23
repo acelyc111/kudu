@@ -44,8 +44,8 @@ class ArrayView;
 
 // Returned by Env::GetSpaceInfo().
 struct SpaceInfo {
-  int64_t capacity_bytes; // Capacity of a filesystem, in bytes.
-  int64_t free_bytes;     // Bytes available to non-privileged processes.
+  int64_t capacity_bytes = 0; // Capacity of a filesystem, in bytes.
+  int64_t free_bytes = 0;     // Bytes available to non-privileged processes.
 };
 
 class Env {

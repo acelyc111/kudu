@@ -49,19 +49,22 @@ Status OpenFileForSequential(Env *env, const std::string &path,
                              std::shared_ptr<SequentialFile> *file);
 
 // Returns Status::IOError with POSIX code ENOSPC if there is not sufficient
-// disk space to write 'bytes' bytes to the file system represented by 'path'.
+// disk space to write 'requested_bytes' bytes to the file system represented
+// by 'path'.
 // Otherwise returns OK.
 // If 'reserved_bytes' equals -1, it is interpreted as a 1% reservation. No
 // other values less than 0 are supported at this time.
+// If 'free_bytes' is not nullptr, it will be set as the current disk free space bytes.
 Status VerifySufficientDiskSpace(Env *env, const std::string& path,
-                                 int64_t requested_bytes, int64_t reserved_bytes);
+                                 int64_t requested_bytes, int64_t reserved_bytes,
+                                 uint64_t* free_bytes = nullptr);
 
 // Creates the directory given by 'path', unless it already exists.
 //
 // If 'created' is not NULL, sets it to true if the directory was
 // created, false otherwise.
 Status CreateDirIfMissing(Env* env, const std::string& path,
-                          bool* created = NULL);
+                          bool* created = nullptr);
 
 // Recursively create directories, if they do not exist, along the given path.
 // Returns OK if successful or if the given path already existed.

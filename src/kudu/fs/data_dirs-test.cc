@@ -136,7 +136,7 @@ TEST_F(DataDirsTest, TestCreateGroup) {
 
   // Check that the tablet's DataDirGroup spans the right number of dirs.
   int num_dirs_with_tablets = 0;
-  for (const auto& e: dd_manager_->tablets_by_uuid_idx_map_) {
+  for (const auto& e: dd_manager_->tablets_by_uuid_idx_) {
     if (!e.second.empty()) {
       ASSERT_EQ(1, e.second.size());
       num_dirs_with_tablets++;
@@ -159,7 +159,7 @@ TEST_F(DataDirsTest, TestLoadFromPB) {
 
   // Check that the tablet's DataDirGroup spans the right number of dirs.
   int num_dirs_with_tablets = 0;
-  for (const auto& e: dd_manager_->tablets_by_uuid_idx_map_) {
+  for (const auto& e: dd_manager_->tablets_by_uuid_idx_) {
     if (!e.second.empty()) {
       ASSERT_EQ(1, e.second.size());
       num_dirs_with_tablets++;
@@ -274,7 +274,7 @@ TEST_F(DataDirsTest, TestLoadBalancingDistribution) {
   // Calculate the standard deviation of the number of tablets per disk.
   // If tablets are evenly spread across directories, this should be small.
   double sum_squared_dev = 0;
-  for (const auto& e : dd_manager_->tablets_by_uuid_idx_map_) {
+  for (const auto& e : dd_manager_->tablets_by_uuid_idx_) {
     LOG(INFO) << Substitute("$0 is storing data from $1 tablets.",
         dd_manager_->data_dir_by_uuid_idx_[e.first]->dir(), e.second.size());
     double deviation = static_cast<double>(e.second.size()) - kMeanTabletsPerDir;
@@ -310,7 +310,7 @@ TEST_F(DataDirsTest, TestLoadBalancingBias) {
   //
   // Note: this should not happen in the wild and is used here as a way to
   // introduce some initial skew to the distribution.
-  auto uuid_idx_iter = dd_manager_->tablets_by_uuid_idx_map_.begin();
+  auto uuid_idx_iter = dd_manager_->tablets_by_uuid_idx_.begin();
   vector<int> skewed_dir_indices;
   for (int i = 0; i < kNumSkewedDirs; i++) {
     int uuid_idx = uuid_idx_iter->first;
@@ -321,9 +321,9 @@ TEST_F(DataDirsTest, TestLoadBalancingBias) {
   // Add tablets to each skewed directory.
   for (int skew_tablet_idx = 0; skew_tablet_idx < kTabletsPerSkewedDir; skew_tablet_idx++) {
     string skew_tablet = Substitute("$0-$1", kSkewTabletPrefix, skew_tablet_idx);
-    InsertOrDie(&dd_manager_->group_by_tablet_map_, skew_tablet, DataDirGroup(skewed_dir_indices));
+    InsertOrDie(&dd_manager_->group_by_tablet_, skew_tablet, DataDirGroup(skewed_dir_indices));
     for (int uuid_idx : skewed_dir_indices) {
-      InsertOrDie(&FindOrDie(dd_manager_->tablets_by_uuid_idx_map_, uuid_idx), skew_tablet);
+      InsertOrDie(&FindOrDie(dd_manager_->tablets_by_uuid_idx_, uuid_idx), skew_tablet);
     }
   }
 
@@ -336,7 +336,7 @@ TEST_F(DataDirsTest, TestLoadBalancingBias) {
   double sum_squared_dev = 0;
   const double kMeanTabletsPerDir = (kTabletsPerSkewedDir * kNumSkewedDirs +
       kNumAdditionalTablets * FLAGS_fs_target_data_dirs_per_tablet) / kNumDirs;
-  for (const auto& e : dd_manager_->tablets_by_uuid_idx_map_) {
+  for (const auto& e : dd_manager_->tablets_by_uuid_idx_) {
     LOG(INFO) << Substitute("$0 is storing data from $1 tablets.",
         dd_manager_->data_dir_by_uuid_idx_[e.first]->dir(), e.second.size());
     double deviation = static_cast<double>(e.second.size()) - kMeanTabletsPerDir;
@@ -354,7 +354,7 @@ TEST_F(DataDirsTest, TestLoadBalancingBias) {
   // not completely ignore the initially skewed dirs.
   bool some_added_to_skewed_dirs = false;
   for (int skewed_uuid_index : skewed_dir_indices) {
-    set<string>* tablets = FindOrNull(dd_manager_->tablets_by_uuid_idx_map_, skewed_uuid_index);
+    set<string>* tablets = FindOrNull(dd_manager_->tablets_by_uuid_idx_, skewed_uuid_index);
     ASSERT_NE(nullptr, tablets);
     if (tablets->size() > kTabletsPerSkewedDir) {
       some_added_to_skewed_dirs = true;

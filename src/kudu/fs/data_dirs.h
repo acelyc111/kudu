@@ -76,7 +76,7 @@ namespace internal {
 // The same directory may appear in multiple DataDirGroups.
 class DataDirGroup {
  public:
-  DataDirGroup();
+  DataDirGroup() = default;
 
   explicit DataDirGroup(std::vector<int> uuid_indices);
 
@@ -174,7 +174,7 @@ class DataDir {
     EXPIRED_ONLY,
     ALWAYS,
   };
-  Status RefreshIsFull(RefreshMode mode);
+  Status RefreshUsage(RefreshMode mode);
 
   DataDirFsType fs_type() const { return fs_type_; }
 
@@ -187,6 +187,11 @@ class DataDir {
   bool is_full() const {
     std::lock_guard<simple_spinlock> l(lock_);
     return is_full_;
+  }
+
+  uint64_t used_percentage() const {
+    std::lock_guard<simple_spinlock> l(lock_);
+    return free_bytes_;
   }
 
  private:
@@ -203,6 +208,7 @@ class DataDir {
   mutable simple_spinlock lock_;
   MonoTime last_check_is_full_;
   bool is_full_;
+  uint64 free_bytes_;
 
   DISALLOW_COPY_AND_ASSIGN(DataDir);
 };
@@ -327,7 +333,7 @@ class DataDirManager {
   // and data dir to tablet set are cleared of all references to the tablet.
   void DeleteDataDirGroup(const std::string& tablet_id);
 
-  // Returns a random directory from the specfied option's data dir group. If
+  // Returns a random directory from the specified option's data dir group. If
   // there is no room in the group, returns an error.
   Status GetNextDataDir(const CreateBlockOptions& opts, DataDir** dir);
 
@@ -469,6 +475,8 @@ class DataDirManager {
   // lock_guard of dir_group_lock_.
   void GetDirsForGroupUnlocked(int target_size, std::vector<int>* group_indices);
 
+  int PopLessLoadDir(std::vector<int>& candidate_indices) const;
+
   // Goes through the data dirs in 'uuid_indices' and populates
   // 'healthy_indices' with those that haven't failed.
   void RemoveUnhealthyDataDirsUnlocked(const std::vector<int>& uuid_indices,
@@ -500,10 +508,10 @@ class DataDirManager {
   ReverseUuidIndexMap uuid_idx_by_data_dir_;
 
   typedef std::unordered_map<std::string, internal::DataDirGroup> TabletDataDirGroupMap;
-  TabletDataDirGroupMap group_by_tablet_map_;
+  TabletDataDirGroupMap group_by_tablet_;
 
   typedef std::unordered_map<int, std::set<std::string>> TabletsByUuidIndexMap;
-  TabletsByUuidIndexMap tablets_by_uuid_idx_map_;
+  TabletsByUuidIndexMap tablets_by_uuid_idx_;
 
   UuidByUuidIndexMap uuid_by_idx_;
   UuidIndexByUuidMap idx_by_uuid_;
@@ -519,7 +527,7 @@ class DataDirManager {
   mutable percpu_rwlock dir_group_lock_;
 
   // RNG used to select directories.
-  ThreadSafeRandom rng_;
+  mutable ThreadSafeRandom rng_;
 
   DISALLOW_COPY_AND_ASSIGN(DataDirManager);
 };
