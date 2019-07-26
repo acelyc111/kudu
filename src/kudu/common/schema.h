@@ -506,6 +506,8 @@ class Schema {
                const std::vector<ColumnId>& ids,
                int key_columns);
 
+  Status FindColumn(const Slice& col_name, int* idx) const;
+
   // Return the number of bytes needed to represent a single row of this schema, without
   // accounting for the null bitmap if the Schema contains nullable values.
   //
