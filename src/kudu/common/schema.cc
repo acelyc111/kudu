@@ -359,7 +359,7 @@ Status Schema::CreateProjectionByNames(const std::vector<StringPiece>& col_names
   vector<ColumnSchema> cols;
   for (const StringPiece& name : col_names) {
     int idx = find_column(name);
-    if (idx == -1) {
+    if (idx == kColumnNotFound) {
       return Status::NotFound("column not found", name);
     }
     if (has_column_ids()) {
@@ -376,7 +376,7 @@ Status Schema::CreateProjectionByIdsIgnoreMissing(const std::vector<ColumnId>& c
   vector<ColumnId> filtered_col_ids;
   for (ColumnId id : col_ids) {
     int idx = find_column_by_id(id);
-    if (idx == -1) {
+    if (idx == kColumnNotFound) {
       continue;
     }
     cols.push_back(column(idx));

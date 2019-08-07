@@ -59,13 +59,12 @@ class MajorDeltaCompaction {
   // TODO: is base_schema supposed to be the same as base_data->schema()? how about
   // in an ALTER scenario?
   MajorDeltaCompaction(
-      FsManager* fs_manager, const Schema& base_schema, CFileSet* base_data,
+      FsManager* fs_manager, Schema base_schema, CFileSet* base_data,
       std::unique_ptr<DeltaIterator> delta_iter,
       std::vector<std::shared_ptr<DeltaStore> > included_stores,
       std::vector<ColumnId> col_ids,
       HistoryGcOpts history_gc_opts,
       std::string tablet_id);
-  ~MajorDeltaCompaction();
 
   // Executes the compaction.
   // This has no effect on the metadata of the tablet, etc.
@@ -81,6 +80,9 @@ class MajorDeltaCompaction {
   Status UpdateDeltaTracker(DeltaTracker* tracker, const fs::IOContext* io_context);
 
  private:
+  // Do some init work before Compact().
+  void Init();
+
   std::string ColumnNamesToString() const;
 
   // Opens a writer for the base data.
@@ -94,6 +96,9 @@ class MajorDeltaCompaction {
   // back UNDO delta mutations.
   Status OpenUndoDeltaFileWriter();
 
+  // Opens a writer for the delta file.
+  Status OpenDeltaFileWriter(gscoped_ptr<DeltaFileWriter>* delta_writer_, BlockId* block_id);
+
   // Reads the current base data, applies the deltas, and then writes the new base data.
   // A new delta file is written if not all columns were selected for compaction and some
   // deltas need to be written back into a delta file.
@@ -101,7 +106,7 @@ class MajorDeltaCompaction {
 
   FsManager* const fs_manager_;
 
-  // TODO: doc me
+  // Schema of 'base_data_'.
   const Schema base_schema_;
 
   // The computed partial schema which includes only the columns being
@@ -110,6 +115,8 @@ class MajorDeltaCompaction {
 
   // The column ids to compact.
   const std::vector<ColumnId> column_ids_;
+
+  std::string column_names_;
 
   const HistoryGcOpts history_gc_opts_;
 
@@ -122,7 +129,7 @@ class MajorDeltaCompaction {
   // The DeltaStores from which deltas are being read.
   const SharedDeltaStoreVector included_stores_;
 
-  // The merged view of the deltas from included_stores_.
+  // The merged view of the deltas from 'included_stores_'.
   const std::unique_ptr<DeltaIterator> delta_iter_;
 
   // The ID of the tablet being compacted.
@@ -141,6 +148,7 @@ class MajorDeltaCompaction {
   size_t undo_delta_mutations_written_;
 
   enum State {
+    kUnInitialized = 0,
     kInitialized = 1,
     kFinished = 2,
   };

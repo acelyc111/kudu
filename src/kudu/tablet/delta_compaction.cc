@@ -77,14 +77,14 @@ const size_t kRowsPerBlock = 100; // Number of rows per block of columns
 // TODO: can you major-delta-compact a new column after an alter table in order
 // to materialize it? should write a test for this.
 MajorDeltaCompaction::MajorDeltaCompaction(
-    FsManager* fs_manager, const Schema& base_schema, CFileSet* base_data,
+    FsManager* fs_manager, Schema base_schema, CFileSet* base_data,
     unique_ptr<DeltaIterator> delta_iter,
     vector<shared_ptr<DeltaStore> > included_stores,
     vector<ColumnId> col_ids,
     HistoryGcOpts history_gc_opts,
     string tablet_id)
     : fs_manager_(fs_manager),
-      base_schema_(base_schema),
+      base_schema_(std::move(base_schema)),
       column_ids_(std::move(col_ids)),
       history_gc_opts_(std::move(history_gc_opts)),
       base_data_(base_data),
@@ -93,11 +93,14 @@ MajorDeltaCompaction::MajorDeltaCompaction(
       tablet_id_(std::move(tablet_id)),
       redo_delta_mutations_written_(0),
       undo_delta_mutations_written_(0),
-      state_(kInitialized) {
+      state_(kUnInitialized) {
   CHECK(!column_ids_.empty());
 }
 
-MajorDeltaCompaction::~MajorDeltaCompaction() {
+void MajorDeltaCompaction::Init() {
+  CHECK_EQ(state_, kUnInitialized);
+  column_names_ = ColumnNamesToString();
+  state_ = kInitialized;
 }
 
 string MajorDeltaCompaction::ColumnNamesToString() const {
@@ -106,9 +109,9 @@ string MajorDeltaCompaction::ColumnNamesToString() const {
   for (ColumnId col_id : column_ids_) {
     int col_idx = base_schema_.find_column_by_id(col_id);
     if (col_idx != Schema::kColumnNotFound) {
-      col_names.push_back(base_schema_.column_by_id(col_id).ToString());
+      col_names.emplace_back(base_schema_.column_by_id(col_id).ToString());
     } else {
-      col_names.push_back(Substitute("[deleted column id $0]", col_id));
+      col_names.emplace_back(Substitute("[deleted column id $0]", col_id));
     }
   }
   return JoinStrings(col_names, ", ");
@@ -148,7 +151,7 @@ Status MajorDeltaCompaction::FlushRowSetAndDeltas(const IOContext* io_context) {
     size_t n = block.nrows();
 
     // 2) Fetch all the REDO mutations.
-    vector<Mutation *> redo_mutation_block(kRowsPerBlock, static_cast<Mutation *>(nullptr));
+    vector<Mutation*> redo_mutation_block(kRowsPerBlock, static_cast<Mutation*>(nullptr));
     RETURN_NOT_OK(delta_iter_->PrepareBatch(n, DeltaIterator::PREPARE_FOR_COLLECT));
     RETURN_NOT_OK(delta_iter_->CollectMutations(&redo_mutation_block, block.arena()));
 
@@ -275,24 +278,26 @@ Status MajorDeltaCompaction::OpenBaseDataWriter() {
   return Status::OK();
 }
 
-Status MajorDeltaCompaction::OpenRedoDeltaFileWriter() {
+Status MajorDeltaCompaction::OpenDeltaFileWriter(
+    gscoped_ptr<DeltaFileWriter>* delta_writer_, BlockId* block_id) {
   unique_ptr<WritableBlock> block;
   CreateBlockOptions opts({ tablet_id_ });
-  RETURN_NOT_OK_PREPEND(fs_manager_->CreateNewBlock(opts, &block),
+  RETURN_NOT_OK(fs_manager_->CreateNewBlock(opts, &block));
+  *block_id = block->id();
+  delta_writer_->reset(new DeltaFileWriter(std::move(block)));
+  return (*delta_writer_)->Start();
+}
+
+Status MajorDeltaCompaction::OpenRedoDeltaFileWriter() {
+  RETURN_NOT_OK_PREPEND(OpenDeltaFileWriter(&new_redo_delta_writer_, &new_redo_delta_block_),
                         "Unable to create REDO delta output block");
-  new_redo_delta_block_ = block->id();
-  new_redo_delta_writer_.reset(new DeltaFileWriter(std::move(block)));
-  return new_redo_delta_writer_->Start();
+  return Status::OK();
 }
 
 Status MajorDeltaCompaction::OpenUndoDeltaFileWriter() {
-  unique_ptr<WritableBlock> block;
-  CreateBlockOptions opts({ tablet_id_ });
-  RETURN_NOT_OK_PREPEND(fs_manager_->CreateNewBlock(opts, &block),
+  RETURN_NOT_OK_PREPEND(OpenDeltaFileWriter(&new_undo_delta_writer_, &new_undo_delta_block_),
                         "Unable to create UNDO delta output block");
-  new_undo_delta_block_ = block->id();
-  new_undo_delta_writer_.reset(new DeltaFileWriter(std::move(block)));
-  return new_undo_delta_writer_->Start();
+  return Status::OK();
 }
 
 namespace {
@@ -326,9 +331,10 @@ DeltaStoreStats ComputeDeltaStoreStats(const SharedDeltaStoreVector& stores) {
 } // anonymous namespace
 
 Status MajorDeltaCompaction::Compact(const IOContext* io_context) {
+  Init();
   CHECK_EQ(state_, kInitialized);
 
-  VLOG(1) << "Starting major delta compaction for columns " << ColumnNamesToString();
+  VLOG(1) << "Starting major delta compaction for columns " << column_names_;
   RETURN_NOT_OK(base_schema_.CreateProjectionByIdsIgnoreMissing(column_ids_, &partial_schema_));
 
   if (VLOG_IS_ON(1)) {
@@ -348,7 +354,7 @@ Status MajorDeltaCompaction::Compact(const IOContext* io_context) {
   TRACE_COUNTER_INCREMENT("update_count", stats.update_count);
   VLOG(1) << Substitute("Finished major delta compaction of columns $0. "
                         "Compacted $1 delta files. Overall stats: $2",
-                        ColumnNamesToString(),
+                        column_names_,
                         included_stores_.size(),
                         stats.ToString());
   return Status::OK();
