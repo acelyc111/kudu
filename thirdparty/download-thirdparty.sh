@@ -330,12 +330,11 @@ fetch_and_patch \
   "patch -d projects/compiler-rt -p1 < $TP_DIR/patches/llvm-tsan-disable-trace-switching-after-multithreaded-for.patch" \
   "patch -d projects -p1 < $TP_DIR/patches/llvm-ustat-removal.patch"
 
-LZ4_PATCHLEVEL=1
+LZ4_PATCHLEVEL=0
 fetch_and_patch \
- lz4-lz4-$LZ4_VERSION.tar.gz \
+ lz4-$LZ4_VERSION.tar.gz \
  $LZ4_SOURCE \
- $LZ4_PATCHLEVEL \
- "patch -p1 < $TP_DIR/patches/lz4-0001-Fix-cmake-build-to-use-gnu-flags-on-clang.patch"
+ $LZ4_PATCHLEVEL
 
 BITSHUFFLE_PATCHLEVEL=0
 fetch_and_patch \
