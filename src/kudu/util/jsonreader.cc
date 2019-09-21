@@ -29,6 +29,7 @@
 #include "kudu/gutil/strings/substitute.h"
 
 using rapidjson::Value;
+using std::map;
 using std::string;
 using std::vector;
 using strings::Substitute;
@@ -212,8 +213,24 @@ Status JsonReader::ExtractObjectArray(const Value* object,
         "wrong type during field extraction: expected object array but got $0",
         TypeToString(val->GetType())));
   }
-  for (Value::ConstValueIterator iter = val->Begin(); iter != val->End(); ++iter) {
-    result->push_back(iter);
+  for (const auto& v : val->GetArray()) {
+    result->push_back(&v);
+  }
+  return Status::OK();
+}
+
+Status JsonReader::ExtractObjectDict(const Value* object,
+                                     const char* field,
+                                     map<string, const Value*>* result) const {
+  const Value* dict;
+  RETURN_NOT_OK(ExtractField(object, field, &dict));
+  if (PREDICT_FALSE(!dict->IsObject())) {
+    return Status::InvalidArgument(Substitute(
+        "wrong type during field extraction: expected object but got $0",
+        TypeToString(dict->GetType())));
+  }
+  for (const auto& kv : dict->GetObject()) {
+    result->insert(std::make_pair(kv.name.GetString(), &kv.value));
   }
   return Status::OK();
 }

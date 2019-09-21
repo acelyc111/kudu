@@ -2276,11 +2276,10 @@ TEST_F(AdminCliTest, TestExtraConfig) {
   {
     ASSERT_TOOL_OK(
       "table",
-      "set_extra_config",
+      "set_extra_configs",
       master_address,
       kTableId,
-      "kudu.table.history_max_age_sec",
-      "3600"
+      R"*({"kudu.table.history_max_age_sec":"3600","kudu.table.maintenance_priority":"-1"})*"
     );
   }
 
@@ -2294,7 +2293,8 @@ TEST_F(AdminCliTest, TestExtraConfig) {
       kTableId,
     }, &stdout, &stderr);
     ASSERT_TRUE(s.ok()) << ToolRunInfo(s, stdout, stderr);
-    ASSERT_STR_CONTAINS(stdout, "kudu.table.history_max_age_sec | 3600");
+    ASSERT_STR_MATCHES(stdout, "kudu.table.history_max_age_sec[ ]+|[ ]+3600[ ]+");
+    ASSERT_STR_MATCHES(stdout, "kudu.table.maintenance_priority[ ]+|[ ]+-1[ ]+");
   }
 
   // Gets the specified extra-config, the configuration exists.

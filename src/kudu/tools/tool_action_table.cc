@@ -73,6 +73,7 @@ using kudu::client::internal::ReplicaController;
 using std::cerr;
 using std::cout;
 using std::endl;
+using std::map;
 using std::set;
 using std::string;
 using std::unique_ptr;
@@ -160,8 +161,7 @@ const char* const kNewTableNameArg = "new_table_name";
 const char* const kColumnNameArg = "column_name";
 const char* const kNewColumnNameArg = "new_column_name";
 const char* const kKeyArg = "primary_key";
-const char* const kConfigNameArg = "config_name";
-const char* const kConfigValueArg = "config_value";
+const char* const kConfigKeyValuePairsArg = "config_key_value_pairs";
 const char* const kErrorMsgArg = "unable to parse value $0 for column $1 of type $2";
 const char* const kTableRangeLowerBoundArg = "table_range_lower_bound";
 const char* const kTableRangeUpperBoundArg = "table_range_upper_bound";
@@ -454,15 +454,27 @@ Status CopyTable(const RunnerContext& context) {
   return scanner.StartCopy();
 }
 
-Status SetExtraConfig(const RunnerContext& context) {
+Status SetExtraConfigs(const RunnerContext& context) {
   const string& table_name = FindOrDie(context.required_args, kTableNameArg);
-  const string& config_name = FindOrDie(context.required_args, kConfigNameArg);
-  const string& config_value = FindOrDie(context.required_args, kConfigValueArg);
+  const string& key_value_pairs = FindOrDie(context.required_args, kConfigKeyValuePairsArg);
+  JsonReader reader(key_value_pairs);
+  RETURN_NOT_OK(reader.Init());
+  map<string, const rapidjson::Value*> kvs;
+  RETURN_NOT_OK(reader.ExtractObjectDict(reader.root(), nullptr, &kvs));
+  map<string, string> extra_configs;
+  for (const auto& kv : kvs) {
+    string value;
+    RETURN_NOT_OK(reader.ExtractString(kv.second, nullptr, &value));
+    extra_configs.insert(make_pair(kv.first, value));
+  }
+  if (extra_configs.empty()) {
+    return Status::InvalidArgument("extra config key-value is empty");
+  }
 
   client::sp::shared_ptr<KuduClient> client;
   RETURN_NOT_OK(CreateKuduClient(context, &client));
   unique_ptr<KuduTableAlterer> alterer(client->NewTableAlterer(table_name));
-  alterer->AlterExtraConfig({ { config_name, config_value} });
+  alterer->AlterExtraConfig(extra_configs);
   return alterer->Alter();
 }
 
@@ -955,13 +967,13 @@ unique_ptr<Mode> BuildTableMode() {
       .AddOptionalParameter("write_type")
       .Build();
 
-  unique_ptr<Action> set_extra_config =
-      ActionBuilder("set_extra_config", &SetExtraConfig)
-      .Description("Change a extra configuration value on a table")
+  unique_ptr<Action> set_extra_configs =
+      ActionBuilder("set_extra_configs", &SetExtraConfigs)
+      .Description("Change extra configuration values on a table")
       .AddRequiredParameter({ kMasterAddressesArg, kMasterAddressesArgDesc })
       .AddRequiredParameter({ kTableNameArg, "Name of the table to alter" })
-      .AddRequiredParameter({ kConfigNameArg, "Name of the configuration" })
-      .AddRequiredParameter({ kConfigValueArg, "New value for the configuration" })
+      .AddRequiredParameter({ kConfigKeyValuePairsArg,
+                              R"*(Key-value pairs of the configuration as a JSON object. e.g. '{"key1":"val1","key2":"val2"}')*" })
       .Build();
 
   unique_ptr<Action> get_extra_configs =
@@ -1078,7 +1090,7 @@ unique_ptr<Mode> BuildTableMode() {
       .AddAction(std::move(rename_table))
       .AddAction(std::move(scan_table))
       .AddAction(std::move(copy_table))
-      .AddAction(std::move(set_extra_config))
+      .AddAction(std::move(set_extra_configs))
       .AddAction(std::move(get_extra_configs))
       .Build();
 }

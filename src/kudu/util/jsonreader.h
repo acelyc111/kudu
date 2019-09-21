@@ -18,6 +18,7 @@
 #define KUDU_UTIL_JSONREADER_H_
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -89,6 +90,11 @@ class JsonReader {
   Status ExtractObjectArray(const rapidjson::Value* object,
                             const char* field,
                             std::vector<const rapidjson::Value*>* result) const;
+
+  // 'result' is only valid for as long as JsonReader is alive.
+  Status ExtractObjectDict(const rapidjson::Value* object,
+                           const char* field,
+                           std::map<std::string, const rapidjson::Value*>* result) const;
 
   const rapidjson::Value* root() const { return &document_; }
 

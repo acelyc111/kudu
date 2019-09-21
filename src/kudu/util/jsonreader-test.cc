@@ -19,7 +19,9 @@
 
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <glog/logging.h> // IWYU pragma: keep
@@ -27,11 +29,13 @@
 #include <rapidjson/document.h>
 
 #include "kudu/gutil/integral_types.h"
+#include "kudu/gutil/map-util.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/util/status.h"
 #include "kudu/util/test_macros.h"
 
 using rapidjson::Value;
+using std::map;
 using std::string;
 using std::vector;
 using strings::Substitute;
@@ -381,6 +385,69 @@ TEST(JsonReaderTest, NestedArray) {
   ASSERT_TRUE(r.ExtractInt64(r.root(), "foo", nullptr).IsInvalidArgument());
   ASSERT_TRUE(r.ExtractString(r.root(), "foo", nullptr).IsInvalidArgument());
   ASSERT_TRUE(r.ExtractObject(r.root(), "foo", nullptr).IsInvalidArgument());
+}
+
+TEST(JsonReaderTest, ObjectDict) {
+  string dict = Substitute("{ \"key_bool\" : true, "
+                           "\"key_int_small\" : 1234, "
+                           "\"key_int_big\" : $0, "
+                           "\"key_double\" : 123.456, "
+                           "\"key_null\" : null, "
+                           "\"key_string\" : \"val\" }", kint64max);
+  map<const char*, string> doc_by_field({{nullptr, dict},
+                                         {"sub_dict", Substitute("{ \"sub_dict\" : $0 }", dict)}});
+  for (const auto& field_doc : doc_by_field) {
+    JsonReader r(field_doc.second);
+    ASSERT_OK(r.Init());
+
+    map<string, const rapidjson::Value*> objs;
+    ASSERT_OK(r.ExtractObjectDict(r.root(), field_doc.first, &objs));
+    ASSERT_EQ(6, objs.size());
+
+    const rapidjson::Value** found = nullptr;
+
+    // Extract bool value.
+    found = FindOrNull(objs, "key_bool");
+    ASSERT_NE(found, nullptr);
+    bool val_bool;
+    ASSERT_OK(r.ExtractBool(*found, nullptr, &val_bool));
+    ASSERT_EQ(true, val_bool);
+
+    // Extract int32 value.
+    found = FindOrNull(objs, "key_int_small");
+    ASSERT_NE(found, nullptr);
+    int32_t val_int32;
+    ASSERT_OK(r.ExtractInt32(*found, nullptr, &val_int32));
+    ASSERT_EQ(1234, val_int32);
+
+    // Extract int64 value.
+    found = FindOrNull(objs, "key_int_big");
+    ASSERT_NE(found, nullptr);
+    int64_t val_int64;
+    ASSERT_OK(r.ExtractInt64(*found, nullptr, &val_int64));
+    ASSERT_EQ(kint64max, val_int64);
+
+    // Extract double value.
+    found = FindOrNull(objs, "key_double");
+    ASSERT_NE(found, nullptr);
+    double val_double;
+    ASSERT_OK(r.ExtractDouble(*found, nullptr, &val_double));
+    ASSERT_EQ(123.456, val_double);
+
+    // Extract null value.
+    found = FindOrNull(objs, "key_null");
+    ASSERT_NE(found, nullptr);
+    string val_null;
+    ASSERT_OK(r.ExtractString(*found, nullptr, &val_null));
+    ASSERT_EQ("", val_null);
+
+    // Extract string value.
+    found = FindOrNull(objs, "key_string");
+    ASSERT_NE(found, nullptr);
+    string val_string;
+    ASSERT_OK(r.ExtractString(*found, nullptr, &val_string));
+    ASSERT_EQ("val", val_string);
+  }
 }
 
 } // namespace kudu
