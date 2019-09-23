@@ -148,6 +148,7 @@ DECLARE_bool(scanner_inject_service_unavailable_on_continue_scan);
 DECLARE_bool(txn_manager_enabled);
 DECLARE_bool(txn_manager_lazily_initialized);
 DECLARE_int32(client_tablet_locations_by_id_ttl_ms);
+DECLARE_int32(check_outdated_table_interval_seconds);
 DECLARE_int32(flush_threshold_mb);
 DECLARE_int32(flush_threshold_secs);
 DECLARE_int32(heartbeat_interval_ms);
@@ -242,6 +243,7 @@ class ClientTest : public KuduTest {
     // Reduce the TS<->Master heartbeat interval
     FLAGS_heartbeat_interval_ms = 10;
     FLAGS_scanner_gc_check_interval_us = 50 * 1000; // 50 milliseconds.
+    FLAGS_check_outdated_table_interval_seconds = 1;
 
     // Enable TxnManager in Kudu master.
     FLAGS_txn_manager_enabled = true;
@@ -4785,6 +4787,19 @@ TEST_F(ClientTest, TestBasicAlterOperations) {
     ASSERT_NE(boost::none, tablet_replica->tablet()->metadata()->extra_config());
     ASSERT_FALSE(tablet_replica->tablet()->metadata()->extra_config()->has_history_max_age_sec());
   }
+  // 4. Try to alter internal config.
+  {
+    map<string, string> extra_configs;
+    extra_configs[kTableConfigReserveSeconds] = "60";
+    unique_ptr<KuduTableAlterer> table_alterer(client_->NewTableAlterer(kTableName));
+    table_alterer->AlterExtraConfig(extra_configs);
+    Status s = table_alterer->Alter();
+    ASSERT_TRUE(s.IsInvalidArgument());
+    ASSERT_STR_CONTAINS(s.ToString(), "forbidden to change internal extra configuration by user");
+    ASSERT_EQ(11, tablet_replica->tablet()->metadata()->schema_version());
+    ASSERT_NE(boost::none, tablet_replica->tablet()->metadata()->extra_config());
+    ASSERT_FALSE(tablet_replica->tablet()->metadata()->extra_config()->has_reserve_seconds());
+  }
 
   // Test changing a table name.
   {
@@ -4853,6 +4868,198 @@ TEST_F(ClientTest, TestDeleteTable) {
 
   // Should be able to insert successfully into the new table.
   NO_FATALS(InsertTestRows(client_.get(), client_table_.get(), 10));
+}
+
+TEST_F(ClientTest, TestDeleteAndReserveTable) {
+  // Open the table before deleting it.
+  ASSERT_OK(client_->OpenTable(kTableName, &client_table_));
+
+  // Insert a few rows, and scan them back. This is to populate the MetaCache.
+  NO_FATALS(InsertTestRows(client_.get(), client_table_.get(), 10));
+  vector<string> rows;
+  ScanTableToStrings(client_table_.get(), &rows);
+  ASSERT_EQ(10, rows.size());
+
+  // Remove the table.
+  // NOTE that it returns when the operation is completed on the master side
+  string tablet_id = GetFirstTabletId(client_table_.get());
+  ASSERT_OK(client_->DeleteTable(kTableName, false, 60));
+  CatalogManager* catalog_manager = cluster_->mini_master()->master()->catalog_manager();
+  {
+    CatalogManager::ScopedLeaderSharedLock l(catalog_manager);
+    ASSERT_OK(l.first_failed_status());
+    bool exists;
+    ASSERT_OK(catalog_manager->TableNameExists(kTableName, &exists));
+    ASSERT_FALSE(exists);
+  }
+
+  // Exist tablet is still visible.
+  scoped_refptr<TabletReplica> tablet_replica;
+  ASSERT_TRUE(cluster_->mini_tablet_server(0)->server()->tablet_manager()->LookupTablet(
+                  tablet_id, &tablet_replica));
+
+  // Try to open the deleted table.
+  Status s = client_->OpenTable(kTableName, &client_table_);
+  ASSERT_TRUE(s.IsNotFound());
+  ASSERT_STR_CONTAINS(s.ToString(), "the table does not exist");
+
+  // Old table has been renamed.
+  vector<string> tables;
+  ASSERT_OK(client_->ListTables(&tables));
+  ASSERT_EQ(1, tables.size());
+  string trashed_table_name = tables[0];
+  string origin_table_name;
+  WallTime mark_delete_time;
+  ASSERT_TRUE(catalog_manager->GetOriginNameAndDeleteTimeOfTrashedTable(trashed_table_name,
+                                                                        &origin_table_name,
+                                                                        &mark_delete_time));
+  ASSERT_EQ(string(kTableName), origin_table_name);
+
+  // Alter trashed table is not allowed.
+  {
+    // Not allowed to rename.
+    unique_ptr<KuduTableAlterer> table_alterer(client_->NewTableAlterer(trashed_table_name));
+    table_alterer->RenameTo(kTableName);
+    s = table_alterer->Alter();
+    ASSERT_TRUE(s.IsInvalidArgument());
+    ASSERT_STR_CONTAINS(s.ToString(), Substitute("trashed table $0 should not be altered",
+                                                 trashed_table_name));
+  }
+
+  {
+    // Not allowed to add column.
+    unique_ptr<KuduTableAlterer> table_alterer(client_->NewTableAlterer(trashed_table_name));
+    table_alterer->AddColumn("new_column")->Type(KuduColumnSchema::INT32);
+    s = table_alterer->Alter();
+    ASSERT_TRUE(s.IsInvalidArgument());
+    ASSERT_STR_CONTAINS(s.ToString(), Substitute("trashed table $0 should not be altered",
+                                                 trashed_table_name));
+  }
+
+  {
+    // Not allowed to delete.
+    s = client_->DeleteTable(trashed_table_name);
+    ASSERT_TRUE(s.IsInvalidArgument());
+    ASSERT_STR_CONTAINS(s.ToString(), Substitute("trashed table $0 should not be deleted",
+                                                 trashed_table_name));
+  }
+
+  {
+    // Not allowed to set extra configs.
+    map<string, string> extra_configs;
+    extra_configs[kTableMaintenancePriority] = "3";
+    unique_ptr<KuduTableAlterer> table_alterer(client_->NewTableAlterer(trashed_table_name));
+    table_alterer->AlterExtraConfig(extra_configs);
+    s = table_alterer->Alter();
+    ASSERT_TRUE(s.IsInvalidArgument());
+    ASSERT_STR_CONTAINS(s.ToString(), Substitute("trashed table $0 should not be altered",
+                                                 trashed_table_name));
+
+    // Alter trashed table is allowed on force.
+    table_alterer->force_on_trashed_table(true);
+    ASSERT_OK(table_alterer->Alter());
+  }
+
+  {
+    // Write and read are allowed for trashed table.
+    NO_FATALS(InsertTestRows(client_.get(), client_table_.get(), 20, 10));
+    ScanTableToStrings(client_table_.get(), &rows);
+    ASSERT_EQ(30, rows.size());
+  }
+
+  // Create a new table with the same name.
+  NO_FATALS(CreateTable(kTableName, 1, GenerateSplitRows(), {}, &client_table_));
+
+  // Two tables exist now.
+  tables.clear();
+  ASSERT_OK(client_->ListTables(&tables));
+  ASSERT_EQ(2, tables.size());
+  std::sort(tables.begin(), tables.end());
+  ASSERT_EQ(string(kTableName), tables[0]);
+  ASSERT_EQ(string(trashed_table_name), tables[1]);
+
+  // Should be able to insert successfully into the new table.
+  NO_FATALS(InsertTestRows(client_.get(), client_table_.get(), 10));
+  ScanTableToStrings(client_table_.get(), &rows);
+  ASSERT_EQ(10, rows.size());
+
+  // Force to delete the trashed table.
+  ASSERT_OK(client_->DeleteTable(trashed_table_name, true));
+
+  // Only one table left.
+  tables.clear();
+  ASSERT_OK(client_->ListTables(&tables));
+  ASSERT_EQ(1, tables.size());
+  ASSERT_EQ(kTableName, tables[0]);
+}
+
+TEST_F(ClientTest, TestDeleteAndRecallTable) {
+  // Open the table before deleting it.
+  ASSERT_OK(client_->OpenTable(kTableName, &client_table_));
+
+  // Insert a few rows, and scan them back. This is to populate the MetaCache.
+  NO_FATALS(InsertTestRows(client_.get(), client_table_.get(), 10));
+  vector<string> rows;
+  ScanTableToStrings(client_table_.get(), &rows);
+  ASSERT_EQ(10, rows.size());
+
+  // Remove the table
+  ASSERT_OK(client_->DeleteTable(kTableName, false, 60));
+  ASSERT_EVENTUALLY([&] () {
+    Status s = client_->OpenTable(kTableName, &client_table_);
+    ASSERT_TRUE(s.IsNotFound());
+    ASSERT_STR_CONTAINS(s.ToString(), "the table does not exist");
+  });
+
+  // Recall and reopen table.
+  vector<string> tables;
+  ASSERT_OK(client_->ListTables(&tables));
+  ASSERT_EQ(1, tables.size());
+  ASSERT_OK(client_->RecallTable(tables[0]));
+  ASSERT_OK(client_->OpenTable(kTableName, &client_table_));
+
+  // Check data from table.
+  ScanTableToStrings(client_table_.get(), &rows);
+  ASSERT_EQ(10, rows.size());
+}
+
+TEST_F(ClientTest, TestDeleteAndRecallAfterReserveTimeTable) {
+  // Open the table before deleting it.
+  ASSERT_OK(client_->OpenTable(kTableName, &client_table_));
+
+  // Insert a few rows, and scan them back. This is to populate the MetaCache.
+  NO_FATALS(InsertTestRows(client_.get(), client_table_.get(), 10));
+  vector<string> rows;
+  ScanTableToStrings(client_table_.get(), &rows);
+  ASSERT_EQ(10, rows.size());
+
+  // Remove the table
+  ASSERT_OK(client_->DeleteTable(kTableName, false, 2));
+  ASSERT_EVENTUALLY([&] () {
+    Status s = client_->OpenTable(kTableName, &client_table_);
+    ASSERT_TRUE(s.IsNotFound());
+    ASSERT_STR_CONTAINS(s.ToString(), "the table does not exist");
+  });
+
+  vector<string> tables;
+  ASSERT_OK(client_->ListTables(&tables));
+  ASSERT_EQ(1, tables.size());
+
+  // Wait util the table is removed completely.
+  ASSERT_EVENTUALLY([&] () {
+    Status s = client_->OpenTable(tables[0], &client_table_);
+    ASSERT_TRUE(s.IsNotFound());
+    ASSERT_STR_CONTAINS(s.ToString(), "the table does not exist");
+  });
+
+  // Try to recall the table.
+  Status s = client_->RecallTable(tables[0]);
+  ASSERT_TRUE(s.IsNotFound());
+  ASSERT_STR_CONTAINS(s.ToString(), "the table does not exist");
+
+  tables.clear();
+  ASSERT_OK(client_->ListTables(&tables));
+  ASSERT_TRUE(tables.empty());
 }
 
 TEST_F(ClientTest, TestGetTableSchema) {

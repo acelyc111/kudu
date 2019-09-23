@@ -477,14 +477,24 @@ Status KuduClient::IsCreateTableInProgress(const string& table_name,
                                         create_in_progress);
 }
 
-Status KuduClient::DeleteTable(const string& table_name) {
-  return DeleteTableInCatalogs(table_name, true);
+Status KuduClient::DeleteTable(const string& table_name,
+                               bool force_on_trashed_table,
+                               uint32_t reserve_seconds) {
+  return DeleteTableInCatalogs(table_name, true, force_on_trashed_table, reserve_seconds);
 }
 
 Status KuduClient::DeleteTableInCatalogs(const string& table_name,
-                                         bool modify_external_catalogs) {
+                                         bool modify_external_catalogs,
+                                         bool force_on_trashed_table,
+                                         uint32_t reserve_seconds) {
   MonoTime deadline = MonoTime::Now() + default_admin_operation_timeout();
-  return data_->DeleteTable(this, table_name, deadline, modify_external_catalogs);
+  return data_->DeleteTable(this, table_name, deadline,
+      modify_external_catalogs, force_on_trashed_table, reserve_seconds);
+}
+
+Status KuduClient::RecallTable(const string& table_name) {
+  MonoTime deadline = MonoTime::Now() + default_admin_operation_timeout();
+  return data_->RecallTable(this, table_name, deadline);
 }
 
 KuduTableAlterer* KuduClient::NewTableAlterer(const string& table_name) {
@@ -1471,6 +1481,12 @@ KuduTableAlterer* KuduTableAlterer::wait(bool wait) {
 KuduTableAlterer* KuduTableAlterer::modify_external_catalogs(
     bool modify_external_catalogs) {
   data_->modify_external_catalogs_ = modify_external_catalogs;
+  return this;
+}
+
+KuduTableAlterer* KuduTableAlterer::force_on_trashed_table(
+    bool force_on_trashed_table) {
+  data_->force_on_trashed_table_ = force_on_trashed_table;
   return this;
 }
 

@@ -27,6 +27,7 @@
 #include <boost/optional/optional.hpp>
 #include <gflags/gflags.h>
 #include <glog/logging.h>
+#include <google/protobuf/stubs/common.h>
 
 #include "kudu/common/common.pb.h"
 #include "kudu/common/wire_protocol.h"
@@ -36,6 +37,7 @@
 #include "kudu/gutil/map-util.h"
 #include "kudu/gutil/port.h"
 #include "kudu/gutil/strings/substitute.h"
+#include "kudu/gutil/walltime.h"
 #include "kudu/hms/hms_catalog.h"
 #include "kudu/master/authz_provider.h"
 #include "kudu/master/catalog_manager.h"
@@ -63,6 +65,7 @@
 
 DECLARE_bool(hive_metastore_sasl_enabled);
 DECLARE_bool(raft_prepare_replacement_before_eviction);
+DECLARE_int32(max_priority_range);
 DECLARE_string(hive_metastore_uris);
 
 DEFINE_int32(master_inject_latency_on_tablet_lookups_ms, 0,
@@ -488,7 +491,65 @@ void MasterServiceImpl::DeleteTable(const DeleteTableRequestPB* req,
     return;
   }
 
-  Status s = server_->catalog_manager()->DeleteTableRpc(*req, resp, rpc);
+  bool is_trashed_table = false;
+  Status s = server_->catalog_manager()
+      ->IsOutdatedTable(req->table().table_name(), &is_trashed_table);
+  if (s.ok() && is_trashed_table && !req->force_on_trashed_table()) {
+    s = Status::InvalidArgument(Substitute("trashed table $0 should not be deleted",
+                                           req->table().table_name()));
+  }
+
+  if (!s.ok()) {
+    CheckRespErrorOrSetUnknown(s, resp);
+    rpc->RespondSuccess();
+    return;
+  }
+
+  if ((is_trashed_table && req->force_on_trashed_table()) || req->reserve_seconds() == 0) {
+    Status s = server_->catalog_manager()->DeleteTableRpc(*req, resp, rpc);
+    CheckRespErrorOrSetUnknown(s, resp);
+    rpc->RespondSuccess();
+  } else {
+    DCHECK(!is_trashed_table);
+    AlterTableRequestPB alter_req;
+    alter_req.mutable_table()->CopyFrom(req->table());
+    alter_req.set_new_table_name(string(Master::kTrashedTag) + ":"
+                                 + std::to_string(WallTime_Now()) + ":"
+                                 + req->table().table_name());
+    alter_req.set_modify_external_catalogs(req->modify_external_catalogs());
+    (*alter_req.mutable_new_extra_configs())[kTableMaintenancePriority]
+        = std::to_string(-FLAGS_max_priority_range);
+    (*alter_req.mutable_new_extra_configs())[kTableConfigReserveSeconds]
+        = std::to_string(req->reserve_seconds());
+
+    AlterTableResponsePB alter_resp;
+    Status s = server_->catalog_manager()->AlterTableRpc(alter_req, &alter_resp, rpc, false);
+    CheckRespErrorOrSetUnknown(s, &alter_resp);
+    resp->set_allocated_error(alter_resp.release_error());
+    rpc->RespondSuccess();
+  }
+}
+
+void MasterServiceImpl::RecallDeletedTable(const RecallDeletedTableRequestPB* req,
+                                           RecallDeletedTableResponsePB* resp,
+                                           rpc::RpcContext* rpc) {
+  CatalogManager::ScopedLeaderSharedLock l(server_->catalog_manager());
+  if (!l.CheckIsInitializedAndIsLeaderOrRespond(resp, rpc)) {
+    return;
+  }
+
+  bool is_trashed_table = false;
+  Status s = server_->catalog_manager()
+      ->IsOutdatedTable(req->table().table_name(), &is_trashed_table);
+  if (s.ok()) {
+    if (is_trashed_table) {
+      s = server_->catalog_manager()->RecallDeletedTableRpc(*req, resp, rpc);
+    } else {
+      s = Status::InvalidArgument(Substitute("common table $0 should not be recalled",
+                                             req->table().table_name()));
+    }
+  }
+
   CheckRespErrorOrSetUnknown(s, resp);
   rpc->RespondSuccess();
 }
@@ -501,7 +562,18 @@ void MasterServiceImpl::AlterTable(const AlterTableRequestPB* req,
     return;
   }
 
-  Status s = server_->catalog_manager()->AlterTableRpc(*req, resp, rpc);
+  bool is_trashed_table = false;
+  Status s = server_->catalog_manager()
+      ->IsOutdatedTable(req->table().table_name(), &is_trashed_table);
+  if (s.ok()) {
+    if (!is_trashed_table || req->force_on_trashed_table()) {
+      s = server_->catalog_manager()->AlterTableRpc(*req, resp, rpc, true);
+    } else {
+      s = Status::InvalidArgument(Substitute("trashed table $0 should not be altered",
+                                             req->table().table_name()));
+    }
+  }
+
   CheckRespErrorOrSetUnknown(s, resp);
   rpc->RespondSuccess();
 }

@@ -89,10 +89,11 @@
 #include "kudu/gutil/stl_util.h"
 #include "kudu/gutil/strings/escaping.h"
 #include "kudu/gutil/strings/join.h"
+#include "kudu/gutil/strings/numbers.h"
+#include "kudu/gutil/strings/split.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/gutil/sysinfo.h"
 #include "kudu/gutil/utf/utf.h"
-#include "kudu/gutil/walltime.h"
 #include "kudu/hms/hms_catalog.h"
 #include "kudu/master/authz_provider.h"
 #include "kudu/master/auto_rebalancer.h"
@@ -367,6 +368,7 @@ using kudu::consensus::RaftPeerPB;
 using kudu::consensus::StartTabletCopyRequestPB;
 using kudu::consensus::kMinimumTerm;
 using kudu::hms::HmsClientVerifyKuduSyncConfig;
+using kudu::master::TableIdentifierPB;
 using kudu::pb_util::SecureDebugString;
 using kudu::pb_util::SecureShortDebugString;
 using kudu::rpc::RpcContext;
@@ -1817,7 +1819,7 @@ Status CatalogManager::CreateTable(const CreateTableRequestPB* orig_req,
 
   // Verify the table's extra configuration properties.
   TableExtraConfigPB extra_config_pb;
-  RETURN_NOT_OK(ExtraConfigPBFromPBMap(req.extra_configs(), &extra_config_pb));
+  RETURN_NOT_OK(UpdateExtraConfigPB(req.extra_configs(), true, &extra_config_pb));
 
   scoped_refptr<TableInfo> table;
   {
@@ -2343,6 +2345,31 @@ Status CatalogManager::DeleteTable(const DeleteTableRequestPB& req,
   return Status::OK();
 }
 
+Status CatalogManager::RecallDeletedTableRpc(const RecallDeletedTableRequestPB& req,
+                                             RecallDeletedTableResponsePB* resp,
+                                             rpc::RpcContext* rpc) {
+  leader_lock_.AssertAcquiredForReading();
+
+  string origin_table_name;
+  WallTime mark_delete_time;
+  if (!GetOriginNameAndDeleteTimeOfTrashedTable(req.table().table_name(),
+                                                &origin_table_name, &mark_delete_time)) {
+    return SetupError(Status::InvalidArgument("not a trashed table"),
+                      resp, MasterErrorPB::TABLE_NOT_FOUND);
+  }
+
+  AlterTableRequestPB alter_req;
+  alter_req.mutable_table()->CopyFrom(req.table());
+  // Revert table name
+  alter_req.set_new_table_name(origin_table_name);
+  (*alter_req.mutable_new_extra_configs())[kTableMaintenancePriority] = "";
+  (*alter_req.mutable_new_extra_configs())[kTableConfigReserveSeconds] = "";
+
+  AlterTableResponsePB alter_resp;
+  RETURN_NOT_OK(AlterTableRpc(alter_req, &alter_resp, rpc, false));
+  return Status::OK();
+}
+
 Status CatalogManager::ApplyAlterSchemaSteps(const SysTablesEntryPB& current_pb,
                                              vector<AlterTableRequestPB::Step> steps,
                                              Schema* new_schema,
@@ -2636,7 +2663,8 @@ Status CatalogManager::ApplyAlterPartitioningSteps(
 
 Status CatalogManager::AlterTableRpc(const AlterTableRequestPB& req,
                                      AlterTableResponsePB* resp,
-                                     rpc::RpcContext* rpc) {
+                                     rpc::RpcContext* rpc,
+                                     bool external_request) {
   leader_lock_.AssertAcquiredForReading();
 
   if (req.modify_external_catalogs()) {
@@ -2732,10 +2760,11 @@ Status CatalogManager::AlterTableRpc(const AlterTableRequestPB& req,
 
     return AlterTable(r, resp,
                       /*hms_notification_log_event_id=*/none,
-                      /*user=*/none);
+                      /*user=*/none,
+                      external_request);
   }
 
-  return AlterTable(req, resp, /*hms_notification_log_event_id=*/ none, user);
+  return AlterTable(req, resp, /*hms_notification_log_event_id=*/ none, user, external_request);
 }
 
 Status CatalogManager::AlterTableHms(const string& table_id,
@@ -2757,7 +2786,8 @@ Status CatalogManager::AlterTableHms(const string& table_id,
   // Use empty user to skip the authorization validation since the operation
   // originates from catalog manager. Moreover, this avoids duplicate effort,
   // because we already perform authorization before making any changes to the HMS.
-  RETURN_NOT_OK(AlterTable(req, &resp, notification_log_event_id, /*user=*/none));
+  RETURN_NOT_OK(AlterTable(req, &resp, notification_log_event_id, /*user=*/none,
+                           /*external_request=*/true));
 
   // Update the cached HMS notification log event ID.
   DCHECK_GT(notification_log_event_id, hms_notification_log_event_id_);
@@ -2769,7 +2799,8 @@ Status CatalogManager::AlterTableHms(const string& table_id,
 Status CatalogManager::AlterTable(const AlterTableRequestPB& req,
                                   AlterTableResponsePB* resp,
                                   optional<int64_t> hms_notification_log_event_id,
-                                  optional<const string&> user) {
+                                  optional<const string&> user,
+                                  bool external_request) {
   leader_lock_.AssertAcquiredForReading();
 
   // 1. Group the steps into schema altering steps and partition altering steps.
@@ -2928,14 +2959,12 @@ Status CatalogManager::AlterTable(const AlterTableRequestPB& req,
   if (!req.new_extra_configs().empty()) {
     TRACE("Apply alter extra-config");
     Map<string, string> new_extra_configs;
-    RETURN_NOT_OK(ExtraConfigPBToPBMap(l.data().pb.extra_config(),
-                                       &new_extra_configs));
-    // Merge table's extra configuration properties.
     for (auto config : req.new_extra_configs()) {
       new_extra_configs[config.first] = config.second;
     }
-    RETURN_NOT_OK(ExtraConfigPBFromPBMap(new_extra_configs,
-                                         l.mutable_data()->pb.mutable_extra_config()));
+    RETURN_NOT_OK(UpdateExtraConfigPB(new_extra_configs,
+                                      external_request,
+                                      l.mutable_data()->pb.mutable_extra_config()));
   }
 
   // Set to true if columns are altered, added or dropped.
@@ -5714,6 +5743,60 @@ int CatalogManager::TSInfosDict::LookupOrAdd(const string& uuid,
   });
 }
 
+Status CatalogManager::IsOutdatedTable(const std::string& table_name,
+                                       bool* is_trashed_table,
+                                       bool* is_outdated_table) {
+  *is_trashed_table = false;
+  string origin_table_name;
+  WallTime mark_delete_time;
+  if (!GetOriginNameAndDeleteTimeOfTrashedTable(table_name,
+                                                &origin_table_name,
+                                                &mark_delete_time)) {
+    return Status::OK();
+  }
+
+  // TODO(yingchun): Check whether a table is 'trashed' or not by GetTableSchema is a little
+  // expensive.
+  GetTableSchemaRequestPB schema_req;
+  schema_req.mutable_table()->set_table_name(table_name);
+  GetTableSchemaResponsePB schema_resp;
+  RETURN_NOT_OK(GetTableSchema(&schema_req, &schema_resp, boost::none, nullptr));
+  auto found = FindOrNull(schema_resp.extra_configs(), kTableConfigReserveSeconds);
+  if (!found) {
+    return Status::OK();
+  }
+
+  uint32_t reserve_seconds = 0;
+  if (!safe_strtou32(*found, &reserve_seconds)) {
+    return Status::Corruption(Substitute("Table $0's config $1 is invalid",
+                              table_name, kTableConfigReserveSeconds));
+  }
+
+  *is_trashed_table = true;
+  if (is_outdated_table) {
+    *is_outdated_table = (WallTime_Now() - mark_delete_time > reserve_seconds);
+  }
+
+  return Status::OK();
+}
+
+bool CatalogManager::GetOriginNameAndDeleteTimeOfTrashedTable(const string& table_name,
+                                                              string* origin_table_name,
+                                                              WallTime* mark_delete_time) {
+  vector<string> sections = strings::Split(table_name, ":", strings::AllowEmpty());
+  if (sections.size() < 3 || sections[0] != Master::kTrashedTag || sections[2].empty()) {
+    return false;
+  }
+
+  if (!safe_strtod(sections[1], mark_delete_time)
+      || *mark_delete_time < 0 || *mark_delete_time >= WallTime_Now()) {
+    return false;
+  }
+
+  *origin_table_name = sections[2];
+  return true;
+}
+
 ////////////////////////////////////////////////////////////
 // CatalogManager::ScopedLeaderSharedLock
 ////////////////////////////////////////////////////////////
@@ -5825,6 +5908,7 @@ INITTED_AND_LEADER_OR_RESPOND(GetTableLocationsResponsePB);
 INITTED_AND_LEADER_OR_RESPOND(GetTableSchemaResponsePB);
 INITTED_AND_LEADER_OR_RESPOND(GetTableStatisticsResponsePB);
 INITTED_AND_LEADER_OR_RESPOND(GetTabletLocationsResponsePB);
+INITTED_AND_LEADER_OR_RESPOND(RecallDeletedTableResponsePB);
 INITTED_AND_LEADER_OR_RESPOND(ReplaceTabletResponsePB);
 
 #undef INITTED_OR_RESPOND

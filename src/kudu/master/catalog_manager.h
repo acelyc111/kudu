@@ -42,6 +42,7 @@
 #include "kudu/gutil/port.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/strings/stringpiece.h"
+#include "kudu/gutil/walltime.h"
 #include "kudu/master/master.pb.h"
 #include "kudu/tablet/metadata.pb.h"
 #include "kudu/tserver/tablet_replica_lookup.h"
@@ -79,6 +80,7 @@ struct ColumnId;
 
 // Working around FRIEND_TEST() ugliness.
 namespace client {
+class ClientTest_TestDeleteAndReserveTable_Test;
 class ServiceUnavailableRetryClientTest_CreateTable_Test;
 } // namespace client
 
@@ -605,13 +607,22 @@ class CatalogManager : public tserver::TabletReplicaLookupIf {
                         const std::string& table_id,
                         int64_t notification_log_event_id) WARN_UNUSED_RESULT;
 
+  // Recall a table in response to a RecallDeletedTableRequestPB RPC.
+  //
+  // The RPC context is provided for logging/tracing purposes,
+  // but this function does not itself respond to the RPC.
+  Status RecallDeletedTableRpc(const RecallDeletedTableRequestPB& req,
+                               RecallDeletedTableResponsePB* resp,
+                               rpc::RpcContext* rpc) WARN_UNUSED_RESULT;
+
   // Alter the specified table in response to an AlterTableRequest RPC.
   //
   // The RPC context is provided for logging/tracing purposes,
   // but this function does not itself respond to the RPC.
   Status AlterTableRpc(const AlterTableRequestPB& req,
                        AlterTableResponsePB* resp,
-                       rpc::RpcContext* rpc);
+                       rpc::RpcContext* rpc,
+                       bool external_request);
 
   // Alter the specified table in response to an 'ALTER TABLE' HMS
   // notification log listener event.
@@ -817,8 +828,14 @@ class CatalogManager : public tserver::TabletReplicaLookupIf {
   Status InitiateMasterChangeConfig(ChangeConfigOp op, const HostPort& hp,
                                     const std::string& uuid, rpc::RpcContext* rpc);
 
+  // Check whether the table is trashed and outdated.
+  Status IsOutdatedTable(const std::string& table_name,
+                         bool* is_trashed_table,
+                         bool* is_outdated_table = nullptr);
+
  private:
   // These tests call ElectedAsLeaderCb() directly.
+  FRIEND_TEST(kudu::client::ClientTest, TestDeleteAndReserveTable);
   FRIEND_TEST(MasterTest, TestShutdownDuringTableVisit);
   FRIEND_TEST(MasterTest, TestGetTableLocationsDuringRepeatedTableVisit);
   FRIEND_TEST(kudu::AuthzTokenTest, TestSingleMasterUnavailable);
@@ -828,6 +845,9 @@ class CatalogManager : public tserver::TabletReplicaLookupIf {
 
   // This test exclusively acquires the leader_lock_ directly.
   FRIEND_TEST(kudu::client::ServiceUnavailableRetryClientTest, CreateTable);
+
+  // This test call GetOriginNameAndDeleteTimeOfTrashedTable directly.
+  FRIEND_TEST(MasterTest, TestGetOriginNameAndDeleteTimeOfTrashedTable);
 
   friend class AutoRebalancerTest;
   friend class TableLoader;
@@ -858,7 +878,8 @@ class CatalogManager : public tserver::TabletReplicaLookupIf {
   Status AlterTable(const AlterTableRequestPB& req,
                     AlterTableResponsePB* resp,
                     boost::optional<int64_t> hms_notification_log_event_id,
-                    boost::optional<const std::string&> user) WARN_UNUSED_RESULT;
+                    boost::optional<const std::string&> user,
+                    bool external_request) WARN_UNUSED_RESULT;
 
   // Called by SysCatalog::SysCatalogStateChanged when this node
   // becomes the leader of a consensus configuration. Executes
@@ -1118,6 +1139,12 @@ class CatalogManager : public tserver::TabletReplicaLookupIf {
   template<typename RespClass>
   Status WaitForNotificationLogListenerCatchUp(RespClass* resp,
                                                rpc::RpcContext* rpc) WARN_UNUSED_RESULT;
+
+  // Get origin name and delete time of a trashed table.
+  // Returns false if failed.
+  static bool GetOriginNameAndDeleteTimeOfTrashedTable(const std::string& table_name,
+                                                       std::string* origin_table_name,
+                                                       WallTime* mark_delete_time);
 
   // TODO(unknown): the maps are a little wasteful of RAM, since the TableInfo/TabletInfo
   // objects have a copy of the string key. But STL doesn't make it

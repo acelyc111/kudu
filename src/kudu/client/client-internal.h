@@ -119,7 +119,14 @@ class KuduClient::Data {
   static Status DeleteTable(KuduClient* client,
                             const std::string& table_name,
                             const MonoTime& deadline,
-                            bool modify_external_catalogs = true);
+                            bool modify_external_catalogs = true,
+                            bool force_on_trashed_table = false,
+                            uint32_t reserve_seconds = 0);
+
+
+  static Status RecallTable(KuduClient* client,
+                     const std::string& table_name,
+                     const MonoTime& deadline);
 
   static Status AlterTable(KuduClient* client,
                            const master::AlterTableRequestPB& req,
