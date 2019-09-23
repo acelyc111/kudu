@@ -1622,7 +1622,8 @@ TEST_F(AdminCliTest, TestDeleteTable) {
     "table",
     "delete",
     master_address,
-    kTableId
+    kTableId,
+    "-reserve_seconds=0"
   );
 
   vector<string> tables;

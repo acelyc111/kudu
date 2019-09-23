@@ -518,9 +518,21 @@ message DeleteTableRequestPB {
   // Whether to apply the deletion to external catalogs, such as the Hive Metastore,
   // which the Kudu master has been configured to integrate with.
   optional bool modify_external_catalogs = 2 [default = true];
+
+  // Reserve seconds after being deleted.
+  optional uint32 reserve_seconds = 3;
 }
 
 message DeleteTableResponsePB {
+  // The error, if an error occurred with this request.
+  optional MasterErrorPB error = 1;
+}
+
+message RecallDeletedTableRequestPB {
+  required TableIdentifierPB table = 1;
+}
+
+message RecallDeletedTableResponsePB {
   // The error, if an error occurred with this request.
   optional MasterErrorPB error = 1;
 }
@@ -669,6 +681,9 @@ message AlterTableRequestPB {
   optional bool modify_external_catalogs = 5 [default = true];
 
   map<string, string> new_extra_configs = 6;
+
+  // Force to alter a trashed table.
+  optional bool force_on_trashed_table = 7 [default = false];
 }
 
 message AlterTableResponsePB {
@@ -971,6 +986,9 @@ service MasterService {
     option (kudu.rpc.authz_method) = "AuthorizeClient";
   }
   rpc DeleteTable(DeleteTableRequestPB) returns (DeleteTableResponsePB) {
+    option (kudu.rpc.authz_method) = "AuthorizeClient";
+  }
+  rpc RecallDeletedTable(RecallDeletedTableRequestPB) returns (RecallDeletedTableResponsePB) {
     option (kudu.rpc.authz_method) = "AuthorizeClient";
   }
 

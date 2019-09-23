@@ -87,6 +87,8 @@ class KuduTableAlterer::Data {
   // Metastore. The default value is true.
   bool modify_external_catalogs_ = true;
 
+  bool force_on_trashed_table_ = false;
+
  private:
   DISALLOW_COPY_AND_ASSIGN(Data);
 };

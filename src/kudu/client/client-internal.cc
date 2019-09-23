@@ -99,6 +99,8 @@ using master::IsAlterTableDoneRequestPB;
 using master::IsAlterTableDoneResponsePB;
 using master::IsCreateTableDoneRequestPB;
 using master::IsCreateTableDoneResponsePB;
+using master::RecallDeletedTableRequestPB;
+using master::RecallDeletedTableResponsePB;
 using master::MasterFeatures;
 using master::MasterServiceProxy;
 using master::TableIdentifierPB;
@@ -339,16 +341,34 @@ Status KuduClient::Data::WaitForCreateTableToFinish(
 Status KuduClient::Data::DeleteTable(KuduClient* client,
                                      const string& table_name,
                                      const MonoTime& deadline,
-                                     bool modify_external_catalogs) {
+                                     bool modify_external_catalogs,
+                                     uint32_t reserve_seconds) {
   DeleteTableRequestPB req;
   DeleteTableResponsePB resp;
 
   req.mutable_table()->set_table_name(table_name);
   req.set_modify_external_catalogs(modify_external_catalogs);
+  req.set_reserve_seconds(reserve_seconds);
   Synchronizer sync;
   AsyncLeaderMasterRpc<DeleteTableRequestPB, DeleteTableResponsePB> rpc(
       deadline, client, BackoffType::EXPONENTIAL, req, &resp,
       &MasterServiceProxy::DeleteTableAsync, "DeleteTable", sync.AsStatusCallback(), {});
+  rpc.SendRpc();
+  return sync.Wait();
+}
+
+Status KuduClient::Data::RecallTable(KuduClient* client,
+                                     const std::string& table_name,
+                                     const MonoTime& deadline) {
+  RecallDeletedTableRequestPB req;
+  RecallDeletedTableResponsePB resp;
+
+  req.mutable_table()->set_table_name(table_name);
+  Synchronizer sync;
+  AsyncLeaderMasterRpc<RecallDeletedTableRequestPB, RecallDeletedTableResponsePB> rpc(
+      deadline, client, BackoffType::EXPONENTIAL, req, &resp,
+      &MasterServiceProxy::RecallDeletedTableAsync, "RecallDeletedTable", sync.AsStatusCallback(),
+      {});
   rpc.SendRpc();
   return sync.Wait();
 }

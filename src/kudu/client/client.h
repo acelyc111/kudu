@@ -342,8 +342,10 @@ class KUDU_EXPORT KuduClient : public sp::enable_shared_from_this<KuduClient> {
   ///
   /// @param [in] table_name
   ///   Name of the table to drop.
+  /// @param [in] reserve_seconds
+  ///   Reserve seconds after being deleted.
   /// @return Operation status.
-  Status DeleteTable(const std::string& table_name);
+  Status DeleteTable(const std::string& table_name, uint32_t reserve_seconds = 0);
 
   /// @cond PRIVATE_API
 
@@ -356,9 +358,20 @@ class KUDU_EXPORT KuduClient : public sp::enable_shared_from_this<KuduClient> {
   /// @param [in] modify_external_catalogs
   ///   Whether to apply the deletion to external catalogs, such as the Hive Metastore,
   ///   which the Kudu master has been configured to integrate with.
+  /// @param [in] reserve_seconds
+  ///   Reserve seconds after being deleted.
   /// @return Operation status.
   Status DeleteTableInCatalogs(const std::string& table_name,
-                               bool modify_external_catalogs) KUDU_NO_EXPORT;
+                               bool modify_external_catalogs,
+                               uint32_t reserve_seconds = 0) KUDU_NO_EXPORT;
+
+  /// Recall a deleted but still reserved table.
+  ///
+  /// @param [in] table_name
+  ///   Name of the table to recall.
+  /// @return Operation status.
+  Status RecallTable(const std::string& table_name);
+
   /// @endcond
 
   /// Create a KuduTableAlterer object.
@@ -1375,6 +1388,17 @@ class KUDU_EXPORT KuduTableAlterer {
   ///   Whether to apply the alteration to external catalogs.
   /// @return Raw pointer to this alterer object.
   KuduTableAlterer* modify_external_catalogs(bool modify_external_catalogs) KUDU_NO_EXPORT;
+
+  /// @cond PRIVATE_API
+
+  /// Force to alter a trashed table.
+  ///
+  /// Private API.
+  ///
+  /// @param [in] force_on_trashed_table
+  ///   Whether to alter on a trashed table.
+  /// @return Raw pointer to this alterer object.
+  KuduTableAlterer* force_on_trashed_table(bool force_on_trashed_table) KUDU_NO_EXPORT;
 
   /// @endcond
 

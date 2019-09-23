@@ -199,6 +199,8 @@ class ServerBase {
   // The ACL of users who may act as part of the Kudu service.
   security::SimpleAcl service_acl_;
 
+  CountDownLatch stop_background_threads_latch_;
+
  private:
   Status InitAcls();
   void GenerateInstanceID();
@@ -228,10 +230,10 @@ class ServerBase {
 
   std::unique_ptr<DiagnosticsLog> diag_log_;
   scoped_refptr<Thread> excess_log_deleter_thread_;
+
 #ifdef TCMALLOC_ENABLED
   scoped_refptr<Thread> tcmalloc_memory_gc_thread_;
 #endif
-  CountDownLatch stop_background_threads_latch_;
 
   gscoped_ptr<ScopedGLogMetrics> glog_metrics_;
 

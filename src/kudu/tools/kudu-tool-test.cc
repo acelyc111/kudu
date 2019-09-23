@@ -1104,6 +1104,7 @@ TEST_F(ToolTest, TestModeHelp) {
     const vector<string> kTableModeRegexes = {
         "delete.*Delete a table",
         "rename_table.*Rename a table",
+        "recall.*Recall a deleted but still reserved table",
         "rename_column.*Rename a column",
         "list.*List tables",
         "scan.*Scan rows from a table",
@@ -2979,6 +2980,58 @@ TEST_F(ToolTest, TestRenameTable) {
         Substitute("table rename_table $0 $1 $2 --nomodify_external_catalogs",
           master_addr, kNewTableName, kTableName)));
   ASSERT_OK(client->OpenTable(kTableName, &table));
+}
+
+TEST_F(ToolTest, TestRecallTable) {
+  NO_FATALS(StartExternalMiniCluster());
+  shared_ptr<KuduClient> client;
+  ASSERT_OK(cluster_->CreateClient(nullptr, &client));
+  string master_addr = cluster_->master()->bound_rpc_addr().ToString();
+
+  const string& kTableName = "kudu.table";
+
+  // Create the table.
+  TestWorkload workload(cluster_.get());
+  workload.set_table_name(kTableName);
+  workload.set_num_replicas(1);
+  workload.Setup();
+
+  // Delete the table.
+  string out;
+  NO_FATALS(RunActionStdoutNone(Substitute("table delete $0 $1",
+                                           master_addr, kTableName)));
+  shared_ptr<KuduTable> table;
+
+  // Try to open the table.
+  Status s = client->OpenTable(kTableName, &table);
+  ASSERT_TRUE(s.IsNotFound());
+  ASSERT_STR_CONTAINS(s.ToString(), Substitute("the table does not exist"));
+
+  // List trashed table.
+  vector<string> kudu_tables;
+  client->ListTables(&kudu_tables);
+  ASSERT_EQ(kudu_tables.size(), 1);
+
+  // Create another table.
+  workload.Setup();
+  ASSERT_OK(client->OpenTable(kTableName, &table));
+
+  // Try to recall the trashed table.
+  string stderr;
+  s = RunTool(Substitute("table recall $0 $1",
+                         master_addr, kudu_tables[0]),
+              nullptr, &stderr, {}, {});
+  ASSERT_TRUE(s.IsRuntimeError());
+  ASSERT_STR_CONTAINS(s.ToString(), "process exited with non-zero status");
+  SCOPED_TRACE(stderr);
+  ASSERT_STR_CONTAINS(stderr, Substitute("Already present: table $0 already exists", kTableName));
+
+  // Rename the new table and try to recall the trashed table.
+  NO_FATALS(RunActionStdoutNone(
+        Substitute("table rename_table $0 $1 $2",
+          master_addr, kTableName, kTableName + "new")));
+  NO_FATALS(RunActionStdoutNone(Substitute("table recall $0 $1",
+                                           master_addr, kudu_tables[0])));
 }
 
 TEST_F(ToolTest, TestRenameColumn) {

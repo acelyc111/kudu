@@ -69,6 +69,8 @@ class ListTabletServersResponsePB;
 class Master;
 class PingRequestPB;
 class PingResponsePB;
+class RecallDeletedTableRequestPB;
+class RecallDeletedTableResponsePB;
 class ReplaceTabletRequestPB;
 class ReplaceTabletResponsePB;
 class ResetAuthzCacheRequestPB;
@@ -127,6 +129,10 @@ class MasterServiceImpl : public MasterServiceIf {
   void DeleteTable(const DeleteTableRequestPB* req,
                    DeleteTableResponsePB* resp,
                    rpc::RpcContext* rpc) override;
+
+  void RecallDeletedTable(const RecallDeletedTableRequestPB* req,
+                          RecallDeletedTableResponsePB* resp,
+                          rpc::RpcContext* rpc) override;
 
   void AlterTable(const AlterTableRequestPB* req,
                   AlterTableResponsePB* resp,

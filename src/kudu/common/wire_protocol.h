@@ -62,6 +62,10 @@ class ServerEntryPB;
 class ServerRegistrationPB;
 class TableExtraConfigPB;
 
+static const std::string kTableHistoryMaxAgeSec = "kudu.table.history_max_age_sec";
+static const std::string kTableMaintenancePriority = "kudu.table.maintenance_priority";
+static const std::string kTableConfigReserveSeconds = "kudu.table.reserve_seconds";
+
 // Convert the given C++ Status object into the equivalent Protobuf.
 void StatusToPB(const Status& status, AppStatusPB* pb);
 
@@ -147,9 +151,11 @@ Status ColumnPredicateFromPB(const Schema& schema,
 Status ExtraConfigPBToMap(const TableExtraConfigPB& pb,
                           std::map<std::string, std::string>* configs);
 
-// Convert the table's extra configuration protobuf::map to protobuf.
-Status ExtraConfigPBFromPBMap(const google::protobuf::Map<std::string, std::string>& configs,
-                              TableExtraConfigPB* pb);
+// Update or insert the table's extra configuration according to protobuf::map.
+Status ExtraConfigPBFromPBMap(
+    const google::protobuf::Map<std::string, std::string>& new_extra_configs,
+    bool external_request,
+    TableExtraConfigPB* pb);
 
 // Parse int32_t type value from 'value', and store in 'result' when succeed.
 Status ParseInt32Config(const std::string& name, const std::string& value, int32_t* result);

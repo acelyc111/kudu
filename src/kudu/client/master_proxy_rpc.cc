@@ -74,6 +74,8 @@ using master::ListTabletServersRequestPB;
 using master::ListTabletServersResponsePB;
 using master::MasterServiceProxy;
 using master::MasterErrorPB;
+using master::RecallDeletedTableRequestPB;
+using master::RecallDeletedTableResponsePB;
 using master::ReplaceTabletRequestPB;
 using master::ReplaceTabletResponsePB;
 using rpc::BackoffType;
@@ -297,6 +299,7 @@ template class AsyncLeaderMasterRpc<GetTableStatisticsRequestPB, GetTableStatist
 template class AsyncLeaderMasterRpc<ListTablesRequestPB, ListTablesResponsePB>;
 template class AsyncLeaderMasterRpc<ListTabletServersRequestPB, ListTabletServersResponsePB>;
 template class AsyncLeaderMasterRpc<ListMastersRequestPB, ListMastersResponsePB>;
+template class AsyncLeaderMasterRpc<RecallDeletedTableRequestPB, RecallDeletedTableResponsePB>;
 template class AsyncLeaderMasterRpc<ReplaceTabletRequestPB, ReplaceTabletResponsePB>;
 
 } // namespace internal

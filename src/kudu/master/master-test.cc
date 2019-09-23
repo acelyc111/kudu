@@ -35,6 +35,7 @@
 #include <boost/bind.hpp>
 #include <gflags/gflags_declare.h>
 #include <glog/logging.h>
+#include <google/protobuf/stubs/common.h>
 #include <gtest/gtest.h>
 #include <rapidjson/document.h>
 #include <rapidjson/rapidjson.h>
@@ -153,6 +154,7 @@ class MasterTest : public KuduTest {
                      const Schema& schema,
                      const vector<KuduPartialRow>& split_rows,
                      const vector<pair<KuduPartialRow, KuduPartialRow>>& bounds);
+  Status SetConfig(const string& table_name, const string& key, const string& value);
 
   shared_ptr<Messenger> client_messenger_;
   gscoped_ptr<MiniMaster> mini_master_;
@@ -547,6 +549,16 @@ Status MasterTest::CreateTable(const string& table_name,
   if (resp.has_error()) {
     RETURN_NOT_OK(StatusFromPB(resp.error().status()));
   }
+  return Status::OK();
+}
+
+Status MasterTest::SetConfig(const string& table_name, const string& key, const string& value) {
+  AlterTableRequestPB req;
+  AlterTableResponsePB resp;
+  RpcController controller;
+  req.mutable_table()->set_table_name(table_name);
+  (*req.mutable_new_extra_configs())[key] = value;
+  RETURN_NOT_OK(master_->catalog_manager()->AlterTableRpc(req, &resp, nullptr, false));
   return Status::OK();
 }
 
@@ -1834,6 +1846,85 @@ TEST_P(AuthzTokenMasterTest, TestGenerateAuthzTokens) {
 }
 
 INSTANTIATE_TEST_CASE_P(SupportsAuthzTokens, AuthzTokenMasterTest, ::testing::Bool());
+
+const vector<string> kInvalidTableNames
+    = { "abc",
+        Substitute("a$0:$1:abc", Master::kTrashedTag, WallTime_Now()),
+        Substitute("$0a:$1:abc", Master::kTrashedTag, WallTime_Now()),
+        Substitute("$0:$1", Master::kTrashedTag, WallTime_Now()),
+        Substitute("$0:a:abc", Master::kTrashedTag, WallTime_Now()),
+        Substitute("$0:-123:abc", Master::kTrashedTag, WallTime_Now())
+      };
+TEST_F(MasterTest, TestGetOriginNameAndDeleteTimeOfTrashedTable) {
+  string origin_table_name;
+  WallTime mark_delete_time;
+  for (const auto& table_name : kInvalidTableNames) {
+    ASSERT_FALSE(CatalogManager::GetOriginNameAndDeleteTimeOfTrashedTable(
+      table_name, &origin_table_name, &mark_delete_time));
+  }
+
+  ASSERT_TRUE(CatalogManager::GetOriginNameAndDeleteTimeOfTrashedTable(
+      Substitute("$0:123:abc",
+                 Master::kTrashedTag,
+                 WallTime_Now()),
+      &origin_table_name, &mark_delete_time));
+  ASSERT_EQ("abc", origin_table_name);
+  ASSERT_EQ(123, mark_delete_time);
+}
+
+TEST_F(MasterTest, TestIsOutdatedTable) {
+  const char* kTableName = "testtable";
+  const Schema kTableSchema({ ColumnSchema("key", INT32) }, 1);
+
+  bool is_trashed_table = false;
+  bool is_outdated_table = false;
+  // Invalid table names.
+  for (const auto& table_name : kInvalidTableNames) {
+    ASSERT_OK(master_->catalog_manager()
+        ->IsOutdatedTable(table_name, &is_trashed_table, &is_outdated_table));
+    ASSERT_FALSE(is_trashed_table);
+  }
+
+  // Create a new table.
+  const string kTrashedTableName
+      = Substitute("$0:$1:$2", Master::kTrashedTag, WallTime_Now(), kTableName);
+  ASSERT_OK(CreateTable(kTrashedTableName, kTableSchema));
+
+  // Default table is not outdated.
+  CatalogManager::ScopedLeaderSharedLock l(master_->catalog_manager());
+  ASSERT_OK(master_->catalog_manager()
+      ->IsOutdatedTable(kTrashedTableName, &is_trashed_table, &is_outdated_table));
+  ASSERT_FALSE(is_trashed_table);
+  ASSERT_FALSE(is_outdated_table);
+
+  // Set config: kTableConfigReserveSeconds
+  ASSERT_TRUE(SetConfig(kTrashedTableName, kTableConfigReserveSeconds, "-1").IsInvalidArgument());
+  ASSERT_OK(master_->catalog_manager()
+      ->IsOutdatedTable(kTrashedTableName, &is_trashed_table, &is_outdated_table));
+  ASSERT_FALSE(is_trashed_table);
+  ASSERT_FALSE(is_outdated_table);
+
+  ASSERT_TRUE(SetConfig(kTrashedTableName, kTableConfigReserveSeconds, "a").IsInvalidArgument());
+  ASSERT_OK(master_->catalog_manager()
+      ->IsOutdatedTable(kTrashedTableName, &is_trashed_table, &is_outdated_table));
+  ASSERT_FALSE(is_trashed_table);
+  ASSERT_FALSE(is_outdated_table);
+
+  // In reserve time, table is not outdated.
+  ASSERT_OK(SetConfig(kTrashedTableName, kTableConfigReserveSeconds, "100"));
+  ASSERT_OK(master_->catalog_manager()
+      ->IsOutdatedTable(kTrashedTableName, &is_trashed_table, &is_outdated_table));
+  ASSERT_TRUE(is_trashed_table);
+  ASSERT_FALSE(is_outdated_table);
+
+  // After reserve time, table is outdated.
+  ASSERT_OK(SetConfig(kTrashedTableName, kTableConfigReserveSeconds, "1"));
+  SleepFor(MonoDelta::FromSeconds(2));
+  ASSERT_OK(master_->catalog_manager()
+      ->IsOutdatedTable(kTrashedTableName, &is_trashed_table, &is_outdated_table));
+  ASSERT_TRUE(is_trashed_table);
+  ASSERT_TRUE(is_outdated_table);
+}
 
 } // namespace master
 } // namespace kudu

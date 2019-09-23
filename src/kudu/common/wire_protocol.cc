@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstring>
 #include <ostream>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -41,6 +42,7 @@
 #include "kudu/common/wire_protocol.pb.h"
 #include "kudu/consensus/metadata.pb.h"
 #include "kudu/gutil/fixedarray.h"
+#include "kudu/gutil/map-util.h"
 #include "kudu/gutil/port.h"
 #include "kudu/gutil/strings/fastmem.h"
 #include "kudu/gutil/strings/numbers.h"
@@ -62,6 +64,7 @@ using google::protobuf::RepeatedPtrField;
 using kudu::pb_util::SecureDebugString;
 using kudu::pb_util::SecureShortDebugString;
 using std::map;
+using std::set;
 using std::string;
 using std::vector;
 using strings::Substitute;
@@ -666,8 +669,6 @@ Status ColumnPredicateFromPB(const Schema& schema,
   return Status::OK();
 }
 
-const char kTableHistoryMaxAgeSec[] = "kudu.table.history_max_age_sec";
-const char kTableMaintenancePriority[] = "kudu.table.maintenance_priority";
 Status ExtraConfigPBToMap(const TableExtraConfigPB& pb, map<string, string>* configs) {
   Map<string, string> tmp;
   RETURN_NOT_OK(ExtraConfigPBToPBMap(pb, &tmp));
@@ -684,28 +685,61 @@ Status ParseInt32Config(const string& name, const string& value, int32_t* result
   return Status::OK();
 }
 
-Status ExtraConfigPBFromPBMap(const Map<string, string>& configs, TableExtraConfigPB* pb) {
-  TableExtraConfigPB result;
-  for (const auto& config : configs) {
+Status ParseUint32Config(const string& name, const string& value, uint32_t* result) {
+  CHECK(result);
+  if (!safe_strtou32(value, result)) {
+    return Status::InvalidArgument(Substitute("unable to parse $0", name), value);
+  }
+  return Status::OK();
+}
+
+Status ExtraConfigPBFromPBMap(const Map<string, string>& new_extra_configs,
+                              bool external_request,
+                              TableExtraConfigPB* pb) {
+  static const set<string> kSupportedConfigs({kTableHistoryMaxAgeSec,
+                                              kTableMaintenancePriority,
+                                              kTableConfigReserveSeconds});
+  static const set<string> kInternalConfigs({kTableConfigReserveSeconds});
+  for (const auto& config : new_extra_configs) {
     const string& name = config.first;
     const string& value = config.second;
+    if (!ContainsKey(kSupportedConfigs, name)) {
+      return Status::InvalidArgument(
+        Substitute("invalid extra configuration property: $0", name));
+    }
+    if (external_request && ContainsKey(kInternalConfigs, name)) {
+      return Status::InvalidArgument(
+        Substitute("forbidden to change internal extra configuration by user, property: $0", name));
+    }
+
     if (name == kTableHistoryMaxAgeSec) {
       if (!value.empty()) {
         int32_t history_max_age_sec;
         RETURN_NOT_OK(ParseInt32Config(name, value, &history_max_age_sec));
-        result.set_history_max_age_sec(history_max_age_sec);
+        pb->set_history_max_age_sec(history_max_age_sec);
+      } else {
+        pb->clear_history_max_age_sec();
       }
     } else if (name == kTableMaintenancePriority) {
       if (!value.empty()) {
         int32_t maintenance_priority;
         RETURN_NOT_OK(ParseInt32Config(name, value, &maintenance_priority));
-        result.set_maintenance_priority(maintenance_priority);
+        pb->set_maintenance_priority(maintenance_priority);
+      } else {
+        pb->clear_maintenance_priority();
+      }
+    } else if (name == kTableConfigReserveSeconds) {
+      if (!value.empty()) {
+        uint32_t reserve_seconds;
+        RETURN_NOT_OK(ParseUint32Config(name, value, &reserve_seconds));
+        pb->set_reserve_seconds(reserve_seconds);
+      } else {
+        pb->clear_reserve_seconds();
       }
     } else {
-      LOG(WARNING) << "Unknown extra configuration property: " << name;
+      LOG(FATAL) << "unparsed property: " << name;
     }
   }
-  *pb = std::move(result);
   return Status::OK();
 }
 
@@ -717,6 +751,10 @@ Status ExtraConfigPBToPBMap(const TableExtraConfigPB& pb, Map<string, string>* c
   if (pb.has_maintenance_priority()) {
     result[kTableMaintenancePriority] = std::to_string(pb.maintenance_priority());
   }
+  if (pb.has_reserve_seconds()) {
+    result[kTableConfigReserveSeconds] = std::to_string(pb.reserve_seconds());
+  }
+
   *configs = std::move(result);
   return Status::OK();
 }
