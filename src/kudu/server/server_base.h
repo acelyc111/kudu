@@ -167,8 +167,6 @@ class ServerBase {
   // do that before before shutting down the tserver heartbeater.
   void UnregisterAllServices();
 
-  void LogUnauthorizedAccess(rpc::RpcContext* rpc) const;
-
   const std::string name_;
   // Seconds since the epoch.
   int64_t start_time_;
@@ -201,6 +199,7 @@ class ServerBase {
 
  private:
   Status InitAcls();
+  void LogUnauthorizedAccess(rpc::RpcContext* rpc) const;
   void GenerateInstanceID();
   Status DumpServerInfo(const std::string& path,
                         const std::string& format) const;

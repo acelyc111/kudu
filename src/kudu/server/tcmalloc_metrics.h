@@ -23,7 +23,7 @@ namespace kudu {
 class MetricEntity;
 namespace tcmalloc {
 
-// Registers tcmalloc-related status etrics.
+// Registers tcmalloc-related status metrics.
 // This can be called multiple times on different entities, though the resulting
 // metrics will be identical, since the tcmalloc tracking is process-wide.
 void RegisterMetrics(const scoped_refptr<MetricEntity>& entity);
