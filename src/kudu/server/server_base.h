@@ -204,7 +204,6 @@ class ServerBase {
   Status DumpServerInfo(const std::string& path,
                         const std::string& format) const;
   Status StartMetricsLogging();
-  void MetricsLoggingThread();
   std::string FooterHtml() const;
 
   // Callback from the RPC system when a service queue has overflowed.

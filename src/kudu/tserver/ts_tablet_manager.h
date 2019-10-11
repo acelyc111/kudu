@@ -362,7 +362,7 @@ class TSTabletManager : public tserver::TabletReplicaLookupIf {
 
   typedef std::unordered_map<std::string, scoped_refptr<tablet::TabletReplica> > TabletMap;
 
-  // Lock protecting tablet_map_, dirty_tablets_, state_,
+  // Lock protecting tablet_map_, state_,
   // transition_in_progress_, perm_deleted_tablet_ids_,
   // tablet_state_counts_, and last_walked_.
   mutable RWMutex lock_;
