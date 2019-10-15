@@ -18,6 +18,7 @@
 #include "kudu/tablet/tablet_metadata.h"
 
 #include <algorithm>
+#include <list>
 #include <mutex>
 #include <ostream>
 #include <string>
@@ -66,6 +67,7 @@ using kudu::fs::BlockManager;
 using kudu::fs::BlockDeletionTransaction;
 using kudu::pb_util::SecureDebugString;
 using kudu::pb_util::SecureShortDebugString;
+using std::list;
 using std::memory_order_relaxed;
 using std::shared_ptr;
 using std::string;
@@ -189,10 +191,10 @@ vector<BlockIdPB> TabletMetadata::CollectBlockIdPBs(const TabletSuperBlockPB& su
   return block_ids;
 }
 
-vector<BlockId> TabletMetadata::CollectBlockIds() {
-  vector<BlockId> block_ids;
+list<BlockId> TabletMetadata::CollectBlockIds() {
+  list<BlockId> block_ids;
   for (const auto& r : rowsets_) {
-    vector<BlockId> rowset_block_ids = r->GetAllBlocks();
+    list<BlockId> rowset_block_ids = r->GetAllBlocks();
     block_ids.insert(block_ids.begin(),
                      rowset_block_ids.begin(),
                      rowset_block_ids.end());
@@ -348,7 +350,7 @@ Status TabletMetadata::UpdateOnDiskSize() {
 }
 
 Status TabletMetadata::LoadFromSuperBlock(const TabletSuperBlockPB& superblock) {
-  vector<BlockId> orphaned_blocks;
+  list<BlockId> orphaned_blocks;
 
   VLOG(2) << "Loading TabletMetadata from SuperBlockPB:" << std::endl
           << SecureDebugString(superblock);
@@ -497,17 +499,17 @@ Status TabletMetadata::UpdateAndFlush(const RowSetMetadataIds& to_remove,
   return Flush();
 }
 
-void TabletMetadata::AddOrphanedBlocks(const vector<BlockId>& blocks) {
+void TabletMetadata::AddOrphanedBlocks(const list<BlockId>& block_ids) {
   std::lock_guard<LockType> l(data_lock_);
-  AddOrphanedBlocksUnlocked(blocks);
+  AddOrphanedBlocksUnlocked(block_ids);
 }
 
-void TabletMetadata::AddOrphanedBlocksUnlocked(const vector<BlockId>& blocks) {
+void TabletMetadata::AddOrphanedBlocksUnlocked(const list<BlockId>& block_ids) {
   DCHECK(data_lock_.is_locked());
-  orphaned_blocks_.insert(blocks.begin(), blocks.end());
+  orphaned_blocks_.insert(block_ids.begin(), block_ids.end());
 }
 
-void TabletMetadata::DeleteOrphanedBlocks(const vector<BlockId>& blocks) {
+void TabletMetadata::DeleteOrphanedBlocks(const list<BlockId>& blocks) {
   if (PREDICT_FALSE(!FLAGS_enable_tablet_orphaned_block_deletion)) {
     LOG_WITH_PREFIX(WARNING) << "Not deleting " << blocks.size()
         << " block(s) from disk. Block deletion disabled via "
@@ -559,7 +561,7 @@ Status TabletMetadata::Flush() {
                "tablet_id", tablet_id_);
 
   MutexLock l_flush(flush_lock_);
-  vector<BlockId> orphaned;
+  list<BlockId> orphaned;
   TabletSuperBlockPB pb;
   {
     std::lock_guard<LockType> l(data_lock_);

@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <iostream>
 #include <iterator>
+#include <list>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -113,6 +114,7 @@ using fs::FsReport;
 using fs::ReadableBlock;
 using std::cout;
 using std::endl;
+using std::list;
 using std::shared_ptr;
 using std::string;
 using std::unique_ptr;
@@ -140,27 +142,25 @@ Status Check(const RunnerContext& /*context*/) {
   }
 
   // Get the "live" block IDs (i.e. those referenced by a tablet).
-  vector<BlockId> live_block_ids;
+  list<BlockId> live_block_ids;
   unordered_map<BlockId, string, BlockIdHash, BlockIdEqual> live_block_id_to_tablet;
   vector<string> tablet_ids;
   RETURN_NOT_OK(fs_manager.ListTabletIds(&tablet_ids));
   for (const auto& t : tablet_ids) {
     scoped_refptr<TabletMetadata> meta;
     RETURN_NOT_OK(TabletMetadata::Load(&fs_manager, t, &meta));
-    vector<BlockId> tablet_live_block_ids = meta->CollectBlockIds();
-    live_block_ids.insert(live_block_ids.end(),
-                          tablet_live_block_ids.begin(),
-                          tablet_live_block_ids.end());
+    list<BlockId> tablet_live_block_ids = meta->CollectBlockIds();
     for (const auto& id : tablet_live_block_ids) {
       InsertOrDie(&live_block_id_to_tablet, id, t);
     }
+    live_block_ids.splice(live_block_ids.end(), tablet_live_block_ids);
   }
 
   // Get all of the block IDs reachable by the block manager.
   vector<BlockId> all_block_ids;
   RETURN_NOT_OK(fs_manager.block_manager()->GetAllBlockIds(&all_block_ids));
 
-  std::sort(live_block_ids.begin(), live_block_ids.end(), BlockIdCompare());
+  live_block_ids.sort(BlockIdCompare());
   std::sort(all_block_ids.begin(), all_block_ids.end(), BlockIdCompare());
 
   // Blocks found in the block manager but not in a tablet. They are orphaned
