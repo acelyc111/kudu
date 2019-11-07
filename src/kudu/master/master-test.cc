@@ -152,7 +152,9 @@ class MasterTest : public KuduTest {
   Status CreateTable(const string& table_name,
                      const Schema& schema,
                      const vector<KuduPartialRow>& split_rows,
-                     const vector<pair<KuduPartialRow, KuduPartialRow>>& bounds);
+                     const vector<pair<KuduPartialRow, KuduPartialRow>>& bounds,
+                     const vector<string>& hash_columns = vector<string>(),
+                     int32_t hash_num_buckets = 0);
 
   shared_ptr<Messenger> client_messenger_;
   gscoped_ptr<MiniMaster> mini_master_;
@@ -522,7 +524,9 @@ Status MasterTest::CreateTable(const string& table_name,
 Status MasterTest::CreateTable(const string& table_name,
                                const Schema& schema,
                                const vector<KuduPartialRow>& split_rows,
-                               const vector<pair<KuduPartialRow, KuduPartialRow>>& bounds) {
+                               const vector<pair<KuduPartialRow, KuduPartialRow>>& bounds,
+                               const vector<string>& hash_columns,
+                               int32_t hash_num_buckets) {
 
   CreateTableRequestPB req;
   CreateTableResponsePB resp;
@@ -541,6 +545,17 @@ Status MasterTest::CreateTable(const string& table_name,
 
   if (!bounds.empty()) {
     controller.RequireServerFeature(MasterFeatures::RANGE_PARTITION_BOUNDS);
+  }
+
+  if (!hash_columns.empty()) {
+    PartitionSchemaPB* partition_schema = req.mutable_partition_schema();
+    PartitionSchemaPB::HashBucketSchemaPB* bucket_schema =
+        partition_schema->add_hash_bucket_schemas();
+    for (const string& col_name : hash_columns) {
+      bucket_schema->add_columns()->set_name(col_name);
+    }
+    bucket_schema->set_num_buckets(hash_num_buckets);
+    bucket_schema->set_seed(0);
   }
 
   RETURN_NOT_OK(proxy_->CreateTable(req, &resp, &controller));
@@ -1364,6 +1379,7 @@ TEST_F(MasterTest, TestConcurrentCreateOfSameTable) {
                             1);
 
   // Kick off a bunch of threads all trying to create the same table.
+  AtomicBool create_success(false);
   vector<thread> threads;
   for (int i = 0; i < 10; i++) {
     threads.emplace_back([&]() {
@@ -1393,6 +1409,9 @@ TEST_F(MasterTest, TestConcurrentCreateOfSameTable) {
         } else {
           FAIL() << failure_msg;
         }
+      } else {
+        // Creating the table should only succeed once.
+        CHECK(!create_success.Exchange(true));
       }
     });
   }
@@ -1412,6 +1431,7 @@ TEST_F(MasterTest, TestConcurrentRenameOfSameTable) {
   ASSERT_OK(CreateTable(kOldName, kTableSchema));
 
   // Kick off a bunch of threads all trying to rename the same table.
+  AtomicBool create_success(false);
   vector<thread> threads;
   for (int i = 0; i < 10; i++) {
     threads.emplace_back([&]() {
@@ -1435,6 +1455,9 @@ TEST_F(MasterTest, TestConcurrentRenameOfSameTable) {
                                         SecureDebugString(resp));
         CHECK_EQ(MasterErrorPB::TABLE_NOT_FOUND, resp.error().code()) << failure_msg;
         CHECK(s.IsNotFound()) << failure_msg;
+      } else {
+        // Renaming the table should only succeed once.
+        CHECK(!create_success.Exchange(true));
       }
     });
   }
@@ -1458,6 +1481,7 @@ TEST_F(MasterTest, TestConcurrentCreateAndRenameOfSameTable) {
   vector<thread> threads;
   for (int i = 0; i < 10; i++) {
     if (i % 2) {
+      // Create table named 'kNewName'.
       threads.emplace_back([&]() {
         CreateTableRequestPB req;
         CreateTableResponsePB resp;
@@ -1489,7 +1513,7 @@ TEST_F(MasterTest, TestConcurrentCreateAndRenameOfSameTable) {
           Status s = StatusFromPB(resp.error().status());
           string failure_msg = Substitute("Unexpected response: $0", SecureDebugString(resp));
           if (resp.error().code() == MasterErrorPB::TABLE_ALREADY_PRESENT) {
-              CHECK(s.IsServiceUnavailable() || s.IsAlreadyPresent()) << failure_msg;
+            CHECK(s.IsServiceUnavailable() || s.IsAlreadyPresent()) << failure_msg;
           } else {
             FAIL() << failure_msg;
           }
@@ -1499,6 +1523,7 @@ TEST_F(MasterTest, TestConcurrentCreateAndRenameOfSameTable) {
         }
       });
     } else {
+      // Rename table to 'kNewName'.
       threads.emplace_back([&]() {
         AlterTableRequestPB req;
         AlterTableResponsePB resp;
@@ -1545,8 +1570,9 @@ TEST_F(MasterTest, TestConcurrentCreateAndRenameOfSameTable) {
   }
 
   // At least one of rename or create should have failed; if both succeeded
-  // there must be some sort of race.
-  CHECK(!rename_success.Load() || !create_success.Load());
+  // there must be some sort of race. And at least one of rename or create
+  // should success.
+  CHECK(rename_success.Load() ^ create_success.Load());
 
   unordered_set<string> live_tables;
   live_tables.insert(kNewName);
@@ -1621,6 +1647,68 @@ TEST_F(MasterTest, TestConcurrentRenameAndDeleteOfSameTable) {
   dropper.join();
 
   ASSERT_TRUE(renamed ^ deleted);
+}
+
+TEST_F(MasterTest, TestConcurrentDeleteOfSameTable) {
+  const char* kTableName = "testtb";
+  const Schema kTableSchema({ ColumnSchema("key", INT32) }, 1);
+  const int kRangePartitionCount = 100;
+
+  vector<pair<KuduPartialRow, KuduPartialRow>> bounds;
+  for (int i = 0; i < kRangePartitionCount; ++i) {
+    KuduPartialRow lower_bound(&kTableSchema);
+    ASSERT_OK(lower_bound.SetInt32("key", i));
+    KuduPartialRow upper_bound(&kTableSchema);
+    ASSERT_OK(upper_bound.SetInt32("key", i + 1));
+    bounds.emplace_back(std::make_pair(lower_bound, upper_bound));
+  }
+  ASSERT_OK(CreateTable(kTableName, kTableSchema, {}, bounds, { "key" }, 100));
+
+  vector<thread> threads;
+  for (int i = 0; i < kRangePartitionCount; i++) {
+    threads.emplace_back([&]() {
+      AlterTableRequestPB req;
+      AlterTableResponsePB resp;
+      RpcController controller;
+
+      req.mutable_table()->set_table_name(kTableName);
+      int lower_index = i;
+      for (int j = 0; j < 10; ++j) {
+        if (++lower_index == kRangePartitionCount) {
+          lower_index = 0;
+        }
+        AlterTableRequestPB::Step *pb_step = req->add_alter_schema_steps();
+        pb_step->set_type(master::AlterTableRequestPB::StepType::DROP_RANGE_PARTITION);
+        RowOperationsPBEncoder encoder(
+          pb_step->mutable_drop_range_partition()->mutable_range_bounds());
+        KuduPartialRow lower_bound(&kTableSchema);
+        ASSERT_OK(lower_bound.SetInt32("key", lower_index));
+        encoder.Add(RowOperationsPB::RANGE_LOWER_BOUND, lower_bound);
+        KuduPartialRow upper_bound(&kTableSchema);
+        ASSERT_OK(upper_bound.SetInt32("key", lower_index + 1));
+        encoder.Add(RowOperationsPB::INCLUSIVE_RANGE_UPPER_BOUND, upper_bound);
+      }
+      CHECK_OK(proxy_->AlterTable(req, &resp, &controller));
+
+      // There are two expected outcomes:
+      //
+      // 1. This thread won the race: no error.
+      // 2. This thread lost the race: TABLE_NOT_FOUND error with NotFound status.
+      if (resp.has_error()) {
+        Status s = StatusFromPB(resp.error().status());
+        string failure_msg = Substitute("Unexpected response: $0",
+                                        SecureDebugString(resp));
+        CHECK_EQ(MasterErrorPB::TABLE_NOT_FOUND, resp.error().code()) << failure_msg;
+        CHECK(s.IsNotFound()) << failure_msg;
+      } else {
+        // renamed = true;
+      }
+    });
+  }
+
+  for (auto& t : threads) {
+    t.join();
+  }
 }
 
 // Unit tests for the ConnectToMaster() RPC:
