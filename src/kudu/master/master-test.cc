@@ -110,6 +110,7 @@ DECLARE_bool(raft_prepare_replacement_before_eviction);
 DECLARE_double(sys_catalog_fail_during_write);
 DECLARE_int32(diagnostics_log_stack_traces_interval_ms);
 DECLARE_int32(master_inject_latency_on_tablet_lookups_ms);
+DECLARE_int32(rpc_service_queue_length);
 DECLARE_int64(live_row_count_for_testing);
 DECLARE_int64(on_disk_size_for_testing);
 DECLARE_string(location_mapping_cmd);
@@ -125,6 +126,7 @@ class MasterTest : public KuduTest {
     // In this test, we create tables to test catalog manager behavior,
     // but we have no tablet servers. Typically this would be disallowed.
     FLAGS_catalog_manager_check_ts_count_for_create_table = false;
+    FLAGS_rpc_service_queue_length = 1024;
 
     // Start master
     mini_master_.reset(new MiniMaster(GetTestPath("Master"), HostPort("127.0.0.1", 0)));
@@ -1650,10 +1652,12 @@ TEST_F(MasterTest, TestConcurrentRenameAndDeleteOfSameTable) {
 }
 
 TEST_F(MasterTest, TestConcurrentDeleteOfSameTable) {
-  const char* kTableName = "testtb";
+  const char* kTableName = "test.TestConcurrentDeleteOfSameTable";
   const Schema kTableSchema({ ColumnSchema("key", INT32) }, 1);
   const int kRangePartitionCount = 100;
 
+  mini_master_->Shutdown();
+  ASSERT_OK(mini_master_->Restart());
   vector<pair<KuduPartialRow, KuduPartialRow>> bounds;
   for (int i = 0; i < kRangePartitionCount; ++i) {
     KuduPartialRow lower_bound(&kTableSchema);
@@ -1665,20 +1669,24 @@ TEST_F(MasterTest, TestConcurrentDeleteOfSameTable) {
   ASSERT_OK(CreateTable(kTableName, kTableSchema, {}, bounds, { "key" }, 100));
 
   vector<thread> threads;
-  for (int i = 0; i < kRangePartitionCount; i++) {
+  for (int i = 0; i < 1000; i++) {
     threads.emplace_back([&]() {
       AlterTableRequestPB req;
       AlterTableResponsePB resp;
       RpcController controller;
 
       req.mutable_table()->set_table_name(kTableName);
+      ASSERT_OK(SchemaToPB(kTableSchema, req.mutable_schema(),
+                           SCHEMA_PB_WITHOUT_IDS |
+                           SCHEMA_PB_WITHOUT_WRITE_DEFAULT |
+                           SCHEMA_PB_WITHOUT_COMMENT));
       int lower_index = i;
       for (int j = 0; j < 10; ++j) {
         if (++lower_index == kRangePartitionCount) {
           lower_index = 0;
         }
-        AlterTableRequestPB::Step *pb_step = req->add_alter_schema_steps();
-        pb_step->set_type(master::AlterTableRequestPB::StepType::DROP_RANGE_PARTITION);
+        AlterTableRequestPB::Step* pb_step = req.add_alter_schema_steps();
+        pb_step->set_type(AlterTableRequestPB::DROP_RANGE_PARTITION);
         RowOperationsPBEncoder encoder(
           pb_step->mutable_drop_range_partition()->mutable_range_bounds());
         KuduPartialRow lower_bound(&kTableSchema);
@@ -1686,7 +1694,7 @@ TEST_F(MasterTest, TestConcurrentDeleteOfSameTable) {
         encoder.Add(RowOperationsPB::RANGE_LOWER_BOUND, lower_bound);
         KuduPartialRow upper_bound(&kTableSchema);
         ASSERT_OK(upper_bound.SetInt32("key", lower_index + 1));
-        encoder.Add(RowOperationsPB::INCLUSIVE_RANGE_UPPER_BOUND, upper_bound);
+        encoder.Add(RowOperationsPB::RANGE_UPPER_BOUND, upper_bound);
       }
       CHECK_OK(proxy_->AlterTable(req, &resp, &controller));
 
