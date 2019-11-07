@@ -1669,7 +1669,7 @@ TEST_F(MasterTest, TestConcurrentDeleteOfSameTable) {
   ASSERT_OK(CreateTable(kTableName, kTableSchema, {}, bounds, { "key" }, 100));
 
   vector<thread> threads;
-  for (int i = 0; i < 1000; i++) {
+  for (int i = 0; i < 10000; i++) {
     threads.emplace_back([&]() {
       AlterTableRequestPB req;
       AlterTableResponsePB resp;
@@ -1706,8 +1706,9 @@ TEST_F(MasterTest, TestConcurrentDeleteOfSameTable) {
         Status s = StatusFromPB(resp.error().status());
         string failure_msg = Substitute("Unexpected response: $0",
                                         SecureDebugString(resp));
-        CHECK_EQ(MasterErrorPB::TABLE_NOT_FOUND, resp.error().code()) << failure_msg;
-        CHECK(s.IsNotFound()) << failure_msg;
+        CHECK(s.IsInvalidArgument()) << failure_msg;
+        ASSERT_STR_CONTAINS(s.ToString(),
+                            "No range partition found for drop range partition step: ");
       } else {
         // renamed = true;
       }
