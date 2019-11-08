@@ -63,6 +63,10 @@ class TestTabletMetadata : public KuduTabletTest {
   gscoped_ptr<LocalTabletWriter> writer_;
 };
 
+// TODO: 新建一个TestTabletMetadataBnechmark类， 它包含一个TabletMetadata对象
+// benchmark时构造大量的rowset， 每个rowset中包含大量的block, 参考MetadataTest
+// 然后再调用CollectBlockIds并计时
+
 void TestTabletMetadata::BuildPartialRow(int key, int intval, const char* strval,
                                          gscoped_ptr<KuduPartialRow>* row) {
   row->reset(new KuduPartialRow(&client_schema_));
