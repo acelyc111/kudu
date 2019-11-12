@@ -63,9 +63,39 @@ class TestTabletMetadata : public KuduTabletTest {
   gscoped_ptr<LocalTabletWriter> writer_;
 };
 
-// TODO: 新建一个TestTabletMetadataBnechmark类， 它包含一个TabletMetadata对象
-// benchmark时构造大量的rowset， 每个rowset中包含大量的block, 参考MetadataTest
-// 然后再调用CollectBlockIds并计时
+class TestTabletMetadataBenchmark : public KuduTabletTest {
+ public:
+  TestTabletMetadataBenchmark()
+      : KuduTabletTest(GetSimpleTestSchema()) {
+    tablet_meta_ = new TabletMetadata(nullptr, "fake-tablet");
+    CHECK_OK(RowSetMetadata::CreateNew(tablet_meta_.get(), 0, &meta_));
+  }
+
+ protected:
+  scoped_refptr<TabletMetadata> tablet_meta_;
+};
+
+TEST_F(TestTabletMetadataBenchmark, CollectBlockIds) {
+  const int kTestRowSetCount = 1000;
+  const int kTestBlockCountPerRS = 1000;
+
+  for (int i = 0; i < kTestRowSetCount; ++i) {
+    unique_ptr<RowSetMetadata> meta;
+    CHECK_OK(RowSetMetadata::CreateNew(tablet_meta_.get(), i, &meta));
+
+    std::map<ColumnId, BlockId> blocks;
+    for (int j = 0; j < kTestBlockCountPerRS; ++j) {
+      blocks[ColumnId(j)] = BlockId(j);
+    }
+    meta->SetColumnDataBlocks(blocks);
+  }
+
+  for (int i = 0; i < 10; i++) {
+    LOG_TIMING(INFO, "collecting BlockIds") {
+      std::list<BlockId> tablet_meta_->CollectBlockIds();
+    }
+  }
+}
 
 void TestTabletMetadata::BuildPartialRow(int key, int intval, const char* strval,
                                          gscoped_ptr<KuduPartialRow>* row) {
