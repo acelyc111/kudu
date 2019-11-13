@@ -290,6 +290,7 @@ class TabletMetadata : public RefCountedThreadSafe<TabletMetadata> {
  private:
   friend class RefCountedThreadSafe<TabletMetadata>;
   friend class MetadataTest;
+  friend class TestTabletMetadataBenchmark;
 
   // Compile time assert that no one deletes TabletMetadata objects.
   ~TabletMetadata();

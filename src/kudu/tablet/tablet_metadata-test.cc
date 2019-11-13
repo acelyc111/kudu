@@ -34,12 +34,16 @@
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/tablet/local_tablet_writer.h"
 #include "kudu/tablet/metadata.pb.h"
+#include "kudu/tablet/rowset_metadata.h"
 #include "kudu/tablet/tablet-harness.h"
 #include "kudu/tablet/tablet-test-util.h"
 #include "kudu/tablet/tablet.h"
 #include "kudu/util/pb_util.h"
 #include "kudu/util/status.h"
+#include "kudu/util/stopwatch.h"
 #include "kudu/util/test_macros.h"
+
+using std::unique_ptr;
 
 namespace kudu {
 namespace tablet {
@@ -68,7 +72,6 @@ class TestTabletMetadataBenchmark : public KuduTabletTest {
   TestTabletMetadataBenchmark()
       : KuduTabletTest(GetSimpleTestSchema()) {
     tablet_meta_ = new TabletMetadata(nullptr, "fake-tablet");
-    CHECK_OK(RowSetMetadata::CreateNew(tablet_meta_.get(), 0, &meta_));
   }
 
  protected:
@@ -83,16 +86,16 @@ TEST_F(TestTabletMetadataBenchmark, CollectBlockIds) {
     unique_ptr<RowSetMetadata> meta;
     CHECK_OK(RowSetMetadata::CreateNew(tablet_meta_.get(), i, &meta));
 
-    std::map<ColumnId, BlockId> blocks;
+    std::map<ColumnId, BlockId> block_by_column;
     for (int j = 0; j < kTestBlockCountPerRS; ++j) {
-      blocks[ColumnId(j)] = BlockId(j);
+      block_by_column[ColumnId(j)] = BlockId(j);
     }
-    meta->SetColumnDataBlocks(blocks);
+    meta->SetColumnDataBlocks(block_by_column);
   }
 
   for (int i = 0; i < 10; i++) {
     LOG_TIMING(INFO, "collecting BlockIds") {
-      std::list<BlockId> tablet_meta_->CollectBlockIds();
+      std::list<BlockId> block_ids = tablet_meta_->CollectBlockIds();
     }
   }
 }
