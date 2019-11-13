@@ -315,7 +315,6 @@ deque<BlockId> RowSetMetadata::GetAllBlocks() {
                 undo_delta_blocks_.begin(), undo_delta_blocks_.end());
   blocks.insert(blocks.end(),
                 redo_delta_blocks_.begin(), redo_delta_blocks_.end());
-  LOG(INFO) << "blocks size: " << blocks.size();
   return blocks;
 }
 

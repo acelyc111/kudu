@@ -74,11 +74,10 @@ class TestTabletMetadataBenchmark : public KuduTabletTest {
  public:
   TestTabletMetadataBenchmark()
       : KuduTabletTest(GetSimpleTestSchema()) {
-    TabletMetadata* meta = harness_->tablet()->metadata();
+  }
 
-    // Shut down the tablet.
-    harness_->tablet()->Shutdown();
-
+  void SetUp() override {
+    KuduTabletTest::SetUp();
     TabletMetadata::Load(harness_->fs_manager(),
                          harness_->tablet()->tablet_id(),
                          &tablet_meta_);
