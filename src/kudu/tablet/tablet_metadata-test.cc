@@ -74,7 +74,14 @@ class TestTabletMetadataBenchmark : public KuduTabletTest {
  public:
   TestTabletMetadataBenchmark()
       : KuduTabletTest(GetSimpleTestSchema()) {
-    tablet_meta_ = new TabletMetadata(nullptr, "fake-tablet");
+    TabletMetadata* meta = harness_->tablet()->metadata();
+
+    // Shut down the tablet.
+    harness_->tablet()->Shutdown();
+
+    TabletMetadata::Load(harness_->fs_manager(),
+                         harness_->tablet()->tablet_id(),
+                         &tablet_meta_);
   }
 
  protected:
@@ -85,6 +92,7 @@ TEST_F(TestTabletMetadataBenchmark, CollectBlockIds) {
   const int kTestRowSetCount = FLAGS_test_row_set_count;
   const int kTestBlockCountPerRS = FLAGS_test_block_count_per_rs;
 
+  RowSetMetadataVector rs_metas;
   for (int i = 0; i < kTestRowSetCount; ++i) {
     unique_ptr<RowSetMetadata> meta;
     CHECK_OK(RowSetMetadata::CreateNew(tablet_meta_.get(), i, &meta));
@@ -94,7 +102,9 @@ TEST_F(TestTabletMetadataBenchmark, CollectBlockIds) {
       block_by_column[ColumnId(j)] = BlockId(j);
     }
     meta->SetColumnDataBlocks(block_by_column);
+    rs_metas.emplace_back(std::shared_ptr<RowSetMetadata>(meta.release()));
   }
+  tablet_meta_->UpdateAndFlush({}, rs_metas, TabletMetadata::kNoMrsFlushed);
 
   for (int i = 0; i < 10; i++) {
     LOG_TIMING(INFO, "collecting BlockIds") {

@@ -193,6 +193,7 @@ vector<BlockIdPB> TabletMetadata::CollectBlockIdPBs(const TabletSuperBlockPB& su
 
 deque<BlockId> TabletMetadata::CollectBlockIds() {
   deque<BlockId> block_ids;
+  LOG(INFO) << "rowsets_ size: " << rowsets_.size();
   for (const auto& r : rowsets_) {
     deque<BlockId> rowset_block_ids = r->GetAllBlocks();
     block_ids.insert(block_ids.begin(),
