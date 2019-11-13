@@ -43,6 +43,9 @@
 #include "kudu/util/stopwatch.h"
 #include "kudu/util/test_macros.h"
 
+DEFINE_int64(test_row_set_count, 1000, "");
+DEFINE_int64(test_block_count_per_rs, 1000, "");
+
 using std::unique_ptr;
 
 namespace kudu {
@@ -79,8 +82,8 @@ class TestTabletMetadataBenchmark : public KuduTabletTest {
 };
 
 TEST_F(TestTabletMetadataBenchmark, CollectBlockIds) {
-  const int kTestRowSetCount = 1000;
-  const int kTestBlockCountPerRS = 1000;
+  const int kTestRowSetCount = FLAGS_test_row_set_count;
+  const int kTestBlockCountPerRS = FLAGS_test_block_count_per_rs;
 
   for (int i = 0; i < kTestRowSetCount; ++i) {
     unique_ptr<RowSetMetadata> meta;
@@ -96,6 +99,7 @@ TEST_F(TestTabletMetadataBenchmark, CollectBlockIds) {
   for (int i = 0; i < 10; i++) {
     LOG_TIMING(INFO, "collecting BlockIds") {
       std::list<BlockId> block_ids = tablet_meta_->CollectBlockIds();
+      LOG(INFO) << "block_ids size: " << block_ids.size();
     }
   }
 }
