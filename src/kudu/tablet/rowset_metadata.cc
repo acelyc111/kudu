@@ -18,7 +18,7 @@
 #include "kudu/tablet/rowset_metadata.h"
 
 #include <algorithm>
-#include <list>
+#include <deque>
 #include <mutex>
 #include <ostream>
 #include <string>
@@ -31,7 +31,7 @@
 #include "kudu/gutil/map-util.h"
 #include "kudu/tablet/metadata.pb.h"
 
-using std::list;
+using std::deque;
 using std::unique_ptr;
 using std::vector;
 using strings::Substitute;
@@ -58,7 +58,7 @@ Status RowSetMetadata::CreateNew(TabletMetadata* tablet_metadata,
   return Status::OK();
 }
 
-void RowSetMetadata::AddOrphanedBlocks(const list<BlockId>& blocks) {
+void RowSetMetadata::AddOrphanedBlocks(const deque<BlockId>& blocks) {
   tablet_metadata_->AddOrphanedBlocks(blocks);
 }
 
@@ -205,7 +205,7 @@ Status RowSetMetadata::CommitUndoDeltaDataBlock(const BlockId& block_id) {
 }
 
 void RowSetMetadata::CommitUpdate(const RowSetMetadataUpdate& update,
-                                  list<BlockId>* removed) {
+                                  deque<BlockId>* removed) {
   removed->clear();
   {
     std::lock_guard<LockType> l(lock_);
@@ -300,8 +300,8 @@ int64_t RowSetMetadata::live_row_count() const {
   return live_row_count_;
 }
 
-list<BlockId> RowSetMetadata::GetAllBlocks() {
-  list<BlockId> blocks;
+deque<BlockId> RowSetMetadata::GetAllBlocks() {
+  deque<BlockId> blocks;
   std::lock_guard<LockType> l(lock_);
   if (!adhoc_index_block_.IsNull()) {
     blocks.push_back(adhoc_index_block_);

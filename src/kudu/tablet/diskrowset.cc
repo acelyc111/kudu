@@ -18,7 +18,7 @@
 #include "kudu/tablet/diskrowset.h"
 
 #include <algorithm>
-#include <list>
+#include <deque>
 #include <map>
 #include <ostream>
 #include <vector>
@@ -98,7 +98,7 @@ using fs::CreateBlockOptions;
 using fs::IOContext;
 using fs::WritableBlock;
 using log::LogAnchorRegistry;
-using std::list;
+using std::deque;
 using std::shared_ptr;
 using std::string;
 using std::unique_ptr;
@@ -603,7 +603,7 @@ Status DiskRowSet::MajorCompactDeltaStoresWithColumnIds(const vector<ColumnId>& 
   // Prepare the changes to the metadata.
   RowSetMetadataUpdate update;
   compaction->CreateMetadataUpdate(&update);
-  list<BlockId> removed_blocks;
+  deque<BlockId> removed_blocks;
   rowset_metadata_->CommitUpdate(update, &removed_blocks);
 
   // Now that the metadata has been updated, open a new cfile set with the

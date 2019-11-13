@@ -19,7 +19,7 @@
 #include <cstdint>
 #include <iostream>
 #include <iterator>
-#include <list>
+#include <deque>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -113,8 +113,8 @@ using fs::ConsistencyCheckBehavior;
 using fs::FsReport;
 using fs::ReadableBlock;
 using std::cout;
+using std::deque;
 using std::endl;
-using std::list;
 using std::shared_ptr;
 using std::string;
 using std::unique_ptr;
@@ -142,14 +142,14 @@ Status Check(const RunnerContext& /*context*/) {
   }
 
   // Get the "live" block IDs (i.e. those referenced by a tablet).
-  list<BlockId> live_block_ids;
+  deque<BlockId> live_block_ids;
   unordered_map<BlockId, string, BlockIdHash, BlockIdEqual> live_block_id_to_tablet;
   vector<string> tablet_ids;
   RETURN_NOT_OK(fs_manager.ListTabletIds(&tablet_ids));
   for (const auto& t : tablet_ids) {
     scoped_refptr<TabletMetadata> meta;
     RETURN_NOT_OK(TabletMetadata::Load(&fs_manager, t, &meta));
-    list<BlockId> tablet_live_block_ids = meta->CollectBlockIds();
+    deque<BlockId> tablet_live_block_ids = meta->CollectBlockIds();
     for (const auto& id : tablet_live_block_ids) {
       InsertOrDie(&live_block_id_to_tablet, id, t);
     }

@@ -98,7 +98,7 @@ TEST_F(TestTabletMetadataBenchmark, CollectBlockIds) {
 
   for (int i = 0; i < 10; i++) {
     LOG_TIMING(INFO, "collecting BlockIds") {
-      std::list<BlockId> block_ids = tablet_meta_->CollectBlockIds();
+      std::deque<BlockId> block_ids = tablet_meta_->CollectBlockIds();
       LOG(INFO) << "block_ids size: " << block_ids.size();
     }
   }

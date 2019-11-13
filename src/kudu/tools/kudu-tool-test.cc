@@ -23,7 +23,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iterator>
-#include <list>
+#include <deque>
 #include <map>
 #include <memory>
 #include <set>
@@ -201,7 +201,7 @@ using kudu::tserver::TabletServerErrorPB;
 using kudu::tserver::WriteRequestPB;
 using std::back_inserter;
 using std::copy;
-using std::list;
+using std::deque;
 using std::make_pair;
 using std::map;
 using std::max;
@@ -1200,7 +1200,7 @@ TEST_F(ToolTest, TestFsCheck) {
 
   // Create a local replica, flush some rows a few times, and collect all
   // of the created block IDs.
-  list<BlockId> block_ids;
+  deque<BlockId> block_ids;
   {
     TabletHarness::Options opts(kTestDir);
     opts.tablet_id = kTabletId;
