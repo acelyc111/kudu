@@ -153,14 +153,16 @@ Status Check(const RunnerContext& /*context*/) {
     for (const auto& id : tablet_live_block_ids) {
       InsertOrDie(&live_block_id_to_tablet, id, t);
     }
-    live_block_ids.splice(live_block_ids.end(), tablet_live_block_ids);
+    live_block_ids.insert(live_block_ids.end(),
+                          tablet_live_block_ids.begin(),
+                          tablet_live_block_ids.end());
   }
 
   // Get all of the block IDs reachable by the block manager.
   vector<BlockId> all_block_ids;
   RETURN_NOT_OK(fs_manager.block_manager()->GetAllBlockIds(&all_block_ids));
 
-  live_block_ids.sort(BlockIdCompare());
+  std::sort(live_block_ids.begin(), live_block_ids.end(), BlockIdCompare());
   std::sort(all_block_ids.begin(), all_block_ids.end(), BlockIdCompare());
 
   // Blocks found in the block manager but not in a tablet. They are orphaned

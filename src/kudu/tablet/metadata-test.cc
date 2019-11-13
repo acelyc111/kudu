@@ -97,13 +97,13 @@ TEST_F(MetadataTest, RSMD_TestReplaceDeltas_3) {
   to_replace.emplace_back(3);
   to_replace.emplace_back(4);
 
-  list<BlockId> removed;
+  deque<BlockId> removed;
   meta_->CommitUpdate(
       RowSetMetadataUpdate()
       .ReplaceRedoDeltaBlocks(to_replace, { BlockId(123) }), &removed);
   ASSERT_EQ(vector<BlockId>({ BlockId(1), BlockId(2), BlockId(123) }),
             meta_->redo_delta_blocks());
-  ASSERT_EQ(list<BlockId>({ BlockId(3), BlockId(4) }),
+  ASSERT_EQ(deque<BlockId>({ BlockId(3), BlockId(4) }),
             removed);
 }
 
