@@ -18,7 +18,7 @@
 
 #include <atomic>
 #include <cstdint>
-#include <deque>
+#include <list>
 #include <memory>
 #include <string>
 #include <unordered_set>
@@ -114,7 +114,7 @@ class TabletMetadata : public RefCountedThreadSafe<TabletMetadata> {
   static std::vector<BlockIdPB> CollectBlockIdPBs(
       const TabletSuperBlockPB& superblock);
 
-  std::deque<BlockId> CollectBlockIds();
+  std::list<BlockId> CollectBlockIds();
 
   const std::string& tablet_id() const {
     DCHECK_NE(state_, kNotLoadedYet);
@@ -191,7 +191,7 @@ class TabletMetadata : public RefCountedThreadSafe<TabletMetadata> {
   //
   // Blocks are removed from this set after they are successfully deleted
   // in a call to DeleteOrphanedBlocks().
-  void AddOrphanedBlocks(const std::deque<BlockId>& block_ids);
+  void AddOrphanedBlocks(const std::list<BlockId>& block_ids);
 
   // Mark the superblock to be in state 'delete_type', sync it to disk, and
   // then delete all of the rowsets in this tablet.
@@ -333,7 +333,7 @@ class TabletMetadata : public RefCountedThreadSafe<TabletMetadata> {
                               const RowSetMetadataVector& rowsets) const;
 
   // Requires 'data_lock_'.
-  void AddOrphanedBlocksUnlocked(const std::deque<BlockId>& block_ids);
+  void AddOrphanedBlocksUnlocked(const std::list<BlockId>& block_ids);
 
   // Deletes the provided 'blocks' on disk.
   //
@@ -341,7 +341,7 @@ class TabletMetadata : public RefCountedThreadSafe<TabletMetadata> {
   // 'orphaned_blocks_' set.
   //
   // Failures are logged, but are not fatal.
-  void DeleteOrphanedBlocks(const std::deque<BlockId>& blocks);
+  void DeleteOrphanedBlocks(const std::list<BlockId>& blocks);
 
   enum State {
     kNotLoadedYet,

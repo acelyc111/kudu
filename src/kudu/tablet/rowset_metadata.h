@@ -94,7 +94,7 @@ class RowSetMetadata {
 
   Status Flush();
 
-  void AddOrphanedBlocks(const std::deque<BlockId>& blocks);
+  void AddOrphanedBlocks(const std::list<BlockId>& blocks);
 
   const std::string ToString() const;
 
@@ -223,11 +223,11 @@ class RowSetMetadata {
   // Returns the blocks removed from the rowset metadata during the update.
   // These blocks must be added to the TabletMetadata's orphaned blocks list.
   void CommitUpdate(const RowSetMetadataUpdate& update,
-                    std::deque<BlockId>* removed);
+                    std::list<BlockId>* removed);
 
   void ToProtobuf(RowSetDataPB *pb);
 
-  std::deque<BlockId> GetAllBlocks();
+  std::list<BlockId> GetAllBlocks();
 
   // Increase the row count.
   // Note:

@@ -18,7 +18,7 @@
 #include "kudu/tablet/delta_tracker.h"
 
 #include <algorithm>
-#include <deque>
+#include <list>
 #include <mutex>
 #include <ostream>
 #include <set>
@@ -67,7 +67,7 @@ using fs::IOContext;
 using fs::ReadableBlock;
 using fs::WritableBlock;
 using log::LogAnchorRegistry;
-using std::deque;
+using std::list;
 using std::set;
 using std::shared_ptr;
 using std::string;
@@ -369,7 +369,7 @@ Status DeltaTracker::CommitDeltaStoreMetadataUpdate(const RowSetMetadataUpdate& 
                                          &new_stores, type),
                         "Unable to open delta blocks");
 
-  deque<BlockId> removed_blocks;
+  list<BlockId> removed_blocks;
   rowset_metadata_->CommitUpdate(update, &removed_blocks);
   rowset_metadata_->AddOrphanedBlocks(removed_blocks);
   // Once we successfully commit to the rowset metadata, let's ensure we update

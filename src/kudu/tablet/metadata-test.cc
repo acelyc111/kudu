@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <deque>
+#include <list>
 #include <memory>
 #include <string>
 #include <vector>
@@ -31,7 +31,7 @@
 #include "kudu/util/status.h"
 #include "kudu/util/test_util.h"
 
-using std::deque;
+using std::list;
 using std::unique_ptr;
 using std::vector;
 using std::string;
@@ -65,13 +65,13 @@ TEST_F(MetadataTest, RSMD_TestReplaceDeltas_1) {
   to_replace.emplace_back(2);
   to_replace.emplace_back(3);
 
-  deque<BlockId> removed;
+  list<BlockId> removed;
   meta_->CommitUpdate(
       RowSetMetadataUpdate()
       .ReplaceRedoDeltaBlocks(to_replace, { BlockId(123) }), &removed);
   ASSERT_EQ(vector<BlockId>({ BlockId(1), BlockId(123), BlockId(4) }),
             meta_->redo_delta_blocks());
-  ASSERT_EQ(deque<BlockId>({ BlockId(2), BlockId(3) }),
+  ASSERT_EQ(list<BlockId>({ BlockId(2), BlockId(3) }),
             removed);
 }
 
@@ -81,13 +81,13 @@ TEST_F(MetadataTest, RSMD_TestReplaceDeltas_2) {
   to_replace.emplace_back(1);
   to_replace.emplace_back(2);
 
-  deque<BlockId> removed;
+  list<BlockId> removed;
   meta_->CommitUpdate(
       RowSetMetadataUpdate()
       .ReplaceRedoDeltaBlocks(to_replace, { BlockId(123) }), &removed);
   ASSERT_EQ(vector<BlockId>({ BlockId(123), BlockId(3), BlockId(4) }),
             meta_->redo_delta_blocks());
-  ASSERT_EQ(deque<BlockId>({ BlockId(1), BlockId(2) }),
+  ASSERT_EQ(list<BlockId>({ BlockId(1), BlockId(2) }),
             removed);
 }
 
@@ -97,13 +97,13 @@ TEST_F(MetadataTest, RSMD_TestReplaceDeltas_3) {
   to_replace.emplace_back(3);
   to_replace.emplace_back(4);
 
-  deque<BlockId> removed;
+  list<BlockId> removed;
   meta_->CommitUpdate(
       RowSetMetadataUpdate()
       .ReplaceRedoDeltaBlocks(to_replace, { BlockId(123) }), &removed);
   ASSERT_EQ(vector<BlockId>({ BlockId(1), BlockId(2), BlockId(123) }),
             meta_->redo_delta_blocks());
-  ASSERT_EQ(deque<BlockId>({ BlockId(3), BlockId(4) }),
+  ASSERT_EQ(list<BlockId>({ BlockId(3), BlockId(4) }),
             removed);
 }
 
@@ -114,7 +114,7 @@ TEST_F(MetadataTest, RSMD_TestReplaceDeltas_Bad_NonContiguous) {
   to_replace.emplace_back(4);
 
   EXPECT_DEATH({
-    deque<BlockId> removed;
+    list<BlockId> removed;
     meta_->CommitUpdate(
         RowSetMetadataUpdate().ReplaceRedoDeltaBlocks(to_replace, { BlockId(123) }),
         &removed);
@@ -129,7 +129,7 @@ TEST_F(MetadataTest, RSMD_TestReplaceDeltas_Bad_DoesntExist) {
   to_replace.emplace_back(555);
 
   EXPECT_DEATH({
-    deque<BlockId> removed;
+    list<BlockId> removed;
     meta_->CommitUpdate(
         RowSetMetadataUpdate().ReplaceRedoDeltaBlocks(to_replace, { BlockId(123) }),
         &removed);
