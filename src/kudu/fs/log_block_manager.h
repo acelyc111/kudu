@@ -47,6 +47,7 @@ namespace kudu {
 class BlockRecordPB;
 class Env;
 class RWFile;
+class ThreadPool;
 
 namespace fs {
 class DataDir;
@@ -59,6 +60,7 @@ class LogBlock;
 class LogBlockContainer;
 class LogBlockDeletionTransaction;
 class LogWritableBlock;
+struct ContainerLoadResult;
 struct LogBlockManagerMetrics;
 } // namespace internal
 
@@ -366,6 +368,12 @@ class LogBlockManager : public BlockManager {
                    FsReport* report,
                    Status* result_status);
 
+  // Reads records from one log block container in data directory.
+  // The result details will be collected into 'result'.
+  void LoadRecords(const DataDir* dir,
+                   LogBlockContainerRefPtr container,
+                   internal::ContainerLoadResult* result);
+
   // Perform basic initialization.
   Status Init();
 
@@ -464,6 +472,8 @@ class LogBlockManager : public BlockManager {
   //
   // May be null if instantiated without metrics.
   std::unique_ptr<internal::LogBlockManagerMetrics> metrics_;
+
+  const std::unique_ptr<ThreadPool> pool_;
 
   DISALLOW_COPY_AND_ASSIGN(LogBlockManager);
 };
