@@ -42,6 +42,7 @@ namespace kudu {
 class DataDirGroupPB;
 class Env;
 class ThreadPool;
+class ThreadPoolToken;
 
 // We pass around the results of canonicalization to indicate to the
 // DataDirManager which, if any, failed to canonicalize.
@@ -201,6 +202,7 @@ class DataDir {
   const std::string dir_;
   const std::unique_ptr<PathInstanceMetadataFile> metadata_file_;
   const std::unique_ptr<ThreadPool> pool_;
+  const std::unique_ptr<ThreadPoolToken> pool_token_;
 
   bool is_shutdown_;
 

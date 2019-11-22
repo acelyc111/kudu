@@ -2429,7 +2429,7 @@ void LogBlockManager::OpenDataDir(DataDir* dir,
   // Create a per-dir thread pool.
   unique_ptr<ThreadPool> pool;
   ThreadPoolBuilder("data-directory-containers-reader-pool")
-      .set_max_threads(5)
+      .set_max_threads(FLAGS_log_container_open_one_data_dir_concurrency)
       .Build(&pool);
 
   vector<scoped_refptr<internal::ContainerLoadResult>> container_results;

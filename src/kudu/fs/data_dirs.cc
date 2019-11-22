@@ -101,6 +101,10 @@ DEFINE_bool(fs_data_dirs_consider_available_space, true,
 TAG_FLAG(fs_data_dirs_consider_available_space, runtime);
 TAG_FLAG(fs_data_dirs_consider_available_space, evolving);
 
+DEFINE_uint64(fs_open_one_data_dir_concurrency, 5,
+              "Maximum work thread to load data in one data directory.");
+TAG_FLAG(fs_open_one_data_dir_concurrency, advanced);
+
 METRIC_DEFINE_gauge_uint64(server, data_dirs_failed,
                            "Data Directories Failed",
                            kudu::MetricUnit::kDataDirectories,
@@ -226,6 +230,7 @@ DataDir::DataDir(Env* env,
       dir_(std::move(dir)),
       metadata_file_(std::move(metadata_file)),
       pool_(std::move(pool)),
+      pool_token_(pool_->NewToken(ThreadPool::ExecutionMode::CONCURRENT)),
       is_shutdown_(false),
       is_full_(false),
       available_bytes_(0) {
@@ -719,7 +724,7 @@ Status DataDirManager::Open() {
     // Create a per-dir thread pool.
     unique_ptr<ThreadPool> pool;
     RETURN_NOT_OK(ThreadPoolBuilder(Substitute("data dir $0", i))
-                  .set_max_threads(1)
+                  .set_max_threads(FLAGS_fs_open_one_data_dir_concurrency + 1)
                   .set_trace_metric_prefix("data dirs")
                   .Build(&pool));
 
