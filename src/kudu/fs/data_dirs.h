@@ -31,6 +31,7 @@
 #include "kudu/gutil/callback.h"
 #include "kudu/gutil/macros.h"
 #include "kudu/gutil/ref_counted.h"
+#include "kudu/fs/fs_report.h"
 #include "kudu/util/locks.h"
 #include "kudu/util/metrics.h"
 #include "kudu/util/monotime.h"
@@ -137,6 +138,11 @@ struct DataDirMetrics {
   scoped_refptr<AtomicGauge<uint64_t>> data_dirs_full;
 };
 
+struct ContainerLoadResult: public RefCountedThreadSafe<ContainerLoadResult> {
+  Status status;
+  FsReport report;
+};
+
 // Representation of a data directory in use by the block manager.
 class DataDir {
  public:
@@ -200,6 +206,14 @@ class DataDir {
     return available_bytes_;
   }
 
+  void AddLoadResult(const scoped_refptr<ContainerLoadResult>& load_result) {
+    load_results_.push_back(load_result);
+  }
+
+  std::vector<scoped_refptr<ContainerLoadResult>> PourOutLoadResults() {
+    return std::move(load_results_);
+  }
+
  private:
   Env* env_;
   DataDirMetrics* metrics_;
@@ -207,6 +221,7 @@ class DataDir {
   const std::string dir_;
   const std::unique_ptr<PathInstanceMetadataFile> metadata_file_;
   const std::unique_ptr<ThreadPool> pool_;
+  std::vector<scoped_refptr<ContainerLoadResult>> load_results_;
 
   bool is_shutdown_;
 

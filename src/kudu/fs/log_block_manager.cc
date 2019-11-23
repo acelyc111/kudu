@@ -1503,35 +1503,6 @@ void LogBlockDeletionTransaction::AddBlock(const LogBlockRefPtr& lb) {
 }
 
 ////////////////////////////////////////////////////////////
-// ContainerLoadResult
-////////////////////////////////////////////////////////////
-struct ContainerLoadResult: public RefCountedThreadSafe<ContainerLoadResult> {
-  Status status;
-  FsReport report;
-  // Keep track of containers that have nothing but dead blocks; they will be
-  // deleted during repair.
-  std::vector<LogBlockContainerRefPtr> dead_containers;
-  // Keep track of containers whose live block ratio is low; their metadata
-  // files will be compacted during repair.
-  std::unordered_map<std::string, std::vector<BlockRecordPB>> low_live_block_containers;
-  // Keep track of deleted blocks whose space hasn't been punched; they will
-  // be repunched during repair.
-  std::vector<LogBlockRefPtr> need_repunching_blocks;
-
-  ContainerLoadResult() {
-    // We are going to perform these checks.
-    //
-    // Note: this isn't necessarily the complete set of FsReport checks; there
-    // may be checks that the LBM cannot perform.
-    report.full_container_space_check.emplace();
-    report.incomplete_container_check.emplace();
-    report.malformed_record_check.emplace();
-    report.misaligned_block_check.emplace();
-    report.partial_record_check.emplace();
-  }
-};
-
-////////////////////////////////////////////////////////////
 // LogBlock (definition)
 ////////////////////////////////////////////////////////////
 
@@ -1971,6 +1942,19 @@ LogBlockManager::~LogBlockManager() {
   dd_manager_->WaitOnClosures();
 }
 
+// Ensure that no load task failed without being handled.
+//
+// Currently only disk failures are handled. Reports from failed disks are
+// unusable.
+#define RETURN_ON_DISK_FAILURE(s)                             \
+  if (PREDICT_FALSE(!s.ok())) {                               \
+    if (!s.IsDiskFailure()) {                                 \
+      return s;                                               \
+    }                                                         \
+    LOG(ERROR) << Substitute("Not using report from $0: $1",  \
+        dd_manager_->data_dirs()[i]->dir(), s.ToString());    \
+  }
+
 Status LogBlockManager::Open(FsReport* report) {
   RETURN_NOT_OK(file_cache_.Init());
 
@@ -2013,8 +1997,9 @@ Status LogBlockManager::Open(FsReport* report) {
     InsertOrDie(&block_limits_by_data_dir_, dd.get(), limit);
   }
 
-  vector<FsReport> reports(dd_manager_->data_dirs().size());
+  // Load containers in each data dirs.
   vector<Status> statuses(dd_manager_->data_dirs().size());
+  vector<unique_ptr<ThreadPoolToken>> pool_tokens;
   int i = -1;
   for (const auto& dd : dd_manager_->data_dirs()) {
     i++;
@@ -2026,39 +2011,70 @@ Status LogBlockManager::Open(FsReport* report) {
       statuses[i] = Status::IOError("Data directory failed", "", EIO);
       continue;
     }
+
+    pool_tokens.emplace_back(dd->NewToken(ThreadPool::ExecutionMode::CONCURRENT).release());
     // Open the data dir asynchronously.
     dd->ExecClosure(
         Bind(&LogBlockManager::OpenDataDir,
              Unretained(this),
              dd.get(),
-             &reports[i],
+             pool_tokens.back().get(),
              &statuses[i]));
   }
 
-  // Wait for the opens to complete.
+  // Wait for the load tasks to complete.
   for (const auto& dd : dd_manager_->data_dirs()) {
     dd->WaitOnClosures();
   }
-  if (dd_manager_->GetFailedDataDirs().size() == dd_manager_->data_dirs().size()) {
-    return Status::IOError("All data dirs failed to open", "", EIO);
+  for (const auto& pt : pool_tokens) {
+    pt->Wait();
   }
 
-  // Ensure that no open failed without being handled.
-  //
-  // Currently only disk failures are handled. Reports from failed disks are
-  // unusable.
+  // Check load errors.
+  for (const auto& status : statuses) {
+    RETURN_ON_DISK_FAILURE(status);
+  }
+
+  // Check load errors and merge each data dir result, then do repair task.
+  std::vector<scoped_refptr<LogContainerLoadResult>> results;
+  for (const auto& dd : dd_manager_->data_dirs()) {
+    results.emplace_back(new LogContainerLoadResult());
+    auto& result = results.back();
+    for (const auto& lr : dd->PourOutLoadResults()) {
+      auto lclr = down_cast<LogContainerLoadResult*>(lr.get());
+      RETURN_ON_DISK_FAILURE(lclr->status);
+      result->report.MergeFrom(lclr->report);
+      result->dead_containers.insert(
+          result->dead_containers.end(),
+          lclr->dead_containers.begin(),
+          lclr->dead_containers.end());
+      result->low_live_block_containers.insert(
+          lclr->low_live_block_containers.begin(),
+          lclr->low_live_block_containers.end());
+      result->need_repunching_blocks.insert(
+          result->need_repunching_blocks.end(),
+          lclr->need_repunching_blocks.begin(),
+          lclr->need_repunching_blocks.end());
+    }
+    dd->ExecClosure(Bind(&LogBlockManager::RepairTask, Unretained(this), dd.get(), result));
+  }
+  // Wait for the repair task to complete.
+  for (const auto& dd : dd_manager_->data_dirs()) {
+    dd->WaitOnClosures();
+  }
+
   FsReport merged_report;
-  for (i = 0; i < statuses.size(); i++) {
-    const Status& s = statuses[i];
-    if (PREDICT_TRUE(s.ok())) {
-      merged_report.MergeFrom(reports[i]);
-      continue;
+  for (int i = 0; i < dd_manager_->data_dirs().size(); ++i) {
+    if (!results[i]->status.ok()) {
+      return results[i]->status.CloneAndPrepend(Substitute(
+          "fatal error while repairing inconsistencies in data directory $0",
+          dd_manager_->data_dirs()[i]->dir()));
     }
-    if (!s.IsDiskFailure()) {
-      return s;
-    }
-    LOG(ERROR) << Substitute("Not using report from $0: $1",
-        dd_manager_->data_dirs()[i]->dir(), s.ToString());
+    merged_report.MergeFrom(results[i]->report);
+  }
+
+  if (dd_manager_->GetFailedDataDirs().size() == dd_manager_->data_dirs().size()) {
+    return Status::IOError("All data dirs failed to open", "", EIO);
   }
 
   // Either return or log the report.
@@ -2409,11 +2425,8 @@ Status LogBlockManager::RemoveLogBlock(const BlockId& block_id,
 }
 
 void LogBlockManager::OpenDataDir(DataDir* dir,
-                                  FsReport* report,
+                                  ThreadPoolToken* pool_token,
                                   Status* result_status) {
-  scoped_refptr<internal::ContainerLoadResult> data_dir_result(new internal::ContainerLoadResult());
-  data_dir_result->report.data_dirs.push_back(dir->dir());
-
   // Find all containers and open them.
   unordered_set<string> containers_seen;
   vector<string> children;
@@ -2426,10 +2439,6 @@ void LogBlockManager::OpenDataDir(DataDir* dir,
     return;
   }
 
-  unique_ptr<ThreadPoolToken> dir_pool_token = dir->NewToken(ThreadPool::ExecutionMode::CONCURRENT);
-
-  vector<scoped_refptr<internal::ContainerLoadResult>> container_results;
-  int valid_container_count = 0;
   for (const string& child : children) {
     string container_name;
     if (!TryStripSuffixString(
@@ -2442,9 +2451,13 @@ void LogBlockManager::OpenDataDir(DataDir* dir,
       continue;
     }
 
+    // Add a new result for the container.
+    scoped_refptr<LogContainerLoadResult> result(new LogContainerLoadResult());
+    result->report.data_dirs.push_back(dir->dir());
+    dir->AddLoadResult(result);
+
     LogBlockContainerRefPtr container;
-    s = LogBlockContainer::Open(
-        this, dir, &data_dir_result->report, container_name, &container);
+    s = LogBlockContainer::Open(this, dir, &result->report, container_name, &container);
     if (s.IsAborted()) {
       // Skip the container. Open() added a record of it to 'data_dir_result->report' for us.
       continue;
@@ -2460,60 +2473,19 @@ void LogBlockManager::OpenDataDir(DataDir* dir,
       return;
     }
 
-    container_results.emplace_back(new internal::ContainerLoadResult());
-    s = dir_pool_token->SubmitFunc(std::bind(&LogBlockManager::LoadRecords, this, dir, container,
-                                             container_results[valid_container_count].get()));
+    s = pool_token->SubmitFunc(std::bind(&LogBlockManager::LoadRecords, this,
+                                         dir, container, result));
     if (!s.ok()) {
       *result_status = s.CloneAndPrepend(Substitute(
           "fatal error while submitting load task for container $0", container_name));
       return;
     }
-    ++valid_container_count;
   }
-  dir_pool_token->Wait();
-  dir_pool_token->Shutdown();
-
-  for (int i = 0; i < valid_container_count; ++i) {
-    if (!container_results[i]->status.ok()) {
-      *result_status = container_results[i]->status;
-      return;
-    }
-    data_dir_result->report.MergeFrom(container_results[i]->report);
-    data_dir_result->dead_containers.insert(
-        data_dir_result->dead_containers.end(),
-        container_results[i]->dead_containers.begin(),
-        container_results[i]->dead_containers.end());
-    data_dir_result->low_live_block_containers.insert(
-        container_results[i]->low_live_block_containers.begin(),
-        container_results[i]->low_live_block_containers.end());
-    data_dir_result->need_repunching_blocks.insert(
-        data_dir_result->need_repunching_blocks.end(),
-        container_results[i]->need_repunching_blocks.begin(),
-        container_results[i]->need_repunching_blocks.end());
-  }
-  container_results.clear();
-
-  // Like the rest of Open(), repairs are performed per data directory to take
-  // advantage of parallelism.
-  s = Repair(dir,
-             &data_dir_result->report,
-             std::move(data_dir_result->need_repunching_blocks),
-             std::move(data_dir_result->dead_containers),
-             std::move(data_dir_result->low_live_block_containers));
-  if (!s.ok()) {
-    *result_status = s.CloneAndPrepend(Substitute(
-        "fatal error while repairing inconsistencies in data directory $0",
-        dir->dir()));
-    return;
-  }
-
-  *report = std::move(data_dir_result->report);
-  *result_status = Status::OK();
 }
 
-void LogBlockManager::LoadRecords(const DataDir* dir,
+void LogBlockManager::LoadRecords(DataDir* dir,
                                   LogBlockContainerRefPtr container,
-                                  internal::ContainerLoadResult* result) {
+                                  const scoped_refptr<LogContainerLoadResult>& result) {
   MonoTime start_time = MonoTime::Now();
   // Process the records, building a container-local map for live blocks and
   // a list of dead blocks.
@@ -2654,8 +2626,9 @@ void LogBlockManager::LoadRecords(const DataDir* dir,
       // its blocks. The report entry remains, however, so it's clear that
       // there was a space discrepancy.
       if (container->live_blocks()) {
-        result->need_repunching_blocks.insert(result->need_repunching_blocks.end(),
-                                              dead_blocks.begin(), dead_blocks.end());
+        result->need_repunching_blocks.insert(
+            result->need_repunching_blocks.end(),
+            dead_blocks.begin(), dead_blocks.end());
       }
     }
 
@@ -2689,9 +2662,19 @@ void LogBlockManager::LoadRecords(const DataDir* dir,
 
   mem_tracker_->Consume(mem_usage);
 
-  std::lock_guard<simple_spinlock> l(lock_);
-  AddNewContainerUnlocked(container);
-  MakeContainerAvailableUnlocked(std::move(container));
+  {
+    std::lock_guard<simple_spinlock> l(lock_);
+    AddNewContainerUnlocked(container);
+    MakeContainerAvailableUnlocked(std::move(container));
+  }
+}
+
+void LogBlockManager::RepairTask(DataDir* dir, LogContainerLoadResult* result) {
+  result->status = Repair(dir,
+                          &result->report,
+                          std::move(result->need_repunching_blocks),
+                          std::move(result->dead_containers),
+                          std::move(result->low_live_block_containers));
 }
 
 #define RETURN_NOT_OK_LBM_DISK_FAILURE_PREPEND(status_expr, msg) do { \

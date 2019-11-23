@@ -33,6 +33,7 @@
 
 #include "kudu/fs/block_id.h"
 #include "kudu/fs/block_manager.h"
+#include "kudu/fs/data_dirs.h"
 #include "kudu/gutil/macros.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/util/atomic.h"
@@ -48,6 +49,7 @@ class BlockRecordPB;
 class Env;
 class RWFile;
 class ThreadPool;
+class ThreadPoolToken;
 
 namespace fs {
 class DataDir;
@@ -66,6 +68,30 @@ struct LogBlockManagerMetrics;
 
 typedef scoped_refptr<internal::LogBlock> LogBlockRefPtr;
 typedef scoped_refptr<internal::LogBlockContainer> LogBlockContainerRefPtr;
+
+struct LogContainerLoadResult: public ContainerLoadResult {
+  // Keep track of containers that have nothing but dead blocks; they will be
+  // deleted during repair.
+  std::vector<LogBlockContainerRefPtr> dead_containers;
+  // Keep track of containers whose live block ratio is low; their metadata
+  // files will be compacted during repair.
+  std::unordered_map<std::string, std::vector<BlockRecordPB>> low_live_block_containers;
+  // Keep track of deleted blocks whose space hasn't been punched; they will
+  // be repunched during repair.
+  std::vector<LogBlockRefPtr> need_repunching_blocks;
+
+  LogContainerLoadResult() {
+    // We are going to perform these checks.
+    //
+    // Note: this isn't necessarily the complete set of FsReport checks; there
+    // may be checks that the LBM cannot perform.
+    report.full_container_space_check.emplace();
+    report.incomplete_container_check.emplace();
+    report.malformed_record_check.emplace();
+    report.misaligned_block_check.emplace();
+    report.partial_record_check.emplace();
+  }
+};
 
 // A log-backed (i.e. sequentially allocated file) block storage
 // implementation.
@@ -330,6 +356,8 @@ class LogBlockManager : public BlockManager {
   Status RemoveLogBlock(const BlockId& block_id,
                         LogBlockRefPtr* lb);
 
+  void RepairTask(DataDir* dir, LogContainerLoadResult* result);
+
   // Repairs any inconsistencies for 'dir' described in 'report'.
   //
   // The following additional repairs will be performed:
@@ -359,20 +387,18 @@ class LogBlockManager : public BlockManager {
                              const std::vector<BlockRecordPB>& records,
                              int64_t* file_bytes_delta);
 
-  // Opens a particular data directory belonging to the block manager. The
-  // results of consistency checking (and repair, if applicable) are written to
-  // 'report'.
+  // Opens a particular data directory belonging to the block manager.
   //
   // Success or failure is set in 'result_status'.
   void OpenDataDir(DataDir* dir,
-                   FsReport* report,
+                   ThreadPoolToken* pool_token,
                    Status* result_status);
 
   // Reads records from one log block container in data directory.
   // The result details will be collected into 'result'.
-  void LoadRecords(const DataDir* dir,
+  void LoadRecords(DataDir* dir,
                    LogBlockContainerRefPtr container,
-                   internal::ContainerLoadResult* result);
+                   const scoped_refptr<LogContainerLoadResult>& result);
 
   // Perform basic initialization.
   Status Init();
