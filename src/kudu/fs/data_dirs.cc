@@ -59,7 +59,6 @@
 #include "kudu/util/status.h"
 #include "kudu/util/stopwatch.h"
 #include "kudu/util/test_util_prod.h"
-#include "kudu/util/threadpool.h"
 
 DEFINE_int32(fs_target_data_dirs_per_tablet, 3,
              "Indicates the target number of data dirs to spread each "
@@ -230,7 +229,6 @@ DataDir::DataDir(Env* env,
       dir_(std::move(dir)),
       metadata_file_(std::move(metadata_file)),
       pool_(std::move(pool)),
-      pool_token_(pool_->NewToken(ThreadPool::ExecutionMode::CONCURRENT)),
       is_shutdown_(false),
       is_full_(false),
       available_bytes_(0) {
@@ -261,6 +259,10 @@ void DataDir::ExecClosure(const Closure& task) {
 
 void DataDir::WaitOnClosures() {
   pool_->Wait();
+}
+
+unique_ptr<ThreadPoolToken> DataDir::NewToken(ThreadPool::ExecutionMode mode) {
+  return pool_->NewToken(mode);
 }
 
 Status DataDir::RefreshAvailableSpace(RefreshMode mode) {

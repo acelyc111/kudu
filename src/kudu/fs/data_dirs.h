@@ -36,13 +36,12 @@
 #include "kudu/util/monotime.h"
 #include "kudu/util/random.h"
 #include "kudu/util/status.h"
+#include "kudu/util/threadpool.h"
 
 namespace kudu {
 
 class DataDirGroupPB;
 class Env;
-class ThreadPool;
-class ThreadPoolToken;
 
 // We pass around the results of canonicalization to indicate to the
 // DataDirManager which, if any, failed to canonicalize.
@@ -162,6 +161,12 @@ class DataDir {
   // Waits for any outstanding closures submitted via ExecClosure() to finish.
   void WaitOnClosures();
 
+  // Allocates a new token for use in token-based task submission. All tokens
+  // must be destroyed before their ThreadPool is destroyed.
+  //
+  // See ThreadPool::NewToken for more details.
+  std::unique_ptr<ThreadPoolToken> NewToken(ThreadPool::ExecutionMode mode);
+
   // Tests whether the data directory is full by comparing the free space of
   // its underlying filesystem with a predefined "reserved" space value.
   //
@@ -202,7 +207,6 @@ class DataDir {
   const std::string dir_;
   const std::unique_ptr<PathInstanceMetadataFile> metadata_file_;
   const std::unique_ptr<ThreadPool> pool_;
-  const std::unique_ptr<ThreadPoolToken> pool_token_;
 
   bool is_shutdown_;
 

@@ -2426,11 +2426,7 @@ void LogBlockManager::OpenDataDir(DataDir* dir,
     return;
   }
 
-  // Create a per-dir thread pool.
-  unique_ptr<ThreadPool> pool;
-  ThreadPoolBuilder("data-directory-containers-reader-pool")
-      .set_max_threads(FLAGS_log_container_open_one_data_dir_concurrency)
-      .Build(&pool);
+  unique_ptr<ThreadPoolToken> dir_pool_token = dir->NewToken(ThreadPool::ExecutionMode::CONCURRENT);
 
   vector<scoped_refptr<internal::ContainerLoadResult>> container_results;
   int valid_container_count = 0;
@@ -2465,8 +2461,8 @@ void LogBlockManager::OpenDataDir(DataDir* dir,
     }
 
     container_results.emplace_back(new internal::ContainerLoadResult());
-    s = pool->SubmitFunc(std::bind(&LogBlockManager::LoadRecords, this, dir, container,
-                                   container_results[valid_container_count].get()));
+    s = dir_pool_token->SubmitFunc(std::bind(&LogBlockManager::LoadRecords, this, dir, container,
+                                             container_results[valid_container_count].get()));
     if (!s.ok()) {
       *result_status = s.CloneAndPrepend(Substitute(
           "fatal error while submitting load task for container $0", container_name));
@@ -2474,8 +2470,8 @@ void LogBlockManager::OpenDataDir(DataDir* dir,
     }
     ++valid_container_count;
   }
-  pool->Wait();
-  pool->Shutdown();
+  dir_pool_token->Wait();
+  dir_pool_token->Shutdown();
 
   for (int i = 0; i < valid_container_count; ++i) {
     if (!container_results[i]->status.ok()) {
