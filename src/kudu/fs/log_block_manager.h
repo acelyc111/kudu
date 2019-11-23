@@ -62,36 +62,12 @@ class LogBlock;
 class LogBlockContainer;
 class LogBlockDeletionTransaction;
 class LogWritableBlock;
-struct ContainerLoadResult;
+struct LogContainerLoadResult;
 struct LogBlockManagerMetrics;
 } // namespace internal
 
 typedef scoped_refptr<internal::LogBlock> LogBlockRefPtr;
 typedef scoped_refptr<internal::LogBlockContainer> LogBlockContainerRefPtr;
-
-struct LogContainerLoadResult: public ContainerLoadResult {
-  // Keep track of containers that have nothing but dead blocks; they will be
-  // deleted during repair.
-  std::vector<LogBlockContainerRefPtr> dead_containers;
-  // Keep track of containers whose live block ratio is low; their metadata
-  // files will be compacted during repair.
-  std::unordered_map<std::string, std::vector<BlockRecordPB>> low_live_block_containers;
-  // Keep track of deleted blocks whose space hasn't been punched; they will
-  // be repunched during repair.
-  std::vector<LogBlockRefPtr> need_repunching_blocks;
-
-  LogContainerLoadResult() {
-    // We are going to perform these checks.
-    //
-    // Note: this isn't necessarily the complete set of FsReport checks; there
-    // may be checks that the LBM cannot perform.
-    report.full_container_space_check.emplace();
-    report.incomplete_container_check.emplace();
-    report.malformed_record_check.emplace();
-    report.misaligned_block_check.emplace();
-    report.partial_record_check.emplace();
-  }
-};
 
 // A log-backed (i.e. sequentially allocated file) block storage
 // implementation.
@@ -356,7 +332,7 @@ class LogBlockManager : public BlockManager {
   Status RemoveLogBlock(const BlockId& block_id,
                         LogBlockRefPtr* lb);
 
-  void RepairTask(DataDir* dir, LogContainerLoadResult* result);
+  void RepairTask(DataDir* dir, internal::LogContainerLoadResult* result);
 
   // Repairs any inconsistencies for 'dir' described in 'report'.
   //
@@ -398,7 +374,7 @@ class LogBlockManager : public BlockManager {
   // The result details will be collected into 'result'.
   void LoadRecords(DataDir* dir,
                    LogBlockContainerRefPtr container,
-                   const scoped_refptr<LogContainerLoadResult>& result);
+                   const scoped_refptr<internal::LogContainerLoadResult>& result);
 
   // Perform basic initialization.
   Status Init();

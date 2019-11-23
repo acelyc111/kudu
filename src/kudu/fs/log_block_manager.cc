@@ -1503,6 +1503,35 @@ void LogBlockDeletionTransaction::AddBlock(const LogBlockRefPtr& lb) {
 }
 
 ////////////////////////////////////////////////////////////
+// LogContainerLoadResult
+////////////////////////////////////////////////////////////
+
+struct LogContainerLoadResult: public ContainerLoadResult {
+  // Keep track of containers that have nothing but dead blocks; they will be
+  // deleted during repair.
+  std::vector<LogBlockContainerRefPtr> dead_containers;
+  // Keep track of containers whose live block ratio is low; their metadata
+  // files will be compacted during repair.
+  std::unordered_map<std::string, std::vector<BlockRecordPB>> low_live_block_containers;
+  // Keep track of deleted blocks whose space hasn't been punched; they will
+  // be repunched during repair.
+  std::vector<LogBlockRefPtr> need_repunching_blocks;
+
+  LogContainerLoadResult() {
+    // We are going to perform these checks.
+    //
+    // Note: this isn't necessarily the complete set of FsReport checks; there
+    // may be checks that the LBM cannot perform.
+    report.full_container_space_check.emplace();
+    report.incomplete_container_check.emplace();
+    report.malformed_record_check.emplace();
+    report.misaligned_block_check.emplace();
+    report.partial_record_check.emplace();
+  }
+};
+
+
+////////////////////////////////////////////////////////////
 // LogBlock (definition)
 ////////////////////////////////////////////////////////////
 
@@ -2036,12 +2065,12 @@ Status LogBlockManager::Open(FsReport* report) {
   }
 
   // Check load errors and merge each data dir result, then do repair task.
-  std::vector<scoped_refptr<LogContainerLoadResult>> results;
+  std::vector<scoped_refptr<internal::LogContainerLoadResult>> results;
   for (const auto& dd : dd_manager_->data_dirs()) {
-    results.emplace_back(new LogContainerLoadResult());
+    results.emplace_back(new internal::LogContainerLoadResult());
     auto& result = results.back();
     for (const auto& lr : dd->PourOutLoadResults()) {
-      auto lclr = down_cast<LogContainerLoadResult*>(lr.get());
+      auto lclr = down_cast<internal::LogContainerLoadResult*>(lr.get());
       RETURN_ON_DISK_FAILURE(lclr->status);
       result->report.MergeFrom(lclr->report);
       result->dead_containers.insert(
@@ -2452,7 +2481,7 @@ void LogBlockManager::OpenDataDir(DataDir* dir,
     }
 
     // Add a new result for the container.
-    scoped_refptr<LogContainerLoadResult> result(new LogContainerLoadResult());
+    scoped_refptr<internal::LogContainerLoadResult> result(new internal::LogContainerLoadResult());
     result->report.data_dirs.push_back(dir->dir());
     dir->AddLoadResult(result);
 
@@ -2485,7 +2514,7 @@ void LogBlockManager::OpenDataDir(DataDir* dir,
 
 void LogBlockManager::LoadRecords(DataDir* dir,
                                   LogBlockContainerRefPtr container,
-                                  const scoped_refptr<LogContainerLoadResult>& result) {
+                                  const scoped_refptr<internal::LogContainerLoadResult>& result) {
   MonoTime start_time = MonoTime::Now();
   // Process the records, building a container-local map for live blocks and
   // a list of dead blocks.
@@ -2669,7 +2698,7 @@ void LogBlockManager::LoadRecords(DataDir* dir,
   }
 }
 
-void LogBlockManager::RepairTask(DataDir* dir, LogContainerLoadResult* result) {
+void LogBlockManager::RepairTask(DataDir* dir, internal::LogContainerLoadResult* result) {
   result->status = Repair(dir,
                           &result->report,
                           std::move(result->need_repunching_blocks),
