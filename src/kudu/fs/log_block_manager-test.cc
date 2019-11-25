@@ -1341,6 +1341,7 @@ TEST_F(LogBlockManagerTest, TestRepairUnpunchedBlocks) {
 
   // Check the report.
   FsReport report;
+  LOG(INFO) << "ReopenBlockManager";
   ASSERT_OK(ReopenBlockManager(nullptr, &report));
   ASSERT_FALSE(report.HasFatalErrors());
   ASSERT_EQ(1, report.full_container_space_check->entries.size());
@@ -1357,6 +1358,7 @@ TEST_F(LogBlockManagerTest, TestRepairUnpunchedBlocks) {
   // Wait for the block manager to punch out all of the holes (done as part of
   // repair at startup). It's easiest to do this by reopening it; shutdown will
   // wait for outstanding hole punches.
+  LOG(INFO) << "ReopenBlockManager";
   ASSERT_OK(ReopenBlockManager(nullptr, &report));
   NO_FATALS(AssertEmptyReport(report));
 

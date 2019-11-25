@@ -2699,11 +2699,13 @@ void LogBlockManager::LoadRecords(DataDir* dir,
 }
 
 void LogBlockManager::RepairTask(DataDir* dir, internal::LogContainerLoadResult* result) {
+  LOG(INFO) << result->report.ToString();
   result->status = Repair(dir,
                           &result->report,
                           std::move(result->need_repunching_blocks),
                           std::move(result->dead_containers),
                           std::move(result->low_live_block_containers));
+  LOG(INFO) << result->report.ToString();
 }
 
 #define RETURN_NOT_OK_LBM_DISK_FAILURE_PREPEND(status_expr, msg) do { \
