@@ -1330,7 +1330,7 @@ TEST_F(LogBlockManagerTest, TestRepairUnpunchedBlocks) {
   ASSERT_EQ(0, file_size_on_disk);
 
   // Add some "unpunched blocks" to the container.
-  LBMCorruptor corruptor(env_, dd_manager_->GetDataDirs(), 0);
+  LBMCorruptor corruptor(env_, dd_manager_->GetDataDirs(), SeedRandom());
   ASSERT_OK(corruptor.Init());
   for (int i = 0; i < kNumBlocks; i++) {
     ASSERT_OK(corruptor.AddUnpunchedBlockToFullContainer());
@@ -1341,7 +1341,6 @@ TEST_F(LogBlockManagerTest, TestRepairUnpunchedBlocks) {
 
   // Check the report.
   FsReport report;
-  LOG(INFO) << "ReopenBlockManager";
   ASSERT_OK(ReopenBlockManager(nullptr, &report));
   ASSERT_FALSE(report.HasFatalErrors());
   ASSERT_EQ(1, report.full_container_space_check->entries.size());
@@ -1358,25 +1357,12 @@ TEST_F(LogBlockManagerTest, TestRepairUnpunchedBlocks) {
   // Wait for the block manager to punch out all of the holes (done as part of
   // repair at startup). It's easiest to do this by reopening it; shutdown will
   // wait for outstanding hole punches.
-  LOG(INFO) << "ReopenBlockManager";
   ASSERT_OK(ReopenBlockManager(nullptr, &report));
   NO_FATALS(AssertEmptyReport(report));
-  LOG(INFO) << "ReopenBlockManager";
 
   // File size should be 0 post-repair.
   ASSERT_OK(env_->GetFileSizeOnDisk(data_file, &file_size_on_disk));
   ASSERT_EQ(0, file_size_on_disk);
-
-//  LOG(INFO) << "ReopenBlockManager";
-//  {
-//    FsReport report;
-//    ASSERT_OK(ReopenBlockManager(nullptr, &report));
-//    NO_FATALS(AssertEmptyReport(report));
-//  }
-//
-//  // File size should be 0 post-repair.
-//  ASSERT_OK(env_->GetFileSizeOnDisk(data_file, &file_size_on_disk));
-//  ASSERT_EQ(0, file_size_on_disk);
 }
 
 TEST_F(LogBlockManagerTest, TestRepairIncompleteContainer) {

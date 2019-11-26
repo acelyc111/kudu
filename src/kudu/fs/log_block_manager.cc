@@ -1321,7 +1321,6 @@ void LogBlockContainer::SetReadOnly(const Status& error) {
 }
 
 void LogBlockContainer::ContainerDeletionAsync(int64_t offset, int64_t length) {
-  LOG(INFO) << "dead " << dead();
   if (dead()) {
     // Don't bother punching holes; the container's destructor will delete the
     // container's files outright.
@@ -1434,7 +1433,6 @@ void LogBlockDeletionTransaction::AddDeletedBlock(BlockId block) {
 }
 
 LogBlockDeletionTransaction::~LogBlockDeletionTransaction() {
-  LOG(INFO) << "deleted_interval_map_: " << deleted_interval_map_.size();
   for (auto& entry : deleted_interval_map_) {
     LogBlockContainer* container = entry.first.get();
 
@@ -1442,7 +1440,6 @@ LogBlockDeletionTransaction::~LogBlockDeletionTransaction() {
     // to delete the container files outright, rather than
     // punching holes.
     if (container->check_death_condition()) {
-      LOG(INFO) << "check_death_condition";
       // Mark the container as deleted and remove it from the global map.
       //
       // It's possible for multiple deletion transactions to end up here. For
@@ -1454,7 +1451,6 @@ LogBlockDeletionTransaction::~LogBlockDeletionTransaction() {
       // The function 'TrySetDead()' can only be called successfully once,
       // because there is a compare-and-swap operation inside.
       if (container->TrySetDead()) {
-        LOG(INFO) << "TrySetDead";
         lbm_->RemoveDeadContainer(container->ToString());
       }
       continue;
@@ -1465,8 +1461,6 @@ LogBlockDeletionTransaction::~LogBlockDeletionTransaction() {
                                 container->ToString()));
 
     for (const auto& interval : entry.second) {
-      LOG(INFO) << "ExecClosure LogBlockContainer::ContainerDeletionAsync "
-          << interval.first << "-" << interval.second;
       container->ExecClosure(Bind(&LogBlockContainer::ContainerDeletionAsync,
                                   container,
                                   interval.first,
@@ -1512,7 +1506,7 @@ void LogBlockDeletionTransaction::AddBlock(const LogBlockRefPtr& lb) {
 // LogContainerLoadResult
 ////////////////////////////////////////////////////////////
 
-struct LogContainerLoadResult: public ContainerLoadResult {
+struct LogContainerLoadResult: public LoadResult {
   // Keep track of containers that have nothing but dead blocks; they will be
   // deleted during repair.
   std::vector<LogBlockContainerRefPtr> dead_containers;
@@ -1535,7 +1529,6 @@ struct LogContainerLoadResult: public ContainerLoadResult {
     report.partial_record_check.emplace();
   }
 };
-
 
 ////////////////////////////////////////////////////////////
 // LogBlock (definition)
@@ -1981,7 +1974,7 @@ LogBlockManager::~LogBlockManager() {
 //
 // Currently only disk failures are handled. Reports from failed disks are
 // unusable.
-#define RETURN_ON_DISK_FAILURE(d, s)                          \
+#define RETURN_ON_NON_DISK_FAILURE(d, s)                      \
   if (PREDICT_FALSE(!s.ok())) {                               \
     if (!s.IsDiskFailure()) {                                 \
       return s;                                               \
@@ -2053,11 +2046,11 @@ Status LogBlockManager::Open(FsReport* report) {
         Bind(&LogBlockManager::OpenDataDir,
              Unretained(this),
              dd.get(),
-             pool_tokens.back().get(),
+             pool_tokens[i].get(),
              &statuses[i]));
   }
 
-  // Wait for the load tasks to complete.
+  // Wait for the open tasks to complete.
   for (const auto& dd : dd_manager_->data_dirs()) {
     dd->WaitOnClosures();
   }
@@ -2066,24 +2059,20 @@ Status LogBlockManager::Open(FsReport* report) {
   }
   pool_tokens.clear();
 
-  // Check load errors.
+  // Check load errors and merge each data dir results, then do repair tasks.
+  vector<scoped_refptr<internal::LogContainerLoadResult>> results(dd_manager_->data_dirs().size());
   for (int i = 0; i < dd_manager_->data_dirs().size(); ++i) {
-    RETURN_ON_DISK_FAILURE(dd_manager_->data_dirs()[i], statuses[i]);
-  }
-
-  // Check load errors and merge each data dir result, then do repair task.
-  std::vector<scoped_refptr<internal::LogContainerLoadResult>> results;
-  for (int i = 0; i < dd_manager_->data_dirs().size(); ++i) {
-    if (!statuses[i].ok()) {
-      results.emplace_back(nullptr);
-      continue;
-    }
+    const auto& s = statuses[i];
     const auto& dd = dd_manager_->data_dirs()[i];
-    results.emplace_back(new internal::LogContainerLoadResult());
-    auto& result = results.back();
+    RETURN_ON_NON_DISK_FAILURE(dd, s);
+
+    scoped_refptr<internal::LogContainerLoadResult> result(new internal::LogContainerLoadResult());
+    results[i] = result;
+    result->report.data_dirs.push_back(dd->dir());
     for (const auto& lr : dd->PourOutLoadResults()) {
       auto lclr = down_cast<internal::LogContainerLoadResult*>(lr.get());
-      RETURN_ON_DISK_FAILURE(dd, lclr->status);
+      RETURN_ON_NON_DISK_FAILURE(dd, lclr->status);
+
       result->report.MergeFrom(lclr->report);
       result->dead_containers.insert(
           result->dead_containers.end(),
@@ -2100,10 +2089,10 @@ Status LogBlockManager::Open(FsReport* report) {
           lclr->need_repunching_blocks.end());
       lclr->need_repunching_blocks.clear();
     }
-    result->report.data_dirs.push_back(dd->dir());
     dd->ExecClosure(Bind(&LogBlockManager::RepairTask, Unretained(this), dd.get(), result));
   }
-  // Wait for the repair task to complete.
+
+  // Wait for the repair tasks to complete.
   for (const auto& dd : dd_manager_->data_dirs()) {
     dd->WaitOnClosures();
   }
@@ -2113,7 +2102,7 @@ Status LogBlockManager::Open(FsReport* report) {
     if (!results[i]) {
       continue;
     }
-    if (!results[i]->status.ok()) {
+    if (PREDICT_FALSE(!results[i]->status.ok())) {
       return results[i]->status.CloneAndPrepend(Substitute(
           "fatal error while repairing inconsistencies in data directory $0",
           dd_manager_->data_dirs()[i]->dir()));
@@ -2498,7 +2487,6 @@ void LogBlockManager::OpenDataDir(DataDir* dir,
     if (!InsertIfNotPresent(&containers_seen, container_name)) {
       continue;
     }
-
     // Add a new result for the container.
     scoped_refptr<internal::LogContainerLoadResult> result(new internal::LogContainerLoadResult());
     dir->AddLoadResult(result);
@@ -2506,7 +2494,7 @@ void LogBlockManager::OpenDataDir(DataDir* dir,
     LogBlockContainerRefPtr container;
     s = LogBlockContainer::Open(this, dir, &result->report, container_name, &container);
     if (s.IsAborted()) {
-      // Skip the container. Open() added a record of it to 'data_dir_result->report' for us.
+      // Skip the container. Open() added a record of it to 'result->report' for us.
       continue;
     }
     if (!s.ok()) {
@@ -2533,7 +2521,6 @@ void LogBlockManager::OpenDataDir(DataDir* dir,
 void LogBlockManager::LoadRecords(DataDir* dir,
                                   LogBlockContainerRefPtr container,
                                   const scoped_refptr<internal::LogContainerLoadResult>& result) {
-  MonoTime start_time = MonoTime::Now();
   // Process the records, building a container-local map for live blocks and
   // a list of dead blocks.
   //
@@ -2664,7 +2651,6 @@ void LogBlockManager::LoadRecords(DataDir* dir,
     }
     int64_t cleanup_threshold_size = container->live_bytes_aligned() *
         (1 + FLAGS_log_container_excess_space_before_cleanup_fraction);
-    LOG(INFO) << data_filename << " : " << reported_size << " : " << cleanup_threshold_size;
     if (reported_size > cleanup_threshold_size) {
       result->report.full_container_space_check->entries.emplace_back(
           container->ToString(), reported_size - container->live_bytes_aligned());
@@ -2673,9 +2659,8 @@ void LogBlockManager::LoadRecords(DataDir* dir,
       // its blocks. The report entry remains, however, so it's clear that
       // there was a space discrepancy.
       if (container->live_blocks()) {
-        result->need_repunching_blocks.insert(
-            result->need_repunching_blocks.end(),
-            dead_blocks.begin(), dead_blocks.end());
+        result->need_repunching_blocks.insert(result->need_repunching_blocks.end(),
+                                              dead_blocks.begin(), dead_blocks.end());
       }
     }
 
@@ -2685,13 +2670,6 @@ void LogBlockManager::LoadRecords(DataDir* dir,
   result->report.stats.live_block_bytes_aligned += container->live_bytes_aligned();
   result->report.stats.live_block_count += container->live_blocks();
   result->report.stats.lbm_container_count++;
-
-  // Log number of containers opened every 10 seconds
-  MonoTime now = MonoTime::Now();
-  if ((now - start_time).ToSeconds() > 10) {
-    LOG(INFO) << Substitute("Opened $0 log block containers in $1",
-                            result->report.stats.lbm_container_count, dir->dir());
-  }
 
   next_block_id_.StoreMax(max_block_id + 1);
 
@@ -2709,22 +2687,27 @@ void LogBlockManager::LoadRecords(DataDir* dir,
 
   mem_tracker_->Consume(mem_usage);
 
+  int64_t container_count = 0;
   {
     std::lock_guard<simple_spinlock> l(lock_);
     AddNewContainerUnlocked(container);
     MakeContainerAvailableUnlocked(std::move(container));
+    container_count = all_containers_by_name_.size();
+  }
+
+  // Log every 200 number of log block containers
+  if (container_count % 200 == 0) {
+    LOG(INFO) << Substitute("Opened $0 log block containers in $1",
+                            container_count, dir->dir());
   }
 }
 
 void LogBlockManager::RepairTask(DataDir* dir, internal::LogContainerLoadResult* result) {
-  LOG(INFO) << result->report.ToString();
-  LOG(INFO) << result->need_repunching_blocks.size();
   result->status = Repair(dir,
                           &result->report,
                           std::move(result->need_repunching_blocks),
                           std::move(result->dead_containers),
                           std::move(result->low_live_block_containers));
-  LOG(INFO) << result->report.ToString();
 }
 
 #define RETURN_NOT_OK_LBM_DISK_FAILURE_PREPEND(status_expr, msg) do { \

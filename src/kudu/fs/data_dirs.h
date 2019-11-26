@@ -138,11 +138,12 @@ struct DataDirMetrics {
   scoped_refptr<AtomicGauge<uint64_t>> data_dirs_full;
 };
 
-struct ContainerLoadResult: public RefCountedThreadSafe<ContainerLoadResult> {
+// Data in a directory may be loaded by unit, this struct represent load result of one unit.
+struct LoadResult: public RefCountedThreadSafe<LoadResult> {
   Status status;
   FsReport report;
   
-  virtual ~ContainerLoadResult() {}
+  virtual ~LoadResult() = default;
 };
 
 // Representation of a data directory in use by the block manager.
@@ -170,7 +171,7 @@ class DataDir {
   void WaitOnClosures();
 
   // Allocates a new token for use in token-based task submission. All tokens
-  // must be destroyed before their ThreadPool is destroyed.
+  // must be destroyed before DataDir is destroyed.
   //
   // See ThreadPool::NewToken for more details.
   std::unique_ptr<ThreadPoolToken> NewToken(ThreadPool::ExecutionMode mode);
@@ -208,11 +209,15 @@ class DataDir {
     return available_bytes_;
   }
 
-  void AddLoadResult(const scoped_refptr<ContainerLoadResult>& load_result) {
+  // Data in a directory may be loaded by unit, add load result of one data unit.
+  // Not thread-safe.
+  void AddLoadResult(const scoped_refptr<LoadResult>& load_result) {
     load_results_.push_back(load_result);
   }
 
-  std::vector<scoped_refptr<ContainerLoadResult>> PourOutLoadResults() {
+  // Pour out all load results for further more analysis.
+  // Not thread-safe.
+  std::vector<scoped_refptr<LoadResult>> PourOutLoadResults() {
     return std::move(load_results_);
   }
 
@@ -223,7 +228,7 @@ class DataDir {
   const std::string dir_;
   const std::unique_ptr<PathInstanceMetadataFile> metadata_file_;
   const std::unique_ptr<ThreadPool> pool_;
-  std::vector<scoped_refptr<ContainerLoadResult>> load_results_;
+  std::vector<scoped_refptr<LoadResult>> load_results_;
 
   bool is_shutdown_;
 
