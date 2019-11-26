@@ -141,6 +141,8 @@ struct DataDirMetrics {
 struct ContainerLoadResult: public RefCountedThreadSafe<ContainerLoadResult> {
   Status status;
   FsReport report;
+  
+  virtual ~ContainerLoadResult() {}
 };
 
 // Representation of a data directory in use by the block manager.
