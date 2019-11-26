@@ -475,8 +475,6 @@ class LogBlockManager : public BlockManager {
   // May be null if instantiated without metrics.
   std::unique_ptr<internal::LogBlockManagerMetrics> metrics_;
 
-  const std::unique_ptr<ThreadPool> pool_;
-
   DISALLOW_COPY_AND_ASSIGN(LogBlockManager);
 };
 
