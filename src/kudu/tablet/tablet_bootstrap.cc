@@ -236,7 +236,7 @@ class TabletBootstrap {
 
   // Opens the latest log segments for the Tablet that will allow to rebuild
   // the tablet's soft state. If there are existing log segments in the tablet's
-  // log directly they are moved to a "log-recovery" directory which is deleted
+  // log directory they are moved to a "log-recovery" directory which is deleted
   // when the replay process is completed (as they have been duplicated in the
   // current log directory).
   //
