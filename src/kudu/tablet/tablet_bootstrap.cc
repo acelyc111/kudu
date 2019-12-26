@@ -1057,8 +1057,8 @@ Status TabletBootstrap::HandleEntryPair(const IOContext* io_context, LogEntryPB*
 
 #define RETURN_NOT_OK_REPLAY(ReplayMethodName, io_context, replicate, commit)       \
   RETURN_NOT_OK_PREPEND(ReplayMethodName(io_context, replicate, commit),            \
-                        Substitute(error_fmt, OperationType_Name(op_type), \
-                                   SecureShortDebugString(*(replicate)), \
+                        Substitute(error_fmt, OperationType_Name(op_type),          \
+                                   SecureShortDebugString(*(replicate)),            \
                                    SecureShortDebugString(commit)))
 
   ReplicateMsg* replicate = replicate_entry->mutable_replicate();
