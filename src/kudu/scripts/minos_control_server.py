@@ -21,6 +21,11 @@ known_unhealth_nodes = set()
 default_follower_unavailable_considered_failed_sec = 300    # default value of follower_unavailable_considered_failed_sec
 rebalance_cluster_after_operation = True    # whether to rebalance cluster after operation
 
+def exit_if_failed(status, output):
+    if status != 0:
+        print(output)
+        exit();
+
 def get_minos_type(cluster_name):
     minos_type = 'null'
     minos_clinet_path = None
@@ -53,7 +58,7 @@ def is_cluster_health():
                                               ' 2>/dev/null'
                                               % cluster)
     unhealth_nodes = set()
-    if status == 0 or status == 256:
+    if status == 0:
         ksck_info = json.loads(output)
         for master in ksck_info['master_summaries']:
             if master['health'] != 'HEALTHY':
@@ -119,8 +124,8 @@ def get_tservers_info():
     tservers_info = dict()
     status, output = commands.getstatusoutput('${KUDU_HOME}/kudu tserver list @%s -format=json'
                                               % cluster)
-    if status == 0 or status == 256:
-        tservers_info = json.loads(output)
+    exit_if_failed(status, output)
+    tservers_info = json.loads(output)
     return tservers_info
 
 
@@ -139,6 +144,7 @@ def set_flag(rpc_address, seconds):
     cmd = ('${KUDU_HOME}/kudu tserver set_flag %s follower_unavailable_considered_failed_sec %s'
            % (rpc_address, seconds))
     status, output = commands.getstatusoutput(cmd)
+    exit_if_failed(status, output)
 
 
 def rebalance_cluster(blacklist_tserver_uuid):
@@ -192,6 +198,7 @@ for task in tasks:
         cmd = ('%s/deploy show kudu %s --job %s --task %d'
           % (minos_client_path, cluster, job, task))
         status, output = commands.getstatusoutput(cmd)
+        exit_if_failed(status, output)
         print(output)
         hostname = parse_node_from_minos_output(output, job)
         rpc_address, uuid = get_tablet_server_info(hostname, tservers_info)
@@ -203,6 +210,7 @@ for task in tasks:
     cmd = ('%s/deploy %s kudu %s --job %s --task %d --skip_confirm %s'
           % (minos_client_path, operate, cluster, job, task, flags))
     status, output = commands.getstatusoutput(cmd)
+    exit_if_failed(status, output)
     print(output)
     if operate == 'stop':
         known_unhealth_nodes.add(parse_node_from_minos_output(output, job))
