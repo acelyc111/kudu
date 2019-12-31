@@ -19,7 +19,7 @@
 
 #include "kudu/collector/collector_util.h"
 
-#include <stddef.h>
+#include <cstddef>
 
 #include <gflags/gflags_declare.h>
 

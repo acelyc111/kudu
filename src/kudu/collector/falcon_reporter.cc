@@ -17,10 +17,8 @@
 
 #include "kudu/collector/falcon_reporter.h"
 
-#include <kudu/util/curl_util.h>
-#include <stddef.h>
-
 #include <algorithm>
+#include <cstddef>
 #include <functional>
 #include <iterator>
 #include <mutex>
@@ -32,6 +30,7 @@
 #include <glog/logging.h>
 
 #include "kudu/gutil/strings/substitute.h"
+#include "kudu/util/curl_util.h"
 #include "kudu/util/debug/trace_event.h"
 #include "kudu/util/faststring.h"
 #include "kudu/util/jsonwriter.h"
@@ -49,17 +48,17 @@ DEFINE_string(collector_falcon_agent, "http://127.0.0.1:1988/v1/push",
 DEFINE_int32(collector_falcon_metrics_version, 4,
              "Version of metrics pushed to falcon, it will be tagged in "
              "'tag' section of an item");
-DEFINE_int32(collector_falcon_pusher_count, 4,
-             "Thread count to push collected items to falcon agent");
-DEFINE_int32(collector_report_batch_size, 1000,
-            "Count of items will be pushed to falcon agent by batch");
-DEFINE_int32(collector_push_timeout_ms, 20,
-             "Timeout for pushing items to falcon agent");
+DEFINE_uint32(collector_falcon_pusher_count, 4,
+              "Thread count to push collected items to falcon agent");
+DEFINE_uint32(collector_report_batch_size, 1000,
+             "Count of items will be pushed to falcon agent by batch");
+DEFINE_uint32(collector_push_timeout_ms, 20,
+              "Timeout for pushing items to falcon agent");
 
 DECLARE_string(collector_cluster_name);
-DECLARE_int32(collector_interval_sec);
-DECLARE_int32(collector_timeout_sec);
-DECLARE_int32(collector_warn_threshold_ms);
+DECLARE_uint32(collector_interval_sec);
+DECLARE_uint32(collector_timeout_sec);
+DECLARE_uint32(collector_warn_threshold_ms);
 
 using std::list;
 using std::string;
@@ -214,7 +213,8 @@ Status FalconReporter::PushToAgent(list<scoped_refptr<ItemBase>> falcon_items) {
   EasyCurl curl;
   faststring dst;
   curl.set_timeout(MonoDelta::FromMilliseconds(FLAGS_collector_push_timeout_ms));
-  RETURN_NOT_OK(curl.PostToURL(FLAGS_collector_falcon_agent, data, &dst));
+  RETURN_NOT_OK_PREPEND(curl.PostToURL(FLAGS_collector_falcon_agent, data, &dst),
+      Substitute("Failed to pushed items to agent, size $0", data.size()));
   TRACE(Substitute("Pushed items to agent, size $0", data.size()));
   return Status::OK();
 }

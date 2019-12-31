@@ -18,11 +18,11 @@
 
 #include <cstdint>
 #include <list>
-#include <map>
 #include <memory>
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <gtest/gtest_prod.h>
@@ -70,15 +70,23 @@ class MetricsCollector : public RefCounted<MetricsCollector> {
   FRIEND_TEST(TestMetricsCollector, TestMergeToTableLevelMetrics);
   FRIEND_TEST(TestMetricsCollector, TestMergeToClusterLevelMetrics);
   FRIEND_TEST(TestMetricsCollector, TestParseMetrics);
+  FRIEND_TEST(TestMetricsCollector, TestParseTypesOfMetrics);
   FRIEND_TEST(TestMetricsCollector, TestInitMetrics);
   FRIEND_TEST(TestMetricsCollector, TestInitFilters);
   FRIEND_TEST(TestMetricsCollector, TestInitMetricsUrlParameters);
   FRIEND_TEST(TestMetricsCollector, TestInitClusterLevelMetrics);
 
+  // Metric name --> value, metric is in type of GAUGE or COUNTER.
   typedef std::unordered_map<std::string, int64_t> Metrics;
+  // Table name --> metric name-value pairs.
   typedef std::unordered_map<std::string, Metrics> TablesMetrics;
+
+  // Simple struct to collect histogram metrics.
   struct SimpleHistogram {
+    // 'total_count' value in histogram metric.
     int64_t count;
+    // 'percentile_xxx" value in histogram metric, percentile_xxx is specified
+    // by kRegisterPercentiles.
     int64_t value;
     SimpleHistogram(int64_t c, int64_t v) : count(c), value(v) {
     }
@@ -86,27 +94,37 @@ class MetricsCollector : public RefCounted<MetricsCollector> {
       return count == rhs.count && value == rhs.value;
     }
   };
-
+  // Metric name --> SimpleHistogram, metric is in type of HISTOGRAM.
   typedef std::unordered_map<std::string, std::vector<SimpleHistogram>> HistMetrics;
+  // Table name --> metric name-struct pairs.
   typedef std::unordered_map<std::string, HistMetrics> TablesHistMetrics;
 
+  // Metric name --> type, where type is in 'COUNTER', 'GAUGE' and 'HISTOGRAM'.
   typedef std::unordered_map<std::string, std::string> MetricTypes;
 
   Status InitMetrics();
+  enum class NodeType {
+    kMaster = 0,
+    kTServer = 1,
+  };
+  Status InitMetricsFromNode(NodeType node_type, MetricTypes* metric_types) const;
   static Status ExtractMetricTypes(const JsonReader& r,
                                    const rapidjson::Value* entity,
                                    MetricTypes* metric_types);
   Status InitFilters();
   Status InitMetricsUrlParameters();
+  Status InitHostTableLevelMetrics();
   Status InitClusterLevelMetrics();
 
   Status StartMetricCollectorThread();
   void MetricCollectorThread();
-  Status CollectAndReportMetrics();
+  Status CollectAndReportMasterMetrics();
+  Status CollectAndReportTServerMetrics();
 
   Status UpdateThreadPool(int32_t thread_count);
 
-  Status CollectAndReportHostLevelMetrics(const std::string& url,
+  Status CollectAndReportHostLevelMetrics(NodeType node_type,
+                                          const std::string& url,
                                           TablesMetrics* metrics_by_table_name,
                                           TablesHistMetrics* hist_metrics_by_table_name);
 
@@ -152,26 +170,33 @@ class MetricsCollector : public RefCounted<MetricsCollector> {
   static Status GetMetrics(const std::string& url, std::string* resp);
 
   // Parse metrics from http response, entities may be in different types.
-  Status ParseMetrics(const std::string& data,
+  Status ParseMetrics(NodeType node_type,
+                      const std::string& data,
                       TablesMetrics* metrics_by_table_name,
                       Metrics* host_metrics,
                       TablesHistMetrics* hist_metrics_by_table_name,
                       HistMetrics* host_hist_metrics);
-  static Status ParseServerMetrics(const JsonReader& r,
-                                   const rapidjson::Value* entity);
+  Status ParseServerMetrics(const JsonReader& r,
+                            const rapidjson::Value* entity,
+                            Metrics* host_metrics,
+                            HistMetrics* host_hist_metrics) const;
   Status ParseTableMetrics(const JsonReader& r,
                            const rapidjson::Value* entity,
                            TablesMetrics* metrics_by_table_name,
                            Metrics* host_metrics,
                            TablesHistMetrics* hist_metrics_by_table_name,
                            HistMetrics* host_hist_metrics) const;
-  static Status ParseTabletMetrics(const JsonReader& r,
-                                   const rapidjson::Value* entity);
+  Status ParseCatalogMetrics(const JsonReader& r,
+                             const rapidjson::Value* entity,
+                             Metrics* tablet_metrics,
+                             HistMetrics* tablet_hist_metrics) const;
+  Status ParseEntityMetrics(const JsonReader& r,
+                            const rapidjson::Value* entity,
+                            Metrics* kv_metrics,
+                            Metrics* merged_kv_metrics,
+                            HistMetrics* hist_metrics,
+                            HistMetrics* merged_hist_metrics) const;
 
-  // Return true when this entity could be filtered.
-  // When server side support attributes filter, this function has no effect.
-  bool FilterByAttribute(const JsonReader& r,
-                         const rapidjson::Value* entity) const;
   Status GetNumberMetricValue(const rapidjson::Value* metric,
                               const std::string& metric_name,
                               int64_t* result) const;
@@ -187,11 +212,12 @@ class MetricsCollector : public RefCounted<MetricsCollector> {
   scoped_refptr<NodesChecker> nodes_checker_;
   scoped_refptr<ReporterBase> reporter_;
 
-  std::map<std::string, MetricTypes> metric_types_by_entity_type_;
+  MetricTypes metric_types_;
   // Attribute filter, attributes not in this map will be filtered if it's not empty.
   // attribute name ---> attribute values
   std::unordered_map<std::string, std::set<std::string>> attributes_filter_;
   std::string metric_url_parameters_;
+  std::unordered_set<std::string> hosttable_metrics_;
   Metrics cluster_metrics_;
 
   CountDownLatch stop_background_threads_latch_;

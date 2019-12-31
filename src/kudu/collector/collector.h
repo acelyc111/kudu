@@ -56,7 +56,7 @@ class Collector {
   Status StartExcessLogFileDeleterThread();
   void ExcessLogFileDeleterThread();
 
-  static Status ValidateIntervalAndTimeout(int interval, int timeout);
+  static Status ValidateFlags();
 
   bool initialized_;
 

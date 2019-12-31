@@ -25,6 +25,11 @@ KUDU_CLUSTER_ID = 37613
 KUDU_TABLES_ID = 37638
 KUDU_TSERVER_ID = 37639
 KUDU_SYS_ID = 37640
+KUDU_SERVER_TSERVER = 40185
+KUDU_SERVER_MASTER = 40186
+KUDU_MASTER_CATALOG = 40207
+KUDU_NODES_HEALTHY = 40229
+KUDU_TSERVER_TABLET_DISTRIBUTION = 40258
 screenIdList = {
     KUDU_CLUSTER_ID: "[cluster]",
     KUDU_TABLES_ID: [
@@ -41,7 +46,13 @@ screenIdList = {
         "[metrics_u]",
         "[metrics_tw]"],
     KUDU_TSERVER_ID: "[tserver]",
-    KUDU_SYS_ID: "[server-sys]"}
+    KUDU_SYS_ID: "[server-sys]",
+    KUDU_SERVER_TSERVER: "[server_tserver]",
+    KUDU_SERVER_MASTER: "[server_master]",
+    KUDU_MASTER_CATALOG: "[master_catalog]",
+    KUDU_NODES_HEALTHY: "[nodes_healthy]",
+    KUDU_TSERVER_TABLET_DISTRIBUTION: "[host_table_distribution]"
+}
 # kuduScreenId = 351
 sessionId = ""
 metaPort = ""
@@ -185,7 +196,6 @@ def parse_lines(file_name):
 # return: screenConfigs
 def prepare_screen_config(
         clusterName,
-        templateName,
         screenTemplateFile,
         tableListFile,
         masterListFile,
@@ -276,7 +286,7 @@ def prepare_screen_config(
                     "ERROR: bad json: [details][%s][graphs][%s]: [counters] should be provided as non-empty list/dict" %
                     (screen, title))
                 sys.exit(1)
-            for counter in templateJson[counters["template"] if counters.has_key("template") else templateName]:
+            for counter in templateJson[counters["template"]]:
                 newCounters.append(
                     counter.replace(
                         "${cluster.name}",
@@ -550,31 +560,30 @@ if __name__ == '__main__':
             sys.argv[0])
         sys.exit(1)
 
-    if len(sys.argv) != 7:
+    if len(sys.argv) != 6:
         print(
-            "USAGE: python %s <cluster_name> <template_name> <screen_template_file> <master_list_file> <tserver_list_file> <table_list_file>" %
+            "USAGE: python %s <cluster_name> <screen_template_file> <master_list_file> <tserver_list_file> <table_list_file>" %
             sys.argv[0])
         sys.exit(1)
 
     clusterName = sys.argv[1]
-    templateName = sys.argv[2]
-    screenTemplateFile = sys.argv[3]
-    masterListFile = sys.argv[4]
-    tserverListFile = sys.argv[5]
-    tableListFile = sys.argv[6]
+    screenTemplateFile = sys.argv[2]
+    masterListFile = sys.argv[3]
+    tserverListFile = sys.argv[4]
+    tableListFile = sys.argv[5]
+
+    screenConfigs = prepare_screen_config(
+        clusterName,
+        screenTemplateFile,
+        tableListFile,
+        masterListFile,
+        tserverListFile)
 
     login()
 
     for scrid, scrNames in screenIdList.items():
         oldKuduScreens = get_kudu_screens(scrid)
         oldScreenName2Id = {}
-        screenConfigs = prepare_screen_config(
-            clusterName,
-            templateName,
-            screenTemplateFile,
-            tableListFile,
-            masterListFile,
-            tserverListFile)
         for oldScreen in oldKuduScreens:
             oldScreenName2Id[oldScreen['name']] = oldScreen['id']
         if scrid == KUDU_TABLES_ID:

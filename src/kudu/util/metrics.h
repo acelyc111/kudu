@@ -1243,6 +1243,7 @@ class FunctionGauge : public Gauge {
   // This should be used during destruction. If you want a settable
   // Gauge, use a normal Gauge instead of a FunctionGauge.
   void DetachToConstant(T v) {
+    UpdateModificationEpoch();
     std::lock_guard<simple_spinlock> l(lock_);
     function_ = [v]() { return v; };
   }

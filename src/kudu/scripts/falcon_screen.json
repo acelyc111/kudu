@@ -1,3 +1,4 @@
+
 {
   "comments": [
     {
@@ -16,9 +17,7 @@
   ],
   "version": "20180827",
   "counter_templates": {
-      "full": [
-          "metric=kudu-tserver-health service=kudu cluster=${cluster.name} level=${level} v=4",
-          "metric=kudu-table-health service=kudu cluster=${cluster.name} level=${level} v=4",
+      "tablet_metrics": [
           "metric=all_transactions_inflight service=kudu cluster=${cluster.name} level=${level} v=4",
           "metric=alter_schema_transactions_inflight service=kudu cluster=${cluster.name} level=${level} v=4",
           "metric=average_diskrowset_height service=kudu cluster=${cluster.name} level=${level} v=4",
@@ -45,6 +44,7 @@
           "metric=key_file_lookups_per_op_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
           "metric=key_file_lookups service=kudu cluster=${cluster.name} level=${level} v=4",
           "metric=leader_memory_pressure_rejections service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=live_row_count service=kudu cluster=${cluster.name} level=${level} v=4",
           "metric=log_append_latency_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
           "metric=log_bytes_logged service=kudu cluster=${cluster.name} level=${level} v=4",
           "metric=log_cache_num_ops service=kudu cluster=${cluster.name} level=${level} v=4",
@@ -69,7 +69,6 @@
           "metric=op_prepare_run_time_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
           "metric=ops_behind_leader service=kudu cluster=${cluster.name} level=${level} v=4",
           "metric=raft_term service=kudu cluster=${cluster.name} level=${level} v=4",
-          "metric=replica_count service=kudu cluster=${cluster.name} level=${level} v=4",
           "metric=rows_deleted service=kudu cluster=${cluster.name} level=${level} v=4",
           "metric=rows_inserted service=kudu cluster=${cluster.name} level=${level} v=4",
           "metric=rows_updated service=kudu cluster=${cluster.name} level=${level} v=4",
@@ -96,6 +95,19 @@
           "metric=write_op_duration_client_propagated_consistency_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
           "metric=write_op_duration_commit_wait_consistency_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
           "metric=write_transactions_inflight service=kudu cluster=${cluster.name} level=${level} v=4"
+      ],
+      "master_health": [
+          "metric=kudu-master-health service=kudu cluster=${cluster.name} level=host v=4"
+      ],
+      "tserver_health": [
+          "metric=kudu-tserver-health service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=merged_entities_count_of_tablet service=kudu cluster=${cluster.name} level=host v=4"
+      ],
+      "table_health": [
+          "metric=kudu-table-health service=kudu cluster=${cluster.name} level=table v=4"
+      ],
+      "host_table_distribution": [
+          "metric=merged_entities_count_of_tablet service=kudu cluster=${cluster.name} level=host_table v=4"
       ],
       "table_ab": [
         "metric=all_transactions_inflight service=kudu cluster=${cluster.name} level=${level} v=4",
@@ -200,9 +212,6 @@
         "metric=write_op_duration_commit_wait_consistency_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
         "metric=write_transactions_inflight service=kudu cluster=${cluster.name} level=${level} v=4"
       ],
-      "replica_count" : [
-          "metric=replica_count service=kudu cluster=${cluster.name} level=${level} v=4"
-      ],
       "cluster" : [
           "metric=kudu.success service=kudu level=${level}",
           "metric=kudu.writeLatency service=kudu level=${level}",
@@ -217,6 +226,227 @@
         "metric=replicas_count service=kudu cluster=${cluster.name} level=${level} v=4",
         "metric=on_disk_size service=kudu cluster=${cluster.name} level=${level} v=4",
         "metric=on_disk_data_size service=kudu cluster=${cluster.name} level=${level} v=4"
+      ],
+      "server_master": [
+          "metric=block_cache_evictions service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_cache_hits_caching service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_cache_hits service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_cache_inserts service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_cache_lookups service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_cache_misses_caching service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_cache_misses service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_cache_usage service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_manager_blocks_open_reading service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_manager_blocks_open_writing service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_manager_total_blocks_created service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_manager_total_blocks_deleted service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_manager_total_bytes_read service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_manager_total_bytes_written service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_manager_total_disk_sync service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_manager_total_readable_blocks service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_manager_total_writable_blocks service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=cluster_replica_skew service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=code_cache_hits service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=code_cache_queries service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=cpu_stime service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=cpu_utime service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=data_dirs_failed service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=data_dirs_full service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=file_cache_evictions service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=file_cache_hits_caching service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=file_cache_hits service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=file_cache_inserts service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=file_cache_lookups service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=file_cache_misses_caching service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=file_cache_misses service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=file_cache_usage service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=generic_current_allocated_bytes service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=generic_heap_size service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=glog_error_messages service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=glog_info_messages service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=glog_warning_messages service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_consensus_ConsensusService_BulkChangeConfig_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_consensus_ConsensusService_ChangeConfig_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_consensus_ConsensusService_GetConsensusState_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_consensus_ConsensusService_GetLastOpId_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_consensus_ConsensusService_GetNodeInstance_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_consensus_ConsensusService_LeaderStepDown_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_consensus_ConsensusService_RequestConsensusVote_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_consensus_ConsensusService_RunLeaderElection_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_consensus_ConsensusService_StartTabletCopy_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_consensus_ConsensusService_UnsafeChangeConfig_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_consensus_ConsensusService_UpdateConsensus_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_master_MasterService_AlterTable_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_master_MasterService_ChangeTServerState_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_master_MasterService_ConnectToMaster_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_master_MasterService_CreateTable_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_master_MasterService_DeleteTable_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_master_MasterService_GetMasterRegistration_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_master_MasterService_GetTableLocations_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_master_MasterService_GetTableSchema_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_master_MasterService_GetTableStatistics_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_master_MasterService_GetTabletLocations_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_master_MasterService_IsAlterTableDone_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_master_MasterService_IsCreateTableDone_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_master_MasterService_ListMasters_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_master_MasterService_ListTables_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_master_MasterService_ListTabletServers_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_master_MasterService_Ping_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_master_MasterService_ReplaceTablet_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_master_MasterService_ResetAuthzCache_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_master_MasterService_TSHeartbeat_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_server_GenericService_CheckLeaks_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_server_GenericService_DumpMemTrackers_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_server_GenericService_FlushCoverage_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_server_GenericService_GetFlags_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_server_GenericService_GetStatus_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_server_GenericService_ServerClock_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_server_GenericService_SetFlag_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_server_GenericService_SetServerWallClockForTests_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_tserver_TabletCopyService_BeginTabletCopySession_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_tserver_TabletCopyService_CheckSessionActive_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_tserver_TabletCopyService_EndTabletCopySession_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_tserver_TabletCopyService_FetchData_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=hybrid_clock_error service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=hybrid_clock_timestamp service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=involuntary_context_switches service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=log_block_manager_blocks_under_management service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=log_block_manager_bytes_under_management service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=log_block_manager_containers service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=log_block_manager_dead_containers_deleted service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=log_block_manager_full_containers service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=log_block_manager_holes_punched service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=op_apply_queue_length_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=op_apply_queue_time_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=op_apply_run_time_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=reactor_active_latency_us_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=reactor_load_percent_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=rpc_connections_accepted service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=rpc_incoming_queue_time_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=rpcs_queue_overflow service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=rpcs_timed_out_in_queue service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=spinlock_contention_time service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=tablet_copy_bytes_sent service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=tablet_copy_open_source_sessions service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=tcmalloc_current_total_thread_cache_bytes service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=tcmalloc_max_total_thread_cache_bytes service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=tcmalloc_pageheap_free_bytes service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=tcmalloc_pageheap_unmapped_bytes service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=threads_running service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=threads_started service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=voluntary_context_switches service=kudu cluster=${cluster.name} level=host v=4"
+      ],
+      "server_tserver": [
+          "metric=active_scanners service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_cache_evictions service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_cache_hits_caching service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_cache_hits service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_cache_inserts service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_cache_lookups service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_cache_misses_caching service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_cache_misses service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_cache_usage service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_manager_blocks_open_reading service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_manager_blocks_open_writing service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_manager_total_blocks_created service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_manager_total_blocks_deleted service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_manager_total_bytes_read service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_manager_total_bytes_written service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_manager_total_disk_sync service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_manager_total_readable_blocks service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=block_manager_total_writable_blocks service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=code_cache_hits service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=code_cache_queries service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=cpu_stime service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=cpu_utime service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=data_dirs_failed service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=data_dirs_full service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=file_cache_evictions service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=file_cache_hits_caching service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=file_cache_hits service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=file_cache_inserts service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=file_cache_lookups service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=file_cache_misses_caching service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=file_cache_misses service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=file_cache_usage service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=generic_current_allocated_bytes service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=generic_heap_size service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=glog_error_messages service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=glog_info_messages service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=glog_warning_messages service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_consensus_ConsensusService_BulkChangeConfig_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_consensus_ConsensusService_ChangeConfig_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_consensus_ConsensusService_GetConsensusState_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_consensus_ConsensusService_GetLastOpId_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_consensus_ConsensusService_GetNodeInstance_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_consensus_ConsensusService_LeaderStepDown_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_consensus_ConsensusService_RequestConsensusVote_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_consensus_ConsensusService_RunLeaderElection_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_consensus_ConsensusService_StartTabletCopy_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_consensus_ConsensusService_UnsafeChangeConfig_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_consensus_ConsensusService_UpdateConsensus_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_server_GenericService_CheckLeaks_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_server_GenericService_DumpMemTrackers_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_server_GenericService_FlushCoverage_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_server_GenericService_GetFlags_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_server_GenericService_GetStatus_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_server_GenericService_ServerClock_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_server_GenericService_SetFlag_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_server_GenericService_SetServerWallClockForTests_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_tserver_TabletCopyService_BeginTabletCopySession_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_tserver_TabletCopyService_CheckSessionActive_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_tserver_TabletCopyService_EndTabletCopySession_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_tserver_TabletCopyService_FetchData_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_tserver_TabletServerAdminService_AlterSchema_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_tserver_TabletServerAdminService_CreateTablet_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_tserver_TabletServerAdminService_DeleteTablet_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_tserver_TabletServerService_Checksum_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_tserver_TabletServerService_ListTablets_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_tserver_TabletServerService_Ping_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_tserver_TabletServerService_ScannerKeepAlive_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_tserver_TabletServerService_Scan_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_tserver_TabletServerService_SplitKeyRange_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=handler_latency_kudu_tserver_TabletServerService_Write_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=hybrid_clock_error service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=hybrid_clock_timestamp service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=involuntary_context_switches service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=log_block_manager_blocks_under_management service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=log_block_manager_bytes_under_management service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=log_block_manager_containers service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=log_block_manager_dead_containers_deleted service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=log_block_manager_full_containers service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=log_block_manager_holes_punched service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=op_apply_queue_length_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=op_apply_queue_time_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=op_apply_run_time_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=reactor_active_latency_us_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=reactor_load_percent_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=rpc_connections_accepted service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=rpc_incoming_queue_time_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=rpcs_queue_overflow service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=rpcs_timed_out_in_queue service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=scanner_duration_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=scanners_expired service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=spinlock_contention_time service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=tablet_copy_bytes_fetched service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=tablet_copy_bytes_sent service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=tablet_copy_open_client_sessions service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=tablet_copy_open_source_sessions service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=tablets_num_bootstrapping service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=tablets_num_failed service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=tablets_num_initialized service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=tablets_num_not_initialized service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=tablets_num_running service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=tablets_num_shutdown service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=tablets_num_stopped service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=tablets_num_stopping service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=tcmalloc_current_total_thread_cache_bytes service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=tcmalloc_max_total_thread_cache_bytes service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=tcmalloc_pageheap_free_bytes service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=tcmalloc_pageheap_unmapped_bytes service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=threads_running service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=threads_started service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=voluntary_context_switches service=kudu cluster=${cluster.name} level=host v=4"
       ],
       "sys" : [
           "cpu.busy",
@@ -535,6 +765,60 @@
       ]
     },
     {
+      "screen": "${cluster.name} [nodes_healthy]",
+      "graphs": [
+        {
+          "title": "tserver健康状态",
+          "endpoints": ["${for.each.tserver}"],
+          "counters": {
+              "level": "host",
+              "template": "tserver_health"
+          },
+          "graph_type": "h",
+          "method": "",
+          "timespan": 86400
+        },
+        {
+          "title": "master健康状态",
+          "endpoints": ["${for.each.master}"],
+          "counters": {
+              "level": "host",
+              "template": "master_health"
+          },
+          "graph_type": "h",
+          "method": "",
+          "timespan": 86400
+        },
+        {
+          "title": "table健康状态",
+          "endpoints": ["${for.each.table}"],
+          "counters": {
+              "level": "table",
+              "template": "table_health"
+          },
+          "graph_type": "h",
+          "method": "",
+          "timespan": 86400
+        }
+      ]
+    },
+    {
+      "screen": "${cluster.name} [host_table_distribution]",
+      "graphs": [
+        {
+          "title": "tserver各表tablet分布",
+          "endpoints": ["${for.each.tserver} ${for.each.table}"],
+          "counters": {
+              "level": "host",
+              "template": "host_table_distribution"
+          },
+          "graph_type": "h",
+          "method": "",
+          "timespan": 86400
+        }
+      ]
+    },
+    {
       "screen": "${cluster.name} [tserver]",
       "graphs": [
         {
@@ -542,7 +826,55 @@
           "endpoints": ["${for.each.tserver}"],
           "counters": {
               "level": "host",
-              "template": "full"
+              "template": "tablet_metrics"
+          },
+          "graph_type": "h",
+          "method": "",
+          "timespan": 86400
+        }
+      ]
+    },
+    {
+      "screen": "${cluster.name} [server_tserver]",
+      "graphs": [
+        {
+          "title": "tserver Kudu服务指标",
+          "endpoints": ["${for.each.tserver}"],
+          "counters": {
+              "level": "host",
+              "template": "server_tserver"
+          },
+          "graph_type": "h",
+          "method": "",
+          "timespan": 86400
+        }
+      ]
+    },
+    {
+      "screen": "${cluster.name} [server_master]",
+      "graphs": [
+        {
+          "title": "master Kudu服务指标",
+          "endpoints": ["${for.each.master}"],
+          "counters": {
+              "level": "host",
+              "template": "server_master"
+          },
+          "graph_type": "h",
+          "method": "",
+          "timespan": 86400
+        }
+      ]
+    },
+    {
+      "screen": "${cluster.name} [master_catalog]",
+      "graphs": [
+        {
+          "title": "master catalog表指标",
+          "endpoints": ["${for.each.master}"],
+          "counters": {
+              "level": "host",
+              "template": "tablet_metrics"
           },
           "graph_type": "h",
           "method": "",

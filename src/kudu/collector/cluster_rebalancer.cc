@@ -17,8 +17,8 @@
 
 #include "kudu/collector/cluster_rebalancer.h"
 
-#include <stdio.h>
-#include <time.h>
+#include <cstdio>
+#include <ctime>
 
 #include <ostream>
 #include <vector>

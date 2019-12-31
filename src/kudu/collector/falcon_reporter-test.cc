@@ -31,7 +31,7 @@
 
 DECLARE_string(collector_cluster_name);
 DECLARE_int32(collector_falcon_metrics_version);
-DECLARE_int32(collector_interval_sec);
+DECLARE_uint32(collector_interval_sec);
 
 using std::list;
 using std::string;

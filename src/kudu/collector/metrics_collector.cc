@@ -17,9 +17,9 @@
 
 #include "kudu/collector/metrics_collector.h"
 
-#include <string.h>
-
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <list>
 #include <ostream>
@@ -59,27 +59,27 @@ DEFINE_string(collector_attributes, "",
 DEFINE_string(collector_cluster_level_metrics, "on_disk_size,on_disk_data_size",
               "Metric names which should be merged and pushed to cluster level view "
               "(comma-separated list of metric names)");
-DEFINE_bool(collector_ignore_hosttable_level_metrics, false,
-            "Whether to ignore to report host-table level metrics.");
+DEFINE_string(collector_hosttable_level_metrics, "merged_entities_count_of_tablet",
+              "Host-table level metrics need to report (comma-separated list of metric names).");
 DEFINE_string(collector_metrics, "",
               "Metrics to collect (comma-separated list of metric names)");
 DEFINE_string(collector_metrics_types_for_test, "",
-              "Only for test, used to initialize metric_types_by_entity_type_");
+              "Only for test, used to initialize metric_types_");
 DEFINE_bool(collector_request_merged_metrics, true,
             "Whether to request merged metrics and exclude unmerged metrics from server");
 
 DECLARE_string(collector_cluster_name);
-DECLARE_int32(collector_interval_sec);
-DECLARE_int32(collector_timeout_sec);
-DECLARE_int32(collector_warn_threshold_ms);
+DECLARE_uint32(collector_interval_sec);
+DECLARE_uint32(collector_timeout_sec);
+DECLARE_uint32(collector_warn_threshold_ms);
 
 using rapidjson::Value;
 using std::list;
-using std::map;
 using std::set;
 using std::string;
 using std::vector;
 using std::unordered_map;
+using std::unordered_set;
 using strings::Substitute;
 
 namespace kudu {
@@ -105,6 +105,7 @@ Status MetricsCollector::Init() {
   RETURN_NOT_OK(InitMetrics());
   RETURN_NOT_OK(InitFilters());
   RETURN_NOT_OK(InitMetricsUrlParameters());
+  RETURN_NOT_OK(InitHostTableLevelMetrics());
   RETURN_NOT_OK(InitClusterLevelMetrics());
 
   initialized_ = true;
@@ -147,7 +148,8 @@ void MetricsCollector::MetricCollectorThread() {
   MonoTime collect_time;
   do {
     collect_time = MonoTime::Now();
-    WARN_NOT_OK(CollectAndReportMetrics(), "Unable to collect metrics");
+    WARN_NOT_OK(CollectAndReportTServerMetrics(), "Unable to collect tserver metrics");
+    WARN_NOT_OK(CollectAndReportMasterMetrics(), "Unable to collect master metrics");
     collect_time += MonoDelta::FromSeconds(FLAGS_collector_interval_sec);
   } while (!RunOnceMode() && !stop_background_threads_latch_.WaitUntil(collect_time));
   LOG(INFO) << "MetricCollectorThread exit";
@@ -175,41 +177,61 @@ Status MetricsCollector::UpdateThreadPool(int32_t thread_count) {
 }
 
 Status MetricsCollector::InitMetrics() {
+  MetricTypes metric_types;
+  InitMetricsFromNode(NodeType::kMaster, &metric_types);
+
+  MetricTypes tserver_metric_types;
+  InitMetricsFromNode(NodeType::kTServer, &tserver_metric_types);
+
+  // TODO(yingchun): check values in debug mode.
+  for (const auto& metric_type : tserver_metric_types) {
+    const auto* type = FindOrNull(metric_types, metric_type.first);
+    if (type) {
+      CHECK_EQ(*type, metric_type.second);
+    } else {
+      EmplaceOrDie(&metric_types, std::make_pair(metric_type.first, metric_type.second));
+    }
+  }
+
+  metric_types_.swap(metric_types);
+  return Status::OK();
+}
+
+Status MetricsCollector::InitMetricsFromNode(NodeType node_type, MetricTypes* metric_types) const {
+  DCHECK(metric_types);
+
   string resp;
   if (PREDICT_TRUE(FLAGS_collector_metrics_types_for_test.empty())) {
+    auto node_addr = node_type == NodeType::kMaster ?
+        nodes_checker_->GetFirstMaster() : nodes_checker_->GetFirstTServer();
     RETURN_NOT_OK(GetMetrics(
-        nodes_checker_->GetFirstMaster() + "/metrics?include_schema=1", &resp));
+        node_addr + "/metrics?include_schema=1&merge_rules=tablet|table|table_name", &resp));
   } else {
     resp = FLAGS_collector_metrics_types_for_test;
   }
+
   JsonReader r(resp);
   RETURN_NOT_OK(r.Init());
   vector<const Value*> entities;
   RETURN_NOT_OK(r.ExtractObjectArray(r.root(), nullptr, &entities));
 
-  map<string, MetricTypes> metric_types_by_entity_type;
-  bool tablet_entity_inited = false;
+  bool table_entity_inited = false;
   bool server_entity_inited = false;
   for (const Value* entity : entities) {
     string entity_type;
     CHECK_OK(r.ExtractString(entity, "type", &entity_type));
-    if (entity_type == "tablet") {
-      if (tablet_entity_inited) continue;
-      EmplaceOrDie(&metric_types_by_entity_type, std::make_pair("tablet", MetricTypes()));
-      auto& tablet_metric_types = FindOrDie(metric_types_by_entity_type, "tablet");
-      ExtractMetricTypes(r, entity, &tablet_metric_types);
-      tablet_entity_inited = true;
+    if (entity_type == "table") {
+      if (table_entity_inited) continue;
+      ExtractMetricTypes(r, entity, metric_types);
+      table_entity_inited = true;
     } else if (entity_type == "server") {
       if (server_entity_inited) continue;
-      EmplaceOrDie(&metric_types_by_entity_type, std::make_pair("server", MetricTypes()));
-      auto& server_metric_types = FindOrDie(metric_types_by_entity_type, "server");
-      ExtractMetricTypes(r, entity, &server_metric_types);
+      ExtractMetricTypes(r, entity, metric_types);
       server_entity_inited = true;
     } else {
       LOG(WARNING) << "unhandled entity type " << entity_type;
     }
   }
-  metric_types_by_entity_type_.swap(metric_types_by_entity_type);
   return Status::OK();
 }
 
@@ -260,7 +282,6 @@ Status MetricsCollector::InitMetricsUrlParameters() {
                   "want collector work well";
   }
 
-  // TODO(yingchun) This is supported since version 1.10
   if (!attributes_filter_.empty()) {
     metric_url_parameters_ += "&attributes=";
   }
@@ -269,6 +290,13 @@ Status MetricsCollector::InitMetricsUrlParameters() {
       metric_url_parameters_ += Substitute("$0,$1,", attribute_filter.first, value);
     }
   }
+  return Status::OK();
+}
+
+Status MetricsCollector::InitHostTableLevelMetrics() {
+  unordered_set<string> hosttable_metrics(
+      Split(FLAGS_collector_hosttable_level_metrics, ",", strings::SkipEmpty()));
+  hosttable_metrics_.swap(hosttable_metrics);
   return Status::OK();
 }
 
@@ -283,14 +311,52 @@ Status MetricsCollector::InitClusterLevelMetrics() {
   return Status::OK();
 }
 
-Status MetricsCollector::CollectAndReportMetrics() {
-  LOG(INFO) << "Start to CollectAndReportMetrics";
+Status MetricsCollector::CollectAndReportMasterMetrics() {
+  LOG(INFO) << "Start to CollectAndReportMasterMetrics";
   MonoTime start(MonoTime::Now());
   scoped_refptr<Trace> trace(new Trace);
   ADOPT_TRACE(trace.get());
-  TRACE_EVENT0("collector", "MetricsCollector::CollectAndReportMetrics");
+  TRACE_EVENT0("collector", "MetricsCollector::CollectAndReportMasterMetrics");
   TRACE("init");
-  vector<string> tserver_http_addrs = nodes_checker_->GetNodes();
+  vector<string> master_http_addrs = nodes_checker_->GetMasters();
+  TRACE("Nodes got");
+  if (master_http_addrs.empty()) {
+    return Status::OK();
+  }
+  RETURN_NOT_OK(UpdateThreadPool(std::max(host_metric_collector_thread_pool_->num_threads(),
+                                          static_cast<int32_t>(master_http_addrs.size()))));
+  for (int i = 0; i < master_http_addrs.size(); ++i) {
+    RETURN_NOT_OK(host_metric_collector_thread_pool_->SubmitFunc(
+      std::bind(&MetricsCollector::CollectAndReportHostLevelMetrics,
+                this,
+                NodeType::kMaster,
+                master_http_addrs[i] + metric_url_parameters_,
+                nullptr,
+                nullptr)));
+  }
+  TRACE("Thead pool jobs submitted");
+  host_metric_collector_thread_pool_->Wait();
+  TRACE("Thead pool jobs done");
+
+  int64_t elapsed_ms = (MonoTime::Now() - start).ToMilliseconds();
+  if (elapsed_ms > FLAGS_collector_warn_threshold_ms) {
+    if (Trace::CurrentTrace()) {
+      LOG(WARNING) << "Trace:" << std::endl
+                   << Trace::CurrentTrace()->DumpToString();
+    }
+  }
+
+  return Status::OK();
+}
+
+Status MetricsCollector::CollectAndReportTServerMetrics() {
+  LOG(INFO) << "Start to CollectAndReportTServerMetrics";
+  MonoTime start(MonoTime::Now());
+  scoped_refptr<Trace> trace(new Trace);
+  ADOPT_TRACE(trace.get());
+  TRACE_EVENT0("collector", "MetricsCollector::CollectAndReportTServerMetrics");
+  TRACE("init");
+  vector<string> tserver_http_addrs = nodes_checker_->GetTServers();
   TRACE("Nodes got");
   if (tserver_http_addrs.empty()) {
     return Status::OK();
@@ -302,6 +368,7 @@ Status MetricsCollector::CollectAndReportMetrics() {
     RETURN_NOT_OK(host_metric_collector_thread_pool_->SubmitFunc(
       std::bind(&MetricsCollector::CollectAndReportHostLevelMetrics,
                 this,
+                NodeType::kTServer,
                 tserver_http_addrs[i] + metric_url_parameters_,
                 &hosts_metrics_by_table_name[i],
                 &hosts_hist_metrics_by_table_name[i])));
@@ -481,26 +548,21 @@ Status MetricsCollector::ConvertStateToInt(const string& value, int64_t* result)
   return Status::OK();
 }
 
-bool MetricsCollector::FilterByAttribute(const JsonReader& r,
-                                         const rapidjson::Value* entity) const {
-  if (attributes_filter_.empty()) {
-    return false;
-  }
-  const Value* attributes;
-  CHECK_OK(r.ExtractObject(entity, "attributes", &attributes));
-  for (const auto& name_values : attributes_filter_) {
-    string value;
-    Status s = r.ExtractString(attributes, name_values.first.c_str(), &value);
-    if (s.ok() && ContainsKey(name_values.second, value)) {
-      return false;
-    }
-  }
-  return true;
-}
+Status MetricsCollector::ParseServerMetrics(const JsonReader& r,
+                                            const rapidjson::Value* entity,
+                                            Metrics* host_metrics,
+                                            HistMetrics* host_hist_metrics) const {
+  CHECK(entity);
+  CHECK(host_metrics);
+  CHECK(host_hist_metrics);
 
-Status MetricsCollector::ParseServerMetrics(const JsonReader& /*r*/,
-                                            const rapidjson::Value* /*entity*/) {
-  return Status::NotSupported("server entity is not supported");
+  string server_type;
+  CHECK_OK(r.ExtractString(entity, "id", &server_type));
+  CHECK(server_type == "kudu.tabletserver" || server_type == "kudu.master");
+
+  CHECK_OK(ParseEntityMetrics(r, entity, host_metrics, nullptr, host_hist_metrics, nullptr));
+
+  return Status::OK();
 }
 
 Status MetricsCollector::ParseTableMetrics(const JsonReader& r,
@@ -509,6 +571,7 @@ Status MetricsCollector::ParseTableMetrics(const JsonReader& r,
                                            Metrics* host_metrics,
                                            TablesHistMetrics* hist_metrics_by_table_name,
                                            HistMetrics* host_hist_metrics) const {
+  CHECK(entity);
   CHECK(metrics_by_table_name);
   CHECK(host_metrics);
   CHECK(hist_metrics_by_table_name);
@@ -525,14 +588,47 @@ Status MetricsCollector::ParseTableMetrics(const JsonReader& r,
   EmplaceOrDie(hist_metrics_by_table_name, std::make_pair(table_name, HistMetrics()));
   auto& table_hist_metrics = FindOrDie(*hist_metrics_by_table_name, table_name);
 
+  CHECK_OK(ParseEntityMetrics(r, entity,
+      &table_metrics, host_metrics, &table_hist_metrics, host_hist_metrics));
+
+  return Status::OK();
+}
+
+Status MetricsCollector::ParseCatalogMetrics(const JsonReader& r,
+                                             const rapidjson::Value* entity,
+                                             Metrics* tablet_metrics,
+                                             HistMetrics* tablet_hist_metrics) const {
+  CHECK(entity);
+  CHECK(tablet_metrics);
+  CHECK(tablet_hist_metrics);
+
+  string tablet_id;
+  CHECK_OK(r.ExtractString(entity, "id", &tablet_id));
+  if (tablet_id != "sys.catalog") {  // Only used to parse 'sys.catalog'.
+    return Status::OK();
+  }
+
+  CHECK_OK(ParseEntityMetrics(r, entity, tablet_metrics, nullptr, tablet_hist_metrics, nullptr));
+
+  return Status::OK();
+}
+
+Status MetricsCollector::ParseEntityMetrics(const JsonReader& r,
+                                            const rapidjson::Value* entity,
+                                            Metrics* kv_metrics,
+                                            Metrics* merged_kv_metrics,
+                                            HistMetrics* hist_metrics,
+                                            HistMetrics* merged_hist_metrics) const {
+  CHECK(entity);
+  CHECK(kv_metrics);
+  CHECK(hist_metrics);
+
   vector<const Value*> metrics;
   CHECK_OK(r.ExtractObjectArray(entity, "metrics", &metrics));
   for (const Value* metric : metrics) {
     string name;
     CHECK_OK(r.ExtractString(metric, "name", &name));
-    const auto* tablet_metric_types = FindOrNull(metric_types_by_entity_type_, "tablet");
-    CHECK(tablet_metric_types);
-    const auto* known_type = FindOrNull(*tablet_metric_types, name);
+    const auto* known_type = FindOrNull(metric_types_, name);
     if (!known_type) {
       LOG(ERROR) << Substitute("metric $0 has unknown type, ignore it", name);
       continue;
@@ -554,10 +650,11 @@ Status MetricsCollector::ParseTableMetrics(const JsonReader& r,
           LOG(FATAL) << "Unknown type, metrics name: " << name;
       }
 
-      EmplaceOrDie(&table_metrics, std::make_pair(name, value));
-      if (!EmplaceIfNotPresent(host_metrics, std::make_pair(name, value))) {
-        auto& host_metric = FindOrDie(*host_metrics, name);
-        host_metric += value;
+      EmplaceOrDie(kv_metrics, std::make_pair(name, value));
+      if (merged_kv_metrics &&
+          !EmplaceIfNotPresent(merged_kv_metrics, std::make_pair(name, value))) {
+        auto& found_metric = FindOrDie(*merged_kv_metrics, name);
+        found_metric += value;
       }
     } else if (*known_type == "HISTOGRAM") {
       for (const auto& percentile : kRegisterPercentiles) {
@@ -568,10 +665,11 @@ Status MetricsCollector::ParseTableMetrics(const JsonReader& r,
         int64_t percentile_value;
         CHECK_OK(r.ExtractInt64(metric, percentile.c_str(), &percentile_value));
         vector<SimpleHistogram> tmp({{total_count, percentile_value}});
-        EmplaceOrDie(&table_hist_metrics, std::make_pair(hist_metric_name, tmp));
-        if (!EmplaceIfNotPresent(host_hist_metrics, std::make_pair(hist_metric_name, tmp))) {
-          auto& host_hist_metric = FindOrDie(*host_hist_metrics, hist_metric_name);
-          host_hist_metric.emplace_back(tmp[0]);
+        EmplaceOrDie(hist_metrics, std::make_pair(hist_metric_name, tmp));
+        if (merged_hist_metrics &&
+            !EmplaceIfNotPresent(merged_hist_metrics, std::make_pair(hist_metric_name, tmp))) {
+          auto& found_hist_metric = FindOrDie(*merged_hist_metrics, hist_metric_name);
+          found_hist_metric.emplace_back(tmp[0]);
         }
       }
     } else {
@@ -582,12 +680,8 @@ Status MetricsCollector::ParseTableMetrics(const JsonReader& r,
   return Status::OK();
 }
 
-Status MetricsCollector::ParseTabletMetrics(const JsonReader& /*r*/,
-                                            const rapidjson::Value* /*entity*/) {
-  return Status::NotSupported("tablet entity is not supported");
-}
-
 Status MetricsCollector::CollectAndReportHostLevelMetrics(
+    NodeType node_type,
     const string& url,
     TablesMetrics* metrics_by_table_name,
     TablesHistMetrics* hist_metrics_by_table_name) {
@@ -597,8 +691,6 @@ Status MetricsCollector::CollectAndReportHostLevelMetrics(
   TRACE_EVENT1("collector", "MetricsCollector::CollectAndReportHostLevelMetrics",
                "url", url);
   TRACE("init");
-  CHECK(metrics_by_table_name);
-  CHECK(hist_metrics_by_table_name);
 
   // Get metrics from server.
   string resp;
@@ -607,14 +699,14 @@ Status MetricsCollector::CollectAndReportHostLevelMetrics(
   // Merge metrics by table and metric type.
   Metrics host_metrics;
   HistMetrics host_hist_metrics;
-  RETURN_NOT_OK(ParseMetrics(resp, metrics_by_table_name, &host_metrics,
+  RETURN_NOT_OK(ParseMetrics(node_type, resp, metrics_by_table_name, &host_metrics,
                              hist_metrics_by_table_name, &host_hist_metrics));
 
   string host_name = ExtractHostName(url);
   auto timestamp = static_cast<uint64_t>(WallTime_Now());
 
   // Host table level.
-  if (!FLAGS_collector_ignore_hosttable_level_metrics) {
+  if (metrics_by_table_name && hist_metrics_by_table_name) {
     RETURN_NOT_OK(ReportHostTableLevelMetrics(host_name, timestamp,
                                               *metrics_by_table_name,
                                               *hist_metrics_by_table_name));
@@ -635,7 +727,8 @@ Status MetricsCollector::CollectAndReportHostLevelMetrics(
   return Status::OK();
 }
 
-Status MetricsCollector::ParseMetrics(const string& data,
+Status MetricsCollector::ParseMetrics(NodeType node_type,
+                                      const string& data,
                                       TablesMetrics* metrics_by_table_name,
                                       Metrics* host_metrics,
                                       TablesHistMetrics* hist_metrics_by_table_name,
@@ -646,19 +739,19 @@ Status MetricsCollector::ParseMetrics(const string& data,
   RETURN_NOT_OK(r.ExtractObjectArray(r.root(), nullptr, &entities));
 
   for (const Value* entity : entities) {
-    if (FilterByAttribute(r, entity)) {
-      continue;
-    }
     string entity_type;
     CHECK_OK(r.ExtractString(entity, "type", &entity_type));
     if (entity_type == "server") {
-      CHECK(ParseServerMetrics(r, entity).IsNotSupported());
+      CHECK_OK(ParseServerMetrics(r, entity, host_metrics, host_hist_metrics));
     } else if (entity_type == "table") {
-      CHECK_OK(ParseTableMetrics(r, entity,
-                                 metrics_by_table_name, host_metrics,
-                                 hist_metrics_by_table_name, host_hist_metrics));
-    } else if (entity_type == "tablet") {
-      CHECK(ParseTabletMetrics(r, entity).IsNotSupported());
+      if (NodeType::kMaster == node_type) {
+        CHECK_OK(ParseCatalogMetrics(r, entity, host_metrics, host_hist_metrics));
+      } else {
+        CHECK(NodeType::kTServer == node_type);
+        CHECK_OK(ParseTableMetrics(r, entity,
+                                   metrics_by_table_name, host_metrics,
+                                   hist_metrics_by_table_name, host_hist_metrics));
+      }
     } else {
       LOG(FATAL) << "Unknown entity_type: " << entity_type;
     }
@@ -681,17 +774,17 @@ void MetricsCollector::CollectMetrics(const string& endpoint,
                                level,
                                timestamp,
                                metric.second,
-                               FindOrDie(metric_types_by_entity_type_["tablet"], metric.first),
+                               metric_types_[metric.first],
                                extra_tags));
   }
 }
 
 void MetricsCollector::CollectMetrics(const string& endpoint,
-                      const HistMetrics& metrics,
-                      const string& level,
-                      uint64_t timestamp,
-                      const string& extra_tags,
-                      list<scoped_refptr<ItemBase>>* items) {
+                                      const HistMetrics& metrics,
+                                      const string& level,
+                                      uint64_t timestamp,
+                                      const string& extra_tags,
+                                      list<scoped_refptr<ItemBase>>* items) {
   for (const auto& metric : metrics) {
     items->emplace_back(
       reporter_->ConstructItem(endpoint,
@@ -714,8 +807,14 @@ Status MetricsCollector::ReportHostTableLevelMetrics(
   int metrics_count = 0;
   for (const auto& table_metrics : metrics_by_table_name) {
     const auto extra_tag = Substitute("table=$0", table_metrics.first);
-    metrics_count += table_metrics.second.size();
-    CollectMetrics(host_name, table_metrics.second, "host_table", timestamp, extra_tag, &items);
+    Metrics filtered_metrics;
+    for (const auto& metric : table_metrics.second) {
+      if (ContainsKey(hosttable_metrics_, metric.first)) {
+        filtered_metrics.insert(metric);
+      }
+    }
+    metrics_count += filtered_metrics.size();
+    CollectMetrics(host_name, filtered_metrics, "host_table", timestamp, extra_tag, &items);
   }
   TRACE(Substitute("Host-table GAUGE/COUNTER type metrics collected, count $0", metrics_count));
 
@@ -723,10 +822,14 @@ Status MetricsCollector::ReportHostTableLevelMetrics(
   int hist_metrics_count = 0;
   for (const auto& table_hist_metrics : hist_metrics_by_table_name) {
     const auto extra_tag = Substitute("table=$0", table_hist_metrics.first);
+    HistMetrics filtered_metrics;
+    for (const auto& metric : table_hist_metrics.second) {
+      if (ContainsKey(hosttable_metrics_, metric.first)) {
+        filtered_metrics.insert(metric);
+      }
+    }
     hist_metrics_count += table_hist_metrics.second.size();
-    CollectMetrics(host_name, table_hist_metrics.second,
-                   "host_table", timestamp, extra_tag,
-                   &items);
+    CollectMetrics(host_name, filtered_metrics, "host_table", timestamp, extra_tag, &items);
   }
   TRACE(Substitute("Host-table HISTOGRAM type metrics collected, count $0", hist_metrics_count));
 

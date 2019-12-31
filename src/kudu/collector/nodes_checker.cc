@@ -43,9 +43,9 @@
 
 DECLARE_string(collector_cluster_name);
 DECLARE_string(collector_master_addrs);
-DECLARE_int32(collector_interval_sec);
-DECLARE_int32(collector_timeout_sec);
-DECLARE_int32(collector_warn_threshold_ms);
+DECLARE_uint32(collector_interval_sec);
+DECLARE_uint32(collector_timeout_sec);
+DECLARE_uint32(collector_warn_threshold_ms);
 
 using rapidjson::Value;
 using std::list;
@@ -108,7 +108,12 @@ string NodesChecker::ToString() const {
   return "NodesChecker";
 }
 
-vector<string> NodesChecker::GetNodes() {
+vector<string> NodesChecker::GetMasters() {
+  shared_lock<RWMutex> l(nodes_lock_);
+  return master_http_addrs_;
+}
+
+vector<string> NodesChecker::GetTServers() {
   shared_lock<RWMutex> l(nodes_lock_);
   return tserver_http_addrs_;
 }
@@ -117,6 +122,12 @@ string NodesChecker::GetFirstMaster() {
   shared_lock<RWMutex> l(nodes_lock_);
   CHECK(!master_http_addrs_.empty());
   return master_http_addrs_[0];
+}
+
+string NodesChecker::GetFirstTServer() {
+  shared_lock<RWMutex> l(nodes_lock_);
+  CHECK(!tserver_http_addrs_.empty());
+  return tserver_http_addrs_[0];
 }
 
 Status NodesChecker::StartNodesCheckerThread() {

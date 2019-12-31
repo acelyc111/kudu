@@ -42,6 +42,35 @@ function get_stdcpp_lib()
     fi
 }
 
+function get_system_lib()
+{
+    libname=`ldd ${BASE_DIR}/build/latest/bin/kudu 2>/dev/null | grep "lib${1}\.so"`
+    libname=`echo $libname | cut -f1 -d" "`
+    libs=(`ldconfig -p|grep $libname|awk '{print $NF}'`)
+
+    bit_mode=`getconf LONG_BIT`
+    for lib in ${libs[*]}; do
+        if [ "`check_bit $lib`" = "true" ]; then
+            echo "$lib"
+            return
+        fi
+    done;
+
+    # if get failed by ldconfig, then just extract lib from ldd result
+    libname=`ldd ${BASE_DIR}/build/latest/bin/kudu 2>/dev/null | grep "lib${1}\.so"`
+    libname=`echo $libname | cut -f3 -d" "`
+    if echo "$libname" | grep -q "lib${2}\.so"; then
+        echo "$libname"
+    fi
+}
+
+function get_system_libname()
+{
+    libname=`ldd ${BASE_DIR}/build/latest/bin/kudu 2>/dev/null | grep "lib${1}\.so"`
+    libname=`echo $libname | cut -f1 -d" "`
+    echo "$libname"
+}
+
 function check_bit()
 {
     bit_mode=`getconf LONG_BIT`
@@ -130,6 +159,7 @@ copy_file ${BASE_DIR}/build/latest/bin/kudu-master ${PACK_DIR}/kudu_master
 copy_file ${BASE_DIR}/build/latest/bin/kudu-tserver ${PACK_DIR}/kudu_tablet_server
 copy_file ${BASE_DIR}/build/latest/bin/kudu ${PACK_DIR}/
 copy_file `get_stdcpp_lib $custom_gcc` ${PACK_DIR}/
+copy_file `get_system_lib crypto` ${PACK_DIR}/`get_system_libname crypto`
 copy_file ${BASE_DIR}/src/kudu/scripts/batch_operate_on_tables.sh ${PACK_DIR}/
 copy_file ${BASE_DIR}/src/kudu/scripts/falcon_screen.json ${PACK_DIR}/
 copy_file ${BASE_DIR}/src/kudu/scripts/falcon_screen.py ${PACK_DIR}/
@@ -137,7 +167,8 @@ copy_file ${BASE_DIR}/src/kudu/scripts/kudu_falcon_screen.sh ${PACK_DIR}/
 copy_file ${BASE_DIR}/src/kudu/scripts/minos_control_server.py ${PACK_DIR}/
 copy_file ${BASE_DIR}/src/kudu/scripts/cal_bill_daily.py ${PACK_DIR}/
 copy_file ${BASE_DIR}/src/kudu/scripts/kudu_utils.py ${PACK_DIR}/
-copy_file ${BASE_DIR}/src/kudu/scripts/start_local_kudu.sh ${PACK_DIR}/
+copy_file ${BASE_DIR}/src/kudu/scripts/start_kudu.sh ${PACK_DIR}/
+copy_file ${BASE_DIR}/src/kudu/scripts/stop_kudu.sh ${PACK_DIR}/
 copy_file ${BASE_DIR}/src/kudu/scripts/kudurc ${PACK_DIR}/
 copy_file -r ${BASE_DIR}/www ${PACK_DIR}/
 cd ${BASE_DIR}/build

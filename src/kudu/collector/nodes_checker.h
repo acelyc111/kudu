@@ -49,8 +49,10 @@ class NodesChecker : public RefCounted<NodesChecker> {
 
   std::string ToString() const;
 
-  std::vector<std::string> GetNodes();
+  std::vector<std::string> GetMasters();
+  std::vector<std::string> GetTServers();
   std::string GetFirstMaster();
+  std::string GetFirstTServer();
 
  private:
   friend class RefCounted<NodesChecker>;

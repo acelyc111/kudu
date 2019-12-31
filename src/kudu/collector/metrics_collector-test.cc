@@ -17,9 +17,8 @@
 
 #include "kudu/collector/metrics_collector.h"
 
-#include <stdint.h>
+#include <cstdint>
 
-#include <map>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -27,14 +26,11 @@
 
 #include <gflags/gflags_declare.h>
 #include <gtest/gtest.h>
-#include <rapidjson/document.h>
 
 #include "kudu/collector/local_reporter.h"
 #include "kudu/collector/nodes_checker.h"
 #include "kudu/collector/reporter_base.h"
 #include "kudu/gutil/ref_counted.h"
-#include "kudu/util/jsonreader.h"
-#include "kudu/util/status.h"
 #include "kudu/util/test_macros.h"
 
 DECLARE_bool(collector_request_merged_metrics);
@@ -43,7 +39,6 @@ DECLARE_string(collector_cluster_level_metrics);
 DECLARE_string(collector_metrics);
 DECLARE_string(collector_metrics_types_for_test);
 
-using std::map;
 using std::set;
 using std::string;
 using std::unordered_map;
@@ -392,190 +387,158 @@ TEST(TestMetricsCollector, TestMergeToClusterLevelMetrics) {
 }
 
 TEST(TestMetricsCollector, TestParseMetrics) {
-  // Check ParseServerMetrics and ParseTabletMetrics.
-  {
-    string data;
-    JsonReader r(data);
-    const rapidjson::Value entity;
-    ASSERT_TRUE(MetricsCollector::ParseServerMetrics(r, &entity).IsNotSupported());
-    ASSERT_TRUE(MetricsCollector::ParseTabletMetrics(r, &entity).IsNotSupported());
-  }
-  // Check ParseTableMetrics.
-  {
-    auto collector = BuildCollector();
-    collector->metric_types_by_entity_type_["tablet"] = {
-        {"test_metric", "COUNTER"},
-        {"metric_counter1", "COUNTER"},
-        {"metric_counter2", "COUNTER"},
-        {"metric_histogram1", "HISTOGRAM"},
-        {"metric_histogram2", "HISTOGRAM"}
-    };
-    string data(
-        R"*([                                             )*"
-        R"*(  {                                           )*"
-        R"*(    "type": "server",                         )*"
-        R"*(    "id": "server1",                          )*"
-        R"*(    "attributes": {                           )*"
-        R"*(      "attrA": "val1",                        )*"
-        R"*(      "attrB": "val2"                         )*"
-        R"*(    },                                        )*"
-        R"*(    "metrics": [                              )*"
-        R"*(      {                                       )*"
-        R"*(        "name": "test_metric",                )*"
-        R"*(        "value": 123                          )*"
-        R"*(      }                                       )*"
-        R"*(    ]                                         )*"
-        R"*(  },                                          )*"
-        R"*(  {                                           )*"
-        R"*(    "type": "tablet",                         )*"
-        R"*(    "id": "tablet1",                          )*"
-        R"*(    "attributes": {                           )*"
-        R"*(      "attr1": "val1",                        )*"
-        R"*(      "attr2": "val2"                         )*"
-        R"*(    },                                        )*"
-        R"*(    "metrics": [                              )*"
-        R"*(      {                                       )*"
-        R"*(        "name": "test_metric",                )*"
-        R"*(        "value": 321                          )*"
-        R"*(      }                                       )*"
-        R"*(    ]                                         )*"
-        R"*(  },                                          )*"
-        R"*(  {                                           )*"
-        R"*(    "type": "table",                          )*"
-        R"*(    "id": "table1",                           )*"
-        R"*(    "attributes": {                           )*"
-        R"*(      "attr1": "val2",                        )*"
-        R"*(      "attr2": "val3"                         )*"
-        R"*(    },                                        )*"
-        R"*(    "metrics": [                              )*"
-        R"*(      {                                       )*"
-        R"*(        "name": "metric_counter1",            )*"
-        R"*(        "value": 10                           )*"
-        R"*(      },                                      )*"
-        R"*(      {                                       )*"
-        R"*(        "name": "metric_counter2",            )*"
-        R"*(        "value": 20                           )*"
-        R"*(      },                                      )*"
-        R"*(      {                                       )*"
-        R"*(        "name": "metric_histogram1",          )*"
-        R"*(        "total_count": 17,                    )*"
-        R"*(        "min": 6,                             )*"
-        R"*(        "mean": 47.8235,                      )*"
-        R"*(        "percentile_75": 62,                  )*"
-        R"*(        "percentile_95": 72,                  )*"
-        R"*(        "percentile_99": 73,                  )*"
-        R"*(        "percentile_99_9": 73,                )*"
-        R"*(        "percentile_99_99": 73,               )*"
-        R"*(        "max": 73,                            )*"
-        R"*(        "total_sum": 813                      )*"
-        R"*(      }                                       )*"
-        R"*(    ]                                         )*"
-        R"*(  },                                          )*"
-        R"*(  {                                           )*"
-        R"*(    "type": "table",                          )*"
-        R"*(    "id": "table2",                           )*"
-        R"*(    "attributes": {                           )*"
-        R"*(      "attr1": "val3",                        )*"
-        R"*(      "attr2": "val2"                         )*"
-        R"*(    },                                        )*"
-        R"*(    "metrics": [                              )*"
-        R"*(      {                                       )*"
-        R"*(        "name": "metric_counter1",            )*"
-        R"*(        "value": 100                          )*"
-        R"*(      },                                      )*"
-        R"*(      {                                       )*"
-        R"*(        "name": "metric_histogram1",          )*"
-        R"*(        "total_count": 170,                   )*"
-        R"*(        "min": 60,                            )*"
-        R"*(        "mean": 478.235,                      )*"
-        R"*(        "percentile_75": 620,                 )*"
-        R"*(        "percentile_95": 720,                 )*"
-        R"*(        "percentile_99": 730,                 )*"
-        R"*(        "percentile_99_9": 735,               )*"
-        R"*(        "percentile_99_99": 735,              )*"
-        R"*(        "max": 735,                           )*"
-        R"*(        "total_sum": 8130                     )*"
-        R"*(      },                                      )*"
-        R"*(      {                                       )*"
-        R"*(        "name": "metric_histogram2",          )*"
-        R"*(        "total_count": 34,                    )*"
-        R"*(        "min": 6,                             )*"
-        R"*(        "mean": 47.8235,                      )*"
-        R"*(        "percentile_75": 62,                  )*"
-        R"*(        "percentile_95": 72,                  )*"
-        R"*(        "percentile_99": 72,                  )*"
-        R"*(        "percentile_99_9": 73,                )*"
-        R"*(        "percentile_99_99": 73,               )*"
-        R"*(        "max": 73,                            )*"
-        R"*(        "total_sum": 813                      )*"
-        R"*(      }                                       )*"
-        R"*(    ]                                         )*"
-        R"*(  }                                           )*"
-        R"*(]                                             )*");
+  auto collector = BuildCollector();
+  collector->metric_types_ = {
+      {"server_metric", "COUNTER"},
+      {"metric_counter1", "COUNTER"},
+      {"metric_counter2", "COUNTER"},
+      {"server_metric_histogram", "HISTOGRAM"},
+      {"metric_histogram1", "HISTOGRAM"},
+      {"metric_histogram2", "HISTOGRAM"}
+  };
+  string data(
+      R"*([                                             )*"
+      R"*(  {                                           )*"
+      R"*(    "type": "server",                         )*"
+      R"*(    "id": "kudu.tabletserver",                )*"
+      R"*(    "attributes": {                           )*"
+      R"*(      "attrA": "val1",                        )*"
+      R"*(      "attrB": "val2"                         )*"
+      R"*(    },                                        )*"
+      R"*(    "metrics": [                              )*"
+      R"*(      {                                       )*"
+      R"*(        "name": "server_metric",              )*"
+      R"*(        "value": 123                          )*"
+      R"*(      },                                      )*"
+      R"*(      {                                       )*"
+      R"*(        "name": "server_metric_histogram",    )*"
+      R"*(        "total_count": 60,                    )*"
+      R"*(        "min": 4,                             )*"
+      R"*(        "mean": 76.16666666666667,            )*"
+      R"*(        "percentile_75": 25,                  )*"
+      R"*(        "percentile_95": 66,                  )*"
+      R"*(        "percentile_99": 79,                  )*"
+      R"*(        "percentile_99_9": 3486,              )*"
+      R"*(        "percentile_99_99": 3486,             )*"
+      R"*(        "max": 3486,                          )*"
+      R"*(        "total_sum": 4570                     )*"
+      R"*(      }                                       )*"
+      R"*(    ]                                         )*"
+      R"*(  },                                          )*"
+      R"*(  {                                           )*"
+      R"*(    "type": "table",                          )*"
+      R"*(    "id": "table1",                           )*"
+      R"*(    "attributes": {                           )*"
+      R"*(      "attr1": "val2",                        )*"
+      R"*(      "attr2": "val3"                         )*"
+      R"*(    },                                        )*"
+      R"*(    "metrics": [                              )*"
+      R"*(      {                                       )*"
+      R"*(        "name": "metric_counter1",            )*"
+      R"*(        "value": 10                           )*"
+      R"*(      },                                      )*"
+      R"*(      {                                       )*"
+      R"*(        "name": "metric_counter2",            )*"
+      R"*(        "value": 20                           )*"
+      R"*(      },                                      )*"
+      R"*(      {                                       )*"
+      R"*(        "name": "metric_histogram1",          )*"
+      R"*(        "total_count": 17,                    )*"
+      R"*(        "min": 6,                             )*"
+      R"*(        "mean": 47.8235,                      )*"
+      R"*(        "percentile_75": 62,                  )*"
+      R"*(        "percentile_95": 72,                  )*"
+      R"*(        "percentile_99": 73,                  )*"
+      R"*(        "percentile_99_9": 73,                )*"
+      R"*(        "percentile_99_99": 73,               )*"
+      R"*(        "max": 73,                            )*"
+      R"*(        "total_sum": 813                      )*"
+      R"*(      }                                       )*"
+      R"*(    ]                                         )*"
+      R"*(  },                                          )*"
+      R"*(  {                                           )*"
+      R"*(    "type": "table",                          )*"
+      R"*(    "id": "table2",                           )*"
+      R"*(    "attributes": {                           )*"
+      R"*(      "attr1": "val3",                        )*"
+      R"*(      "attr2": "val2"                         )*"
+      R"*(    },                                        )*"
+      R"*(    "metrics": [                              )*"
+      R"*(      {                                       )*"
+      R"*(        "name": "metric_counter1",            )*"
+      R"*(        "value": 100                          )*"
+      R"*(      },                                      )*"
+      R"*(      {                                       )*"
+      R"*(        "name": "metric_histogram1",          )*"
+      R"*(        "total_count": 170,                   )*"
+      R"*(        "min": 60,                            )*"
+      R"*(        "mean": 478.235,                      )*"
+      R"*(        "percentile_75": 620,                 )*"
+      R"*(        "percentile_95": 720,                 )*"
+      R"*(        "percentile_99": 730,                 )*"
+      R"*(        "percentile_99_9": 735,               )*"
+      R"*(        "percentile_99_99": 735,              )*"
+      R"*(        "max": 735,                           )*"
+      R"*(        "total_sum": 8130                     )*"
+      R"*(      },                                      )*"
+      R"*(      {                                       )*"
+      R"*(        "name": "metric_histogram2",          )*"
+      R"*(        "total_count": 34,                    )*"
+      R"*(        "min": 6,                             )*"
+      R"*(        "mean": 47.8235,                      )*"
+      R"*(        "percentile_75": 62,                  )*"
+      R"*(        "percentile_95": 72,                  )*"
+      R"*(        "percentile_99": 72,                  )*"
+      R"*(        "percentile_99_9": 73,                )*"
+      R"*(        "percentile_99_99": 73,               )*"
+      R"*(        "max": 73,                            )*"
+      R"*(        "total_sum": 813                      )*"
+      R"*(      }                                       )*"
+      R"*(    ]                                         )*"
+      R"*(  }                                           )*"
+      R"*(]                                             )*");
 
-    // Attribute filter is empty.
-    {
-      MetricsCollector::TablesMetrics tables_metrics;
-      MetricsCollector::TablesHistMetrics tables_hist_metrics;
-      MetricsCollector::Metrics host_metrics;
-      MetricsCollector::HistMetrics host_hist_metrics;
-      ASSERT_OK(collector->ParseMetrics(data,
-                                       &tables_metrics, &host_metrics,
-                                       &tables_hist_metrics, &host_hist_metrics));
-      ASSERT_EQ(tables_metrics, MetricsCollector::TablesMetrics({
-          {
-            "table1",
-            {
-              {"metric_counter1", 10},
-              {"metric_counter2", 20},
-            }
-          },
-          {
-            "table2",
-            {
-              {"metric_counter1", 100}
-            }
-          }
-      }));
-      ASSERT_EQ(tables_hist_metrics, MetricsCollector::TablesHistMetrics({
-          {
-            "table1",
-            {
-              {
-                "metric_histogram1_percentile_99",
-                {
-                  {17, 73}
-                }
-              }
-            }
-          },
-          {
-            "table2",
-            {
-              {
-                "metric_histogram1_percentile_99",
-                {
-                  {170, 730}
-                }
-              },
-              {
-                "metric_histogram2_percentile_99",
-                {
-                  {34, 72}
-                }
-              }
-            }
-          }
-      }));
-      ASSERT_EQ(host_metrics, MetricsCollector::Metrics({
-          {"metric_counter1", 110},
-          {"metric_counter2", 20}
-      }));
-      ASSERT_EQ(host_hist_metrics, MetricsCollector::HistMetrics({
+  MetricsCollector::TablesMetrics tables_metrics;
+  MetricsCollector::TablesHistMetrics tables_hist_metrics;
+  MetricsCollector::Metrics host_metrics;
+  MetricsCollector::HistMetrics host_hist_metrics;
+  ASSERT_OK(collector->ParseMetrics(MetricsCollector::NodeType::kTServer,
+                                    data,
+                                    &tables_metrics, &host_metrics,
+                                    &tables_hist_metrics, &host_hist_metrics));
+  ASSERT_EQ(tables_metrics, MetricsCollector::TablesMetrics({
+      {
+        "table1",
+        {
+          {"metric_counter1", 10},
+          {"metric_counter2", 20},
+        }
+      },
+      {
+        "table2",
+        {
+          {"metric_counter1", 100}
+        }
+      }
+  }));
+  ASSERT_EQ(tables_hist_metrics, MetricsCollector::TablesHistMetrics({
+      {
+        "table1",
+        {
           {
             "metric_histogram1_percentile_99",
             {
-              {17, 73},
+              {17, 73}
+            }
+          }
+        }
+      },
+      {
+        "table2",
+        {
+          {
+            "metric_histogram1_percentile_99",
+            {
               {170, 730}
             }
           },
@@ -585,82 +548,43 @@ TEST(TestMetricsCollector, TestParseMetrics) {
               {34, 72}
             }
           }
-      }));
-    }
-
-    // Attribute filter is not empty.
-    {
-      collector->attributes_filter_ = {{"attr1", {"val1", "val2"}}};
-
-      MetricsCollector::TablesMetrics tables_metrics;
-      MetricsCollector::TablesHistMetrics tables_hist_metrics;
-      MetricsCollector::Metrics host_metrics;
-      MetricsCollector::HistMetrics host_hist_metrics;
-      ASSERT_OK(collector->ParseMetrics(data,
-                                       &tables_metrics, &host_metrics,
-                                       &tables_hist_metrics, &host_hist_metrics));
-      ASSERT_EQ(tables_metrics, MetricsCollector::TablesMetrics({
-          {
-            "table1",
-            {
-              {"metric_counter1", 10},
-              {"metric_counter2", 20},
-            }
-          }
-      }));
-      ASSERT_EQ(tables_hist_metrics, MetricsCollector::TablesHistMetrics({
-          {
-            "table1",
-            {
-              {
-                "metric_histogram1_percentile_99",
-                {
-                  {17, 73}
-                }
-              }
-            }
-          }
-      }));
-      ASSERT_EQ(host_metrics, MetricsCollector::Metrics({
-          {"metric_counter1", 10},
-          {"metric_counter2", 20}
-      }));
-      ASSERT_EQ(host_hist_metrics, MetricsCollector::HistMetrics({
-          {
-            "metric_histogram1_percentile_99",
-            {
-              {17, 73},
-            }
-          }
-      }));
-    }
-  }
+        }
+      }
+  }));
+  ASSERT_EQ(host_metrics, MetricsCollector::Metrics({
+      {"metric_counter1", 110},
+      {"metric_counter2", 20},
+      {"server_metric", 123}
+  }));
+  ASSERT_EQ(host_hist_metrics, MetricsCollector::HistMetrics({
+      {
+        "metric_histogram1_percentile_99",
+        {
+          {17, 73},
+          {170, 730}
+        }
+      },
+      {
+        "metric_histogram2_percentile_99",
+        {
+          {34, 72}
+        }
+      },
+      {
+        "server_metric_histogram_percentile_99",
+        {
+          {60, 79}
+        }
+      }
+  }));
 }
 
 TEST(TestMetricsCollector, TestInitMetrics) {
   FLAGS_collector_metrics_types_for_test =
       R"*([                                                       )*"
       R"*(  {                                                     )*"
-      R"*(    "type": "tablet",                                   )*"
+      R"*(    "type": "table",                                   )*"
       R"*(    "id": "table1",                                     )*"
-      R"*(    "metrics": [                                        )*"
-      R"*(      {                                                 )*"
-      R"*(        "name": "counter_metric1",                      )*"
-      R"*(        "type": "counter"                               )*"
-      R"*(      },                                                )*"
-      R"*(      {                                                 )*"
-      R"*(        "name": "histogram_metric1",                    )*"
-      R"*(        "type": "histogram"                             )*"
-      R"*(      },                                                )*"
-      R"*(      {                                                 )*"
-      R"*(        "name": "gauge_metric1",                        )*"
-      R"*(        "type": "gauge"                                 )*"
-      R"*(      }                                                 )*"
-      R"*(    ]                                                   )*"
-      R"*(  },                                                    )*"
-      R"*(  {                                                     )*"
-      R"*(    "type": "tablet",                                   )*"
-      R"*(    "id": "table2",                                     )*"
       R"*(    "metrics": [                                        )*"
       R"*(      {                                                 )*"
       R"*(        "name": "counter_metric1",                      )*"
@@ -696,25 +620,15 @@ TEST(TestMetricsCollector, TestInitMetrics) {
       R"*(]                                                       )*";
   auto collector = BuildCollector();
   ASSERT_OK(collector->InitMetrics());
-  map<string, MetricsCollector::MetricTypes> expect_metric_types({
-      {
-        "tablet",
-        {
-          {"counter_metric1", "COUNTER"},
-          {"histogram_metric1", "HISTOGRAM"},
-          {"gauge_metric1", "GAUGE"},
-        }
-      },
-      {
-        "server",
-        {
-          {"counter_metric2", "COUNTER"},
-          {"histogram_metric2", "HISTOGRAM"},
-          {"gauge_metric2", "GAUGE"},
-        }
-      }
+  MetricsCollector::MetricTypes expect_metric_types({
+      {"counter_metric1", "COUNTER"},
+      {"histogram_metric1", "HISTOGRAM"},
+      {"gauge_metric1", "GAUGE"},
+      {"counter_metric2", "COUNTER"},
+      {"histogram_metric2", "HISTOGRAM"},
+      {"gauge_metric2", "GAUGE"}
   });
-  ASSERT_EQ(collector->metric_types_by_entity_type_, expect_metric_types);
+  ASSERT_EQ(collector->metric_types_, expect_metric_types);
 }
 
 TEST(TestMetricsCollector, TestInitFilters) {

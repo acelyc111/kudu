@@ -42,15 +42,15 @@ DEFINE_string(collector_cluster_name, "",
 DEFINE_string(collector_master_addrs, "",
               "Comma-separated list of Kudu master addresses where each address is of "
               "form 'hostname:port");
-DEFINE_int32(collector_interval_sec, 60,
-             "Number of interval seconds to collect metrics");
-DEFINE_string(collector_report_method, "",
-              "Which monitor system the metrics reported to. Now supported system: falcon");
-DEFINE_int32(collector_timeout_sec, 10,
-             "Number of seconds to wait for a master, tserver, or CLI tool to return metrics");
-DEFINE_int32(collector_warn_threshold_ms, 1000,
-             "If a task takes more than this number of milliseconds, issue a warning with a "
-             "trace.");
+DEFINE_uint32(collector_interval_sec, 60,
+              "Number of interval seconds to collect metrics");
+DEFINE_string(collector_report_method, "falcon",
+              "Which monitor system the metrics reported to. Now supported system: local, falcon");
+DEFINE_uint32(collector_timeout_sec, 10,
+              "Number of seconds to wait for a master, tserver, or CLI tool to return metrics");
+DEFINE_uint32(collector_warn_threshold_ms, 1000,
+              "If a task takes more than this number of milliseconds, issue a warning with a "
+              "trace.");
 
 DECLARE_string(principal);
 DECLARE_string(keytab_file);
@@ -73,8 +73,7 @@ Collector::~Collector() {
 Status Collector::Init() {
   CHECK(!initialized_);
 
-  RETURN_NOT_OK(ValidateIntervalAndTimeout(FLAGS_collector_interval_sec,
-                                           FLAGS_collector_timeout_sec));
+  RETURN_NOT_OK(ValidateFlags());
   RETURN_NOT_OK(security::InitKerberosForServer(FLAGS_principal, FLAGS_keytab_file));
 
   if (FLAGS_collector_report_method == "falcon") {
@@ -82,9 +81,9 @@ Status Collector::Init() {
   } else if (FLAGS_collector_report_method == "local") {
     reporter_.reset(new LocalReporter());
   } else {
-    LOG(FATAL) << Substitute("Unsupported FLAGS_collector_report_method $0",
-                             FLAGS_collector_report_method);
+    __builtin_unreachable();
   }
+
   CHECK_OK(reporter_->Init());
   nodes_checker_.reset(new NodesChecker(reporter_));
   CHECK_OK(nodes_checker_->Init());
@@ -156,15 +155,28 @@ void Collector::ExcessLogFileDeleterThread() {
   }
 }
 
-Status Collector::ValidateIntervalAndTimeout(int interval, int timeout) {
-  if (10 <= interval && interval <= 60 &&
-      0 < timeout && timeout < interval) {
-    return Status::OK();
+Status Collector::ValidateFlags() {
+  if (FLAGS_collector_interval_sec < 10 ||
+      FLAGS_collector_interval_sec > 60 ||
+      FLAGS_collector_timeout_sec < 1 ||
+      FLAGS_collector_timeout_sec >= FLAGS_collector_interval_sec) {
+    return Status::InvalidArgument("--collector_interval_sec should in range [10, 60], and "
+                                   "--collector_timeout_sec should in range "
+                                   "(0, collector_interval_sec)");
   }
 
-  return Status::InvalidArgument(
-      Substitute("Invalid interval '$0'(should in range [10, 60]), "
-                 "or invalid timeout '$1'(should in range (0, interval))", interval, timeout));
+  if (FLAGS_collector_report_method != "local" &&
+      FLAGS_collector_report_method != "falcon") {
+    return Status::InvalidArgument("--collector_report_method only support 'local' and 'falcon'.");
+  }
+
+  if (FLAGS_collector_cluster_name.empty() ||
+      FLAGS_collector_master_addrs.empty()) {
+    return Status::InvalidArgument("--collector_cluster_name and --collector_master_addrs should "
+                                   "not be empty.");
+  }
+
+  return Status::OK();
 }
 } // namespace collector
 } // namespace kudu
