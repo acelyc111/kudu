@@ -41,7 +41,6 @@ DECLARE_bool(collector_request_merged_metrics);
 DECLARE_string(collector_attributes);
 DECLARE_string(collector_cluster_level_metrics);
 DECLARE_string(collector_metrics);
-DECLARE_string(collector_table_names);
 DECLARE_string(collector_metrics_types_for_test);
 
 using std::map;
@@ -735,12 +734,11 @@ TEST(TestMetricsCollector, TestInitFilters) {
   ASSERT_EQ(collector->attributes_filter_, expect_attributes_filter);
 }
 
-#define CHECK_URL_PARAMETERS(metrics, request_merged, attributes, table_names, expect_url)        \
+#define CHECK_URL_PARAMETERS(metrics, request_merged, attributes, expect_url)                     \
 do {                                                                                              \
   FLAGS_collector_metrics = metrics;                                                              \
   FLAGS_collector_request_merged_metrics = request_merged;                                        \
   FLAGS_collector_attributes = attributes;                                                        \
-  FLAGS_collector_table_names = table_names;                                                      \
   auto collector = BuildCollector();                                                              \
   ASSERT_OK(collector->InitFilters());                                                            \
   ASSERT_OK(collector->InitMetricsUrlParameters());                                               \
@@ -748,17 +746,18 @@ do {                                                                            
 } while (false)
 
 TEST(TestMetricsCollector, TestInitMetricsUrlParameters) {
-  CHECK_URL_PARAMETERS("", true, "", "",
-      "/metrics?compact=1&origin=false&merge=true");
-  CHECK_URL_PARAMETERS("m1,m2,m3", true, "", "",
-      "/metrics?compact=1&metrics=m1,m2,m3&origin=false&merge=true");
+  CHECK_URL_PARAMETERS("", true, "",
+      "/metrics?compact=1&merge_rules=tablet|table|table_name");
+  CHECK_URL_PARAMETERS("m1,m2,m3", true, "",
+      "/metrics?compact=1&metrics=m1,m2,m3&merge_rules=tablet|table|table_name");
   // TODO(yingchun): now FLAGS_collector_request_merged_metrics must be true
   //CHECK_URL_PARAMETERS("", false, "", "",
   //    "/metrics?compact=1");
-  CHECK_URL_PARAMETERS("", true, "attr1:a1,a2;attr2:a3", "",
-      "/metrics?compact=1&origin=false&merge=true&attributes=attr2,a3,attr1,a1,attr1,a2,");
-  CHECK_URL_PARAMETERS("", true, "", "t1,t2,t3",
-      "/metrics?compact=1&origin=false&merge=true&table_names=t1,t2,t3");
+  CHECK_URL_PARAMETERS("", true, "attr1:a1,a2;attr2:a3",
+      "/metrics?compact=1&merge_rules=tablet|table|table_name"
+      "&attributes=attr2,a3,attr1,a1,attr1,a2,");
+  CHECK_URL_PARAMETERS("", true, "",
+      "/metrics?compact=1&merge_rules=tablet|table|table_name");
 }
 
 TEST(TestMetricsCollector, TestInitClusterLevelMetrics) {

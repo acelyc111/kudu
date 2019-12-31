@@ -92,7 +92,6 @@ class MetricsCollector : public RefCounted<MetricsCollector> {
 
   typedef std::unordered_map<std::string, std::string> MetricTypes;
 
-  Status ValidateTableFilter(const std::string& attribute_filter, const std::string& table_filter);
   Status InitMetrics();
   static Status ExtractMetricTypes(const JsonReader& r,
                                    const rapidjson::Value* entity,

@@ -67,8 +67,6 @@ DEFINE_string(collector_metrics_types_for_test, "",
               "Only for test, used to initialize metric_types_by_entity_type_");
 DEFINE_bool(collector_request_merged_metrics, true,
             "Whether to request merged metrics and exclude unmerged metrics from server");
-DEFINE_string(collector_table_names, "",
-              "Table names to collect (comma-separated list of table names)");
 
 DECLARE_string(collector_cluster_name);
 DECLARE_int32(collector_interval_sec);
@@ -104,10 +102,8 @@ MetricsCollector::~MetricsCollector() {
 Status MetricsCollector::Init() {
   CHECK(!initialized_);
 
-  RETURN_NOT_OK(ValidateTableFilter(FLAGS_collector_attributes, FLAGS_collector_table_names));
   RETURN_NOT_OK(InitMetrics());
   RETURN_NOT_OK(InitFilters());
-  CHECK(attributes_filter_.empty());  // TODO(yingchun) disable now
   RETURN_NOT_OK(InitMetricsUrlParameters());
   RETURN_NOT_OK(InitClusterLevelMetrics());
 
@@ -176,15 +172,6 @@ Status MetricsCollector::UpdateThreadPool(int32_t thread_count) {
   TRACE("New thread pool built");
 
   return Status::OK();
-}
-
-Status MetricsCollector::ValidateTableFilter(const string& attribute_filter,
-                                             const string& /*table_filter*/) {
-  if (attribute_filter.empty()) {
-    return Status::OK();
-  }
-
-  return Status::InvalidArgument("attribute filter is not supported now");
 }
 
 Status MetricsCollector::InitMetrics() {
@@ -266,7 +253,7 @@ Status MetricsCollector::InitMetricsUrlParameters() {
     metric_url_parameters_ += "&metrics=" + FLAGS_collector_metrics;
   }
   if (FLAGS_collector_request_merged_metrics) {
-    metric_url_parameters_ += "&origin=false&merge=true";
+    metric_url_parameters_ += "&merge_rules=tablet|table|table_name";
   } else {
     LOG(FATAL) << "Non-merge mode is not supported now, you should set "
                   "FLAGS_collector_request_merged_metrics to true if you "
@@ -281,10 +268,6 @@ Status MetricsCollector::InitMetricsUrlParameters() {
     for (const auto& value : attribute_filter.second) {
       metric_url_parameters_ += Substitute("$0,$1,", attribute_filter.first, value);
     }
-  }
-  // TODO(yingchun) This is supported since internal version 1.8.0
-  if (!FLAGS_collector_table_names.empty()) {
-    metric_url_parameters_ += "&table_names=" + FLAGS_collector_table_names;
   }
   return Status::OK();
 }
