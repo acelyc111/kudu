@@ -24,6 +24,7 @@ dependencies {
   // TODO(KUDU-2500): Spark uses reflection which requires the annotations at runtime.
   compile libs.yetusAnnotations
 
+  configurations.provided.exclude(group: 'thrift', module: 'libthrift-fix-leak')
   provided libs.scalaLibrary
   provided libs.sparkCore
   provided libs.sparkSql

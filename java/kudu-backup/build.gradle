@@ -26,6 +26,7 @@ dependencies {
     // Ensure we use the scala-library provided by Spark to avoid any compatibility issues.
     exclude group: "org.scala-lang", module: "scala-library"
   }
+  configurations.provided.exclude(group: 'thrift', module: 'libthrift-fix-leak')
   compile project(path: ":kudu-client", configuration: "shadow")
   compile project(path: ":kudu-spark", configuration: "shadow")
   compile (libs.scopt)  {

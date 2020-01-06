@@ -28,7 +28,7 @@ dependencies {
     // Make sure wrong Scala version is not pulled in.
     exclude group: "org.scala-lang", module: "scala-library"
   }
-
+  configurations.provided.exclude(group: 'thrift', module: 'libthrift-fix-leak')
   provided libs.scalaLibrary
   provided libs.sparkAvro
   provided libs.sparkCore

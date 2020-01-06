@@ -57,6 +57,7 @@ case class KuduReadOptions(
     splitSizeBytes: Option[Long] = None,
     useDriverMetadata: Boolean = defaultUseDriverMetadata,
     snapshotTimestampMs: Option[Long] = None)
+    useSparkSQLRowIterator: Boolean = defaultUseSparkSQLRowIterator)
 
 object KuduReadOptions {
   val defaultBatchSize: Int = 1024 * 1024 * 20 // TODO: Understand/doc this setting?
@@ -64,4 +65,5 @@ object KuduReadOptions {
   val defaultFaultTolerantScanner: Boolean = false
   val defaultKeepAlivePeriodMs: Long = AsyncKuduClient.DEFAULT_KEEP_ALIVE_PERIOD_MS
   val defaultUseDriverMetadata: Boolean = true
+  val defaultUseSparkSQLRowIterator: Boolean = false
 }

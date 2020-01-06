@@ -20,6 +20,8 @@ package org.apache.kudu.spark.kudu
 import java.net.InetAddress
 import java.util.Locale
 
+import org.apache.kudu.ColumnSchema
+
 import scala.collection.JavaConverters._
 import scala.util.Try
 import org.apache.spark.rdd.RDD
@@ -40,6 +42,7 @@ import org.apache.kudu.spark.kudu.KuduWriteOptions._
 import org.apache.kudu.spark.kudu.SparkUtil._
 import org.apache.spark.sql.execution.streaming.Sink
 import org.apache.spark.sql.streaming.OutputMode
+import org.apache.spark.sql.catalyst.expressions.AttributeReference
 
 /**
  * Data source for integration with Spark's [[DataFrame]] API.
@@ -72,6 +75,7 @@ class DefaultSource
   val HANDLE_SCHEMA_DRIFT = "kudu.handleSchemaDrift"
   val USE_DRIVER_METADATA = "kudu.useDriverMetadata"
   val SNAPSHOT_TIMESTAMP_MS = "kudu.snapshotTimestampMs"
+  val USE_SPARKSQL_ROW_ITERATOR = "kudu.useSparkSQLRowIterator"
 
   /**
    * A nice alias for the data source so that when specifying the format
@@ -80,6 +84,8 @@ class DefaultSource
    * `META-INF/services/org.apache.spark.sql.sources.DataSourceRegister`
    */
   override def shortName(): String = "kudu"
+
+  val TABLE_ALIAS = "kudu.table.alias"
 
   /**
    * Construct a BaseRelation using the provided context and parameters.
@@ -112,12 +118,13 @@ class DefaultSource
     val schemaOption = Option(schema)
     val readOptions = getReadOptions(parameters)
     val writeOptions = getWriteOptions(parameters)
-
+    val alias = parameters.get(TABLE_ALIAS)
     new KuduRelation(
       tableName,
       kuduMaster,
       operationType,
       schemaOption,
+      alias,
       readOptions,
       writeOptions
     )(sqlContext)
@@ -188,6 +195,8 @@ class DefaultSource
     val useDriverMetadata =
       parameters.get(USE_DRIVER_METADATA).map(_.toBoolean).getOrElse(defaultUseDriverMetadata)
     val snapshotTimestampMs = parameters.get(SNAPSHOT_TIMESTAMP_MS).map(_.toLong)
+    val useSparkSQLRowIterator: Boolean =
+      parameters.get(USE_SPARKSQL_ROW_ITERATOR).map(_.toBoolean).getOrElse(false)
     KuduReadOptions(
       batchSize,
       scanLocality,
@@ -198,6 +207,7 @@ class DefaultSource
       splitSizeBytes,
       useDriverMetadata,
       snapshotTimestampMs
+      useSparkSQLRowIterator
     )
   }
 
@@ -276,10 +286,12 @@ class KuduRelation(
     val masterAddrs: String,
     val operationType: OperationType,
     val userSchema: Option[StructType],
+    val alias: Option[String],
     val readOptions: KuduReadOptions = new KuduReadOptions,
     val writeOptions: KuduWriteOptions = new KuduWriteOptions)(val sqlContext: SQLContext)
-    extends BaseRelation with PrunedFilteredScan with InsertableRelation {
-  val log: Logger = LoggerFactory.getLogger(getClass)
+    extends BaseRelation with PrunedFilteredScan with InsertableRelation with UpdatetableRelation
+    with DeletetableRelation {
+    val log: Logger = LoggerFactory.getLogger(getClass)
 
   private val context: KuduContext =
     new KuduContext(masterAddrs, sqlContext.sparkContext)
@@ -321,7 +333,34 @@ class KuduRelation(
    * @return schema generated from the Kudu table's schema
    */
   override def schema: StructType = {
-    sparkSchema(table.getSchema, userSchema.map(_.fieldNames))
+    val fields =
+      userSchema match {
+        case Some(x) =>
+          x.fields
+            .map(uf => table.getSchema.getColumn(uf.name))
+            .map(kuduColumnToSparkField)
+        case None =>
+          table.getSchema.getColumns.asScala.map(kuduColumnToSparkField).toArray
+      }
+
+    val sqlTableName = if (!tableName.contains(".")) {
+      tableName
+    } else {
+      tableName.split('.')(1)
+    }
+
+    new StructType(fields) {
+      override def toAttributes: Seq[AttributeReference] =
+        map(
+          f =>
+            AttributeReference(f.name, f.dataType, f.nullable, f.metadata)(
+              qualifier = Some(alias.getOrElse(sqlTableName))))
+    }
+  }
+
+  def kuduColumnToSparkField: (ColumnSchema) => StructField = { columnSchema =>
+    val sparkType = kuduTypeToSparkType(columnSchema.getType, columnSchema.getTypeAttributes)
+    new StructField(columnSchema.getName, sparkType, columnSchema.isNullable)
   }
 
   /**
@@ -462,6 +501,33 @@ class KuduRelation(
    */
   override def toString(): String = {
     "Kudu " + this.tableName
+  }
+
+  override def insertWithIgnoreDuplicateRowsOptions(
+      data: DataFrame,
+      overwrite: Boolean,
+      ignoreDuplicate: Boolean): Unit = {
+    if (ignoreDuplicate) {
+      context.insertIgnoreRows(data, tableName)
+    } else {
+      insert(data, overwrite)
+    }
+  }
+
+  override def checkInvalidKeySetting(columns: Map[String, String]): Unit = {
+    val schema = table.getSchema
+    val keyColumns = columns.keys.filter(columnName => schema.getColumn(columnName).isKey)
+    if (keyColumns.nonEmpty) {
+      throw new IllegalArgumentException("key columns cannot be updated")
+    }
+  }
+
+  override def update(data: DataFrame, columns: Map[String, String]): Unit = {
+    context.updateRows(data, tableName, columns)
+  }
+
+  override def delete(data: DataFrame): Unit = {
+    context.writeRows(data, tableName, Delete)
   }
 }
 

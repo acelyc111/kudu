@@ -19,7 +19,7 @@ package org.apache.kudu.spark.kudu
 
 import java.security.AccessController
 import java.security.PrivilegedAction
-
+import java.sql.Timestamp
 import javax.security.auth.Subject
 import javax.security.auth.login.AppConfigurationEntry
 import javax.security.auth.login.Configuration
@@ -35,6 +35,8 @@ import org.apache.spark.sql.catalyst.util.TypeUtils
 import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.types.DataType
+import org.apache.spark.sql.types.DataTypes
+import org.apache.spark.sql.types.DecimalType
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.util.AccumulatorV2
 import org.apache.spark.util.CollectionAccumulator
@@ -48,6 +50,8 @@ import org.apache.kudu.spark.kudu.SparkUtil.kuduSchema
 import org.apache.kudu.spark.kudu.SparkUtil._
 import org.apache.kudu.Schema
 import org.apache.kudu.Type
+import org.apache.spark.sql.catalyst.CatalystTypeConverters
+import org.apache.spark.sql.catalyst.InternalRow
 
 /**
  * KuduContext is a serializable container for Kudu client connections.
@@ -324,6 +328,26 @@ class KuduContext(val kuduMaster: String, sc: SparkContext, val socketReadTimeou
   }
 
   /**
+   * Updates a Kudu table with the rows of a [[DataFrame]].
+   *
+   * @param data the data to update into Kudu
+   * @param tableName the Kudu table to update
+   * @param columns the key value to be set
+   */
+  def updateRows(data: DataFrame, tableName: String, columns: Map[String, String]): Unit = {
+    val schema = data.schema
+    data.queryExecution.toRdd.foreachPartition(iterator => {
+      val pendingErrors = updatePartitionRows(iterator, schema, tableName, columns)
+      val errorCount = pendingErrors.getRowErrors.length
+      if (errorCount > 0) {
+        val errors = pendingErrors.getRowErrors.take(5).map(_.getErrorStatus).mkString
+        throw new RuntimeException(
+          s"failed to write $errorCount rows from DataFrame to Kudu; sample errors: $errors")
+      }
+    })
+  }
+
+  /**
    * Deletes the rows of a [[DataFrame]] from a Kudu table.
    *
    * @param data the data to delete from Kudu
@@ -517,6 +541,118 @@ class KuduContext(val kuduMaster: String, sc: SparkContext, val socketReadTimeou
     val table = syncClient.openTable(tableName)
     val partitioner = new KuduPartitioner.KuduPartitionerBuilder(table).build()
     partitioner.numPartitions()
+  }
+
+  private def updatePartitionRows(
+      rows: Iterator[InternalRow],
+      schema: StructType,
+      tableName: String,
+      columns: Map[String, String]): RowErrorsAndOverflowStatus = {
+    val table: KuduTable = syncClient.openTable(tableName)
+    val indices: Array[(Int, Int)] = schema.fields.zipWithIndex.map({
+      case (field, sparkIdx) =>
+        sparkIdx -> table.getSchema.getColumnIndex(field.name)
+    })
+    val session: KuduSession = syncClient.newSession
+    session.setFlushMode(FlushMode.AUTO_FLUSH_BACKGROUND)
+    val kuduTableSchema = table.getSchema
+    val columnSettingMap = transformColumnSettings(kuduTableSchema, columns)
+    val typeConverter = CatalystTypeConverters.createToScalaConverter(schema)
+    try {
+      for (internalRow <- rows) {
+        val operation = Update.operation(table)
+        val row = typeConverter(internalRow).asInstanceOf[Row]
+        for ((sparkIdx, kuduIdx) <- indices) {
+          val isKey = kuduTableSchema.getColumnByIndex(kuduIdx).isKey
+          val isUpdate = columnSettingMap.contains(kuduIdx)
+          val columnNeed = isKey || isUpdate
+          if (columnNeed) {
+            val value = columnSettingMap.get(kuduIdx)
+            if (isUpdate && value.contains(null)) {
+              operation.getRow.setNull(kuduIdx)
+            } else {
+              schema.fields(sparkIdx).dataType match {
+                case DataTypes.StringType =>
+                  operation.getRow.addString(
+                    kuduIdx,
+                    if (isKey) row.getString(sparkIdx) else value.get.asInstanceOf[String])
+                case DataTypes.BinaryType =>
+                  operation.getRow.addBinary(
+                    kuduIdx,
+                    if (isKey) row.getAs[Array[Byte]](sparkIdx)
+                    else value.get.asInstanceOf[Array[Byte]])
+                case DataTypes.BooleanType =>
+                  operation.getRow.addBoolean(
+                    kuduIdx,
+                    if (isKey) row.getBoolean(sparkIdx) else value.get.asInstanceOf[Boolean])
+                case DataTypes.ByteType =>
+                  operation.getRow.addByte(
+                    kuduIdx,
+                    if (isKey) row.getByte(sparkIdx) else value.get.asInstanceOf[Byte])
+                case DataTypes.ShortType =>
+                  operation.getRow.addShort(
+                    kuduIdx,
+                    if (isKey) row.getShort(sparkIdx) else value.get.asInstanceOf[Short])
+                case DataTypes.IntegerType =>
+                  operation.getRow.addInt(
+                    kuduIdx,
+                    if (isKey) row.getInt(sparkIdx) else value.get.asInstanceOf[Int])
+                case DataTypes.LongType =>
+                  operation.getRow.addLong(
+                    kuduIdx,
+                    if (isKey) row.getLong(sparkIdx) else value.get.asInstanceOf[Long])
+                case DataTypes.FloatType =>
+                  operation.getRow.addFloat(
+                    kuduIdx,
+                    if (isKey) row.getFloat(sparkIdx) else value.get.asInstanceOf[Float])
+                case DataTypes.DoubleType =>
+                  operation.getRow.addDouble(
+                    kuduIdx,
+                    if (isKey) row.getDouble(sparkIdx) else value.get.asInstanceOf[Double])
+                case DataTypes.TimestampType =>
+                  operation.getRow.addTimestamp(
+                    kuduIdx,
+                    if (isKey) row.getTimestamp(sparkIdx) else value.get.asInstanceOf[Timestamp])
+                case t => throw new IllegalArgumentException(s"No support for Spark SQL type $t")
+              }
+            }
+          }
+        }
+        session.apply(operation)
+      }
+    } finally {
+      session.close()
+    }
+    session.getPendingErrors
+  }
+
+  private def transformColumnSettings(
+      schema: Schema,
+      columns: Map[String, String]): Map[Int, Any] = {
+    columns.map(e => {
+      val value = if (e._2 == null) {
+        null
+      } else {
+        schema.getColumn(e._1).getType match {
+          case Type.STRING => e._2
+          case Type.BINARY => e._2.getBytes
+          case Type.BOOL => e._2.toBoolean
+          case Type.INT8 => e._2.toByte
+          case Type.INT16 => e._2.toShort
+          case Type.INT32 => e._2.toInt
+          case Type.INT64 => e._2.toLong
+          case Type.FLOAT => e._2.toFloat
+          case Type.DOUBLE => e._2.toDouble
+          case Type.DECIMAL => e._2.toDouble
+          case Type.UNIXTIME_MICROS => timestamp(e._2)
+        }
+      }
+      (schema.getColumnIndex(e._1), value)
+    })
+  }
+
+  private def timestamp(dateTime: String): Timestamp = {
+    Timestamp.valueOf(dateTime)
   }
 }
 

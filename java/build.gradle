@@ -36,6 +36,7 @@ allprojects {
   repositories {
     mavenCentral()
     mavenLocal()
+    maven {url "http://nexus.d.xiaomi.net/nexus/content/groups/public"}
   }
 
   // Read the version.txt file to set the project version
