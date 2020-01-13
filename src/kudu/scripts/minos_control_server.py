@@ -58,7 +58,7 @@ def is_cluster_health():
                                               ' 2>/dev/null'
                                               % cluster)
     unhealth_nodes = set()
-    if status == 0:
+    if status == 0 or status == 256:
         ksck_info = json.loads(output)
         for master in ksck_info['master_summaries']:
             if master['health'] != 'HEALTHY':
@@ -106,7 +106,7 @@ def wait_cluster_health():
 
 def parse_node_from_minos_output(output, job):
     host = ''
-    regex = re.compile('[a-zA-Z\s]*[tT]ask [0-9]+ of (%s) on ([0-9a-z-.]+)\(0\).+' % job)
+    regex = re.compile('[a-zA-Z\s]*[tT]ask [0-9]+ of (%s) on ([0-9a-z-.]+)(:[0-9]+)*\(0\).+' % job)
     match = regex.search(output)
     if match is not None:
         host = match.group(2)
