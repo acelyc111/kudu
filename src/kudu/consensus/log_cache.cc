@@ -177,8 +177,8 @@ Status LogCache::AppendOperations(const vector<ReplicateRefPtr>& msgs,
   // Try to consume the memory. If it can't be consumed, we may need to evict.
   bool borrowed_memory = false;
   if (!tracker_->TryConsume(mem_required)) {
-    int spare = tracker_->SpareCapacity();
-    int need_to_free = mem_required - spare;
+    int64_t spare = tracker_->SpareCapacity();
+    int64_t need_to_free = mem_required - spare;
     VLOG_WITH_PREFIX_UNLOCKED(1) << "Memory limit would be exceeded trying to append "
                         << HumanReadableNumBytes::ToString(mem_required)
                         << " to log cache (available="
@@ -224,7 +224,6 @@ Status LogCache::AppendOperations(const vector<ReplicateRefPtr>& msgs,
     tracker_->Release(mem_required);
     return log_status;
   }
-
 
   return Status::OK();
 }

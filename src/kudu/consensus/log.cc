@@ -994,7 +994,7 @@ int GetPrefixSizeToGC(RetentionIndexes retention_indexes, const SegmentSequence&
 }
 
 void Log::GetSegmentsToGCUnlocked(RetentionIndexes retention_indexes,
-                                    SegmentSequence* segments_to_gc) const {
+                                  SegmentSequence* segments_to_gc) const {
   reader_->GetSegmentsSnapshot(segments_to_gc);
   segments_to_gc->resize(GetPrefixSizeToGC(retention_indexes, *segments_to_gc));
 }

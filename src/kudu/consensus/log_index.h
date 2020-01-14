@@ -37,12 +37,12 @@ struct LogIndexEntry {
   consensus::OpId op_id;
 
   // The sequence number of the log segment which contains this entry.
-  int64_t segment_sequence_number;
+  int64_t segment_sequence_number = 0;
 
   // The offset within that log segment for the batch which contains this
   // entry. Note that the offset points to an entire batch which may contain
   // more than one replicate.
-  int64_t offset_in_segment;
+  int64_t offset_in_segment = 0;
 
   std::string ToString() const;
 };

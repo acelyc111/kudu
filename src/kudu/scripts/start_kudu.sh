@@ -45,7 +45,7 @@ NUM_MASTERS=1
 NUM_TSERVERS=3
 MASTER_RPC_PORT_BASE=8764
 TSERVER_RPC_PORT_BASE=9870
-TIME_SOURCE=system_unsync
+TIME_SOURCE=builtin
 BUILDDIR="$PWD"
 echo $(readlink -f $(dirname $0))
 while (( "$#" )); do

@@ -73,10 +73,10 @@ class LogCache {
   // operation.
   //
   // The result will be limited such that the total ByteSize() of the returned ops
-  // is less than max_size_bytes, unless that would result in an empty result, in
+  // is less than 'max_size_bytes', unless that would result in an empty result, in
   // which case exactly one op is returned.
   //
-  // The OpId which precedes the returned ops is returned in *preceding_op.
+  // The OpId which precedes the returned ops is returned in 'preceding_op'.
   // The index of this OpId will match 'after_op_index'.
   //
   // If the ops being requested are not available in the log, this will synchronously
@@ -102,7 +102,7 @@ class LogCache {
   // Following this, reads of truncated indexes using ReadOps(), LookupOpId(),
   // HasOpBeenWritten(), etc, will return as if the operations were never appended.
   //
-  // NOTE: unless a new operation is appended followig 'index', this truncation does
+  // NOTE: unless a new operation is appended following 'index', this truncation does
   // not persist across server restarts.
   void TruncateOpsAfter(int64_t index);
 
@@ -207,7 +207,7 @@ class LogCache {
 
   // Pointer to a parent memtracker for all log caches. This
   // exists to compute server-wide cache size and enforce a
-  // server-wide memory limit.  When the first instance of a log
+  // server-wide memory limit. When the first instance of a log
   // cache is created, a new entry is added to MemTracker's static
   // map; subsequent entries merely increment the refcount, so that
   // the parent tracker can be deleted if all log caches are

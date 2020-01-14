@@ -354,7 +354,7 @@ class Log : public RefCountedThreadSafe<Log> {
   // only refer to in-mem state that has been flushed are candidates for
   // garbage collection.
   //
-  // 'min_op_idx' is the minimum operation index required to be retained.
+  // 'retention_indexes' are the minimum operation indexes required to be retained.
   // If successful, num_gced is set to the number of deleted log segments.
   //
   // This method is thread-safe.
@@ -491,9 +491,6 @@ class Log : public RefCountedThreadSafe<Log> {
   // Index which translates between operation indexes and the position
   // of the operation in the log.
   scoped_refptr<LogIndex> log_index_;
-
-  // The maximum segment size, in bytes.
-  uint64_t max_segment_size_;
 
   // The queue used to communicate between the threads appending operations to
   // the log and the thread which actually writing the operations them to disk.
