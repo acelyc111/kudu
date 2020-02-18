@@ -37,6 +37,7 @@ class ClusterRebalancer;
 class MetricsCollector;
 class NodesChecker;
 class ReporterBase;
+class ServiceMonitor;
 
 class Collector {
  public:
@@ -64,6 +65,7 @@ class Collector {
   scoped_refptr<MetricsCollector> metrics_collector_;
   scoped_refptr<NodesChecker> nodes_checker_;
   scoped_refptr<ClusterRebalancer> cluster_rebalancer_;
+  scoped_refptr<ServiceMonitor> service_monitor_;
 
   CountDownLatch stop_background_threads_latch_;
   scoped_refptr<Thread> excess_log_deleter_thread_;

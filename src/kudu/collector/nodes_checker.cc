@@ -142,7 +142,7 @@ void NodesChecker::NodesCheckerThread() {
     UpdateAndCheckNodes();
     check_time += MonoDelta::FromSeconds(FLAGS_collector_interval_sec);
   } while (!RunOnceMode() && !stop_background_threads_latch_.WaitUntil(check_time));
-  LOG(INFO) << "FalconPusherThread exit";
+  LOG(INFO) << "NodesCheckerThread exit";
 }
 
 void NodesChecker::UpdateAndCheckNodes() {

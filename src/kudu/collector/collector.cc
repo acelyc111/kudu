@@ -29,6 +29,7 @@
 #include "kudu/collector/metrics_collector.h"
 #include "kudu/collector/nodes_checker.h"
 #include "kudu/collector/reporter_base.h"
+#include "kudu/collector/service_monitor.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/security/init.h"
 #include "kudu/util/env.h"
@@ -91,6 +92,8 @@ Status Collector::Init() {
   CHECK_OK(metrics_collector_->Init());
   cluster_rebalancer_.reset(new ClusterRebalancer());
   CHECK_OK(cluster_rebalancer_->Init());
+  service_monitor_.reset(new ServiceMonitor(reporter_));
+  CHECK_OK(service_monitor_->Init());
 
   initialized_ = true;
   return Status::OK();
@@ -107,6 +110,7 @@ Status Collector::Start() {
   nodes_checker_->Start();
   metrics_collector_->Start();
   cluster_rebalancer_->Start();
+  service_monitor_->Start();
 
   return Status::OK();
 }
@@ -120,6 +124,7 @@ void Collector::Shutdown() {
     metrics_collector_->Shutdown();
     nodes_checker_->Shutdown();
     cluster_rebalancer_->Shutdown();
+    service_monitor_->Shutdown();
 
     stop_background_threads_latch_.CountDown();
 

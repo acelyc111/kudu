@@ -26,10 +26,12 @@ set(COLLECTOR_SRCS
   falcon_reporter.cc
   local_reporter.cc
   metrics_collector.cc
-  nodes_checker.cc)
+  nodes_checker.cc
+  service_monitor.cc)
 
 add_library(collector ${COLLECTOR_SRCS})
 target_link_libraries(collector
+  kudu_client
   kudu_curl_util
   kudu_tools_test_util
   log

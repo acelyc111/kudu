@@ -213,9 +213,9 @@
         "metric=write_transactions_inflight service=kudu cluster=${cluster.name} level=${level} v=4"
       ],
       "cluster" : [
-          "metric=kudu.success service=kudu level=${level}",
-          "metric=kudu.writeLatency service=kudu level=${level}",
-          "metric=kudu.scanLatency service=kudu level=${level}",
+          "metric=kudu.success service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=kudu.writeLatency service=kudu cluster=${cluster.name} level=${level} v=4",
+          "metric=kudu.scanLatency service=kudu cluster=${cluster.name} level=${level} v=4",
           "metric=healthy_table_proportion service=kudu cluster=${cluster.name} level=${level} v=4"
       ],
       "cluster_stat" : [
