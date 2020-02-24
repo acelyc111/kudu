@@ -67,3 +67,9 @@ clusters_info:
     charge_type: public_share
     instance: HDD
     master_addresses: c3-hadoop-kudu-prc-ct01.bj:18000,c3-hadoop-kudu-prc-ct02.bj:18000,c3-hadoop-kudu-prc-ct03.bj:18000
+  c3tst-master:
+    olap_version: 2
+    region: chnbj-idc
+    charge_type: public_share
+    instance: HDD
+    master_addresses: c3-hadoop-srv-st2270.bj:16000,c3-hadoop-srv-st2271.bj:16000,c3-hadoop-kudu-prc-ct01.bj:16000
