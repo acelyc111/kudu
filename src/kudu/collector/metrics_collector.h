@@ -87,8 +87,8 @@ class MetricsCollector : public RefCounted<MetricsCollector> {
     int64_t count;
     // 'percentile_xxx" value in histogram metric, percentile_xxx is specified
     // by kRegisterPercentiles.
-    int64_t value;
-    SimpleHistogram(int64_t c, int64_t v) : count(c), value(v) {
+    double value;
+    SimpleHistogram(int64_t c, double v) : count(c), value(v) {
     }
     inline bool operator==(const SimpleHistogram& rhs) const {
       return count == rhs.count && value == rhs.value;

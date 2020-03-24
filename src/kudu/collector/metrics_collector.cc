@@ -39,6 +39,7 @@
 #include "kudu/gutil/port.h"
 #include "kudu/gutil/strings/split.h"
 #include "kudu/gutil/strings/substitute.h"
+#include "kudu/gutil/strings/util.h"
 #include "kudu/gutil/walltime.h"
 #include "kudu/util/curl_util.h"
 #include "kudu/util/debug/trace_event.h"
@@ -85,7 +86,8 @@ using strings::Substitute;
 namespace kudu {
 namespace collector {
 
-const set<string> MetricsCollector::kRegisterPercentiles = {"percentile_99"};
+const set<string> MetricsCollector::kRegisterPercentiles =
+    {"mean", "percentile_75", "percentile_95", "percentile_99"};
 
 MetricsCollector::MetricsCollector(scoped_refptr<NodesChecker> nodes_checker,
                                    scoped_refptr<ReporterBase> reporter)
@@ -244,6 +246,10 @@ Status MetricsCollector::ExtractMetricTypes(const JsonReader& r,
   for (const Value* metric : metrics) {
     string name;
     RETURN_NOT_OK(r.ExtractString(metric, "name", &name));
+    if (HasPrefixString(name, "average_")) {
+      EmplaceOrDie(metric_types, std::make_pair(name, "MEANGAUGE"));
+      continue;
+    }
     string type;
     RETURN_NOT_OK(r.ExtractString(metric, "type", &type));
     string upper_type;
@@ -656,14 +662,26 @@ Status MetricsCollector::ParseEntityMetrics(const JsonReader& r,
         auto& found_metric = FindOrDie(*merged_kv_metrics, name);
         found_metric += value;
       }
+    } else if (*known_type == "MEANGAUGE") {
+      double total_count;
+      CHECK_OK(r.ExtractDouble(metric, "total_count", &total_count));
+      double value;
+      CHECK_OK(r.ExtractDouble(metric, "value", &value));
+      vector<SimpleHistogram> tmp({{static_cast<int64_t>(total_count), value}});
+      EmplaceOrDie(hist_metrics, std::make_pair(name, tmp));
+      if (merged_hist_metrics &&
+          !EmplaceIfNotPresent(merged_hist_metrics, std::make_pair(name, tmp))) {
+        auto& found_hist_metric = FindOrDie(*merged_hist_metrics, name);
+        found_hist_metric.emplace_back(tmp[0]);
+      }
     } else if (*known_type == "HISTOGRAM") {
       for (const auto& percentile : kRegisterPercentiles) {
         string hist_metric_name(name);
         hist_metric_name += "_" + percentile;
         int64_t total_count;
         CHECK_OK(r.ExtractInt64(metric, "total_count", &total_count));
-        int64_t percentile_value;
-        CHECK_OK(r.ExtractInt64(metric, percentile.c_str(), &percentile_value));
+        double percentile_value;
+        CHECK_OK(r.ExtractDouble(metric, percentile.c_str(), &percentile_value));
         vector<SimpleHistogram> tmp({{total_count, percentile_value}});
         EmplaceOrDie(hist_metrics, std::make_pair(hist_metric_name, tmp));
         if (merged_hist_metrics &&

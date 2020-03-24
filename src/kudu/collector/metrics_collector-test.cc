@@ -392,6 +392,7 @@ TEST(TestMetricsCollector, TestParseMetrics) {
       {"server_metric", "COUNTER"},
       {"metric_counter1", "COUNTER"},
       {"metric_counter2", "COUNTER"},
+      {"average_metric", "MEANGAUGE"},
       {"server_metric_histogram", "HISTOGRAM"},
       {"metric_histogram1", "HISTOGRAM"},
       {"metric_histogram2", "HISTOGRAM"}
@@ -442,6 +443,12 @@ TEST(TestMetricsCollector, TestParseMetrics) {
       R"*(        "value": 20                           )*"
       R"*(      },                                      )*"
       R"*(      {                                       )*"
+      R"*(        "name": "average_metric",             )*"
+      R"*(        "value": 1,                           )*"
+      R"*(        "total_sum": 10,                      )*"
+      R"*(        "total_count": 10                     )*"
+      R"*(      },                                      )*"
+      R"*(      {                                       )*"
       R"*(        "name": "metric_histogram1",          )*"
       R"*(        "total_count": 17,                    )*"
       R"*(        "min": 6,                             )*"
@@ -467,6 +474,12 @@ TEST(TestMetricsCollector, TestParseMetrics) {
       R"*(      {                                       )*"
       R"*(        "name": "metric_counter1",            )*"
       R"*(        "value": 100                          )*"
+      R"*(      },                                      )*"
+      R"*(      {                                       )*"
+      R"*(        "name": "average_metric",             )*"
+      R"*(        "value": 0.5,                         )*"
+      R"*(        "total_sum": 20,                      )*"
+      R"*(        "total_count": 20                     )*"
       R"*(      },                                      )*"
       R"*(      {                                       )*"
       R"*(        "name": "metric_histogram1",          )*"
@@ -526,6 +539,30 @@ TEST(TestMetricsCollector, TestParseMetrics) {
         "table1",
         {
           {
+            "average_metric",
+            {
+              {10, 1}
+            }
+          },
+          {
+            "metric_histogram1_mean",
+            {
+              {17, 47.8235}
+            }
+          },
+          {
+            "metric_histogram1_percentile_75",
+            {
+              {17, 62}
+            }
+          },
+          {
+            "metric_histogram1_percentile_95",
+            {
+              {17, 72}
+            }
+          },
+          {
             "metric_histogram1_percentile_99",
             {
               {17, 73}
@@ -537,9 +574,51 @@ TEST(TestMetricsCollector, TestParseMetrics) {
         "table2",
         {
           {
+            "average_metric",
+            {
+              {20, 0.5}
+            }
+          },
+          {
+            "metric_histogram1_mean",
+            {
+              {170, 478.235}
+            }
+          },
+          {
+            "metric_histogram1_percentile_75",
+            {
+              {170, 620}
+            }
+          },
+          {
+            "metric_histogram1_percentile_95",
+            {
+              {170, 720}
+            }
+          },
+          {
             "metric_histogram1_percentile_99",
             {
               {170, 730}
+            }
+          },
+          {
+            "metric_histogram2_mean",
+            {
+              {34, 47.8235}
+            }
+          },
+          {
+            "metric_histogram2_percentile_75",
+            {
+              {34, 62}
+            }
+          },
+          {
+            "metric_histogram2_percentile_95",
+            {
+              {34, 72}
             }
           },
           {
@@ -558,6 +637,34 @@ TEST(TestMetricsCollector, TestParseMetrics) {
   }));
   ASSERT_EQ(host_hist_metrics, MetricsCollector::HistMetrics({
       {
+        "average_metric",
+        {
+          {10, 1},
+          {20, 0.5}
+        }
+      },
+      {
+        "metric_histogram1_mean",
+        {
+          {17, 47.8235},
+          {170, 478.235}
+        }
+      },
+      {
+        "metric_histogram1_percentile_75",
+        {
+          {17, 62},
+          {170, 620}
+        }
+      },
+      {
+        "metric_histogram1_percentile_95",
+        {
+          {17, 72},
+          {170, 720}
+        }
+      },
+      {
         "metric_histogram1_percentile_99",
         {
           {17, 73},
@@ -565,9 +672,45 @@ TEST(TestMetricsCollector, TestParseMetrics) {
         }
       },
       {
+        "metric_histogram2_mean",
+        {
+          {34, 47.8235}
+        }
+      },
+      {
+        "metric_histogram2_percentile_75",
+        {
+          {34, 62}
+        }
+      },
+      {
+        "metric_histogram2_percentile_95",
+        {
+          {34, 72}
+        }
+      },
+      {
         "metric_histogram2_percentile_99",
         {
           {34, 72}
+        }
+      },
+      {
+        "server_metric_histogram_mean",
+        {
+          {60, 76.16666666666667}
+        }
+      },
+      {
+        "server_metric_histogram_percentile_75",
+        {
+          {60, 25}
+        }
+      },
+      {
+        "server_metric_histogram_percentile_95",
+        {
+          {60, 66}
         }
       },
       {
