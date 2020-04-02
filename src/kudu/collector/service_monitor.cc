@@ -61,7 +61,7 @@ DEFINE_uint32(collector_monitor_timeout_threshold_sec, 30,
               "take more than this number of seconds, "
               "issue a warning with a trace.");
 DEFINE_uint32(collector_monitor_upsert_timeout_ms, 100,
-              "Timeout for one upsert operation");
+              "Timeout for one insert/upsert operation");
 
 DECLARE_string(collector_cluster_name);
 DECLARE_string(collector_master_addrs);
@@ -411,7 +411,7 @@ Status ServiceMonitor::UpsertAndScanRows(const shared_ptr<KuduTable>& table) {
     if (s.ok()) {
       write_success++;
     } else {
-      LOG(WARNING) << s.ToString() <<  Substitute(": unable to upsert row (id=$0).", i);
+      LOG(WARNING) << s.ToString() <<  Substitute(": unable to upsert row (key=$0).", i);
     }
   }
   int64_t write_latency_ms = (MonoTime::Now() - start).ToMilliseconds();
@@ -464,7 +464,9 @@ Status ServiceMonitor::UpsertAndScanRows(const shared_ptr<KuduTable>& table) {
   RETURN_NOT_OK(row->SetInt64("key", timestamp));
   RETURN_NOT_OK(row->SetInt32("total_count", total_count));
   RETURN_NOT_OK(row->SetInt32("success_count", success_count));
-  RETURN_NOT_OK(session->Apply(insert));
+  WARN_NOT_OK(session->Apply(insert),
+              Substitute("unable to insert row (key=$0, total_count=$1, success_count=$2)",
+                         timestamp, total_count, success_count));
   RETURN_NOT_OK(session->Close());
 
   unordered_map<string, int64_t> report_metrics;

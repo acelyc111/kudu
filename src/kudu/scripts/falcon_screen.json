@@ -208,7 +208,7 @@
         "metric=log_sync_latency_percentile_75 service=kudu cluster=${cluster.name} level=${level} v=4",
         "metric=log_sync_latency_percentile_95 service=kudu cluster=${cluster.name} level=${level} v=4",
         "metric=log_sync_latency_percentile_99 service=kudu cluster=${cluster.name} level=${level} v=4",
-        "metric=lth service=kudu cluster=${cluster.name} level=${level} v=4"
+        "metric=live_row_count service=kudu cluster=${cluster.name} level=${level} v=4"
       ],
       "table_mn": [
         "metric=majority_done_ops service=kudu cluster=${cluster.name} level=${level} v=4",

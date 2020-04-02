@@ -194,6 +194,8 @@ Status MetricsCollector::InitMetrics() {
       EmplaceOrDie(&metric_types, std::make_pair(metric_type.first, metric_type.second));
     }
   }
+  EmplaceIfNotPresent(&metric_types, std::make_pair("merged_entities_count_of_tablet", "GAUGE"));
+  EmplaceIfNotPresent(&metric_types, std::make_pair("live_row_count", "GAUGE"));
 
   metric_types_.swap(metric_types);
   return Status::OK();
