@@ -148,8 +148,9 @@ Status Collector::StartExcessLogFileDeleterThread() {
     RETURN_NOT_OK_PREPEND(DeleteExcessLogFiles(Env::Default()),
                           "Unable to delete excess log files");
   }
-  return Thread::Create("server", "excess-log-deleter", &Collector::ExcessLogFileDeleterThread,
-                        this, &excess_log_deleter_thread_);
+  return Thread::Create("server", "excess-log-deleter",
+                        [this]() { this->ExcessLogFileDeleterThread(); },
+                        &excess_log_deleter_thread_);
 }
 
 void Collector::ExcessLogFileDeleterThread() {

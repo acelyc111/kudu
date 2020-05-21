@@ -433,8 +433,7 @@ void Master::ShutdownImpl() {
 }
 
 Status Master::StartOutdatedReservedTablesDeleterThread() {
-  return Thread::Create("master",
-                        "outdated-reserved-tables-deleter",
+  return Thread::Create("master", "outdated-reserved-tables-deleter",
                         [this]() { this->OutdatedReservedTablesDeleterThread(); },
                         &outdated_reserved_tables_deleter_thread_);
 }

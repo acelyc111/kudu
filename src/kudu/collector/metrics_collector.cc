@@ -142,8 +142,9 @@ string MetricsCollector::ToString() const {
 }
 
 Status MetricsCollector::StartMetricCollectorThread() {
-  return Thread::Create("server", "metric-collector", &MetricsCollector::MetricCollectorThread,
-                        this, &metric_collector_thread_);
+  return Thread::Create("server", "metric-collector",
+                        [this]() { this->MetricCollectorThread(); },
+                        &metric_collector_thread_);
 }
 
 void MetricsCollector::MetricCollectorThread() {
@@ -334,7 +335,7 @@ Status MetricsCollector::CollectAndReportMasterMetrics() {
   RETURN_NOT_OK(UpdateThreadPool(std::max(host_metric_collector_thread_pool_->num_threads(),
                                           static_cast<int32_t>(master_http_addrs.size()))));
   for (int i = 0; i < master_http_addrs.size(); ++i) {
-    RETURN_NOT_OK(host_metric_collector_thread_pool_->SubmitFunc(
+    RETURN_NOT_OK(host_metric_collector_thread_pool_->Submit(
       std::bind(&MetricsCollector::CollectAndReportHostLevelMetrics,
                 this,
                 NodeType::kMaster,
@@ -373,7 +374,7 @@ Status MetricsCollector::CollectAndReportTServerMetrics() {
   vector<TablesMetrics> hosts_metrics_by_table_name(tserver_http_addrs.size());
   vector<TablesHistMetrics> hosts_hist_metrics_by_table_name(tserver_http_addrs.size());
   for (int i = 0; i < tserver_http_addrs.size(); ++i) {
-    RETURN_NOT_OK(host_metric_collector_thread_pool_->SubmitFunc(
+    RETURN_NOT_OK(host_metric_collector_thread_pool_->Submit(
       std::bind(&MetricsCollector::CollectAndReportHostLevelMetrics,
                 this,
                 NodeType::kTServer,
@@ -654,8 +655,12 @@ Status MetricsCollector::ParseEntityMetrics(const JsonReader& r,
         case rapidjson::Type::kNumberType:
           CHECK_OK(GetNumberMetricValue(val, name, &value));
           break;
+        case rapidjson::Type::kFalseType:
+        case rapidjson::Type::kTrueType:
+          // Do not process true/false type.
+          break;
         default:
-          LOG(FATAL) << "Unknown type, metrics name: " << name;
+          LOG(WARNING) << "Unknown type, metrics name: " << name;
       }
 
       EmplaceOrDie(kv_metrics, std::make_pair(name, value));

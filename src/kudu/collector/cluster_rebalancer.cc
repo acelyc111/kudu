@@ -101,8 +101,9 @@ string ClusterRebalancer::ToString() const {
 }
 
 Status ClusterRebalancer::StartClusterRebalancerThread() {
-  return Thread::Create("server", "cluster-rebalancer", &ClusterRebalancer::ClusterRebalancerThread,
-                        this, &cluster_rebalancer_thread_);
+  return Thread::Create("server", "cluster-rebalancer",
+                        [this]() { this->ClusterRebalancerThread(); },
+                        &cluster_rebalancer_thread_);
 }
 
 void ClusterRebalancer::ClusterRebalancerThread() {

@@ -342,8 +342,9 @@ Status ServiceMonitor::CallLeaderStepDown(const string& tablet_id, const string&
 }
 
 Status ServiceMonitor::StartServiceMonitorThread() {
-  return Thread::Create("collector", "nodes-checker", &ServiceMonitor::ServiceMonitorThread,
-                        this, &service_monitor_thread_);
+  return Thread::Create("collector", "nodes-checker",
+                        [this]() { this->ServiceMonitorThread(); },
+                        &service_monitor_thread_);
 }
 
 void ServiceMonitor::ServiceMonitorThread() {

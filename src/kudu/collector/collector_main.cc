@@ -33,16 +33,14 @@ namespace kudu {
 namespace collector {
 
 static int CollectorMain(int argc, char** argv) {
-  InitKuduOrDie();
-
-  GFlagsMap default_flags = GetFlagsMap();
+  RETURN_MAIN_NOT_OK(InitKudu(), "InitKudu() failed", 1);
 
   ParseCommandLineFlags(&argc, &argv, true);
   if (argc != 1) {
     std::cerr << "usage: " << argv[0] << std::endl;
     return 1;
   }
-  std::string nondefault_flags = GetNonDefaultFlags(default_flags);
+  std::string nondefault_flags = GetNonDefaultFlags();
   InitGoogleLoggingSafe(argv[0]);
 
   LOG(INFO) << "Collector non-default flags:\n"
@@ -52,10 +50,10 @@ static int CollectorMain(int argc, char** argv) {
 
   Collector collector;
   LOG(INFO) << "Initializing collector...";
-  CHECK_OK(collector.Init());
+  RETURN_MAIN_NOT_OK(collector.Init(), "Init() failed", 3);
 
   LOG(INFO) << "Starting collector...";
-  CHECK_OK(collector.Start());
+  RETURN_MAIN_NOT_OK(collector.Start(), "Start() failed", 4);
 
   LOG(INFO) << "Collector successfully started.";
   while (!RunOnceMode()) {

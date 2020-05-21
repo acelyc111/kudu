@@ -131,8 +131,9 @@ string NodesChecker::GetFirstTServer() {
 }
 
 Status NodesChecker::StartNodesCheckerThread() {
-  return Thread::Create("collector", "nodes-checker", &NodesChecker::NodesCheckerThread,
-                        this, &nodes_checker_thread_);
+  return Thread::Create("collector", "nodes-checker",
+                        [this]() { this->NodesCheckerThread(); },
+                        &nodes_checker_thread_);
 }
 
 void NodesChecker::NodesCheckerThread() {

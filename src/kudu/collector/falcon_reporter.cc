@@ -152,7 +152,7 @@ Status FalconReporter::StartFalconPusherThreadPool() {
       .set_idle_timeout(MonoDelta::FromMilliseconds(1))
       .Build(&pusher_thread_pool_));
   for (int i = 0; i < FLAGS_collector_falcon_pusher_count; ++i) {
-    RETURN_NOT_OK(pusher_thread_pool_->SubmitFunc(std::bind(&FalconReporter::FalconPusher,
+    RETURN_NOT_OK(pusher_thread_pool_->Submit(std::bind(&FalconReporter::FalconPusher,
                                                             this)));
   }
 
