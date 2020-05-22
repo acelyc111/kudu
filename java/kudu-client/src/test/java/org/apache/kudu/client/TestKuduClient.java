@@ -145,7 +145,7 @@ public class TestKuduClient {
     assertTrue(client.getTablesList().getTablesList().contains(TABLE_NAME));
 
     // Check that we can delete it.
-    client.deleteTable(TABLE_NAME);
+    client.deleteTable(TABLE_NAME, false, -1);
     assertFalse(client.getTablesList().getTablesList().contains(TABLE_NAME));
 
     // Check that we can re-recreate it, with a different schema.

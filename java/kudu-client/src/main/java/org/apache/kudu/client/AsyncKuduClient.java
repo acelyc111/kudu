@@ -695,15 +695,37 @@ public class AsyncKuduClient implements AutoCloseable {
   /**
    * Delete a table on the cluster with the specified name.
    * @param name the table's name
+   * @param forceOnTrashedTable the flag the decide whether to trash table
+   * @param reserveSeconds the trashed table to be alive time
    * @return a deferred object to track the progress of the deleteTable command
    */
-  public Deferred<DeleteTableResponse> deleteTable(String name) {
+  public Deferred<DeleteTableResponse> deleteTable(String name,
+                                                   boolean forceOnTrashedTable,
+                                                   int reserveSeconds) {
     checkIsClosed();
     DeleteTableRequest delete = new DeleteTableRequest(this.masterTable,
                                                        name,
                                                        timer,
-                                                       defaultAdminOperationTimeoutMs);
+                                                       defaultAdminOperationTimeoutMs,
+                                                       forceOnTrashedTable,
+                                                       reserveSeconds);
+
     return sendRpcToTablet(delete);
+  }
+
+  /**
+   * Recall a deleted table on the cluster with the specified name
+   * @param name
+   * @return an rpc response object
+   * @throws KuduException
+   */
+  public Deferred<RecallDeletedTableResponse> recallDeletedTable(String name) {
+    checkIsClosed();
+    RecallDeletedTableRequest recall = new RecallDeletedTableRequest(this.masterTable,
+                                                                     name,
+                                                                     timer,
+                                                                     defaultAdminOperationTimeoutMs);
+    return sendRpcToTablet(recall);
   }
 
   /**

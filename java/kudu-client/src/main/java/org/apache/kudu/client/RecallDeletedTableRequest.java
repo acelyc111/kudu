@@ -18,8 +18,8 @@
 package org.apache.kudu.client;
 
 import com.google.protobuf.Message;
-import io.netty.util.Timer;
 import org.apache.yetus.audience.InterfaceAudience;
+import org.jboss.netty.util.Timer;
 
 import org.apache.kudu.master.Master;
 import org.apache.kudu.util.Pair;
@@ -28,37 +28,26 @@ import org.apache.kudu.util.Pair;
  * RPC to delete tables
  */
 @InterfaceAudience.Private
-class DeleteTableRequest extends KuduRpc<DeleteTableResponse> {
+class RecallDeletedTableRequest extends KuduRpc<RecallDeletedTableResponse> {
 
-  static final String DELETE_TABLE = "DeleteTable";
+  static final String RECALL_DELETED_TABLE = "RecallDeletedTable";
 
   private final String name;
 
-  private final boolean forceOnTrashedTable;
-
-  private final int reserveSeconds;
-
-  DeleteTableRequest(KuduTable table,
-                     String name,
-                     Timer timer,
-                     long timeoutMillis,
-                     boolean forceOnTrashedTable,
-                     int reserveSeconds) {
+  RecallDeletedTableRequest(KuduTable table,
+                            String name,
+                            Timer timer,
+                            long timeoutMillis) {
     super(table, timer, timeoutMillis);
     this.name = name;
-    this.forceOnTrashedTable = forceOnTrashedTable;
-    this.reserveSeconds = reserveSeconds;
   }
 
   @Override
   Message createRequestPB() {
-    final Master.DeleteTableRequestPB.Builder builder = Master.DeleteTableRequestPB.newBuilder();
+    final Master.RecallDeletedTableRequestPB.Builder builder = Master.RecallDeletedTableRequestPB.newBuilder();
     Master.TableIdentifierPB tableID =
         Master.TableIdentifierPB.newBuilder().setTableName(name).build();
     builder.setTable(tableID);
-    builder.setForceOnTrashedTable(forceOnTrashedTable);
-    builder.setReserveSeconds(reserveSeconds);
-
     return builder.build();
   }
 
@@ -69,17 +58,17 @@ class DeleteTableRequest extends KuduRpc<DeleteTableResponse> {
 
   @Override
   String method() {
-    return DELETE_TABLE;
+    return RECALL_DELETED_TABLE;
   }
 
   @Override
-  Pair<DeleteTableResponse, Object> deserialize(CallResponse callResponse,
-                                                String tsUUID) throws KuduException {
-    final Master.DeleteTableResponsePB.Builder builder = Master.DeleteTableResponsePB.newBuilder();
+  Pair<RecallDeletedTableResponse, Object> deserialize(CallResponse callResponse,
+                                                       String tsUUID) throws KuduException {
+    final Master.RecallDeletedTableResponsePB.Builder builder = Master.RecallDeletedTableResponsePB.newBuilder();
     readProtobuf(callResponse.getPBMessage(), builder);
-    DeleteTableResponse response =
-        new DeleteTableResponse(timeoutTracker.getElapsedMillis(), tsUUID);
-    return new Pair<DeleteTableResponse, Object>(
+    RecallDeletedTableResponse response =
+        new RecallDeletedTableResponse(timeoutTracker.getElapsedMillis(), tsUUID);
+    return new Pair<RecallDeletedTableResponse, Object>(
         response, builder.hasError() ? builder.getError() : null);
   }
 }
