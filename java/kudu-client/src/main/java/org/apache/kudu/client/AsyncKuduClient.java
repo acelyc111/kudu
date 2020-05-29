@@ -693,6 +693,16 @@ public class AsyncKuduClient implements AutoCloseable {
   }
 
   /**
+   * SoftDelete a table on the cluster with the specified name, the table will be
+   * reserved for 7 days after being deleted.
+   * @param name the table's name
+   * @return a deferred object to track the progress of the deleteTable command
+   */
+  public Deferred<DeleteTableResponse> deleteTable(String name) {
+    return deleteTable(name, false, 60 * 60 * 24 * 7);
+  }
+
+  /**
    * Delete a table on the cluster with the specified name.
    * @param name the table's name
    * @param forceOnTrashedTable the flag the decide whether to trash table

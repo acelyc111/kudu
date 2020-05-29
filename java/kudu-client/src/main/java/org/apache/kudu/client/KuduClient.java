@@ -162,6 +162,18 @@ public class KuduClient implements AutoCloseable {
   }
 
   /**
+   * SoftDelete a table on the cluster with the specified name, the table will be
+   * reserved for 7 days after being deleted.
+   * @param name the table's name
+   * @return an rpc response object
+   * @throws KuduException if anything went wrong
+   */
+  public DeleteTableResponse deleteTable(String name) throws KuduException {
+    Deferred<DeleteTableResponse> d = asyncClient.deleteTable(name);
+    return joinAndHandleException(d);
+  }
+
+  /**
    * Delete a table on the cluster with the specified name.
    * @param name the table's name
    * @param forceOnTrashedTable the flag the decide whether to trash table
