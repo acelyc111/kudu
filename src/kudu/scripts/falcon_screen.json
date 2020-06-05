@@ -491,6 +491,7 @@
           "metric=log_block_manager_dead_containers_deleted service=kudu cluster=${cluster.name} level=host v=4",
           "metric=log_block_manager_full_containers service=kudu cluster=${cluster.name} level=host v=4",
           "metric=log_block_manager_holes_punched service=kudu cluster=${cluster.name} level=host v=4",
+          "metric=num_raft_leaders service=kudu cluster=${cluster.name} level=host v=4",
           "metric=op_apply_queue_length_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
           "metric=op_apply_queue_time_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",
           "metric=op_apply_run_time_percentile_99 service=kudu cluster=${cluster.name} level=host v=4",

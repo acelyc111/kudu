@@ -140,6 +140,21 @@ def get_tablet_server_info(hostname, tservers_info):
     return rpc_address, uuid
 
 
+def get_cluster_version():
+    version_info = dict()
+    version = ''
+    min_version = '9.9.9'
+    status, output = commands.getstatusoutput('${KUDU_HOME}/kudu cluster ksck @%s -sections=VERSION_SUMMARIES -ksck_format=json_compact'
+                                              % cluster)
+    exit_if_failed(status, output)
+    version_info = json.loads(output)
+    for item in version_info['version_summaries']:
+        version = item['version']
+        if version < min_version:
+            min_version = version
+    return min_version
+
+
 def set_flag(rpc_address, seconds):
     cmd = ('${KUDU_HOME}/kudu tserver set_flag %s follower_unavailable_considered_failed_sec %s'
            % (rpc_address, seconds))
@@ -147,13 +162,42 @@ def set_flag(rpc_address, seconds):
     exit_if_failed(status, output)
 
 
+def maintain_tserver(op_type, ts_uuid):
+    cmd = ('${KUDU_HOME}/kudu tserver state %s @%s %s'
+           % (op_type, cluster, ts_uuid))
+    status, output = commands.getstatusoutput(cmd)
+    exit_if_failed(status, output)
+
+
+def wait_tserver_quiesce(rpc_address):
+    print(time_header() + 'Start to quiesce tserver ' + rpc_address)
+    cmd = ('${KUDU_HOME}/kudu tserver quiesce start %s -error_if_not_fully_quiesced' % (rpc_address))
+    is_quiesced = False
+    while not is_quiesced:
+        status, output = commands.getstatusoutput(cmd)
+        if status == 0:
+            print(time_header() + 'Tablet server is fully quiesced.')
+            is_quiesced = True
+        else:
+            print(time_header() + output)
+            time.sleep(1)
+
+
 def rebalance_cluster(blacklist_tserver_uuid):
     ignored_tservers_uuid = set()
     for node in known_unhealth_nodes:
         rpc_address, uuid = get_tablet_server_info(node, tservers_info)
         ignored_tservers_uuid.add(uuid)
-    cmd = ('${KUDU_HOME}/kudu cluster rebalance @%s -blacklist_tservers=%s -ignored_tservers=%s'
-           % (cluster, blacklist_tserver_uuid, str(','.join(ignored_tservers_uuid))))
+    if blacklist_tserver_uuid == '':
+        cmd = ('${KUDU_HOME}/kudu cluster rebalance @%s -ignored_tservers=%s'
+               % (cluster, str(','.join(ignored_tservers_uuid))))
+    elif version < '1.11':
+        cmd = ('${KUDU_HOME}/kudu cluster rebalance @%s -blacklist_tservers=%s -ignored_tservers=%s'
+               % (cluster, blacklist_tserver_uuid, str(','.join(ignored_tservers_uuid))))
+    else:
+        ignored_tservers_uuid.add(blacklist_tserver_uuid)
+        cmd = ('${KUDU_HOME}/kudu cluster rebalance @%s -ignored_tservers=%s -move_replicas_from_ignored_tservers'
+               % (cluster, str(','.join(ignored_tservers_uuid))))
     p = subprocess.Popen(cmd, stdout = subprocess.PIPE, shell=True)
     for line in iter(p.stdout.readline, b''):
         print line
@@ -184,8 +228,10 @@ check_parameter('You will rebalance cluster after operation: %s? (y/n)', rebalan
 
 tservers_info = get_tservers_info()
 wait_cluster_health()
+version = get_cluster_version()
+print('The cluster version(before rolling_update) is ' + version)
 
-if 'tablet_server' in job and operate in ['restart', 'rolling_update']:
+if version < '1.11' and 'tablet_server' in job and operate in ['restart', 'rolling_update']:
     for tserver in tservers_info:
         set_flag(tserver['rpc-addresses'], 7200)
 
@@ -195,13 +241,16 @@ for task in tasks:
         exit()
 
     if 'tablet_server' in job:
-        cmd = ('%s/deploy show kudu %s --job %s --task %d'
-          % (minos_client_path, cluster, job, task))
+        cmd = ('%s/deploy show kudu %s --job %s --task %d' % (minos_client_path, cluster, job, task))
         status, output = commands.getstatusoutput(cmd)
         exit_if_failed(status, output)
         print(output)
         hostname = parse_node_from_minos_output(output, job)
         rpc_address, uuid = get_tablet_server_info(hostname, tservers_info)
+        if version > '1.11':
+            maintain_tserver("enter_maintenance", uuid)
+            if version > '1.12':
+                wait_tserver_quiesce(rpc_address)
         if operate == 'stop':
             # migrate replicas on tserver
             rebalance_cluster(uuid)
@@ -218,12 +267,15 @@ for task in tasks:
     wait_cluster_health()
 
     if 'tablet_server' in job and operate in ['restart', 'rolling_update']:
-        set_flag(rpc_address, 7200)
+        if version < '1.11':
+            set_flag(rpc_address, 7200)
+        else:
+            maintain_tserver("exit_maintenance", uuid)
 
     print(time_header() + '==========================')
     time.sleep(10)
 
-if 'tablet_server' in job and operate in ['restart', 'rolling_update']:
+if version < '1.11' and 'tablet_server' in job and operate in ['restart', 'rolling_update']:
     for tserver in tservers_info:
         set_flag(tserver['rpc-addresses'], default_follower_unavailable_considered_failed_sec)
 
