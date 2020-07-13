@@ -26,7 +26,6 @@ import org.apache.spark.TaskContext
 import org.apache.spark.util.LongAccumulator
 import org.apache.yetus.audience.InterfaceAudience
 import org.apache.yetus.audience.InterfaceStability
-import org.apache.kudu.Type
 
 import org.apache.kudu.client
 import org.apache.kudu.client._

@@ -19,6 +19,7 @@ package org.apache.kudu.spark.kudu
 
 import java.security.AccessController
 import java.security.PrivilegedAction
+import java.sql.Date
 import java.sql.Timestamp
 import javax.security.auth.Subject
 import javax.security.auth.login.AppConfigurationEntry
@@ -573,9 +574,22 @@ class KuduContext(val kuduMaster: String, sc: SparkContext, val socketReadTimeou
             } else {
               schema.fields(sparkIdx).dataType match {
                 case DataTypes.StringType =>
-                  operation.getRow.addString(
+                  kuduTableSchema.getColumnByIndex(kuduIdx).getType match {
+                    case Type.STRING =>
+                      operation.getRow.addString(
+                        kuduIdx,
+                        if (isKey) row.getString(sparkIdx) else value.get.asInstanceOf[String])
+                    case Type.VARCHAR =>
+                      operation.getRow.addVarchar(
+                        kuduIdx,
+                        if (isKey) row.getString(sparkIdx) else value.get.asInstanceOf[String])
+                    case t =>
+                      throw new IllegalArgumentException(s"Invalid Kudu column type $t")
+                  }
+                case DataTypes.DateType =>
+                  operation.getRow.addDate(
                     kuduIdx,
-                    if (isKey) row.getString(sparkIdx) else value.get.asInstanceOf[String])
+                    if (isKey) row.getDate(sparkIdx) else value.get.asInstanceOf[Date])
                 case DataTypes.BinaryType =>
                   operation.getRow.addBinary(
                     kuduIdx,
@@ -635,6 +649,7 @@ class KuduContext(val kuduMaster: String, sc: SparkContext, val socketReadTimeou
       } else {
         schema.getColumn(e._1).getType match {
           case Type.STRING => e._2
+          case Type.VARCHAR => e._2
           case Type.BINARY => e._2.getBytes
           case Type.BOOL => e._2.toBoolean
           case Type.INT8 => e._2.toByte
@@ -644,15 +659,12 @@ class KuduContext(val kuduMaster: String, sc: SparkContext, val socketReadTimeou
           case Type.FLOAT => e._2.toFloat
           case Type.DOUBLE => e._2.toDouble
           case Type.DECIMAL => e._2.toDouble
-          case Type.UNIXTIME_MICROS => timestamp(e._2)
+          case Type.DATE => Date.valueOf(e._2)
+          case Type.UNIXTIME_MICROS => Timestamp.valueOf(e._2)
         }
       }
       (schema.getColumnIndex(e._1), value)
     })
-  }
-
-  private def timestamp(dateTime: String): Timestamp = {
-    Timestamp.valueOf(dateTime)
   }
 }
 
