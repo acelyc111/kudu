@@ -36,7 +36,9 @@ allprojects {
   repositories {
     mavenCentral()
     mavenLocal()
-    maven {url "http://nexus.d.xiaomi.net/nexus/content/groups/public"}
+    maven {url "https://pkgs.d.xiaomi.net:443/artifactory/maven-release-virtual/"}
+    maven {url "https://pkgs.d.xiaomi.net:443/artifactory/maven-remote-virtual/"}
+    maven {url "https://pkgs.d.xiaomi.net:443/artifactory/maven-snapshot-virtual/"}
   }
 
   // Read the version.txt file to set the project version
