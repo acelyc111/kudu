@@ -60,8 +60,8 @@ DEFINE_uint32(collector_monitor_timeout_threshold_sec, 30,
               "If operations for checkintg service and record the result "
               "take more than this number of seconds, "
               "issue a warning with a trace.");
-DEFINE_uint32(collector_monitor_upsert_timeout_ms, 100,
-              "Timeout for one insert/upsert operation");
+DEFINE_uint32(collector_monitor_upsert_timeout_ms, 5000,
+              "Timeout for batch insert/upsert operation");
 
 DECLARE_string(collector_cluster_name);
 DECLARE_string(collector_master_addrs);
@@ -70,6 +70,7 @@ DECLARE_uint32(collector_warn_threshold_ms);
 
 using kudu::client::KuduClientBuilder;
 using kudu::client::KuduColumnSchema;
+using kudu::client::KuduError;
 using kudu::client::KuduInsert;
 using kudu::client::KuduPredicate;
 using kudu::client::KuduScanBatch;
@@ -342,7 +343,7 @@ Status ServiceMonitor::CallLeaderStepDown(const string& tablet_id, const string&
 }
 
 Status ServiceMonitor::StartServiceMonitorThread() {
-  return Thread::Create("collector", "nodes-checker",
+  return Thread::Create("collector", "service-monitor",
                         [this]() { this->ServiceMonitorThread(); },
                         &service_monitor_thread_);
 }
@@ -391,7 +392,7 @@ void ServiceMonitor::CheckService() {
 
 Status ServiceMonitor::UpsertAndScanRows(const shared_ptr<KuduTable>& table) {
   shared_ptr<KuduSession> session = table->client()->NewSession();
-  RETURN_NOT_OK(session->SetFlushMode(KuduSession::AUTO_FLUSH_SYNC));
+  RETURN_NOT_OK(session->SetFlushMode(KuduSession::AUTO_FLUSH_BACKGROUND));
   session->SetTimeoutMillis(FLAGS_collector_monitor_upsert_timeout_ms);
   vector<KuduScanToken*> tokens;
   ElementDeleter deleter(&tokens);
@@ -408,12 +409,23 @@ Status ServiceMonitor::UpsertAndScanRows(const shared_ptr<KuduTable>& table) {
     KuduPartialRow* row = upsert->mutable_row();
     RETURN_NOT_OK(row->SetInt64("key", i));
     RETURN_NOT_OK(row->SetInt64("value", timestamp));
-    Status s = session->Apply(upsert);
-    if (s.ok()) {
-      write_success++;
-    } else {
-      LOG(WARNING) << s.ToString() <<  Substitute(": unable to upsert row (key=$0).", i);
+    RETURN_NOT_OK(session->Apply(upsert));
+  }
+  write_success += record_count;
+  Status s = session->Flush();
+  if (!s.ok()) {
+    vector<KuduError*> errors;
+    ElementDeleter d(&errors);
+    bool overflow;
+    session->GetPendingErrors(&errors, &overflow);
+    if (overflow) {
+      LOG(WARNING) << "Error overflow occured";
     }
+    for (KuduError* error : errors) {
+      LOG(WARNING) << "UPSERT FAILED: " << error->status().ToString()
+                   << error->failed_op().ToString();
+    }
+    write_success -= errors.size();
   }
   int64_t write_latency_ms = (MonoTime::Now() - start).ToMilliseconds();
   TRACE("Upsert some rows");
@@ -460,16 +472,6 @@ Status ServiceMonitor::UpsertAndScanRows(const shared_ptr<KuduTable>& table) {
   double success_count = write_success + read_success;
   double kudu_success = success_count/total_count*100;
 
-  KuduInsert* insert = table->NewInsert();
-  KuduPartialRow* row = insert->mutable_row();
-  RETURN_NOT_OK(row->SetInt64("key", timestamp));
-  RETURN_NOT_OK(row->SetInt32("total_count", total_count));
-  RETURN_NOT_OK(row->SetInt32("success_count", success_count));
-  WARN_NOT_OK(session->Apply(insert),
-              Substitute("unable to insert row (key=$0, total_count=$1, success_count=$2)",
-                         timestamp, total_count, success_count));
-  RETURN_NOT_OK(session->Close());
-
   unordered_map<string, int64_t> report_metrics;
   report_metrics.emplace("kudu.scanLatency", scan_latency_ms);
   report_metrics.emplace("kudu.writeLatency", write_latency_ms);
@@ -487,6 +489,15 @@ Status ServiceMonitor::UpsertAndScanRows(const shared_ptr<KuduTable>& table) {
   }
   reporter_->PushItems(std::move(items));
   TRACE("Pushed results");
+
+  KuduInsert* insert = table->NewInsert();
+  KuduPartialRow* row = insert->mutable_row();
+  RETURN_NOT_OK(row->SetInt64("key", timestamp));
+  RETURN_NOT_OK(row->SetInt32("total_count", total_count));
+  RETURN_NOT_OK(row->SetInt32("success_count", success_count));
+  RETURN_NOT_OK(session->Apply(insert));
+  RETURN_NOT_OK(session->Flush());
+  RETURN_NOT_OK(session->Close());
 
   return Status::OK();
 }
