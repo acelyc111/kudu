@@ -10,6 +10,7 @@ import json
 import re
 import os
 import subprocess
+import kudu_utils
 
 cluster = ''            # cluster name in minos config
 job = 'tablet_server'   # job name in minos config
@@ -21,9 +22,12 @@ known_unhealth_nodes = set()
 default_follower_unavailable_considered_failed_sec = 300    # default value of follower_unavailable_considered_failed_sec
 rebalance_cluster_after_operation = True    # whether to rebalance cluster after operation
 
+def record_cmd_execution(cmd):
+    kudu_utils.LOG.info(time_header() + 'Execute the command: ' + cmd + ' done.')
+
 def exit_if_failed(status, output):
     if status != 0:
-        print(output)
+        kudu_utils.LOG.fatal(output)
         exit();
 
 def get_minos_type(cluster_name):
@@ -102,6 +106,7 @@ def wait_cluster_health():
                 time.sleep(5)
                 nodes = is_cluster_health()
                 break
+    kudu_utils.LOG.info(time_header() + "Cluster is healthy now.")
 
 
 def parse_node_from_minos_output(output, job):
@@ -160,6 +165,7 @@ def set_flag(rpc_address, seconds):
            % (rpc_address, seconds))
     status, output = commands.getstatusoutput(cmd)
     exit_if_failed(status, output)
+    record_cmd_execution(cmd)
 
 
 def maintain_tserver(op_type, ts_uuid):
@@ -167,6 +173,7 @@ def maintain_tserver(op_type, ts_uuid):
            % (op_type, cluster, ts_uuid))
     status, output = commands.getstatusoutput(cmd)
     exit_if_failed(status, output)
+    record_cmd_execution(cmd)
 
 
 def wait_tserver_quiesce(rpc_address):
@@ -180,7 +187,8 @@ def wait_tserver_quiesce(rpc_address):
             is_quiesced = True
         else:
             print(time_header() + output)
-            time.sleep(1)
+            time.sleep(10)
+    record_cmd_execution(cmd)
 
 
 def rebalance_cluster(blacklist_tserver_uuid):
@@ -198,11 +206,12 @@ def rebalance_cluster(blacklist_tserver_uuid):
         ignored_tservers_uuid.add(blacklist_tserver_uuid)
         cmd = ('${KUDU_HOME}/kudu cluster rebalance @%s -ignored_tservers=%s -move_replicas_from_ignored_tservers'
                % (cluster, str(','.join(ignored_tservers_uuid))))
-    p = subprocess.Popen(cmd, stdout = subprocess.PIPE, shell=True)
-    for line in iter(p.stdout.readline, b''):
-        print line
-    p.stdout.close()
-    p.wait()
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, shell=True)
+    out, unused_err = p.communicate()
+    for line in out.splitlines():
+        kudu_utils.LOG.info(line)
+    exit_if_failed(p.returncode, "Run rebalance failed.")
+    record_cmd_execution(cmd)
 
 
 check_parameter('You will operate on cluster: %s? (y/n)', cluster)
@@ -229,7 +238,7 @@ check_parameter('You will rebalance cluster after operation: %s? (y/n)', rebalan
 tservers_info = get_tservers_info()
 wait_cluster_health()
 version = get_cluster_version()
-print('The cluster version(before rolling_update) is ' + version)
+kudu_utils.LOG.info('The cluster version(before rolling_update) is ' + version)
 
 if version < '1.11' and 'tablet_server' in job and operate in ['restart', 'rolling_update']:
     for tserver in tservers_info:
@@ -261,12 +270,13 @@ for task in tasks:
     status, output = commands.getstatusoutput(cmd)
     exit_if_failed(status, output)
     print(output)
+    record_cmd_execution(cmd)
     if operate == 'stop':
         known_unhealth_nodes.add(parse_node_from_minos_output(output, job))
 
     wait_cluster_health()
 
-    if 'tablet_server' in job and operate in ['restart', 'rolling_update']:
+    if 'tablet_server' in job:
         if version < '1.11':
             set_flag(rpc_address, 7200)
         else:
