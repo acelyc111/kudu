@@ -3265,7 +3265,9 @@ Status CatalogManager::ListTables(const ListTablesRequestPB* req,
       }
     }
     InsertOrUpdate(&table_info_by_name, table_name, table_info);
-    EmplaceIfNotPresent(&table_owner_map, table_name, owner == *user);
+    if (user) {
+      EmplaceIfNotPresent(&table_owner_map, table_name, owner == *user);
+    }
   }
 
   MAYBE_INJECT_FIXED_LATENCY(FLAGS_catalog_manager_inject_latency_list_authz_ms);

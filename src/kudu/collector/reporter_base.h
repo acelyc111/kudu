@@ -25,7 +25,6 @@
 #include <rapidjson/document.h>
 
 #include "kudu/gutil/atomicops.h"
-#include "kudu/gutil/gscoped_ptr.h"
 #include "kudu/gutil/macros.h"
 #include "kudu/server/server_base.h"
 #include "kudu/tools/ksck_results.h"
