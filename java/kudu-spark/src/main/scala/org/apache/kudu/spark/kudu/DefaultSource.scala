@@ -75,7 +75,6 @@ class DefaultSource
   val HANDLE_SCHEMA_DRIFT = "kudu.handleSchemaDrift"
   val USE_DRIVER_METADATA = "kudu.useDriverMetadata"
   val SNAPSHOT_TIMESTAMP_MS = "kudu.snapshotTimestampMs"
-  val USE_SPARKSQL_ROW_ITERATOR = "kudu.useSparkSQLRowIterator"
 
   /**
    * A nice alias for the data source so that when specifying the format
@@ -195,8 +194,6 @@ class DefaultSource
     val useDriverMetadata =
       parameters.get(USE_DRIVER_METADATA).map(_.toBoolean).getOrElse(defaultUseDriverMetadata)
     val snapshotTimestampMs = parameters.get(SNAPSHOT_TIMESTAMP_MS).map(_.toLong)
-    val useSparkSQLRowIterator: Boolean =
-      parameters.get(USE_SPARKSQL_ROW_ITERATOR).map(_.toBoolean).getOrElse(false)
     KuduReadOptions(
       batchSize,
       scanLocality,
@@ -207,7 +204,6 @@ class DefaultSource
       splitSizeBytes,
       useDriverMetadata,
       snapshotTimestampMs
-      useSparkSQLRowIterator
     )
   }
 
@@ -289,9 +285,8 @@ class KuduRelation(
     val alias: Option[String],
     val readOptions: KuduReadOptions = new KuduReadOptions,
     val writeOptions: KuduWriteOptions = new KuduWriteOptions)(val sqlContext: SQLContext)
-    extends BaseRelation with PrunedFilteredScan with InsertableRelation with UpdatetableRelation
-    with DeletetableRelation {
-    val log: Logger = LoggerFactory.getLogger(getClass)
+    extends BaseRelation with PrunedFilteredScan with InsertableRelation {
+  val log: Logger = LoggerFactory.getLogger(getClass)
 
   private val context: KuduContext =
     new KuduContext(masterAddrs, sqlContext.sparkContext)
@@ -354,7 +349,7 @@ class KuduRelation(
         map(
           f =>
             AttributeReference(f.name, f.dataType, f.nullable, f.metadata)(
-              qualifier = Some(alias.getOrElse(sqlTableName))))
+              qualifier = Seq(alias.getOrElse(sqlTableName))))
     }
   }
 
@@ -503,7 +498,7 @@ class KuduRelation(
     "Kudu " + this.tableName
   }
 
-  override def insertWithIgnoreDuplicateRowsOptions(
+  def insertWithIgnoreDuplicateRowsOptions(
       data: DataFrame,
       overwrite: Boolean,
       ignoreDuplicate: Boolean): Unit = {
@@ -514,7 +509,7 @@ class KuduRelation(
     }
   }
 
-  override def checkInvalidKeySetting(columns: Map[String, String]): Unit = {
+  def checkInvalidKeySetting(columns: Map[String, String]): Unit = {
     val schema = table.getSchema
     val keyColumns = columns.keys.filter(columnName => schema.getColumn(columnName).isKey)
     if (keyColumns.nonEmpty) {
@@ -522,11 +517,11 @@ class KuduRelation(
     }
   }
 
-  override def update(data: DataFrame, columns: Map[String, String]): Unit = {
+  def update(data: DataFrame, columns: Map[String, String]): Unit = {
     context.updateRows(data, tableName, columns)
   }
 
-  override def delete(data: DataFrame): Unit = {
+  def delete(data: DataFrame): Unit = {
     context.writeRows(data, tableName, Delete)
   }
 }

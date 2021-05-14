@@ -117,11 +117,7 @@ class KuduRDD private[kudu] (
       KuduScanToken.deserializeIntoScanner(partition.scanToken, client)
     // We don't store the RowResult so we can enable the reuseRowResult optimization.
     scanner.setReuseRowResult(true)
-    if (options != null && options.useSparkSQLRowIterator) {
-      new SQLRowIterator(scanner, kuduContext)
-    } else {
-      new RowIterator(scanner, kuduContext, rowsRead)
-    }
+    new RowIterator(scanner, kuduContext, rowsRead)
   }
 
   override def getPreferredLocations(partition: Partition): Seq[String] = {
@@ -174,59 +170,4 @@ private class RowIterator(
     }
     Row.fromSeq(columns)
   }
-}
-
-/**
- * A Spark SQL [[Row]] iterator which wraps a [[KuduScanner]].
- * @param scanner the wrapped scanner
- * @param kuduContext the kudu context
- */
-private class SQLRowIterator(val scanner: KuduScanner, val kuduContext: KuduContext)
-    extends Iterator[Row] {
-
-  private var currentIterator: RowResultIterator = null
-
-  override def hasNext: Boolean = {
-    if (TaskContext.get().isInterrupted()) {
-      throw new RuntimeException("Kudu task interrupted")
-    }
-    while ((currentIterator != null && !currentIterator.hasNext && scanner.hasMoreRows) ||
-      (scanner.hasMoreRows && currentIterator == null)) {
-      currentIterator = scanner.nextRows()
-    }
-    currentIterator.hasNext
-  }
-
-  override def next(): Row = new KuduRow(currentIterator.next())
-}
-
-/**
- * A Spark SQL [[Row]] which wraps a Kudu [[RowResult]].
- * @param rowResult the wrapped row result
- */
-private[spark] class KuduRow(private val rowResult: RowResult = null) extends Row {
-
-  override def length: Int = rowResult.getColumnProjection.getColumnCount
-
-  override def get(i: Int): Any = {
-    if (rowResult.isNull(i)) null
-    else
-      rowResult.getColumnType(i) match {
-        case Type.BOOL => rowResult.getBoolean(i)
-        case Type.INT8 => rowResult.getByte(i)
-        case Type.INT16 => rowResult.getShort(i)
-        case Type.INT32 => rowResult.getInt(i)
-        case Type.INT64 => rowResult.getLong(i)
-        case Type.UNIXTIME_MICROS => rowResult.getTimestamp(i)
-        case Type.FLOAT => rowResult.getFloat(i)
-        case Type.DOUBLE => rowResult.getDouble(i)
-        case Type.STRING => rowResult.getString(i)
-        case Type.BINARY => rowResult.getBinaryCopy(i)
-        case Type.DECIMAL => rowResult.getDecimal(i)
-      }
-  }
-
-  override def copy(): Row = Row.fromSeq(Range(0, length).map(get))
-
-  override def toString(): String = rowResult.toString
 }
