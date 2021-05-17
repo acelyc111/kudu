@@ -114,6 +114,7 @@ class MetricsCollector : public RefCounted<MetricsCollector> {
   Status InitFilters();
   Status InitMetricsUrlParameters();
   Status InitHostTableLevelMetrics();
+  Status InitTableLevelMetrics();
   Status InitClusterLevelMetrics();
 
   Status StartMetricCollectorThread();
@@ -218,6 +219,7 @@ class MetricsCollector : public RefCounted<MetricsCollector> {
   std::unordered_map<std::string, std::set<std::string>> attributes_filter_;
   std::string metric_url_parameters_;
   std::unordered_set<std::string> hosttable_metrics_;
+  std::unordered_set<std::string> table_duplicate_metrics_;
   Metrics cluster_metrics_;
 
   CountDownLatch stop_background_threads_latch_;

@@ -769,7 +769,9 @@ TEST(TestMetricsCollector, TestInitMetrics) {
       {"gauge_metric1", "GAUGE"},
       {"counter_metric2", "COUNTER"},
       {"histogram_metric2", "HISTOGRAM"},
-      {"gauge_metric2", "GAUGE"}
+      {"gauge_metric2", "GAUGE"},
+      {"live_row_count", "GAUGE"},
+      {"merged_entities_count_of_tablet", "GAUGE"}
   });
   ASSERT_EQ(collector->metric_types_, expect_metric_types);
 }

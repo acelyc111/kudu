@@ -68,6 +68,9 @@ DEFINE_string(collector_metrics_types_for_test, "",
               "Only for test, used to initialize metric_types_");
 DEFINE_bool(collector_request_merged_metrics, true,
             "Whether to request merged metrics and exclude unmerged metrics from server");
+DEFINE_string(collector_table_level_counter_to_gauge, "scanner_rows_scanned",
+              "Table level metric names which will be duplicated from COUNTER to GAUGE type "
+              "(comma-separated list of metric names)");
 
 DECLARE_string(collector_cluster_name);
 DECLARE_uint32(collector_interval_sec);
@@ -108,6 +111,7 @@ Status MetricsCollector::Init() {
   RETURN_NOT_OK(InitFilters());
   RETURN_NOT_OK(InitMetricsUrlParameters());
   RETURN_NOT_OK(InitHostTableLevelMetrics());
+  RETURN_NOT_OK(InitTableLevelMetrics());
   RETURN_NOT_OK(InitClusterLevelMetrics());
 
   initialized_ = true;
@@ -306,6 +310,13 @@ Status MetricsCollector::InitHostTableLevelMetrics() {
   unordered_set<string> hosttable_metrics(
       Split(FLAGS_collector_hosttable_level_metrics, ",", strings::SkipEmpty()));
   hosttable_metrics_.swap(hosttable_metrics);
+  return Status::OK();
+}
+
+Status MetricsCollector::InitTableLevelMetrics() {
+  unordered_set<string> table_duplicate_metrics(
+      Split(FLAGS_collector_table_level_counter_to_gauge, ",", strings::SkipEmpty()));
+  table_duplicate_metrics_.swap(table_duplicate_metrics);
   return Status::OK();
 }
 
@@ -897,6 +908,21 @@ Status MetricsCollector::ReportTableLevelMetrics(
     CollectMetrics(table_metrics.first,
                    table_metrics.second,
                    "table", timestamp, "", &items);
+
+    // Duplicate some COUNTER metrics to GAUGE type
+    for (const auto& duplicate_metric : table_duplicate_metrics_) {
+      const auto& origin_metric = table_metrics.second.find(duplicate_metric);
+      if (origin_metric != table_metrics.second.end()) {
+        items.emplace_back(
+            reporter_->ConstructItem(table_metrics.first,
+                                     origin_metric->first + "_GAUGE",
+                                     "table",
+                                     timestamp,
+                                     origin_metric->second,
+                                     "GAUGE",
+                                     ""));
+      }
+    }
   }
   TRACE(Substitute("Table GAUGE/COUNTER type metrics collected, count $0", metrics_count));
 
