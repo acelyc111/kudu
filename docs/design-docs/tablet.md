@@ -194,7 +194,7 @@ When the MemRowSet fills up, a Flush occurs, which persists the data to disk.
 | DiskRowSet 0 |  | DiskRowSet 1 | .. | DiskRowSet N |
 +-------------+-  +--------------+    +--------------+
 ```
-When the data is flushed, it is stored as a set of CFiles (see cfile.md).
+When the data is flushed, it is stored as a set of [CFiles](cfile.md).
 Each of the rows in the data is addressable by a sequential "rowid", which is
 dense, immutable, and unique within this DiskRowSet. For example, if a given
 DiskRowSet contains 5 rows, then they will be assigned rowid 0 through 4, in
@@ -515,8 +515,7 @@ RowSets:
 
 Unlike Delta Compactions described above, note that row ids are _not_ maintained
 in a Merging Compaction. This makes the handling of concurrent mutations a somewhat
-intricate dance. This process is described in more detail in 'compaction.txt' in this
-directory.
+intricate dance. This process is described in more detail in [Compaction Design Doc](compaction.md).
 
 Overall picture
 ============================================================

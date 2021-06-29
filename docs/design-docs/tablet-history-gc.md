@@ -26,9 +26,8 @@ The ancient history mark is a HybridTime timestamp prior to which history is
 considered "ancient". Ancient data is made unavailable and removed from disk.
 The _ancient history mark_ is defined by a property called the "tablet history
 max age". This property is configured with a _gflag_ called
-`--tablet_history_default_max_age_sec`, which at the time of writing defaults
-to 15 minutes. In the future, we may allow this to be specified on a per-table
-basis.
+`--tablet_history_max_age_sec`, which at the time of writing defaults
+to 7 days. Now, it can be specified on a per-table basis.
 
 ## Consistency and read visibility
 
