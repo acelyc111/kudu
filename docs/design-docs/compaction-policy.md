@@ -16,7 +16,8 @@ Compaction Policy
 ============================================================
 
 This document explains the policy of performing a compaction.
-For details explaining how compactions are implemented, see compaction.md.
+For details explaining how compactions are implemented, see
+[compaction design doc](compaction.md).
 
 The compaction policy is responsible for selecting a set of rowsets to compact
 together. Compactions are necessary in order to reduce the number of DiskRowSets
@@ -122,9 +123,11 @@ Long scan (e.g. full table scan):
 A long scan is likely to retrieve data from many rowsets. In this case, the size
 of the rowsets comes into play.
 
+```
 Let S = the number of MB in the scan
 Let B = the disk bandwidth (MB/sec)
 Let n = the number of rowsets accessed, as before
+```
 
 Assume that accessing each rowset costs 1 seek (same as `C_pk`).
 
