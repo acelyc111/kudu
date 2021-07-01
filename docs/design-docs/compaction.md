@@ -16,8 +16,10 @@ Compaction design notes
 =======================
 
 This document explains the mechanics of performing a rowset flush/compaction.
-For details explaining how compactions are selected, see compaction-policy.md.
-NOTE: this does not describe anything about flushing delta stores to delta files!
+For details explaining how compactions are selected, see
+[compaction policy doc](compaction-policy.md).
+
+> NOTE: this does not describe anything about flushing delta stores to delta files!
 
 Goal: Take two or more RowSets with overlapping key ranges, and merge
 them into a new RowSet, while updates are concurrently being applied.

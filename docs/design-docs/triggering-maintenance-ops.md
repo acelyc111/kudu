@@ -34,18 +34,7 @@ are:
 1. memory usage
 2. tablet statistics
 3. the age of memrowsets
-
-Some other criteria that we considered, but rejected for v1 include:
-1. free disk space.
-2. load-balancing between disks or disksets which will be touched by
-   maintenance operations
-
-Free disk space should not be an issue in most competently administered setups.
-We may revisit this later, but for the initial version, it is best to assume we
-have enough space.
-
-We can't consider disk-based scheduling right now since we don't have support
-for multiple disks yet.
+4. free disk space.
 
 
 Memory usage
@@ -61,8 +50,7 @@ make tradeoffs between #2 and #3 by deciding to flush certain MemRowSets to
 disk.
 
 We want to keep the total amount of memory held by #1, #2 and #3 from growing
-too large.  For now, our goal is to keep this sum relatively constant.  We have
-not yet implemented giving memory held by tcmalloc back to the operating system.
+too large.  For now, our goal is to keep this sum relatively constant.
 
 
 Tablet Statistics
@@ -79,12 +67,12 @@ heuristics.
 
 The Age of MemRowSet objects
 -------------------------------------------------------------------------------
-MemRowSet and DeltaMemRowSet objects must be flushed to disk when they get too
+MemRowSet and DeltaMemStore objects must be flushed to disk when they get too
 old.  If we don't do this, the write-ahead log (WAL) will grow without bound.
 This growth would waste disk space and slow startup to a crawl, since the
 entire WAL must be traversed during the startup process.
 
-We should embed a WAL op id in each MemRowSets and DeltaMemRowSet.  The
+We should embed a WAL op id in each MemRowSets and DeltaMemStore.  The
 scheduler will look more favorably on the flushing of a MemRowSet as it ages.
 After the operation id falls too far behind, it will try to flush the MemRowSet
 no matter what.
@@ -101,10 +89,10 @@ may also incur further performance costs after completion. These cannot be
 delayed indefinitely, as RAM is a finite resource.
 
 
-MemStore Flush
+MemRowSet Flush
 ------------------------------
 Cost:
-- Sequential I/O now (writing the actual memstore contents to disk)
+- Sequential I/O now (writing the actual MemRowSet contents to disk)
 - Sequential I/O later (frequent small flushes will cost more compactions down the road)
 
 Benefit:
@@ -112,10 +100,10 @@ Benefit:
 
 Other/wash:
 - At first glance, flushing might seem to increase cost of further insert/updates
-  because it adds a new RowSet. However, because memstores are not compressed in
-  any way, typically the newly flushed RowSet will be much smaller on disk than the
-  memstore that it came from. This means that, even if we have to cache the whole
-  result RowSet in the block cache, we're making much more effective use of RAM and
+  because it adds a new DiskRowSet. However, because MemRowSet are not compressed in
+  any way, typically the newly flushed DiskRowSet will be much smaller on disk than the
+  MemRowSet that it came from. This means that, even if we have to cache the whole
+  result DiskRowSet in the block cache, we're making much more effective use of RAM and
   thus may _reduce_ the total number of actual I/Os.
 
 
@@ -124,17 +112,18 @@ DeltaMemStore Flush
 Basically the same costs as MemStore flush
 
 Additional benefits:
-TODO: flushing may also speed up scans substantially. Need to run experiments on this --
+- TODO: flushing may also speed up scans substantially. Need to run experiments on this --
 how much better is scanning a static cached file compared to scanning the equivalent
 memstore. Maybe an order of magnitude.
 
 
 LRU cache eviction
 ------------------------------
-Cost: slower reads, slower inserts if evicting key columns or blooms
-Benefit: frees RAM
+Cost:
+- slower reads, slower inserts if evicting key columns or blooms
 
-
+Benefit:
+- frees RAM
 
 
 Maintenance operations to manage future performance
