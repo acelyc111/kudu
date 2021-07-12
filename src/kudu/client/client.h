@@ -971,6 +971,7 @@ class KUDU_EXPORT KuduClient : public sp::enable_shared_from_this<KuduClient> {
   FRIEND_TEST(ClientTest, TestScanTimeout);
   FRIEND_TEST(ClientTest, TestWriteWithDeadMaster);
   FRIEND_TEST(MasterFailoverTest, TestPauseAfterCreateTableIssued);
+  FRIEND_TEST(MultiTServerClientTest, TestSetReplicationFactor);
 
   KuduClient();
 
@@ -1789,6 +1790,16 @@ class KUDU_EXPORT KuduTableAlterer {
   ///   Name of the column to alter.
   /// @return Raw pointer to this alterer object.
   KuduTableAlterer* DropColumn(const std::string& name);
+
+  /// Set the table's replication factor.
+  ///
+  /// @note The replication factor should be a odd number and range in
+  /// [1, --max_num_replicas]
+  ///
+  /// @param [in] replication_factor
+  ///   The table's new replication factor.
+  /// @return Raw pointer to this alterer object.
+  KuduTableAlterer* SetReplicationFactor(int replication_factor);
 
   /// Add a range partition to the table with the specified lower bound and
   /// upper bound.

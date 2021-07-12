@@ -189,6 +189,7 @@ const char* const kEncodingTypeArg = "encoding_type";
 const char* const kBlockSizeArg = "block_size";
 const char* const kColumnCommentArg = "column_comment";
 const char* const kCreateTableJSONArg = "create_table_json";
+const char* const kReplicationFactorArg = "replication_factor";
 
 enum PartitionAction {
   ADD,
@@ -958,6 +959,27 @@ Status DeleteColumn(const RunnerContext& context) {
   return alterer->Alter();
 }
 
+Status SetReplicationFactor(const RunnerContext& context) {
+  const string& table_name = FindOrDie(context.required_args, kTableNameArg);
+  const string& str_replication_factor = FindOrDie(context.required_args, kReplicationFactorArg);
+
+  int32_t replication_factor;
+  if (!safe_strto32(str_replication_factor, &replication_factor)) {
+    return Status::InvalidArgument(Substitute(
+        "Unable to parse replication factor value: $0.", str_replication_factor));
+  }
+  if (replication_factor <= 0) {
+    return Status::InvalidArgument(Substitute(
+        "Invalid replication factor: $0, it should be set higher than 0.", replication_factor));
+  }
+
+  client::sp::shared_ptr<KuduClient> client;
+      RETURN_NOT_OK(CreateKuduClient(context, &client));
+  unique_ptr<KuduTableAlterer> alterer(client->NewTableAlterer(table_name));
+  alterer->SetReplicationFactor(replication_factor);
+  return alterer->Alter();
+}
+
 Status GetTableStatistics(const RunnerContext& context) {
   const string& table_name = FindOrDie(context.required_args, kTableNameArg);
   client::sp::shared_ptr<KuduClient> client;
@@ -1472,6 +1494,13 @@ unique_ptr<Mode> BuildTableMode() {
       .AddRequiredParameter({ kTableNameArg, "Name of the table to alter" })
       .Build();
 
+  unique_ptr<Action> set_replication_factor =
+      ClusterActionBuilder("set_replication_factor", &SetReplicationFactor)
+      .Description("Change a table's replication factor")
+      .AddRequiredParameter({ kTableNameArg, "Name of the table to alter" })
+      .AddRequiredParameter({ kReplicationFactorArg, "New replication factor of the table" })
+      .Build();
+
   unique_ptr<Action> statistics =
       ClusterActionBuilder("statistics", &GetTableStatistics)
       .Description("Get table statistics")
@@ -1523,6 +1552,7 @@ unique_ptr<Mode> BuildTableMode() {
       .AddAction(std::move(scan_table))
       .AddAction(std::move(set_comment))
       .AddAction(std::move(set_extra_config))
+      .AddAction(std::move(set_replication_factor))
       .AddAction(std::move(statistics))
       .Build();
 }

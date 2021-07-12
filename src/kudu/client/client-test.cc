@@ -8434,14 +8434,14 @@ TEST_F(ClientTestUnixSocket, TestConnectViaUnixSocket) {
   ASSERT_EQ(1, total_unix_conns);
 }
 
-class WriteRestartTest : public ClientTest {
+class MultiTServerClientTest : public ClientTest {
  public:
   void SetUp() override {
     KuduTest::SetUp();
 
     // Start minicluster and wait for tablet servers to connect to master.
     InternalMiniClusterOptions options;
-    options.num_tablet_servers = 3;
+    options.num_tablet_servers = 4;
     cluster_.reset(new InternalMiniCluster(env_, std::move(options)));
     ASSERT_OK(cluster_->StartSync());
 
@@ -8469,7 +8469,7 @@ class WriteRestartTest : public ClientTest {
 // no errors: client should retry any operations failed due to tablet server
 // restarting. The result row count should match the number of total rows
 // written by the client.
-TEST_F(WriteRestartTest, WriteWhileRestartingMultipleTabletServers) {
+TEST_F(MultiTServerClientTest, WriteWhileRestartingMultipleTabletServers) {
   SKIP_IF_SLOW_NOT_ALLOWED();
 
   constexpr const auto read_mode_to_string =
@@ -8505,6 +8505,40 @@ TEST_F(WriteRestartTest, WriteWhileRestartingMultipleTabletServers) {
                                          mode);
     ASSERT_EQ(kNumRows, row_count);
   }
+}
+
+// Test changing replication factor.
+TEST_F(MultiTServerClientTest, TestSetReplicationFactor) {
+  string tablet_id = GetFirstTabletId(client_table_.get());
+
+  scoped_refptr<internal::RemoteTablet> rt;
+  client_->data_->meta_cache_->ClearCache();
+  ASSERT_OK(MetaCacheLookupById(tablet_id, &rt));
+  ASSERT_NE(nullptr, rt);
+  vector<internal::RemoteReplica> replicas;
+  rt->GetRemoteReplicas(&replicas);
+  ASSERT_EQ(3, replicas.size());
+
+  // Set replication factor from 3 to 1.
+  unique_ptr<KuduTableAlterer> table_alterer(client_->NewTableAlterer(kTableName));
+  ASSERT_OK(table_alterer->SetReplicationFactor(1)->Alter());
+  ASSERT_EVENTUALLY([&] {
+    client_->data_->meta_cache_->ClearCache();
+    ASSERT_OK(MetaCacheLookupById(tablet_id, &rt));
+    ASSERT_NE(nullptr, rt);
+    rt->GetRemoteReplicas(&replicas);
+    ASSERT_EQ(1, replicas.size());
+  });
+
+  // Set replication factor from 1 to 3.
+  ASSERT_OK(table_alterer->SetReplicationFactor(3)->Alter());
+  ASSERT_EVENTUALLY([&] {
+    client_->data_->meta_cache_->ClearCache();
+    ASSERT_OK(MetaCacheLookupById(tablet_id, &rt));
+    ASSERT_NE(nullptr, rt);
+    rt->GetRemoteReplicas(&replicas);
+    ASSERT_EQ(3, replicas.size());
+  });
 }
 
 class ReplicationFactorLimitsTest : public ClientTest {

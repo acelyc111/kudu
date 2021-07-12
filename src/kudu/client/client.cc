@@ -1478,6 +1478,11 @@ KuduTableAlterer* KuduTableAlterer::DropColumn(const string& name) {
   return this;
 }
 
+KuduTableAlterer* KuduTableAlterer::SetReplicationFactor(int replication_factor) {
+  data_->set_replication_factor_to_ = replication_factor;
+  return this;
+}
+
 KuduTableAlterer* KuduTableAlterer::AddRangePartition(
     KuduPartialRow* lower_bound,
     KuduPartialRow* upper_bound,

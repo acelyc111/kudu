@@ -45,6 +45,7 @@
 #include "kudu/common/partial_row.h"
 #include "kudu/common/schema.h"
 #include "kudu/common/wire_protocol.h"
+#include "kudu/consensus/metadata.pb.h"
 #include "kudu/consensus/raft_consensus.h"
 #include "kudu/gutil/port.h"
 #include "kudu/gutil/ref_counted.h"
@@ -70,6 +71,7 @@
 #include "kudu/util/status.h"
 #include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
+#include "kudu/util/threadpool.h"
 
 DECLARE_bool(enable_maintenance_manager);
 DECLARE_bool(log_inject_latency);
@@ -138,7 +140,7 @@ class AlterTableTest : public KuduTest {
     KuduTest::SetUp();
 
     InternalMiniClusterOptions opts;
-    opts.num_tablet_servers = num_replicas();
+    opts.num_tablet_servers = num_tservers();
     cluster_.reset(new InternalMiniCluster(env_, opts));
     ASSERT_OK(cluster_->Start());
 
@@ -155,9 +157,9 @@ class AlterTableTest : public KuduTest {
              .num_replicas(num_replicas())
              .Create());
 
-    if (num_replicas() == 1) {
-      tablet_replica_ = LookupTabletReplica();
-      ASSERT_OK(tablet_replica_->consensus()->WaitUntilLeaderForTests(MonoDelta::FromSeconds(10)));
+    if (num_replicas() > 0) {
+      tablet_replica_ = LookupLeaderTabletReplica(MonoDelta::FromSeconds(5));
+      CHECK(tablet_replica_);
     }
     LOG(INFO) << "Tablet successfully located";
   }
@@ -167,11 +169,41 @@ class AlterTableTest : public KuduTest {
     cluster_->Shutdown();
   }
 
-  scoped_refptr<TabletReplica> LookupTabletReplica() {
-    vector<scoped_refptr<TabletReplica> > replicas;
-    cluster_->mini_tablet_server(0)->server()->tablet_manager()->GetTabletReplicas(&replicas);
-    CHECK_EQ(1, replicas.size());
-    return replicas[0];
+  scoped_refptr<TabletReplica> LookupLeaderTabletReplica(const MonoDelta& timeout) {
+    scoped_refptr<TabletReplica> leader_replica;
+    MonoTime deadline = MonoTime::Now() + timeout;
+    std::unique_ptr<ThreadPool> pool;
+    CHECK_OK(ThreadPoolBuilder("WaitUntilLeader.Pool")
+                     .set_max_threads(num_tservers())
+                     .set_idle_timeout(MonoDelta::FromMilliseconds(10))
+                     .Build(&pool));
+    std::atomic<bool> got_leader(false);
+    for (int i = 0; i < num_tservers(); ++i) {
+      CHECK_OK(pool->Submit(
+        [this, i, deadline, &got_leader, &leader_replica]() {
+          while (!got_leader && MonoTime::Now() < deadline) {
+            vector<scoped_refptr<TabletReplica> > replicas;
+            cluster_->mini_tablet_server(i)->server()->tablet_manager()
+                ->GetTabletReplicas(&replicas);
+            if (replicas.empty()) {
+              SleepFor(MonoDelta::FromMilliseconds(50));
+              continue;
+            }
+
+            MonoDelta remaining_timeout = deadline - MonoTime::Now();
+            auto s = replicas[0]->consensus()->WaitUntilLeaderForTests(remaining_timeout);
+            if (!s.ok()) {
+              SleepFor(MonoDelta::FromMilliseconds(50));
+              continue;
+            }
+
+            got_leader = true;
+            leader_replica = replicas[0];
+          }
+      }));
+    }
+    pool->Wait();
+    return leader_replica;
   }
 
   void ShutdownTS() {
@@ -196,7 +228,7 @@ class AlterTableTest : public KuduTest {
 
     ASSERT_OK(cluster_->mini_tablet_server(idx)->WaitStarted());
     if (idx == 0) {
-      tablet_replica_ = LookupTabletReplica();
+      tablet_replica_ = LookupLeaderTabletReplica(MonoDelta::FromSeconds(5));
     }
   }
 
@@ -231,6 +263,38 @@ class AlterTableTest : public KuduTest {
     table_alterer->AddColumn(column_name)->Type(KuduColumnSchema::INT32)->
         NotNull()->Default(KuduValue::FromInt(default_value));
     return table_alterer->timeout(timeout)->Alter();
+  }
+
+  Status SetReplicationFactor(const string& table_name,
+                              int32_t replication_factor) {
+    unique_ptr<KuduTableAlterer> table_alterer(client_->NewTableAlterer(table_name));
+    table_alterer->SetReplicationFactor(replication_factor);
+    return table_alterer->timeout(MonoDelta::FromSeconds(60))->Alter();
+  }
+
+  void VerifyTabletReplicaCount(int32_t replication_factor) {
+    ASSERT_EVENTUALLY([&] {
+      ASSERT_EQ(replication_factor, tablet_replica_->consensus()->CommittedConfig().peers().size());
+
+      scoped_refptr<TabletReplica> replica;
+      int actual_replica_count = 0;
+      for (int i = 0; i < num_tservers(); i++) {
+        vector<scoped_refptr<TabletReplica>> replicas;
+        cluster_->mini_tablet_server(i)->server()->tablet_manager()->GetTabletReplicas(&replicas);
+        if (replicas.empty()) continue;
+        ASSERT_EQ(1, replicas.size());
+        if (!replicas[0]->tablet()) continue;
+
+        if (!replica) {
+          replica = replicas[0];
+        } else {
+          ASSERT_EQ(replica->tablet()->tablet_id(), replicas[0]->tablet()->tablet_id());
+          ASSERT_TRUE(replica->tablet()->schema()->Equals(*(replicas[0]->tablet()->schema())));
+        }
+        ++actual_replica_count;
+      }
+      ASSERT_EQ(replication_factor, actual_replica_count);
+    });
   }
 
   enum VerifyPattern {
@@ -290,6 +354,7 @@ class AlterTableTest : public KuduTest {
 
  protected:
   virtual int num_replicas() const { return 1; }
+  virtual int num_tservers() const { return 1; }
 
   static const char* const kTableName;
 
@@ -313,7 +378,8 @@ class AlterTableTest : public KuduTest {
 // Subclass which creates three servers and a replicated cluster.
 class ReplicatedAlterTableTest : public AlterTableTest {
  protected:
-  virtual int num_replicas() const OVERRIDE { return 3; }
+  int num_replicas() const override { return 3; }
+  int num_tservers() const override { return num_replicas() + 1; }
 };
 
 const char* const AlterTableTest::kTableName = "fake-table";
@@ -2144,6 +2210,60 @@ TEST_F(ReplicatedAlterTableTest, AlterTableAndDropTablet) {
         fill_row(i).release(),
         fill_row(i + 1).release())->wait(false)->Alter());
   }
+  ASSERT_OK(client_->DeleteTable(kTableName));
+}
+
+TEST_F(ReplicatedAlterTableTest, AlterReplicationFactor) {
+  // 1. The default replication factor is 3.
+  ASSERT_EQ(0, tablet_replica_->tablet()->metadata()->schema_version());
+  NO_FATALS(VerifyTabletReplicaCount(3));
+
+  // 2. Set replication factor to 1.
+  ASSERT_OK(SetReplicationFactor(kTableName, 1));
+  NO_FATALS(VerifyTabletReplicaCount(1));
+  ASSERT_EQ(1, tablet_replica_->tablet()->metadata()->schema_version());
+
+  // 3. Set replication factor to 3.
+  ASSERT_OK(SetReplicationFactor(kTableName, 3));
+  NO_FATALS(VerifyTabletReplicaCount(3));
+  ASSERT_EQ(2, tablet_replica_->tablet()->metadata()->schema_version());
+
+  // 4. Set replication factor to 3 again.
+  ASSERT_OK(SetReplicationFactor(kTableName, 3));
+  NO_FATALS(VerifyTabletReplicaCount(3));
+  ASSERT_EQ(2, tablet_replica_->tablet()->metadata()->schema_version());
+
+  // 5. Set replication factor to 5, while there are only 4 tservers inthe cluster.
+  auto s = SetReplicationFactor(kTableName, 5);
+  ASSERT_TRUE(s.IsInvalidArgument());
+  ASSERT_STR_CONTAINS(s.ToString(), "not enough live tablet servers to alter a table with the"
+                                    " requested replication factor 5; 4 tablet servers are alive");
+  NO_FATALS(VerifyTabletReplicaCount(3));
+  ASSERT_EQ(2, tablet_replica_->tablet()->metadata()->schema_version());
+
+  // 6. Set replication factor to -1, it will fail.
+  s = SetReplicationFactor(kTableName, -1);
+  ASSERT_TRUE(s.IsInvalidArgument());
+  ASSERT_STR_CONTAINS(s.ToString(), "illegal replication factor -1: minimum allowed replication"
+                                    " factor is 1 (controlled by --min_num_replicas)");
+  NO_FATALS(VerifyTabletReplicaCount(3));
+  ASSERT_EQ(2, tablet_replica_->tablet()->metadata()->schema_version());
+
+  // 7. Set replication factor to 2, it will fail.
+  s = SetReplicationFactor(kTableName, 2);
+  ASSERT_TRUE(s.IsInvalidArgument());
+  ASSERT_STR_CONTAINS(s.ToString(), "illegal replication factor 2: replication factor must be odd");
+  NO_FATALS(VerifyTabletReplicaCount(3));
+  ASSERT_EQ(2, tablet_replica_->tablet()->metadata()->schema_version());
+
+  // 8. Set replication factor to 9, it will fail.
+  s = SetReplicationFactor(kTableName, 9);
+  ASSERT_TRUE(s.IsInvalidArgument());
+  ASSERT_STR_CONTAINS(s.ToString(), "illegal replication factor 9: maximum allowed replication "
+                                    "factor is 7 (controlled by --max_num_replicas)");
+  NO_FATALS(VerifyTabletReplicaCount(3));
+  ASSERT_EQ(2, tablet_replica_->tablet()->metadata()->schema_version());
+
   ASSERT_OK(client_->DeleteTable(kTableName));
 }
 
