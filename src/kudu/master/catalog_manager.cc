@@ -3372,7 +3372,7 @@ Status CatalogManager::GetTableSchema(const GetTableSchemaRequestPB* req,
     *resp->mutable_authz_token() = std::move(authz_token);
   }
   resp->mutable_schema()->CopyFrom(schema_pb);
-  resp->set_num_replicas(l.data().pb.num_replicas());
+  resp->set_num_replicas(l.data().pb.num_replicas());  // TODO(yingchun): both RF increase or reduce return the min one
   resp->set_table_id(table->id());
   resp->mutable_partition_schema()->CopyFrom(l.data().pb.partition_schema());
   resp->set_table_name(l.data().pb.name());
