@@ -5229,7 +5229,8 @@ void CatalogManager::HandleTabletSchemaVersionReport(
   tablet->set_reported_schema_version(version);
 
   // Verify if the tablet is under-replicated.
-  if (tablet->metadata().state().pb.consensus_state().has_pending_config()) {
+  const ConsensusStatePB& cstate = tablet->metadata().state().pb.consensus_state();
+  if (cstate.has_pending_config()) {
     return;
   }
 
@@ -5237,6 +5238,10 @@ void CatalogManager::HandleTabletSchemaVersionReport(
   const scoped_refptr<TableInfo>& table = tablet->table();
   TableMetadataLock l(table.get(), LockMode::WRITE);
   if (l.data().is_deleted() || l.data().pb.state() != SysTablesEntryPB::ALTERING) {
+    return;
+  }
+
+  if (cstate.committed_config().peers().size() != l.data().pb.num_replicas()) {
     return;
   }
 
