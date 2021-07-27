@@ -8521,7 +8521,8 @@ TEST_F(MultiTServerClientTest, TestSetReplicationFactor) {
 
   // Set replication factor from 3 to 1.
   unique_ptr<KuduTableAlterer> table_alterer(client_->NewTableAlterer(kTableName));
-  ASSERT_OK(table_alterer->SetReplicationFactor(1)->Alter()->wait(true));
+  ASSERT_OK(table_alterer->SetReplicationFactor(1)->wait(true)->Alter());
+  LOG(WARNING) << "alter";
 //  ASSERT_EVENTUALLY([&] {
     client_->data_->meta_cache_->ClearCache();
     ASSERT_OK(MetaCacheLookupById(tablet_id, &rt));
@@ -8531,7 +8532,8 @@ TEST_F(MultiTServerClientTest, TestSetReplicationFactor) {
 //  });
 
   // Set replication factor from 1 to 3.
-  ASSERT_OK(table_alterer->SetReplicationFactor(3)->Alter()->wait(true));
+  ASSERT_OK(table_alterer->SetReplicationFactor(3)->wait(true)->Alter());
+  LOG(WARNING) << "alter";
 //  ASSERT_EVENTUALLY([&] {
     client_->data_->meta_cache_->ClearCache();
     ASSERT_OK(MetaCacheLookupById(tablet_id, &rt));

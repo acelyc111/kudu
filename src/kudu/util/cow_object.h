@@ -92,6 +92,7 @@ class CowObject {
     std::swap(state_, *dirty_state_);
     dirty_state_.reset();
     lock_.CommitUnlock();
+    LOG(WARNING) << "changed";
   }
 
   // Return the current state, not reflecting any in-progress mutations.

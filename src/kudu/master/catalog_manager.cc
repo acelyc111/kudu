@@ -4931,6 +4931,14 @@ Status CatalogManager::ProcessTabletReport(
     const string& tablet_id = e.first;
     const scoped_refptr<TabletInfo>& tablet = e.second;
     const ReportedTabletPB& report = *FindOrDie(reports, tablet_id);
+    {
+      TabletMetadataLock l_tablet(tablet.get(), LockMode::READ);
+      const ConsensusStatePB& cstate = l_tablet.data().pb.consensus_state();
+      for (const consensus::RaftPeerPB& peer : cstate.committed_config().peers()) {
+        LOG(WARNING) << peer.has_member_type() << " " << peer.member_type();
+      }
+    }
+ 
     if (report.has_schema_version()) {
       HandleTabletSchemaVersionReport(tablet, report.schema_version());
     }
@@ -5228,21 +5236,31 @@ void CatalogManager::HandleTabletSchemaVersionReport(
   // Update the schema version if it's the latest
   tablet->set_reported_schema_version(version);
 
-  // Verify if the tablet is under-replicated.
-  const ConsensusStatePB& cstate = tablet->metadata().state().pb.consensus_state();
-  if (cstate.has_pending_config()) {
-    return;
-  }
-
-  // Verify if it's the last tablet report, and the alter completed.
   const scoped_refptr<TableInfo>& table = tablet->table();
   TableMetadataLock l(table.get(), LockMode::WRITE);
+  TabletMetadataLock l_tablet(tablet.get(), LockMode::READ);
+
+  // Verify if it's the last tablet report, and the alter completed.
   if (l.data().is_deleted() || l.data().pb.state() != SysTablesEntryPB::ALTERING) {
     return;
   }
 
+  // Verify if the tablet is under-replicated.
+  const ConsensusStatePB& cstate = l_tablet.data().pb.consensus_state();
+  LOG_WITH_PREFIX(WARNING) << cstate.has_pending_config() << " vs "
+      << cstate.committed_config().peers().size() << " vs " << l.data().pb.num_replicas();
+  if (cstate.has_pending_config()) {
+    return;
+  }
   if (cstate.committed_config().peers().size() != l.data().pb.num_replicas()) {
     return;
+  }
+  for (const consensus::RaftPeerPB& peer : cstate.committed_config().peers()) {
+    LOG_WITH_PREFIX(WARNING) << peer.has_member_type() << " " << peer.member_type();
+    if (!peer.has_member_type() ||
+        peer.member_type() != consensus::RaftPeerPB::VOTER) {
+        return;
+    }
   }
 
   uint32_t current_version = l.data().pb.version();
@@ -5480,13 +5498,16 @@ Status CatalogManager::BuildLocationsForTablet(
     locs_pb->mutable_interned_replicas()->Reserve(cstate.committed_config().peers().size());
   }
 
+  LOG_WITH_PREFIX(WARNING) << cstate.committed_config().peers().size();
   for (const consensus::RaftPeerPB& peer : cstate.committed_config().peers()) {
+    LOG_WITH_PREFIX(WARNING) << peer.permanent_uuid();
     DCHECK(!peer.has_health_report()); // Health report shouldn't be persisted.
     switch (filter) {
       case VOTER_REPLICA:
         if (!peer.has_member_type() ||
             peer.member_type() != consensus::RaftPeerPB::VOTER) {
           // Jump to the next iteration of the outside cycle.
+          LOG_WITH_PREFIX(WARNING) << peer.has_member_type() << " " << peer.member_type();
           continue;
         }
         break;
