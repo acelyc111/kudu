@@ -5228,6 +5228,11 @@ void CatalogManager::HandleTabletSchemaVersionReport(
   // Update the schema version if it's the latest
   tablet->set_reported_schema_version(version);
 
+  // Verify if the tablet is under-replicated.
+  if (tablet->metadata().state().pb.consensus_state().has_pending_config()) {
+    return;
+  }
+
   // Verify if it's the last tablet report, and the alter completed.
   const scoped_refptr<TableInfo>& table = tablet->table();
   TableMetadataLock l(table.get(), LockMode::WRITE);
@@ -6268,7 +6273,6 @@ string TabletInfo::ToString() const {
                     (table_ != nullptr ? table_->ToString() : "MISSING"));
 }
 
-
 void TabletInfo::UpdateStats(ReportedTabletStatsPB stats) {
   std::lock_guard<simple_spinlock> l(lock_);
   stats_ = std::move(stats);
@@ -6377,6 +6381,8 @@ bool TableInfo::IsAlterInProgress(uint32_t version) const {
   // report), or it's the lowest schema version belonging to at least one
   // tablet. The numeric value of NOT_YET_REPORTED is -1 so we can compare it
   // to 'version' either way.
+  // TODO(yingchun):
+  // 粗粒度：这个table的当前所有tablet（的当前RF下的所有replica）的version都大于等于传入的version，且peer数大于等于RF，则alter完成
   return it->first < static_cast<int64_t>(version);
 }
 
