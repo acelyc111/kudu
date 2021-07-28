@@ -192,17 +192,18 @@ class MaintenanceOp {
   friend class MaintenanceManager;
 
   // General indicator of how much IO the Op will use.
-  enum IOUsage {
+  enum class IOUsage {
     LOW_IO_USAGE, // Low impact operations like removing a file, updating metadata.
     HIGH_IO_USAGE // Everything else.
   };
 
-  enum PerfImprovementOpType {
+  enum class PerfImprovementOpType {
     FLUSH_OP,
-    COMPACT_OP
+    COMPACT_OP,
+    GC_OP,
   };
 
-  explicit MaintenanceOp(std::string name, IOUsage io_usage);
+  explicit MaintenanceOp(std::string name, IOUsage io_usage, PerfImprovementOpType type);
   virtual ~MaintenanceOp();
 
   // Unregister this op, if it is currently registered.
@@ -237,6 +238,8 @@ class MaintenanceOp {
 
   IOUsage io_usage() const { return io_usage_; }
 
+  PerfImprovementOpType type() const { return type_; }
+
   // Return true if the operation has been cancelled due to a pending Unregister().
   bool cancelled() const {
     return cancel_;
@@ -262,6 +265,7 @@ class MaintenanceOp {
   const std::string name_;
 
   IOUsage io_usage_;
+  PerfImprovementOpType type_;
 
   // The number of instances of this op that are currently running. The field
   // is updated by MaintenanceManager which guards the access as needed. If the
@@ -300,6 +304,7 @@ class MaintenanceManager : public std::enable_shared_from_this<MaintenanceManage
  public:
   struct Options {
     int32_t num_threads;
+    int32_t num_flush_threads;
     int32_t polling_interval_ms;
     uint32_t history_size;
   };
@@ -357,27 +362,31 @@ class MaintenanceManager : public std::enable_shared_from_this<MaintenanceManage
   // suitable for logging.
   std::pair<MaintenanceOp*, std::string> FindBestOp();
 
+  int FindPoolForOp(MaintenanceOp* op);
+
   // Adjust the perf score based on the raw perf score, the tablet's workload_score
   // and the table's priority.
   static double AdjustedPerfScore(double perf_improvement, double workload_score, int32_t priority);
 
-  void LaunchOp(MaintenanceOp* op);
+  void LaunchOp(MaintenanceOp* op, int op_launch_pool);
 
   std::string LogPrefix() const;
 
-  bool HasFreeThreads();
+  bool HasFreeThreads() const;
+  bool HasFreeThreadsForCompactionOrGC() const;
+  bool HasFreeThreadsForFlush() const;
 
-  bool CouldNotLaunchNewOp(bool prev_iter_found_no_work);
+  bool CouldNotLaunchNewOp(bool prev_iter_found_no_work) const;
 
-  void IncreaseOpCount(MaintenanceOp *op);
-  void DecreaseOpCountAndNotifyWaiters(MaintenanceOp *op);
+  void IncreaseOpCount(MaintenanceOp *op, int pool);
+  void DecreaseOpCountAndNotifyWaiters(MaintenanceOp *op, int pool);
 
   // Adds ops in 'ops_pending_registration_' to 'ops_'. Must be called while
   // 'lock_' is held.
   void MergePendingOpRegistrationsUnlocked();
 
   const std::string server_uuid_;
-  const int32_t num_threads_;
+  const int32_t num_threads_[2];
   const MonoDelta polling_interval_;
 
   // Ops for which RegisterOp() has been called, but that have not yet been
@@ -402,12 +411,12 @@ class MaintenanceManager : public std::enable_shared_from_this<MaintenanceManage
   ConditionVariable cond_;
 
   scoped_refptr<kudu::Thread> monitor_thread_;
-  std::unique_ptr<ThreadPool> thread_pool_;
+  std::vector<std::unique_ptr<ThreadPool>> thread_pools_;
   bool shutdown_;
 
   // This field is atomic because it's written under 'running_instances_lock_'
   // and read when the latter lock isn't held.
-  std::atomic<int32_t> running_ops_;
+  std::atomic<int32_t> running_ops_[2];
 
   // Lock to guard access to 'completed_ops_' and 'completed_ops_count_'.
   simple_spinlock completed_ops_lock_;

@@ -95,8 +95,9 @@ using strings::Substitute;
 namespace kudu {
 namespace tablet {
 
-TabletOpBase::TabletOpBase(string name, IOUsage io_usage, Tablet* tablet)
-    : MaintenanceOp(std::move(name), io_usage),
+TabletOpBase::TabletOpBase(string name, IOUsage io_usage,
+                           PerfImprovementOpType type, Tablet* tablet)
+    : MaintenanceOp(std::move(name), io_usage, type),
       tablet_(tablet) {
 }
 
@@ -119,7 +120,9 @@ int32_t TabletOpBase::priority() const {
 
 CompactRowSetsOp::CompactRowSetsOp(Tablet* tablet)
   : TabletOpBase(Substitute("CompactRowSetsOp($0)", tablet->tablet_id()),
-                 MaintenanceOp::HIGH_IO_USAGE, tablet),
+                 MaintenanceOp::IOUsage::HIGH_IO_USAGE,
+                 MaintenanceOp::PerfImprovementOpType::COMPACT_OP,
+                 tablet),
     last_num_mrs_flushed_(0),
     last_num_rs_compacted_(0) {
 }
@@ -134,8 +137,9 @@ void CompactRowSetsOp::UpdateStats(MaintenanceOpStats* stats) {
 
   std::lock_guard<simple_spinlock> l(lock_);
 
-  double workload_score = FLAGS_enable_workload_score_for_perf_improvement_ops ?
-                          tablet_->CollectAndUpdateWorkloadStats(MaintenanceOp::COMPACT_OP) : 0;
+  double workload_score =
+      FLAGS_enable_workload_score_for_perf_improvement_ops ?
+      tablet_->CollectAndUpdateWorkloadStats(MaintenanceOp::PerfImprovementOpType::COMPACT_OP) : 0;
 
   // Any operation that changes the on-disk row layout invalidates the
   // cached stats.
@@ -192,7 +196,9 @@ scoped_refptr<AtomicGauge<uint32_t> > CompactRowSetsOp::RunningGauge() const {
 
 MinorDeltaCompactionOp::MinorDeltaCompactionOp(Tablet* tablet)
   : TabletOpBase(Substitute("MinorDeltaCompactionOp($0)", tablet->tablet_id()),
-                 MaintenanceOp::HIGH_IO_USAGE, tablet),
+                 MaintenanceOp::IOUsage::HIGH_IO_USAGE,
+                 MaintenanceOp::PerfImprovementOpType::COMPACT_OP,
+                 tablet),
     last_num_mrs_flushed_(0),
     last_num_dms_flushed_(0),
     last_num_rs_compacted_(0),
@@ -209,8 +215,9 @@ void MinorDeltaCompactionOp::UpdateStats(MaintenanceOpStats* stats) {
 
   std::lock_guard<simple_spinlock> l(lock_);
 
-  double workload_score = FLAGS_enable_workload_score_for_perf_improvement_ops ?
-                          tablet_->CollectAndUpdateWorkloadStats(MaintenanceOp::COMPACT_OP) : 0;
+  double workload_score =
+      FLAGS_enable_workload_score_for_perf_improvement_ops ?
+      tablet_->CollectAndUpdateWorkloadStats(MaintenanceOp::PerfImprovementOpType::COMPACT_OP) : 0;
 
   // Any operation that changes the number of REDO files invalidates the
   // cached stats.
@@ -274,7 +281,9 @@ scoped_refptr<AtomicGauge<uint32_t> > MinorDeltaCompactionOp::RunningGauge() con
 
 MajorDeltaCompactionOp::MajorDeltaCompactionOp(Tablet* tablet)
   : TabletOpBase(Substitute("MajorDeltaCompactionOp($0)", tablet->tablet_id()),
-                 MaintenanceOp::HIGH_IO_USAGE, tablet),
+                 MaintenanceOp::IOUsage::HIGH_IO_USAGE,
+                 MaintenanceOp::PerfImprovementOpType::COMPACT_OP,
+                 tablet),
     last_num_mrs_flushed_(0),
     last_num_dms_flushed_(0),
     last_num_rs_compacted_(0),
@@ -292,8 +301,9 @@ void MajorDeltaCompactionOp::UpdateStats(MaintenanceOpStats* stats) {
 
   std::lock_guard<simple_spinlock> l(lock_);
 
-  double workload_score = FLAGS_enable_workload_score_for_perf_improvement_ops ?
-                          tablet_->CollectAndUpdateWorkloadStats(MaintenanceOp::COMPACT_OP) : 0;
+  double workload_score =
+      FLAGS_enable_workload_score_for_perf_improvement_ops ?
+      tablet_->CollectAndUpdateWorkloadStats(MaintenanceOp::PerfImprovementOpType::COMPACT_OP) : 0;
 
   // Any operation that changes the size of the on-disk data invalidates the
   // cached stats.
@@ -361,7 +371,9 @@ scoped_refptr<AtomicGauge<uint32_t> > MajorDeltaCompactionOp::RunningGauge() con
 
 UndoDeltaBlockGCOp::UndoDeltaBlockGCOp(Tablet* tablet)
   : TabletOpBase(Substitute("UndoDeltaBlockGCOp($0)", tablet->tablet_id()),
-                 MaintenanceOp::HIGH_IO_USAGE, tablet) {
+                 MaintenanceOp::IOUsage::HIGH_IO_USAGE,
+                 MaintenanceOp::PerfImprovementOpType::GC_OP,
+                 tablet) {
 }
 
 void UndoDeltaBlockGCOp::UpdateStats(MaintenanceOpStats* stats) {
@@ -414,7 +426,9 @@ std::string UndoDeltaBlockGCOp::LogPrefix() const {
 
 DeletedRowsetGCOp::DeletedRowsetGCOp(Tablet* tablet)
     : TabletOpBase(Substitute("DeletedRowSetGCOp($0)", tablet->tablet_id()),
-                   MaintenanceOp::HIGH_IO_USAGE, tablet),
+                   MaintenanceOp::IOUsage::HIGH_IO_USAGE,
+                   MaintenanceOp::PerfImprovementOpType::GC_OP,
+                   tablet),
       running_(false) {
 }
 

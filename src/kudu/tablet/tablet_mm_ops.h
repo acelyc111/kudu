@@ -37,7 +37,8 @@ class Tablet;
 
 class TabletOpBase : public MaintenanceOp {
  public:
-  TabletOpBase(std::string name, IOUsage io_usage, Tablet* tablet);
+  TabletOpBase(std::string name, IOUsage io_usage,
+               PerfImprovementOpType type, Tablet* tablet);
   std::string LogPrefix() const;
 
  protected:
