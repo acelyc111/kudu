@@ -2292,7 +2292,7 @@ TEST_F(ReplicatedAlterTableTest, AlterReplicationFactorWhileWriting) {
   workload.set_table_name(kTableName);
   workload.set_num_tablets(1);
   workload.set_num_replicas(1);
-  workload.set_num_write_threads(10);
+  workload.set_num_write_threads(100);
   workload.Setup();
   workload.Start();
 
@@ -2303,7 +2303,7 @@ TEST_F(ReplicatedAlterTableTest, AlterReplicationFactorWhileWriting) {
     tablet_replica_ = LookupLeaderTabletReplica(MonoDelta::FromSeconds(5));
     NO_FATALS(VerifyTabletReplicaCount(3));
     ASSERT_EQ(1, tablet_replica_->tablet()->metadata()->schema_version());
-  }
+  });
 
   workload.StopAndJoin();
 }
