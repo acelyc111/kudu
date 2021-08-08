@@ -2306,6 +2306,13 @@ TEST_F(ReplicatedAlterTableTest, AlterReplicationFactorWhileWriting) {
   });
 
   workload.StopAndJoin();
+
+  auto client = workload.client();
+  KuduTablet* tablet = nullptr;
+  ASSERT_OK(client->GetTablet(tablet_replica_->tablet()->tablet_id(), &tablet));
+  ASSERT_NE(nullptr, tablet);
+  auto replicas = tablet->replicas();
+  ASSERT_EQ(3, replicas.size());
 }
 
 TEST_F(ReplicatedAlterTableTest, AlterReplicationFactorAfterWALGCed) {
