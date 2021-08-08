@@ -2286,6 +2286,28 @@ TEST_F(ReplicatedAlterTableTest, AlterReplicationFactor) {
   ASSERT_OK(client_->DeleteTable(kTableName));
 }
 
+TEST_F(ReplicatedAlterTableTest, AlterReplicationFactorWhileWriting) {
+  ASSERT_OK(client_->DeleteTable(kTableName));
+  TestWorkload workload(cluster_.get());
+  workload.set_table_name(kTableName);
+  workload.set_num_tablets(1);
+  workload.set_num_replicas(1);
+  workload.set_num_write_threads(10);
+  workload.Setup();
+  workload.Start();
+
+  // Set replication factor to 3.
+  ASSERT_OK(SetReplicationFactor(kTableName, 3));
+
+  ASSERT_EVENTUALLY([&] {
+    tablet_replica_ = LookupLeaderTabletReplica(MonoDelta::FromSeconds(5));
+    NO_FATALS(VerifyTabletReplicaCount(3));
+    ASSERT_EQ(1, tablet_replica_->tablet()->metadata()->schema_version());
+  }
+
+  workload.StopAndJoin();
+}
+
 TEST_F(ReplicatedAlterTableTest, AlterReplicationFactorAfterWALGCed) {
   SKIP_IF_SLOW_NOT_ALLOWED();
 
