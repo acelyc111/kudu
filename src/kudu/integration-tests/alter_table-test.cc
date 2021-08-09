@@ -35,6 +35,7 @@
 
 #include "kudu/client/client-test-util.h"
 #include "kudu/client/client.h"
+#include "kudu/client/meta_cache.h"
 #include "kudu/client/row_result.h"
 #include "kudu/client/scan_batch.h"
 #include "kudu/client/schema.h"
@@ -110,6 +111,8 @@ using kudu::client::KuduTableAlterer;
 using kudu::client::KuduTableCreator;
 using kudu::client::KuduUpdate;
 using kudu::client::KuduValue;
+using kudu::client::internal::MetaCacheEntry;
+using kudu::client::internal::RemoteReplica;
 using kudu::client::sp::shared_ptr;
 using kudu::cluster::InternalMiniCluster;
 using kudu::cluster::InternalMiniClusterOptions;
@@ -2298,8 +2301,9 @@ TEST_F(ReplicatedAlterTableTest, AlterReplicationFactorWhileWriting) {
 
   auto client = workload.client();
   KuduTablet* tablet = nullptr;
+  string tablet_id = tablet_replica_->tablet()->tablet_id();
   tablet_replica_ = LookupLeaderTabletReplica(MonoDelta::FromSeconds(5));
-  ASSERT_OK(client->GetTablet(tablet_replica_->tablet()->tablet_id(), &tablet));
+  ASSERT_OK(client->GetTablet(tablet_id, &tablet));
 
   workload.Start();
 
@@ -2315,14 +2319,12 @@ TEST_F(ReplicatedAlterTableTest, AlterReplicationFactorWhileWriting) {
 
   workload.StopAndJoin();
 
-  ASSERT_NE(nullptr, tablet);
-  auto replicas = tablet->replicas();
-  EXPECT_EQ(3, replicas.size());
-
-  ASSERT_OK(client->GetTablet(tablet_replica_->tablet()->tablet_id(), &tablet));
-  ASSERT_NE(nullptr, tablet);
-  replicas = tablet->replicas();
-  EXPECT_EQ(3, replicas.size());
+  internal::MetaCacheEntry entry;
+  ASSERT_TRUE(client->data_->meta_cache_->LookupEntryByIdFastPath(tablet_id, &entry));
+  ASSERT_TRUE(entry.Initialized());
+  std::vector<RemoteReplica> replicas;
+  entry.tablet()->GetRemoteReplicas(&replicas);
+  EXPECT_EQ(1, replicas.size());
 }
 
 TEST_F(ReplicatedAlterTableTest, AlterReplicationFactorAfterWALGCed) {

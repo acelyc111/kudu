@@ -1016,6 +1016,7 @@ class KUDU_EXPORT KuduClient : public sp::enable_shared_from_this<KuduClient> {
   FRIEND_TEST(ClientTest, TestWriteWithDeadMaster);
   FRIEND_TEST(MasterFailoverTest, TestPauseAfterCreateTableIssued);
   FRIEND_TEST(MultiTServerClientTest, TestSetReplicationFactor);
+  FRIEND_TEST(ReplicatedAlterTableTest, AlterReplicationFactorWhileWriting);
 
   KuduClient();
 
