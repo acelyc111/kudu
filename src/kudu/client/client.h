@@ -56,6 +56,7 @@ namespace kudu {
 class AlterTableTest;
 class AuthzTokenTest;
 class ClientStressTest_TestUniqueClientIds_Test;
+class ReplicatedAlterTableTest_AlterReplicationFactorWhileWriting_Test;
 class DisableWriteWhenExceedingQuotaTest;
 class KuduPartialRow;
 class MonoDelta;
@@ -1016,7 +1017,7 @@ class KUDU_EXPORT KuduClient : public sp::enable_shared_from_this<KuduClient> {
   FRIEND_TEST(ClientTest, TestWriteWithDeadMaster);
   FRIEND_TEST(MasterFailoverTest, TestPauseAfterCreateTableIssued);
   FRIEND_TEST(MultiTServerClientTest, TestSetReplicationFactor);
-  FRIEND_TEST(ReplicatedAlterTableTest, AlterReplicationFactorWhileWriting);
+  FRIEND_TEST(kudu::ReplicatedAlterTableTest, AlterReplicationFactorWhileWriting);
 
   KuduClient();
 

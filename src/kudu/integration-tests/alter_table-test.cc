@@ -35,6 +35,7 @@
 
 #include "kudu/client/client-test-util.h"
 #include "kudu/client/client.h"
+#include "kudu/client/client-internal.h"
 #include "kudu/client/meta_cache.h"
 #include "kudu/client/row_result.h"
 #include "kudu/client/scan_batch.h"
@@ -2290,6 +2291,19 @@ TEST_F(ReplicatedAlterTableTest, AlterReplicationFactor) {
   ASSERT_OK(client_->DeleteTable(kTableName));
 }
 
+Status MetaCacheLookupById(
+    const string& tablet_id, scoped_refptr<internal::RemoteTablet>* remote_tablet) {
+  remote_tablet->reset();
+  scoped_refptr<internal::RemoteTablet> rt;
+  Synchronizer sync;
+  client_->data_->meta_cache_->LookupTabletById(
+      client_.get(), tablet_id, MonoTime::Max(), &rt,
+      sync.AsStatusCallback());
+  RETURN_NOT_OK(sync.Wait());
+  *remote_tablet = std::move(rt);
+  return Status::OK();
+}
+
 TEST_F(ReplicatedAlterTableTest, AlterReplicationFactorWhileWriting) {
   ASSERT_OK(client_->DeleteTable(kTableName));
   TestWorkload workload(cluster_.get());
@@ -2299,17 +2313,21 @@ TEST_F(ReplicatedAlterTableTest, AlterReplicationFactorWhileWriting) {
   workload.set_num_write_threads(1);
   workload.Setup();
 
-  auto client = workload.client();
-  KuduTablet* tablet = nullptr;
-  string tablet_id = tablet_replica_->tablet()->tablet_id();
-  tablet_replica_ = LookupLeaderTabletReplica(MonoDelta::FromSeconds(5));
-  ASSERT_OK(client->GetTablet(tablet_id, &tablet));
-
+  {
+    MetaCacheEntry entry;
+    auto client = workload.client();
+    tablet_replica_ = LookupLeaderTabletReplica(MonoDelta::FromSeconds(5));
+    string tablet_id = tablet_replica_->tablet()->tablet_id();
+    ASSERT_TRUE(client->data_->meta_cache_->LookupEntryByIdFastPath(tablet_id, &entry));
+    ASSERT_TRUE(entry.Initialized());
+    std::vector<RemoteReplica> replicas;
+    entry.tablet()->GetRemoteReplicas(&replicas);
+    EXPECT_EQ(1, replicas.size());
+  }
   workload.Start();
 
   // Set replication factor to 3.
   ASSERT_OK(SetReplicationFactor(kTableName, 3));
-  std::cout << "========================================================" << std::endl;
 
   ASSERT_EVENTUALLY([&] {
     tablet_replica_ = LookupLeaderTabletReplica(MonoDelta::FromSeconds(5));
@@ -2319,7 +2337,9 @@ TEST_F(ReplicatedAlterTableTest, AlterReplicationFactorWhileWriting) {
 
   workload.StopAndJoin();
 
-  internal::MetaCacheEntry entry;
+  MetaCacheEntry entry;
+  auto client = workload.client();
+  string tablet_id = tablet_replica_->tablet()->tablet_id();
   ASSERT_TRUE(client->data_->meta_cache_->LookupEntryByIdFastPath(tablet_id, &entry));
   ASSERT_TRUE(entry.Initialized());
   std::vector<RemoteReplica> replicas;
