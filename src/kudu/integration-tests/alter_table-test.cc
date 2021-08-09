@@ -2293,12 +2293,19 @@ TEST_F(ReplicatedAlterTableTest, AlterReplicationFactorWhileWriting) {
   workload.set_table_name(kTableName);
   workload.set_num_tablets(1);
   workload.set_num_replicas(1);
-  workload.set_num_write_threads(100);
+  workload.set_num_write_threads(1);
   workload.Setup();
+
+  auto client = workload.client();
+  KuduTablet* tablet = nullptr;
+  tablet_replica_ = LookupLeaderTabletReplica(MonoDelta::FromSeconds(5));
+  ASSERT_OK(client->GetTablet(tablet_replica_->tablet()->tablet_id(), &tablet));
+
   workload.Start();
 
   // Set replication factor to 3.
   ASSERT_OK(SetReplicationFactor(kTableName, 3));
+  std::cout << "========================================================" << std::endl;
 
   ASSERT_EVENTUALLY([&] {
     tablet_replica_ = LookupLeaderTabletReplica(MonoDelta::FromSeconds(5));
@@ -2308,12 +2315,14 @@ TEST_F(ReplicatedAlterTableTest, AlterReplicationFactorWhileWriting) {
 
   workload.StopAndJoin();
 
-  auto client = workload.client();
-  KuduTablet* tablet = nullptr;
-  ASSERT_OK(client->GetTablet(tablet_replica_->tablet()->tablet_id(), &tablet));
   ASSERT_NE(nullptr, tablet);
   auto replicas = tablet->replicas();
-  ASSERT_EQ(3, replicas.size());
+  EXPECT_EQ(3, replicas.size());
+
+  ASSERT_OK(client->GetTablet(tablet_replica_->tablet()->tablet_id(), &tablet));
+  ASSERT_NE(nullptr, tablet);
+  replicas = tablet->replicas();
+  EXPECT_EQ(3, replicas.size());
 }
 
 TEST_F(ReplicatedAlterTableTest, AlterReplicationFactorAfterWALGCed) {
