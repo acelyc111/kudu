@@ -2304,52 +2304,104 @@ Status MetaCacheLookupById(
   return Status::OK();
 }
 
-TEST_F(ReplicatedAlterTableTest, AlterReplicationFactorWhileWriting) {
+TEST_F(ReplicatedAlterTableTest, AlterReplicationFactorWhileScaning) {
+  // Delete table at first, and create table by TestWorkload later.
   ASSERT_OK(client_->DeleteTable(kTableName));
+
+  // Write some data for scan later.
+  {
+    TestWorkload workload(cluster_.get());
+    workload.set_table_name(kTableName);
+    workload.set_num_tablets(1);
+    workload.set_num_replicas(1);
+    workload.set_num_write_threads(10);
+    workload.Setup();
+    workload.Start();
+    ASSERT_EVENTUALLY([&]() {
+      ASSERT_GE(workload.rows_inserted(), 30000);
+    });
+    workload.StopAndJoin();
+  }
+
+  // Keep scaning the table.
   TestWorkload workload(cluster_.get());
   workload.set_table_name(kTableName);
-  workload.set_num_tablets(1);
-  workload.set_num_replicas(1);
-  workload.set_num_write_threads(1);
+  workload.set_num_write_threads(0);
+  workload.set_num_read_threads(10);
+  workload.set_read_errors_allowed(false);
   workload.Setup();
-
-  {
-    MetaCacheEntry entry;
-    auto client = workload.client();
-    tablet_replica_ = LookupLeaderTabletReplica(MonoDelta::FromSeconds(5));
-    string tablet_id = tablet_replica_->tablet()->tablet_id();
-    ASSERT_TRUE(client->data_->meta_cache_->LookupEntryByIdFastPath(tablet_id, &entry));
-    ASSERT_TRUE(entry.Initialized());
-    std::vector<RemoteReplica> replicas;
-    entry.tablet()->GetRemoteReplicas(&replicas);
-    EXPECT_EQ(1, replicas.size());
-  }
   workload.Start();
 
   // Set replication factor to 3.
   ASSERT_OK(SetReplicationFactor(kTableName, 3));
-
   ASSERT_EVENTUALLY([&] {
     tablet_replica_ = LookupLeaderTabletReplica(MonoDelta::FromSeconds(5));
     NO_FATALS(VerifyTabletReplicaCount(3));
     ASSERT_EQ(1, tablet_replica_->tablet()->metadata()->schema_version());
   });
 
-  workload.StopAndJoin();
+  // Set replication factor to 1.
+  ASSERT_OK(SetReplicationFactor(kTableName, 1));
+  ASSERT_EVENTUALLY([&] {
+    tablet_replica_ = LookupLeaderTabletReplica(MonoDelta::FromSeconds(5));
+    NO_FATALS(VerifyTabletReplicaCount(1));
+    ASSERT_EQ(1, tablet_replica_->tablet()->metadata()->schema_version());
+  });
 
-  MetaCacheEntry entry;
-  auto client = workload.client();
-  string tablet_id = tablet_replica_->tablet()->tablet_id();
-  ASSERT_TRUE(client->data_->meta_cache_->LookupEntryByIdFastPath(tablet_id, &entry));
-  ASSERT_TRUE(entry.Initialized());
-  std::vector<RemoteReplica> replicas;
-  entry.tablet()->GetRemoteReplicas(&replicas);
-  EXPECT_EQ(1, replicas.size());
+  workload.StopAndJoin();
+}
+
+TEST_F(ReplicatedAlterTableTest, AlterReplicationFactorWhileWriting) {
+  SKIP_IF_SLOW_NOT_ALLOWED();
+
+  // Additionally, make the WAL segments smaller to encourage more frequent
+  // roll-over onto WAL segments.
+  FLAGS_flush_threshold_secs = 0;
+  FLAGS_log_segment_size_mb = 1;
+
+  // Make tablet replica copying slow, to make it easier to spot violations.
+  FLAGS_tablet_copy_download_file_inject_latency_ms = 2000;
+
+  // Delete table at first, and create table by TestWorkload later.
+  ASSERT_OK(client_->DeleteTable(kTableName));
+
+  // Keep writing the table.
+  TestWorkload workload(cluster_.get());
+  workload.set_table_name(kTableName);
+  workload.set_num_tablets(1);
+  workload.set_num_replicas(1);
+  workload.set_num_write_threads(10);
+  workload.set_timeout_allowed(true);
+  workload.Setup();
+  workload.Start();
+  ASSERT_EVENTUALLY([&]() {
+    ASSERT_GE(workload.rows_inserted(), 100000);
+  });
+
+  // Set replication factor to 3.
+  ASSERT_OK(SetReplicationFactor(kTableName, 3));
+  ASSERT_EVENTUALLY([&] {
+    tablet_replica_ = LookupLeaderTabletReplica(MonoDelta::FromSeconds(5));
+    NO_FATALS(VerifyTabletReplicaCount(3));
+    ASSERT_EQ(1, tablet_replica_->tablet()->metadata()->schema_version());
+  });
+
+  // Set replication factor to 1.
+  ASSERT_OK(SetReplicationFactor(kTableName, 1));
+  ASSERT_EVENTUALLY([&] {
+    tablet_replica_ = LookupLeaderTabletReplica(MonoDelta::FromSeconds(5));
+    NO_FATALS(VerifyTabletReplicaCount(1));
+    ASSERT_EQ(1, tablet_replica_->tablet()->metadata()->schema_version());
+  });
+
+  workload.StopAndJoin();
 }
 
 TEST_F(ReplicatedAlterTableTest, AlterReplicationFactorAfterWALGCed) {
   SKIP_IF_SLOW_NOT_ALLOWED();
 
+  // Additionally, make the WAL segments smaller to encourage more frequent
+  // roll-over onto WAL segments.
   FLAGS_flush_threshold_secs = 0;
   FLAGS_log_segment_size_mb = 1;
 
