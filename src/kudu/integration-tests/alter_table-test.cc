@@ -92,6 +92,7 @@ DECLARE_int32(flush_threshold_secs);
 DECLARE_int32(heartbeat_interval_ms);
 DECLARE_int32(log_inject_latency_ms_mean);
 DECLARE_int32(log_segment_size_mb);
+DECLARE_int32(tablet_copy_download_file_inject_latency_ms);
 
 using kudu::client::CountTableRows;
 using kudu::client::KuduClient;
@@ -112,8 +113,6 @@ using kudu::client::KuduTableAlterer;
 using kudu::client::KuduTableCreator;
 using kudu::client::KuduUpdate;
 using kudu::client::KuduValue;
-using kudu::client::internal::MetaCacheEntry;
-using kudu::client::internal::RemoteReplica;
 using kudu::client::sp::shared_ptr;
 using kudu::cluster::InternalMiniCluster;
 using kudu::cluster::InternalMiniClusterOptions;
@@ -206,7 +205,7 @@ class AlterTableTest : public KuduTest {
             }
 
             MonoDelta remaining_timeout = deadline - MonoTime::Now();
-            auto s = replicas[0]->consensus()->WaitUntilLeaderForTests(remaining_timeout);
+            auto s = replicas[0]->consensus()->WaitUntilLeader(remaining_timeout);
             if (!s.ok()) {
               SleepFor(MonoDelta::FromMilliseconds(50));
               continue;
@@ -2289,19 +2288,6 @@ TEST_F(ReplicatedAlterTableTest, AlterReplicationFactor) {
   ASSERT_EQ(2, tablet_replica_->tablet()->metadata()->schema_version());
 
   ASSERT_OK(client_->DeleteTable(kTableName));
-}
-
-Status MetaCacheLookupById(
-    const string& tablet_id, scoped_refptr<internal::RemoteTablet>* remote_tablet) {
-  remote_tablet->reset();
-  scoped_refptr<internal::RemoteTablet> rt;
-  Synchronizer sync;
-  client_->data_->meta_cache_->LookupTabletById(
-      client_.get(), tablet_id, MonoTime::Max(), &rt,
-      sync.AsStatusCallback());
-  RETURN_NOT_OK(sync.Wait());
-  *remote_tablet = std::move(rt);
-  return Status::OK();
 }
 
 TEST_F(ReplicatedAlterTableTest, AlterReplicationFactorWhileScaning) {
