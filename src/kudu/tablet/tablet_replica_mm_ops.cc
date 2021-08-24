@@ -138,8 +138,9 @@ void FlushOpPerfImprovementPolicy::SetPerfImprovementForFlush(MaintenanceOpStats
 //
 TabletReplicaOpBase::TabletReplicaOpBase(std::string name,
                                          IOUsage io_usage,
+                                         PerfImprovementOpType type,
                                          TabletReplica* tablet_replica)
-    : MaintenanceOp(std::move(name), io_usage),
+    : MaintenanceOp(std::move(name), io_usage, type),
       tablet_replica_(tablet_replica) {
 }
 
@@ -184,7 +185,8 @@ void FlushMRSOp::UpdateStats(MaintenanceOpStats* stats) {
 
   if (FLAGS_enable_workload_score_for_perf_improvement_ops) {
     double workload_score =
-        tablet_replica_->tablet()->CollectAndUpdateWorkloadStats(MaintenanceOp::FLUSH_OP);
+        tablet_replica_->tablet()->CollectAndUpdateWorkloadStats(
+            MaintenanceOp::PerfImprovementOpType::FLUSH_OP);
     stats->set_workload_score(workload_score);
   }
 
@@ -259,7 +261,8 @@ void FlushDeltaMemStoresOp::UpdateStats(MaintenanceOpStats* stats) {
 
   if (FLAGS_enable_workload_score_for_perf_improvement_ops) {
     double workload_score =
-        tablet_replica_->tablet()->CollectAndUpdateWorkloadStats(MaintenanceOp::FLUSH_OP);
+        tablet_replica_->tablet()->CollectAndUpdateWorkloadStats(
+            MaintenanceOp::PerfImprovementOpType::FLUSH_OP);
     stats->set_workload_score(workload_score);
   }
 
@@ -303,7 +306,8 @@ scoped_refptr<AtomicGauge<uint32_t> > FlushDeltaMemStoresOp::RunningGauge() cons
 LogGCOp::LogGCOp(TabletReplica* tablet_replica)
     : TabletReplicaOpBase(StringPrintf("LogGCOp(%s)",
                                        tablet_replica->tablet()->tablet_id().c_str()),
-                          MaintenanceOp::LOW_IO_USAGE,
+                          MaintenanceOp::IOUsage::LOW_IO_USAGE,
+                          MaintenanceOp::PerfImprovementOpType::GC_OP,
                           tablet_replica),
       log_gc_duration_(METRIC_log_gc_duration.Instantiate(
                            tablet_replica->tablet()->GetMetricEntity())),

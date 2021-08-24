@@ -2407,12 +2407,12 @@ double Tablet::CollectAndUpdateWorkloadStats(MaintenanceOp::PerfImprovementOpTyp
       last_rows_mutated_ = rows_mutated;
     }
   }
-  if (type == MaintenanceOp::FLUSH_OP) {
+  if (type == MaintenanceOp::PerfImprovementOpType::FLUSH_OP) {
     // Flush ops are already scored based on how hot the tablet is
     // for writes, so we'll only adjust the workload score based on
     // how hot the tablet is for reads.
     workload_score = last_read_score_;
-  } else if (type == MaintenanceOp::COMPACT_OP) {
+  } else if (type == MaintenanceOp::PerfImprovementOpType::COMPACT_OP) {
     // Since compactions may improve both read and write performance, increase
     // the workload score based on the read and write rate to the tablet.
     workload_score = std::min(FLAGS_workload_score_upper_bound,

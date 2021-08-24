@@ -27,7 +27,6 @@
 #include <string>
 #include <type_traits>
 #include <utility>
-#include <vector>
 
 #include <gflags/gflags.h>
 
@@ -36,7 +35,6 @@
 #include "kudu/gutil/map-util.h"
 #include "kudu/gutil/port.h"
 #include "kudu/gutil/stringprintf.h"
-#include "kudu/gutil/strings/split.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/util/debug/trace_event.h"
 #include "kudu/util/debug/trace_logging.h"
@@ -54,17 +52,28 @@
 
 using std::pair;
 using std::string;
-using std::vector;
-using strings::Split;
 using strings::Substitute;
 
 DEFINE_int32(maintenance_manager_num_threads, 1,
-             "Size of the maintenance manager thread pool. "
+             "Size of the maintenance manager thread pool, this pool "
+             "is responsible for compaction, GC operations, and flush "
+             "operations. "
              "For spinning disks, the number of threads should "
              "not be above the number of devices.");
 TAG_FLAG(maintenance_manager_num_threads, stable);
 DEFINE_validator(maintenance_manager_num_threads,
                  [](const char* /*n*/, int32 v) { return v > 0; });
+
+DEFINE_int32(maintenance_manager_num_flush_threads, 0,
+             "Size of the maintenance manager flush thread pool, this pool "
+             "is responsible for flush operations specifically. If it is less "
+             "than or equal to 0, or this thread pool is busy with flush "
+             "operations, it will still use the thread pool created by "
+             "--maintenance_manager_num_threads, which will share "
+             "with compaction and GC operations."
+             "For spinning disks, the number of threads should "
+             "not be above the number of devices.");
+TAG_FLAG(maintenance_manager_num_flush_threads, experimental);
 
 DEFINE_int32(maintenance_manager_polling_interval_ms, 250,
              "Polling interval for the maintenance manager scheduler, "
@@ -136,9 +145,10 @@ void MaintenanceOpStats::Clear() {
   last_modified_ = MonoTime();
 }
 
-MaintenanceOp::MaintenanceOp(string name, IOUsage io_usage)
+MaintenanceOp::MaintenanceOp(string name, IOUsage io_usage, PerfImprovementOpType type)
     : name_(std::move(name)),
       io_usage_(io_usage),
+      type_(type),
       running_(0),
       cancel_(false) {
 }
@@ -167,6 +177,7 @@ MaintenanceManagerStatusPB_OpInstancePB OpInstance::DumpToPB() const {
 
 const MaintenanceManager::Options MaintenanceManager::kDefaultOptions = {
   .num_threads = 0,
+  .num_flush_threads = 0,
   .polling_interval_ms = 0,
   .history_size = 0,
 };
@@ -176,24 +187,35 @@ MaintenanceManager::MaintenanceManager(
     string server_uuid,
     const scoped_refptr<MetricEntity>& metric_entity)
     : server_uuid_(std::move(server_uuid)),
-      num_threads_(options.num_threads > 0
-                   ? options.num_threads
-                   : FLAGS_maintenance_manager_num_threads),
+      num_threads_{options.num_threads > 0 ?
+                       options.num_threads : FLAGS_maintenance_manager_num_threads,
+                   options.num_flush_threads > 0 ?
+                       options.num_flush_threads : FLAGS_maintenance_manager_num_flush_threads},
       polling_interval_(MonoDelta::FromMilliseconds(
-          options.polling_interval_ms > 0
-              ? options.polling_interval_ms
-              : FLAGS_maintenance_manager_polling_interval_ms)),
+          options.polling_interval_ms > 0 ?
+              options.polling_interval_ms : FLAGS_maintenance_manager_polling_interval_ms)),
       cond_(&lock_),
       shutdown_(false),
-      running_ops_(0),
       completed_ops_count_(0),
       rand_(GetRandomSeed32()),
       memory_pressure_func_(&process_memory::UnderMemoryPressure),
       metrics_(CHECK_NOTNULL(metric_entity)) {
+  std::unique_ptr<ThreadPool> thread_pool;
   CHECK_OK(ThreadPoolBuilder("MaintenanceMgr")
-               .set_min_threads(num_threads_)
-               .set_max_threads(num_threads_)
-               .Build(&thread_pool_));
+               .set_min_threads(num_threads_[0])
+               .set_max_threads(num_threads_[0])
+               .Build(&thread_pool));
+  thread_pools_.emplace_back(thread_pool.release());
+  running_ops_[0] = 0;
+  if (num_threads_[1] > 0) {
+    std::unique_ptr<ThreadPool> flush_thread_pool;
+    CHECK_OK(ThreadPoolBuilder("MaintenanceFlushMgr")
+                 .set_min_threads(num_threads_[1])
+                 .set_max_threads(num_threads_[1])
+                 .Build(&flush_thread_pool));
+    thread_pools_.emplace_back(flush_thread_pool.release());
+    running_ops_[1] = 0;
+  }
   uint32_t history_size = options.history_size == 0 ?
                           FLAGS_maintenance_manager_history_size :
                           options.history_size;
@@ -227,8 +249,10 @@ void MaintenanceManager::Shutdown() {
     // Shutdown() can remove a queued task silently. We count on eventually running the
     // queued tasks to decrement their "running" count, which is incremented at the time
     // they are enqueued.
-    thread_pool_->Wait();
-    thread_pool_->Shutdown();
+    for (auto& thread_pool : thread_pools_) {
+      thread_pool->Wait();
+      thread_pool->Shutdown();
+    }
   }
 }
 
@@ -313,6 +337,7 @@ void MaintenanceManager::RunSchedulerThread() {
   while (true) {
     MaintenanceOp* op = nullptr;
     string op_note;
+    int op_launch_pool_index = 0;
     {
       std::unique_lock<Mutex> guard(lock_);
       // Upon each iteration, we should have dropped and reacquired 'lock_'.
@@ -347,25 +372,28 @@ void MaintenanceManager::RunSchedulerThread() {
         op = best_op_and_why.first;
         op_note = std::move(best_op_and_why.second);
       }
-      if (op) {
-        // While 'running_instances_lock_' is held, check one more time for
-        // whether the op is cancelled. This ensures that we don't attempt to
-        // launch an op that has been destructed in UnregisterOp(). See
-        // KUDU-3268 for more details.
-        std::lock_guard<Mutex> guard(running_instances_lock_);
-        if (op->cancelled()) {
-          VLOG_AND_TRACE_WITH_PREFIX("maintenance", 2)
-              << "picked maintenance operation that has been cancelled";
-          continue;
-        }
-        IncreaseOpCount(op);
-        prev_iter_found_no_work = false;
-      } else {
+
+      if (!op) {
         VLOG_AND_TRACE_WITH_PREFIX("maintenance", 2)
             << "no maintenance operations look worth doing";
         prev_iter_found_no_work = true;
         continue;
       }
+
+      // While 'running_instances_lock_' is held, check one more time for
+      // whether the op is cancelled. This ensures that we don't attempt to
+      // launch an op that has been destructed in UnregisterOp(). See
+      // KUDU-3268 for more details.
+      std::lock_guard<Mutex> guard2(running_instances_lock_);
+      if (op->cancelled()) {
+        VLOG_AND_TRACE_WITH_PREFIX("maintenance", 2)
+            << "picked maintenance operation that has been cancelled";
+        continue;
+      }
+
+      int op_launch_pool_index = FindPoolForOp(op);
+      IncreaseOpCount(op, op_launch_pool_index);
+      prev_iter_found_no_work = false;
     }
 
     // Prepare the maintenance operation.
@@ -375,14 +403,16 @@ void MaintenanceManager::RunSchedulerThread() {
                             << ". Re-running scheduler.";
       metrics_.SubmitOpPrepareFailed();
       std::lock_guard<Mutex> guard(running_instances_lock_);
-      DecreaseOpCountAndNotifyWaiters(op);
+      DecreaseOpCountAndNotifyWaiters(op, op_launch_pool_index);
       continue;
     }
 
     LOG_AND_TRACE_WITH_PREFIX("maintenance", INFO)
         << Substitute("Scheduling $0: $1", op->name(), op_note);
     // Submit the maintenance operation to be run on the "MaintenanceMgr" pool.
-    CHECK_OK(thread_pool_->Submit([this, op]() { this->LaunchOp(op); }));
+    CHECK_OK(thread_pools_[op_launch_pool_index]->Submit([this, op, op_launch_pool_index]() {
+      this->LaunchOp(op, op_launch_pool_index);
+    }));
   }
 }
 
@@ -427,10 +457,17 @@ pair<MaintenanceOp*, string> MaintenanceManager::FindBestOp() {
   int64_t most_data_retained_bytes = 0;
   MaintenanceOp* most_data_retained_bytes_op = nullptr;
 
+  bool busy_for_compaction_and_gc = !HasFreeThreadsForCompactionOrGC();
   double best_perf_improvement = 0;
   MaintenanceOp* best_perf_improvement_op = nullptr;
   for (auto& val : ops_) {
     MaintenanceOp* op(val.first);
+    if (busy_for_compaction_and_gc &&
+        (op->type() == MaintenanceOp::PerfImprovementOpType::COMPACT_OP ||
+         op->type() == MaintenanceOp::PerfImprovementOpType::GC_OP)) {
+      continue;
+    }
+
     MaintenanceOpStats& stats(val.second);
     VLOG_WITH_PREFIX(3) << "Considering MM op " << op->name();
     // Update op stats.
@@ -441,7 +478,7 @@ pair<MaintenanceOp*, string> MaintenanceManager::FindBestOp() {
     }
 
     const auto logs_retained_bytes = stats.logs_retained_bytes();
-    if (op->io_usage() == MaintenanceOp::LOW_IO_USAGE &&
+    if (op->io_usage() == MaintenanceOp::IOUsage::LOW_IO_USAGE &&
         logs_retained_bytes > low_io_most_logs_retained_bytes) {
       low_io_most_logs_retained_bytes_op = op;
       low_io_most_logs_retained_bytes = logs_retained_bytes;
@@ -532,7 +569,19 @@ pair<MaintenanceOp*, string> MaintenanceManager::FindBestOp() {
     string note = StringPrintf("perf score=%.6f", best_perf_improvement);
     return {best_perf_improvement_op, std::move(note)};
   }
+
   return {nullptr, "no ops with positive improvement"};
+}
+
+int MaintenanceManager::FindPoolForOp(MaintenanceOp* op) {
+  DCHECK(HasFreeThreads());
+
+  if (op->type() == MaintenanceOp::PerfImprovementOpType::FLUSH_OP &&
+      HasFreeThreadsForFlush()) {
+    return 1;
+  }
+
+  return 0;
 }
 
 double MaintenanceManager::AdjustedPerfScore(double perf_improvement,
@@ -551,7 +600,7 @@ double MaintenanceManager::AdjustedPerfScore(double perf_improvement,
   return perf_score * std::pow(FLAGS_maintenance_op_multiplier, priority);
 }
 
-void MaintenanceManager::LaunchOp(MaintenanceOp* op) {
+void MaintenanceManager::LaunchOp(MaintenanceOp* op, int op_launch_pool) {
   const auto thread_id = Thread::CurrentThreadId();
   OpInstance op_instance;
   op_instance.thread_id = thread_id;
@@ -577,7 +626,7 @@ void MaintenanceManager::LaunchOp(MaintenanceOp* op) {
       op_instance.duration = now - op_instance.start_mono_time;
       op->DurationHistogram()->Increment(op_instance.duration.ToMilliseconds());
 
-      DecreaseOpCountAndNotifyWaiters(op);
+      DecreaseOpCountAndNotifyWaiters(op, op_launch_pool);
     }
     cond_.Signal(); // wake up the scheduler
 
@@ -660,24 +709,33 @@ string MaintenanceManager::LogPrefix() const {
   return Substitute("P $0: ", server_uuid_);
 }
 
-bool MaintenanceManager::HasFreeThreads() {
-  return num_threads_ > running_ops_;
+bool MaintenanceManager::HasFreeThreads() const {
+  return HasFreeThreadsForCompactionOrGC() || HasFreeThreadsForFlush();
 }
 
-bool MaintenanceManager::CouldNotLaunchNewOp(bool prev_iter_found_no_work) {
+bool MaintenanceManager::HasFreeThreadsForCompactionOrGC() const {
+  return num_threads_[0] > running_ops_[0];
+}
+
+bool MaintenanceManager::HasFreeThreadsForFlush() const {
+  return num_threads_[1] > 0 &&
+         num_threads_[1] > running_ops_[1];
+}
+
+bool MaintenanceManager::CouldNotLaunchNewOp(bool prev_iter_found_no_work) const {
   lock_.AssertAcquired();
   return (!HasFreeThreads() || prev_iter_found_no_work || disabled_for_tests()) && !shutdown_;
 }
 
-void MaintenanceManager::IncreaseOpCount(MaintenanceOp* op) {
+void MaintenanceManager::IncreaseOpCount(MaintenanceOp* op, int pool) {
   running_instances_lock_.AssertAcquired();
-  ++running_ops_;
+  ++running_ops_[pool];
   ++op->running_;
 }
 
-void MaintenanceManager::DecreaseOpCountAndNotifyWaiters(MaintenanceOp* op) {
+void MaintenanceManager::DecreaseOpCountAndNotifyWaiters(MaintenanceOp* op, int pool) {
   running_instances_lock_.AssertAcquired();
-  --running_ops_;
+  --running_ops_[pool];
   --op->running_;
   op->cond_->Signal();
 }

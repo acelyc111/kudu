@@ -48,7 +48,10 @@ class FlushOpPerfImprovementPolicy {
 
 class TabletReplicaOpBase : public MaintenanceOp {
  public:
-  explicit TabletReplicaOpBase(std::string name, IOUsage io_usage, TabletReplica* tablet_replica);
+  explicit TabletReplicaOpBase(std::string name,
+                               IOUsage io_usage,
+                               PerfImprovementOpType type,
+                               TabletReplica* tablet_replica);
 
  protected:
   int32_t priority() const override;
@@ -62,7 +65,8 @@ class FlushMRSOp : public TabletReplicaOpBase {
   explicit FlushMRSOp(TabletReplica* tablet_replica)
     : TabletReplicaOpBase(StringPrintf("FlushMRSOp(%s)",
                                        tablet_replica->tablet()->tablet_id().c_str()),
-                          MaintenanceOp::HIGH_IO_USAGE,
+                          MaintenanceOp::IOUsage::HIGH_IO_USAGE,
+                          MaintenanceOp::PerfImprovementOpType::FLUSH_OP,
                           tablet_replica) {
     time_since_flush_.start();
   }
@@ -90,7 +94,8 @@ class FlushDeltaMemStoresOp : public TabletReplicaOpBase {
   explicit FlushDeltaMemStoresOp(TabletReplica* tablet_replica)
     : TabletReplicaOpBase(StringPrintf("FlushDeltaMemStoresOp(%s)",
                                        tablet_replica->tablet()->tablet_id().c_str()),
-                          MaintenanceOp::HIGH_IO_USAGE,
+                          MaintenanceOp::IOUsage::HIGH_IO_USAGE,
+                          MaintenanceOp::PerfImprovementOpType::FLUSH_OP,
                           tablet_replica) {}
 
   void UpdateStats(MaintenanceOpStats* stats) override;
