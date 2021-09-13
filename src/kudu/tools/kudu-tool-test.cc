@@ -1711,7 +1711,7 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
       ASSERT_OK(writer.Start());
       generator.Build(kNumEntries);
       ASSERT_OK_FAST(writer.AppendEntries(generator.values(), kNumEntries));
-      ASSERT_OK(writer.Finish());
+      ASSERT_OK(writer.FinishForTests());
     }
 
     // Find the CFile metadata file.
@@ -1942,7 +1942,7 @@ TEST_F(ToolTest, TestFsDumpCFile) {
   ASSERT_OK(writer.Start());
   generator.Build(kNumEntries);
   ASSERT_OK_FAST(writer.AppendEntries(generator.values(), kNumEntries));
-  ASSERT_OK(writer.Finish());
+  ASSERT_OK(writer.FinishForTests());
 
   {
     NO_FATALS(RunActionStdoutNone(Substitute(

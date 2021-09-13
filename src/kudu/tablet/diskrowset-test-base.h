@@ -123,7 +123,7 @@ class TestRowSet : public KuduRowSetTest {
         rb.AddUint32(zero_vals ? 0 : i);
         CHECK_OK(WriteRow(rb.data(), writer));
       }
-      CHECK_OK(writer->Finish());
+      CHECK_OK(writer->FinishForTests());
     }
   }
 

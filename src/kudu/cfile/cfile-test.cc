@@ -282,7 +282,7 @@ class TestCFile : public CFileTestBase {
       slices.emplace_back(reinterpret_cast<uint8_t *>(&i), 4);
       ASSERT_OK(w.AppendRawBlock(slices, i, nullptr, Slice(), "raw-data"));
     }
-    ASSERT_OK(w.Finish());
+    ASSERT_OK(w.FinishForTests());
 
     // Test Read
     unique_ptr<ReadableBlock> source;
@@ -791,7 +791,7 @@ TEST_P(TestCFileBothCacheMemoryTypes, TestMetadata) {
     ASSERT_OK(w.AppendEntries(&val, 1));
 
     w.AddMetadataPair("key_in_footer", "footer value");
-    ASSERT_OK(w.Finish());
+    ASSERT_OK(w.FinishForTests());
   }
 
   // Read the file and ensure metadata is present.
@@ -905,7 +905,7 @@ TEST_P(TestCFileBothCacheMemoryTypes, TestDataCorruption) {
   vector<Slice> slices;
   slices.emplace_back("HelloWorld");
   ASSERT_OK(w.AppendRawBlock(slices, 1, nullptr, Slice(), "raw-data"));
-  ASSERT_OK(w.Finish());
+  ASSERT_OK(w.FinishForTests());
 
   // Get the final size of the data
   unique_ptr<ReadableBlock> source;

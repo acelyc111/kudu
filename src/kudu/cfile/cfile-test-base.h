@@ -406,7 +406,7 @@ class CFileTestBase : public KuduTest {
       i += towrite;
     }
 
-    ASSERT_OK(w.Finish());
+    ASSERT_OK(w.FinishForTests());
   }
 
   std::unique_ptr<FsManager> fs_manager_;

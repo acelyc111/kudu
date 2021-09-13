@@ -102,7 +102,8 @@ class CFileWriter {
   Status Start();
 
   // Close the CFile and close the underlying writable block.
-  Status Finish();
+  // Only used for unit tests.
+  Status FinishForTests();
 
   // Close the CFile, finalizing the underlying block and releasing
   // it to 'transaction'.

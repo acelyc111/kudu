@@ -192,8 +192,8 @@ Status CFileWriter::Start() {
   return Status::OK();
 }
 
-Status CFileWriter::Finish() {
-  TRACE_EVENT0("cfile", "CFileWriter::Finish");
+Status CFileWriter::FinishForTests() {
+  TRACE_EVENT0("cfile", "CFileWriter::FinishForTests");
   BlockManager* bm = block_->block_manager();
   unique_ptr<BlockCreationTransaction> transaction = bm->NewCreationTransaction();
   RETURN_NOT_OK(FinishAndReleaseBlock(transaction.get()));
