@@ -1445,10 +1445,10 @@ Status Tablet::FlushUnlocked() {
   // rowset, replacing it with an empty one.
   //
   // At this point, we have already swapped in a new empty rowset, and any new
-  // inserts are going into that one. 'old_ms' is effectively frozen -- no new
+  // inserts are going into that one. 'old_mrs' is effectively frozen -- no new
   // inserts should arrive after this point.
   //
-  // NOTE: updates and deletes may still arrive into 'old_ms' at this point.
+  // NOTE: updates and deletes may still arrive into 'old_mrs' at this point.
   //
   // TODO(perf): there's a memrowset.Freeze() call which we might be able to
   // use to improve iteration performance during the flush. The old design
@@ -1456,7 +1456,7 @@ Status Tablet::FlushUnlocked() {
 
   uint64_t start_insert_count = 0;
   // Keep track of the main MRS.
-  int64_t main_mrs_id = -1;
+  int64_t main_mrs_id = TabletMetadata::kNoMrsFlushed;
   vector<TxnInfoBeingFlushed> txns_being_flushed;
   for (const auto& old_mrs : old_mrss) {
     start_insert_count += old_mrs->debug_insert_count();
@@ -1467,7 +1467,7 @@ Status Tablet::FlushUnlocked() {
       main_mrs_id = old_mrs->mrs_id();
     }
   }
-  DCHECK_NE(-1, main_mrs_id);
+  DCHECK_NE(TabletMetadata::kNoMrsFlushed, main_mrs_id);
 
   if (old_mrss.size() == 1 && old_mrss[0]->empty()) {
     // If we're flushing an empty RowSet, we can short circuit here rather than
@@ -1478,7 +1478,7 @@ Status Tablet::FlushUnlocked() {
     return HandleEmptyCompactionOrFlush(input.rowsets(), main_mrs_id, txns_being_flushed);
   }
 
-  if (flush_hooks_) {
+  if (PREDICT_FALSE(flush_hooks_)) {
     RETURN_NOT_OK_PREPEND(flush_hooks_->PostSwapNewMemRowSet(),
                           "PostSwapNewMemRowSet hook failed");
   }
@@ -1565,7 +1565,6 @@ Status Tablet::AlterSchema(AlterSchemaOpState* op_state) {
   std::lock_guard<Semaphore> lock(rowsets_flush_sem_);
 
   // If the current version >= new version, there is nothing to do.
-  bool same_schema = schema()->Equals(*op_state->schema());
   if (metadata_->schema_version() >= op_state->schema_version()) {
     const string msg =
         Substitute("Skipping requested alter to schema version $0, tablet already "
@@ -1592,6 +1591,7 @@ Status Tablet::AlterSchema(AlterSchemaOpState* op_state) {
   }
 
   // If the current schema and the new one are equal, there is nothing to do.
+  bool same_schema = schema()->Equals(*op_state->schema());
   if (same_schema) {
     return metadata_->Flush();
   }
@@ -1859,7 +1859,7 @@ Status Tablet::DoMergeCompactionOrFlush(const RowSetsInCompaction &input,
                                     "Phase 1 snapshot: $1",
                                     op_name, flush_snap.ToString());
 
-  if (common_hooks_) {
+  if (PREDICT_FALSE(common_hooks_)) {
     RETURN_NOT_OK_PREPEND(common_hooks_->PostTakeMvccSnapshot(),
                           "PostTakeMvccSnapshot hook failed");
   }
@@ -1879,7 +1879,7 @@ Status Tablet::DoMergeCompactionOrFlush(const RowSetsInCompaction &input,
       "Flush to disk failed");
   RETURN_NOT_OK_PREPEND(drsw.Finish(), "Failed to finish DRS writer");
 
-  if (common_hooks_) {
+  if (PREDICT_FALSE(common_hooks_)) {
     RETURN_NOT_OK_PREPEND(common_hooks_->PostWriteSnapshot(),
                           "PostWriteSnapshot hook failed");
   }
@@ -1887,7 +1887,7 @@ Status Tablet::DoMergeCompactionOrFlush(const RowSetsInCompaction &input,
   // Though unlikely, it's possible that no rows were written because all of
   // the input rows were GCed in this compaction. In that case, we don't
   // actually want to reopen.
-  if (drsw.rows_written_count() == 0) {
+  if (PREDICT_FALSE(drsw.rows_written_count() == 0)) {
     LOG_WITH_PREFIX(INFO) << op_name << " resulted in no output rows (all input rows "
                           << "were GCed!)  Removing all input rowsets.";
     return HandleEmptyCompactionOrFlush(input.rowsets(), mrs_being_flushed,
@@ -1895,12 +1895,12 @@ Status Tablet::DoMergeCompactionOrFlush(const RowSetsInCompaction &input,
   }
 
   // The RollingDiskRowSet writer wrote out one or more RowSets as the
-  // output. Open these into 'new_rowsets'.
+  // output. Open these into 'new_disk_rowsets'.
   vector<shared_ptr<RowSet> > new_disk_rowsets;
   RowSetMetadataVector new_drs_metas;
   drsw.GetWrittenRowSetMetadata(&new_drs_metas);
 
-  if (metrics_.get()) metrics_->bytes_flushed->IncrementBy(drsw.written_size());
+  if (metrics_) metrics_->bytes_flushed->IncrementBy(drsw.written_size());
   CHECK(!new_drs_metas.empty());
   {
     TRACE_EVENT0("tablet", "Opening compaction results");
@@ -1951,8 +1951,7 @@ Status Tablet::DoMergeCompactionOrFlush(const RowSetsInCompaction &input,
   VLOG_WITH_PREFIX(1) << Substitute("$0: entering phase 2 (starting to "
                                     "duplicate updates in new rowsets)",
                                     op_name);
-  shared_ptr<DuplicatingRowSet> inprogress_rowset(
-      new DuplicatingRowSet(input.rowsets(), new_disk_rowsets));
+  auto inprogress_rowset = std::make_shared<DuplicatingRowSet>(input.rowsets(), new_disk_rowsets);
 
   // The next step is to swap in the DuplicatingRowSet, and at the same time,
   // determine an MVCC snapshot which includes all of the ops that saw a
@@ -1997,7 +1996,7 @@ Status Tablet::DoMergeCompactionOrFlush(const RowSetsInCompaction &input,
   // swap as committed in 'non_duplicated_ops_snap'.
   non_duplicated_ops_snap.AddAppliedTimestamps(applying_during_swap);
 
-  if (common_hooks_) {
+  if (PREDICT_FALSE(common_hooks_)) {
     RETURN_NOT_OK_PREPEND(common_hooks_->PostSwapInDuplicatingRowSet(),
                           "PostSwapInDuplicatingRowSet hook failed");
   }
@@ -2024,7 +2023,7 @@ Status Tablet::DoMergeCompactionOrFlush(const RowSetsInCompaction &input,
         Substitute("Failed to re-update deltas missed during $0 phase 1",
                      op_name).c_str());
 
-  if (common_hooks_) {
+  if (PREDICT_FALSE(common_hooks_)) {
     RETURN_NOT_OK_PREPEND(common_hooks_->PostReupdateMissedDeltas(),
                           "PostReupdateMissedDeltas hook failed");
   }
@@ -2068,7 +2067,7 @@ Status Tablet::DoMergeCompactionOrFlush(const RowSetsInCompaction &input,
                                     drs_written,
                                     bytes_written);
 
-  if (common_hooks_) {
+  if (PREDICT_FALSE(common_hooks_)) {
     RETURN_NOT_OK_PREPEND(common_hooks_->PostSwapNewRowSet(),
                           "PostSwapNewRowSet hook failed");
   }

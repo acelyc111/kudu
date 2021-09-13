@@ -1168,7 +1168,7 @@ void TabletServiceAdminImpl::AlterSchema(const AlterSchemaRequestPB* req,
     }
 
     Schema tablet_schema = replica->tablet_metadata()->schema();
-    if (req_schema.Equals(tablet_schema)) {
+    if (req_schema == tablet_schema) {
       context->RespondSuccess();
       return;
     }
@@ -1195,9 +1195,7 @@ void TabletServiceAdminImpl::AlterSchema(const AlterSchemaRequestPB* req,
     return;
   }
 
-  unique_ptr<AlterSchemaOpState> op_state(
-    new AlterSchemaOpState(replica.get(), req, resp));
-
+  auto op_state = std::make_unique<AlterSchemaOpState>(replica.get(), req, resp);
   op_state->set_completion_callback(unique_ptr<OpCompletionCallback>(
       new RpcOpCompletionCallback<AlterSchemaResponsePB>(context, resp)));
 

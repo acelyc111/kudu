@@ -609,8 +609,7 @@ Status TabletReplica::SubmitTxnParticipantOp(std::unique_ptr<ParticipantOpState>
 Status TabletReplica::SubmitAlterSchema(unique_ptr<AlterSchemaOpState> state) {
   RETURN_NOT_OK(CheckRunning());
 
-  unique_ptr<AlterSchemaOp> op(
-      new AlterSchemaOp(std::move(state), consensus::LEADER));
+  auto op = std::make_unique<AlterSchemaOp>(std::move(state), consensus::LEADER);
   scoped_refptr<OpDriver> driver;
   RETURN_NOT_OK(NewLeaderOpDriver(std::move(op), &driver));
   driver->ExecuteAsync();
