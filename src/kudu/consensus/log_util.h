@@ -137,6 +137,7 @@ class LogEntryReader {
     LogEntryTypePB type;
     consensus::OpId op_id;
   };
+  // TODO(yingchun): use ring buffer
   std::deque<RecentEntry> recent_entries_;
   static const int kNumRecentEntries = 4;
 
@@ -164,8 +165,8 @@ class LogEntryReader {
 
 // A segment of the log can either be a ReadableLogSegment (for replay and
 // consensus catch-up) or a WritableLogSegment (where the Log actually stores
-// state). LogSegments have a maximum size defined in LogOptions (set from the
-// log_segment_size_mb flag, which defaults to 64). Upon reaching this size
+// state). LogSegments have a maximringm size defined in LogOptions (set fraom the
+// log_segment_size_mb flag, which defaults to 8). Upon reaching this size
 // segments are rolled over and the Log continues in a new segment.
 
 // A readable log segment for recovery and follower catch-up.
@@ -203,10 +204,10 @@ class ReadableLogSegment : public RefCountedThreadSafe<ReadableLogSegment> {
   // Note: This returns Status and may fail.
   Status Init();
 
-  // Reads all entries of the provided segment & adds them the 'entries' vector.
+  // Reads all entries of the provided segment & adds them to the 'entries' vector.
   // The 'entries' vector owns the read entries.
   //
-  // If the log is corrupted (i.e. the returned 'Status' is 'Corruption') all
+  // If the log is corrupted (i.e. the returned Status is 'Corruption') all
   // the log entries read up to the corrupted one are returned in the 'entries'
   // vector.
   Status ReadEntries(LogEntries* entries) const;
@@ -219,6 +220,18 @@ class ReadableLogSegment : public RefCountedThreadSafe<ReadableLogSegment> {
   // This function is not thread-safe and should only be called when there's no
   // danger of another thread accessing the segment.
   Status RebuildFooterByScanning();
+
+  // Read an entry header and its associated batch at the given offset.
+  // If successful, updates '*offset' to point to the next batch
+  // in the file.
+  //
+  // If unsuccessful, '*offset' is not updated, and '*status_detail' will be updated
+  // to indicate the cause of the error.
+  Status ReadEntryHeaderAndBatch(int64_t* offset, faststring* tmp_buf,
+                                 LogEntryBatchPB* batch,
+                                 EntryHeaderStatus* status_detail) const;
+
+  void UpdateReadableToOffset(int64_t readable_to_offset);
 
   bool IsInitialized() const {
     return is_initialized_;
@@ -276,8 +289,7 @@ class ReadableLogSegment : public RefCountedThreadSafe<ReadableLogSegment> {
 
  private:
   friend class RefCountedThreadSafe<ReadableLogSegment>;
-  friend class LogEntryReader;
-  friend class LogReader;
+  friend class LogEntryReader;  // TODO(yingchun): better to remove it.
   FRIEND_TEST(LogTest, TestWriteAndReadToAndFromInProgressSegment);
 
   struct EntryHeader {
@@ -336,21 +348,11 @@ class ReadableLogSegment : public RefCountedThreadSafe<ReadableLogSegment> {
   // file.
   Status ScanForValidEntryHeaders(int64_t offset, bool* has_valid_entries) const;
 
-  // Read an entry header and its associated batch at the given offset.
-  // If successful, updates '*offset' to point to the next batch
-  // in the file.
-  //
-  // If unsuccessful, '*offset' is not updated, and *status_detail will be updated
-  // to indicate the cause of the error.
-  Status ReadEntryHeaderAndBatch(int64_t* offset, faststring* tmp_buf,
-                                 LogEntryBatchPB* batch,
-                                 EntryHeaderStatus* status_detail) const;
-
   // Reads a log entry header from the segment.
   //
   // Also increments the passed offset* by the length of the entry on successful
   // read.
-  Status ReadEntryHeader(int64_t *offset, EntryHeader* header,
+  Status ReadEntryHeader(int64_t* offset, EntryHeader* header,
                          EntryHeaderStatus* status_detail) const;
 
   // Decode a log entry header from the given slice. The header length is
@@ -367,8 +369,6 @@ class ReadableLogSegment : public RefCountedThreadSafe<ReadableLogSegment> {
                         const EntryHeader& header,
                         faststring* tmp_buf,
                         LogEntryBatchPB* entry_batch) const;
-
-  void UpdateReadableToOffset(int64_t readable_to_offset);
 
   const std::string path_;
 

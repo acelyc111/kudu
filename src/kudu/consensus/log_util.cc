@@ -152,7 +152,7 @@ Status LogEntryReader::ReadNextEntry(unique_ptr<LogEntryPB>* entry) {
     // Read and validate the entry header first.
     Status s;
     EntryHeaderStatus s_detail = EntryHeaderStatus::OTHER_ERROR;
-    if (offset_ + seg_->entry_header_size() < read_up_to_) {
+    if (PREDICT_TRUE(offset_ + seg_->entry_header_size() < read_up_to_)) {
       s = seg_->ReadEntryHeaderAndBatch(&offset_, &tmp_buf_, &current_batch, &s_detail);
     } else {
       s = Status::Corruption(Substitute("Truncated log entry at offset $0", offset_));
@@ -169,6 +169,10 @@ Status LogEntryReader::ReadNextEntry(unique_ptr<LogEntryPB>* entry) {
       num_entries_read_++;
 
       // Record it in the 'recent entries' deque.
+      if (i < current_batch.entry_size() - kNumRecentEntries) {
+        // Skip the first n - kNumRecentEntries entries.
+        continue;
+      }
       OpId op_id;
       if (entry->type() == log::REPLICATE && entry->has_replicate()) {
         op_id = entry->replicate().id();
@@ -180,8 +184,6 @@ Status LogEntryReader::ReadNextEntry(unique_ptr<LogEntryPB>* entry) {
       }
       recent_entries_.push_back({ offset_, entry->type(), op_id });
     }
-    current_batch.mutable_entry()->ExtractSubrange(
-        0, current_batch.entry_size(), nullptr);
   }
 
   *entry = std::move(pending_entries_.front());
@@ -435,13 +437,13 @@ Status ReadableLogSegment::ReadHeader() {
 
   uint8_t header_space[header_size];
   Slice header_slice(header_space, header_size);
-  LogSegmentHeaderPB header;
 
   // Read and parse the log segment header.
   RETURN_NOT_OK_PREPEND(file_->Read(kLogSegmentHeaderMagicAndHeaderLength,
                                     header_slice),
                         "Unable to read fully");
 
+  LogSegmentHeaderPB header;
   RETURN_NOT_OK_PREPEND(pb_util::ParseFromArray(&header,
                                                 header_slice.data(),
                                                 header_size),
@@ -517,12 +519,11 @@ Status ReadableLogSegment::ReadFooter() {
 
   int64_t footer_offset = file_size() - kLogSegmentFooterMagicAndFooterLength - footer_size;
 
-  LogSegmentFooterPB footer;
-
   // Read and parse the log segment footer.
   RETURN_NOT_OK_PREPEND(file_->Read(footer_offset, footer_slice),
                         "Footer not found. Could not read fully.");
 
+  LogSegmentFooterPB footer;
   RETURN_NOT_OK_PREPEND(pb_util::ParseFromArray(&footer,
                                                 footer_slice.data(),
                                                 footer_size),
@@ -644,7 +645,7 @@ Status ReadableLogSegment::ReadEntryHeaderAndBatch(int64_t* offset, faststring* 
   return Status::OK();
 }
 
-Status ReadableLogSegment::ReadEntryHeader(int64_t *offset, EntryHeader* header,
+Status ReadableLogSegment::ReadEntryHeader(int64_t* offset, EntryHeader* header,
                                            EntryHeaderStatus* status_detail) const {
   const size_t header_size = entry_header_size();
   uint8_t scratch[header_size];
@@ -672,7 +673,7 @@ Status ReadableLogSegment::ReadEntryHeader(int64_t *offset, EntryHeader* header,
 EntryHeaderStatus ReadableLogSegment::DecodeEntryHeader(
     const Slice& data, EntryHeader* header) const {
   uint32_t computed_header_crc;
-  if (entry_header_size() == kEntryHeaderSizeV2) {
+  if (PREDICT_TRUE(entry_header_size() == kEntryHeaderSizeV2)) {
     header->msg_length_compressed = DecodeFixed32(&data[0]);
     header->msg_length = DecodeFixed32(&data[4]);
     header->msg_crc    = DecodeFixed32(&data[8]);
@@ -688,7 +689,7 @@ EntryHeaderStatus ReadableLogSegment::DecodeEntryHeader(
   }
 
   // Verify the header.
-  if (computed_header_crc == header->header_crc) {
+  if (PREDICT_TRUE(computed_header_crc == header->header_crc)) {
     return EntryHeaderStatus::OK;
   }
   if (IsAllZeros(data)) {
@@ -706,7 +707,7 @@ Status ReadableLogSegment::ReadEntryBatch(int64_t* offset,
                "path", path_,
                "range", Substitute("offset=$0 entry_len=$1",
                                    *offset, header.msg_length));
-  if (header.msg_length == 0) {
+  if (PREDICT_FALSE(header.msg_length == 0)) {
     return Status::Corruption("Invalid 0 entry length");
   }
   int64_t limit = readable_up_to();
@@ -726,7 +727,7 @@ Status ReadableLogSegment::ReadEntryBatch(int64_t* offset,
   }
   tmp_buf->resize(buf_len);
   Slice entry_batch_slice(tmp_buf->data(), header.msg_length_compressed);
-  Status s =  file_->Read(*offset, entry_batch_slice);
+  Status s = file_->Read(*offset, entry_batch_slice);
   if (PREDICT_FALSE(!s.ok())) {
     return Status::IOError(Substitute("Could not read entry. Cause: $0",
                                       s.ToString()));
@@ -754,7 +755,7 @@ Status ReadableLogSegment::ReadEntryBatch(int64_t* offset,
   s = pb_util::ParseFromArray(&read_entry_batch,
                               entry_batch_slice.data(),
                               header.msg_length);
-  if (!s.ok()) {
+  if (PREDICT_FALSE(!s.ok())) {
     return Status::Corruption(Substitute("Could not parse PB. Cause: $0", s.ToString()));
   }
 
