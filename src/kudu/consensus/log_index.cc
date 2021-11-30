@@ -177,14 +177,12 @@ Status LogIndex::GetChunkForIndex(int64_t log_index, bool create,
                         "Couldn't open index chunk");
   {
     std::lock_guard<simple_spinlock> l(open_chunks_lock_);
-    if (PREDICT_FALSE(ContainsKey(open_chunks_, chunk_idx))) {
-      // Someone else opened the chunk in the meantime.
-      // We'll just return that one.
-      *chunk = FindOrDie(open_chunks_, chunk_idx);
+    if (PREDICT_TRUE(InsertIfNotPresent(&open_chunks_, chunk_idx, *chunk))) {
       return Status::OK();
     }
-
-    InsertOrDie(&open_chunks_, chunk_idx, *chunk);
+    // Someone else opened the chunk in the meantime.
+    // We'll just return that one.
+    *chunk = FindOrDie(open_chunks_, chunk_idx);
   }
 
   return Status::OK();
@@ -217,7 +215,7 @@ Status LogIndex::GetEntry(int64_t index, LogIndexEntry* entry) {
 
   // We never write any real entries to offset 0, because there's a header
   // in each log segment. So, this indicates an entry that was never written.
-  if (phys.offset_in_segment == 0) {
+  if (PREDICT_FALSE(phys.offset_in_segment == 0)) {
     return Status::NotFound("entry not found");
   }
 

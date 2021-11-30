@@ -146,7 +146,7 @@ class LogReader : public enable_make_shared<LogReader> {
   // Index entries in 'segment's footer will be added to the index.
   // If the segment has no footer it will be scanned so this should not be used
   // for new segments.
-  Status AppendSegment(scoped_refptr<ReadableLogSegment> segment);
+  Status AppendSegmentForTests(scoped_refptr<ReadableLogSegment> segment);
 
   // Same as above but for segments without any entries.
   // Used by the Log to add "empty" segments.
@@ -167,7 +167,7 @@ class LogReader : public enable_make_shared<LogReader> {
   // Appends 'segment' to the segment sequence.
   // Assumes that the segment was scanned, if no footer was found.
   // To be used only internally, clients of this class with private access (i.e. friends)
-  // should use the thread safe version, AppendSegment(), which will also scan the segment
+  // should use the thread safe version, AppendSegmentForTests(), which will also scan the segment
   // if no footer is present.
   void AppendSegmentUnlocked(scoped_refptr<ReadableLogSegment> segment);
 
@@ -177,7 +177,7 @@ class LogReader : public enable_make_shared<LogReader> {
   // written to.
   void UpdateLastSegmentOffset(int64_t readable_to_offset);
 
-  // Read the LogEntryBatchPB pointed to by the provided index entry.
+  // Read the LogEntryBatchPB pointed to by the provided 'index_entry'.
   // 'tmp_buf' is used as scratch space to avoid extra allocation.
   Status ReadBatchUsingIndexEntry(const LogIndexEntry& index_entry,
                                   faststring* tmp_buf,
@@ -199,11 +199,12 @@ class LogReader : public enable_make_shared<LogReader> {
   scoped_refptr<Counter> entries_read_;
   scoped_refptr<Histogram> read_batch_latency_;
 
+  // Protect segments_ and state_.
+  mutable simple_spinlock lock_;
+
   // The sequence of all current log segments in increasing sequence number
   // order.
   SegmentSequence segments_;
-
-  mutable simple_spinlock lock_;
 
   State state_;
 

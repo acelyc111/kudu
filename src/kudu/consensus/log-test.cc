@@ -144,7 +144,7 @@ class LogTest : public LogTestBase {
     footer.set_max_replicate_index(first_repl_index + 9L);
 
     RETURN_NOT_OK(readable_segment->Init(header, footer, 0));
-    RETURN_NOT_OK(reader->AppendSegment(readable_segment));
+    RETURN_NOT_OK(reader->AppendSegmentForTests(readable_segment));
     return Status::OK();
   }
 

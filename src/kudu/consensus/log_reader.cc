@@ -148,12 +148,12 @@ Status LogReader::Init(const string& tablet_wal_path) {
   read_segments.reserve(log_files.size()); // Overestimate; will shrink_to_fit later.
 
   // build a log segment from each file
-  for (const string &log_file : log_files) {
-    if (HasPrefixString(log_file, FsManager::kWalFileNamePrefix)) {
+  for (const string& log_file : log_files) {
+    if (PREDICT_TRUE(HasPrefixString(log_file, FsManager::kWalFileNamePrefix))) {
       string fqp = JoinPathSegments(tablet_wal_path, log_file);
       scoped_refptr<ReadableLogSegment> segment;
       Status s = ReadableLogSegment::Open(env_, file_cache_, fqp, &segment);
-      if (s.IsUninitialized()) {
+      if (PREDICT_FALSE(s.IsUninitialized())) {
         // This indicates that the segment was created but the writer
         // crashed before the header was successfully written. In this
         // case, we should skip it.
@@ -166,7 +166,7 @@ Status LogReader::Init(const string& tablet_wal_path) {
       DCHECK(segment);
       CHECK(segment->IsInitialized()) << "Uninitialized segment at: " << segment->path();
 
-      if (!segment->HasFooter()) {
+      if (PREDICT_FALSE(!segment->HasFooter())) {
         VLOG(1) << "Log segment " << fqp << " was likely left in-progress "
                 << "after a previous crash. Will try to rebuild footer by scanning data.";
         RETURN_NOT_OK(segment->RebuildFooterByScanning());
@@ -228,7 +228,7 @@ int64_t LogReader::GetMinReplicateIndex() const {
 
 scoped_refptr<ReadableLogSegment> LogReader::GetSegmentBySequenceNumber(int64_t seq) const {
   std::lock_guard<simple_spinlock> lock(lock_);
-  if (segments_.empty()) {
+  if (PREDICT_FALSE(segments_.empty())) {
     return nullptr;
   }
 
@@ -409,7 +409,7 @@ void LogReader::ReplaceLastSegment(scoped_refptr<ReadableLogSegment> segment) {
   segments_[segments_.size() - 1] = std::move(segment);
 }
 
-Status LogReader::AppendSegment(scoped_refptr<ReadableLogSegment> segment) {
+Status LogReader::AppendSegmentForTests(scoped_refptr<ReadableLogSegment> segment) {
   DCHECK(segment->IsInitialized());
   if (PREDICT_FALSE(!segment->HasFooter())) {
     RETURN_NOT_OK(segment->RebuildFooterByScanning());
@@ -447,7 +447,7 @@ int LogReader::num_segments() const {
 string LogReader::ToString() const {
   std::lock_guard<simple_spinlock> lock(lock_);
   string ret = "Reader's SegmentSequence: \n";
-  for (const SegmentSequence::value_type& entry : segments_) {
+  for (const auto& entry : segments_) {
     ret.append(Substitute("Segment: $0 Footer: $1\n",
                           entry->header().sequence_number(),
                           !entry->HasFooter() ? "NONE" : SecureShortDebugString(entry->footer())));
