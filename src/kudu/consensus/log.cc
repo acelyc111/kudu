@@ -479,6 +479,7 @@ Status SegmentAllocator::AllocateOrRollOverIfNecessary(
     } else if (allocation_state_ == kAllocationFinished) {
       should_rollover = true;
     } else {
+      DCHECK_EQ(allocation_state_, kAllocationInProgress);
       DCHECK(opts_->async_preallocate_segments);
       VLOG_WITH_PREFIX(1) << "Segment allocation already in progress...";
     }

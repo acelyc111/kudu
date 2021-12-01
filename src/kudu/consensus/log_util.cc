@@ -821,7 +821,6 @@ Status WritableLogSegment::WriteEntryBatch(const Slice& data,
                                            const CompressionCodec* codec) {
   DCHECK(is_header_written_);
   DCHECK(!is_footer_written_);
-  uint8_t header_buf[kEntryHeaderSizeV2];
 
   const uint32_t uncompressed_len = data.size();
 
@@ -839,6 +838,7 @@ Status WritableLogSegment::WriteEntryBatch(const Slice& data,
   }
 
   // Fill in the header.
+  uint8_t header_buf[kEntryHeaderSizeV2];
   InlineEncodeFixed32(&header_buf[0], data_to_write.size());
   InlineEncodeFixed32(&header_buf[4], uncompressed_len);
   InlineEncodeFixed32(&header_buf[8], crc::Crc32c(data_to_write.data(), data_to_write.size()));
