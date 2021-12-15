@@ -109,6 +109,8 @@ DEFINE_int64(fs_wal_dir_reserved_bytes, -1,
 DEFINE_validator(fs_wal_dir_reserved_bytes, [](const char* /*n*/, int64_t v) { return v >= -1; });
 TAG_FLAG(fs_wal_dir_reserved_bytes, runtime);
 
+DECLARE_int32(log_container_sample_count);
+
 METRIC_DEFINE_gauge_int64(server, log_block_manager_containers_processing_time_startup,
                           "Time taken to open all log block containers during server startup",
                           kudu::MetricUnit::kMilliseconds,
@@ -458,6 +460,7 @@ Status FsManager::Open(FsReport* report, Timer* read_instance_metadata_files,
 
   // Finally, initialize and open the block manager if needed.
   if (!opts_.skip_block_manager) {
+    CHECK(opts_.read_only || FLAGS_log_container_sample_count <= 0);
     if (read_data_directories) {
       read_data_directories->Start();
     }

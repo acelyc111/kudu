@@ -482,6 +482,8 @@ class LogBlockManager : public BlockManager {
   // May be null if instantiated without metrics.
   std::unique_ptr<internal::LogBlockManagerMetrics> metrics_;
 
+  std::atomic<bool> sampled_enough_containers_;
+
   DISALLOW_COPY_AND_ASSIGN(LogBlockManager);
 };
 

@@ -132,6 +132,11 @@ DEFINE_int32(log_container_metadata_rewrite_inject_latency_ms, 0,
              "Only for testing.");
 TAG_FLAG(log_container_metadata_rewrite_inject_latency_ms, hidden);
 
+DEFINE_int32(log_container_sample_count, -1,
+             "Total count of log containers to load for sampling purpose. Less than or equal to 0 "
+             "means no limit. Only for CLI tool.");
+TAG_FLAG(log_container_sample_count, hidden);
+
 METRIC_DEFINE_gauge_uint64(server, log_block_manager_bytes_under_management,
                            "Bytes Under Management",
                            kudu::MetricUnit::kBytes,
@@ -2589,6 +2594,8 @@ void LogBlockManager::OpenDataDir(
     LogBlockContainerRefPtr container;
     s = LogBlockContainer::Open(
         this, dir, &results->back()->report, container_name, &container);
+    // TODO(yingchun): container is opened but async loaded in dir's threadpool, would it better to
+    // update the progress and metric after it has been fully loaded?
     if (containers_processed) {
       ++*containers_processed;
       if (metrics_) {
@@ -2621,6 +2628,10 @@ void LogBlockManager::OpenDataDir(
 void LogBlockManager::LoadContainer(Dir* dir,
                                     LogBlockContainerRefPtr container,
                                     internal::LogBlockContainerLoadResult* result) {
+  // Skipping load any more container if sampled enough containers.
+  if (PREDICT_FALSE(sampled_enough_containers_)) {
+    return;
+  }
   // Process the records, building a container-local map for live blocks and
   // a list of dead blocks.
   //
@@ -2770,6 +2781,9 @@ void LogBlockManager::LoadContainer(Dir* dir,
   result->report.stats.live_block_bytes_aligned += container->live_bytes_aligned();
   result->report.stats.live_block_count += container->live_blocks();
   result->report.stats.lbm_container_count++;
+  result->report.stats.lbm_dead_container_count = result->dead_containers.size();
+  result->report.stats.lbm_low_live_block_container_count = result->low_live_block_containers.size();
+  result->report.stats.lbm_need_repunching_block_count = result->need_repunching_blocks.size();
 
   next_block_id_.StoreMax(max_block_id + 1);
 
@@ -2793,6 +2807,11 @@ void LogBlockManager::LoadContainer(Dir* dir,
     AddNewContainerUnlocked(container);
     MakeContainerAvailableUnlocked(std::move(container));
     container_count = all_containers_by_name_.size();
+
+    if (FLAGS_log_container_sample_count > 0 &&
+        container_count > FLAGS_log_container_sample_count) {
+      sampled_enough_containers_ = true;
+    }
   }
 
   // Log every 200 number of log block containers

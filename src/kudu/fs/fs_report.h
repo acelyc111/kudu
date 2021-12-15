@@ -242,11 +242,20 @@ struct FsReport {
     // Useful for calculating LBM external fragmentation.
     int64_t live_block_bytes_aligned = 0;
 
-    // Total number of LBM containers.
+    // Total number of loaded LBM containers.
     int64_t lbm_container_count = 0;
 
     // Total number of full LBM containers.
     int64_t lbm_full_container_count = 0;
+
+    // Total number of dead LBM containers.
+    int64_t lbm_dead_container_count = 0;
+
+    // Total number of low live block LBM containers.
+    int64_t lbm_low_live_block_container_count = 0;
+
+    // Total number of LBM container blocks need repunching.
+    int64_t lbm_need_repunching_block_count = 0;
   };
   Stats stats;
 

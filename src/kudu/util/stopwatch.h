@@ -120,6 +120,7 @@ namespace kudu {
 
 #define NANOS_PER_SECOND 1000000000.0
 #define NANOS_PER_MILLISECOND 1000000.0
+#define NANOS_PER_MICROSECOND 1000.0
 
 class Stopwatch;
 
@@ -151,6 +152,10 @@ struct CpuTimes {
     return StringPrintf(
       "real %.3fs\tuser %.3fs\tsys %.3fs",
       wall_seconds(), user_cpu_seconds(), system_cpu_seconds());
+  }
+
+  double wall_micros() const {
+    return static_cast<double>(wall) / NANOS_PER_MICROSECOND;
   }
 
   double wall_millis() const {
