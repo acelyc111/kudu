@@ -70,14 +70,18 @@
 #include "kudu/util/env.h"
 #include "kudu/util/faststring.h"
 #include "kudu/util/memory/arena.h"
+#include "kudu/util/monotime.h"
 #include "kudu/util/pb_util.h"
 #include "kudu/util/slice.h"
 #include "kudu/util/status.h"
+#include "kudu/util/stopwatch.h"
 #include "kudu/util/string_case.h"
 
 DECLARE_bool(force);
 DECLARE_bool(print_meta);
+DECLARE_int32(log_container_sample_count);
 DECLARE_string(columns);
+DECLARE_string(format);
 
 DEFINE_bool(print_rows, true,
             "Print each row in the CFile");
@@ -100,6 +104,21 @@ DEFINE_uint64(block_id, 0,
               "Restrict output to a specific block");
 DEFINE_bool(h, true,
             "Pretty-print values in human-readable units");
+// TODO(yingchun): Should add related mastrics, then we can get a more reasonable value.
+DEFINE_double(estimate_latency_ratio_of_remove_file_to_load_lbm_container, 0.1,
+              "Estimate latency ratio of remove a file to load a LBM container");
+DEFINE_double(estimate_latency_ratio_of_truncate_file_to_load_lbm_container, 0.1,
+              "Estimate latency ratio of truncate a file to load a LBM container");
+DEFINE_double(estimate_latency_ratio_of_repunch_block_to_load_lbm_container, 0.1,
+              "Estimate latency ratio of repunch a block to load a LBM container");
+DEFINE_double(estimate_latency_ratio_of_rewrite_lbm_metadata_to_load_lbm_container, 1,
+              "Estimate latency ratio of rewrite a LBM metadata to a load LBM container");
+DEFINE_double(estimate_latency_ratio_of_load_tablet_metadata_to_load_lbm_container, 2,
+              "Estimate latency ratio of load a tablet metadata to load a LBM container");
+DEFINE_double(estimate_latency_ratio_of_bootstrap_tablet_to_load_lbm_container, 80,
+              "Estimate latency ratio of bootstrap a tablet to load a LBM container");
+DEFINE_double(estimate_latency_ratio_of_start_tablet_to_load_lbm_container, 5,
+              "Estimate latency ratio of start a tablet to load a LBM container");
 
 namespace kudu {
 namespace tools {
@@ -376,6 +395,119 @@ Status Update(const RunnerContext& /*context*/) {
   opts.update_instances = UpdateInstanceBehavior::UPDATE_AND_ERROR_ON_FAILURE;
   FsManager fs(env, std::move(opts));
   return fs.Open();
+}
+
+// The whole tserver bootstrap procedure is combined by:
+// 1. Load LBM containers (FsReport.Stats.lbm_container_count)
+// 2. Repair unhealth LBM containers
+//    2.1 Remove dead containers (FsReport.Stats.lbm_dead_container_count)
+//    2.2 Truncate partial LBM metadata containers (FsReport.partial_record_check)
+//    2.3 Remove incompelete containers (FsReport.incomplete_container_check)
+//    2.4 Truncate full but have extra space containers (FsReport.full_container_space_check)
+//    2.5 Repunch all requested blocks (FsReport.Stats.lbm_need_repunching_block_count)
+//    2.6 Rewrite low live block containers (FsReport.Stats.lbm_low_live_block_container_count)
+// 3. Load tablet metadata (fs_manager.ListTabletIds())
+// 4. Open/Bootstrap tablet (fs_manager.ListTabletIds())
+//    4.1 Play Log segments
+//    4.2 Start Raft
+Status Sample(const RunnerContext& /*context*/) {
+  FsManagerOpts fs_opts;
+  fs_opts.read_only = true;
+  fs_opts.update_instances = UpdateInstanceBehavior::DONT_UPDATE;
+  FsManager fs_manager(Env::Default(), std::move(fs_opts));
+  FsReport report;
+  std::atomic<int> containers_total(0);
+  Stopwatch s;
+  s.start();
+  RETURN_NOT_OK(fs_manager.Open(&report, nullptr, nullptr, nullptr, &containers_total));
+  s.stop();
+
+  // Stop now if we've already found a fatal error. Otherwise, continue.
+  if (report.HasFatalErrors()) {
+    RETURN_NOT_OK(report.PrintAndCheckForFatalErrors());
+  }
+
+  double estimate_total_bootstrap_sec = 0;
+  DataTable table({"type", "count", "latency per item (us)", "total latency (sec)"});
+#define ADD_LATENCY(type, sampled_count, latency_per_item_us)                                    \
+  do {                                                                                           \
+    int64_t count = (sampled_count);                                                             \
+    double total_sec = count * (latency_per_item_us) / 1e6;                                      \
+    estimate_total_bootstrap_sec += total_sec;                                                   \
+    table.AddRow({type, std::to_string(count),                                                   \
+                  std::to_string(latency_per_item_us), std::to_string(total_sec)});              \
+  } while (false)
+
+  // 1. Time to load LBM containers.
+  double estimate_load_lbm_container_latency_us = report.stats.lbm_container_count == 0 ?
+      0 : s.elapsed().wall_micros() / report.stats.lbm_container_count;
+  ADD_LATENCY("lbm containers to load",
+              containers_total,
+              estimate_load_lbm_container_latency_us);
+
+  // 2. Time to repair unhealth LBM containers.
+  // 2.1 Remove dead containers (FsReport.Stats.lbm_dead_container_count)
+  double sampled_ratio = containers_total == 0 ?
+      1 : double(report.stats.lbm_container_count) / containers_total;
+  ADD_LATENCY("lbm dead containers to remove",
+              report.stats.lbm_dead_container_count / sampled_ratio,
+              FLAGS_estimate_latency_ratio_of_remove_file_to_load_lbm_container *
+                  estimate_load_lbm_container_latency_us);
+
+  // 2.2 Truncate partial LBM metadata containers (FsReport.partial_record_check)
+  ADD_LATENCY("lbm partial metadata to truncate",
+              report.partial_record_check->entries.size() / sampled_ratio,
+              FLAGS_estimate_latency_ratio_of_truncate_file_to_load_lbm_container *
+                  estimate_load_lbm_container_latency_us);
+
+  // 2.3 Remove incompelete containers (FsReport.incomplete_container_check)
+  ADD_LATENCY("lbm incomplete containers to remove",
+              report.incomplete_container_check->entries.size() / sampled_ratio,
+              FLAGS_estimate_latency_ratio_of_remove_file_to_load_lbm_container *
+                  estimate_load_lbm_container_latency_us);
+
+  // 2.4 Truncate full but have extra space containers (FsReport.full_container_space_check)
+  ADD_LATENCY("lbm full exceed containers to truncate",
+              report.full_container_space_check->entries.size() / sampled_ratio,
+              FLAGS_estimate_latency_ratio_of_truncate_file_to_load_lbm_container *
+                  estimate_load_lbm_container_latency_us);
+
+  // 2.5 Repunch all requested blocks (FsReport.Stats.lbm_need_repunching_block_count)
+  ADD_LATENCY("lbm blocks to repunch",
+              report.stats.lbm_need_repunching_block_count / sampled_ratio,
+              FLAGS_estimate_latency_ratio_of_repunch_block_to_load_lbm_container *
+                  estimate_load_lbm_container_latency_us);
+
+  // 2.6 Rewrite low live block containers (FsReport.Stats.lbm_low_live_block_container_count)
+  ADD_LATENCY("lbm low live block containers to rewrite",
+              report.stats.lbm_low_live_block_container_count / sampled_ratio,
+              FLAGS_estimate_latency_ratio_of_rewrite_lbm_metadata_to_load_lbm_container *
+                  estimate_load_lbm_container_latency_us);
+
+  // 3. Time to load tablet metadata.
+  vector<string> tablet_ids;
+  RETURN_NOT_OK(fs_manager.ListTabletIds(&tablet_ids));
+  ADD_LATENCY("tablet metadata to load",
+              tablet_ids.size(),
+              FLAGS_estimate_latency_ratio_of_load_tablet_metadata_to_load_lbm_container *
+                  estimate_load_lbm_container_latency_us);
+
+  // 4. Time to open tablet.
+  // 4.1 Play Log segments
+  ADD_LATENCY("tablet to bootstrap",
+              tablet_ids.size(),
+              FLAGS_estimate_latency_ratio_of_bootstrap_tablet_to_load_lbm_container *
+                  estimate_load_lbm_container_latency_us);
+  // 4.2 Start Raft
+  ADD_LATENCY("tablet to start",
+              tablet_ids.size(),
+              FLAGS_estimate_latency_ratio_of_start_tablet_to_load_lbm_container *
+                  estimate_load_lbm_container_latency_us);
+#undef ADD_LATENCY
+
+  table.AddRow({"summary", "-", "-", std::to_string(estimate_total_bootstrap_sec)});
+
+  return table.PrintTo(std::cout);
 }
 
 namespace {
@@ -895,6 +1027,26 @@ unique_ptr<Mode> BuildFsMode() {
       .AddOptionalParameter("fs_wal_dir")
       .Build();
 
+  unique_ptr<Action> sample =
+      ActionBuilder("sample", &Sample)
+          .Description("Sample block containers and tablet metadata in an existing Kudu filesystem")
+          .ExtraDescription("Sample block containers and tablet metadata in an existing Kudu "
+              "filesystem. The output can be used to estimate the whole view of the Kudu "
+              "filesystem.")
+          .AddOptionalParameter("estimate_latency_ratio_of_remove_file_to_load_lbm_container")
+          .AddOptionalParameter("estimate_latency_ratio_of_truncate_file_to_load_lbm_container")
+          .AddOptionalParameter("estimate_latency_ratio_of_repunch_block_to_load_lbm_container")
+          .AddOptionalParameter("estimate_latency_ratio_of_rewrite_lbm_metadata_to_load_lbm_container")
+          .AddOptionalParameter("estimate_latency_ratio_of_load_tablet_metadata_to_load_lbm_container")
+          .AddOptionalParameter("estimate_latency_ratio_of_bootstrap_tablet_to_load_lbm_container")
+          .AddOptionalParameter("estimate_latency_ratio_of_start_tablet_to_load_lbm_container")
+          .AddOptionalParameter("format")
+          .AddOptionalParameter("fs_data_dirs")
+          .AddOptionalParameter("fs_metadata_dir")
+          .AddOptionalParameter("fs_wal_dir")
+          .AddOptionalParameter("log_container_sample_count")
+          .Build();
+
   unique_ptr<Action> list =
       ActionBuilder("list", &List)
       .Description("List metadata for on-disk tablets, rowsets, blocks, and cfiles")
@@ -930,6 +1082,7 @@ unique_ptr<Mode> BuildFsMode() {
       .AddAction(std::move(check))
       .AddAction(std::move(format))
       .AddAction(std::move(list))
+      .AddAction(std::move(sample))
       .AddAction(std::move(update))
       .Build();
 }

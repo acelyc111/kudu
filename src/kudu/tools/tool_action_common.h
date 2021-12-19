@@ -243,11 +243,10 @@ Status MasterAddressesToSet(
 //
 // Example usage:
 //    DataTable table({"person", "favorite color"});
-//    vector<string> cols(2);
-//    AddTableRow({"joe", "red"}, &cols);
-//    AddTableRow({"bob", "green"}, &cols);
-//    AddTableRow({"alice", "yellow"}, &cols);
-//    PrintTable(headers, cols, cout);
+//    AddRow({"joe", "red"});
+//    AddRow({"bob", "green"});
+//    AddRow({"alice", "yellow"});
+//    PrintTo(cout);
 class DataTable {
  public:
   // Construct a table with the given column names.

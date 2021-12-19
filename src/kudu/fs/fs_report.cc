@@ -256,11 +256,19 @@ LBMPartialRecordCheck::Entry::Entry(string c, int64_t o)
 ///////////////////////////////////////////////////////////////////////////////
 
 void FsReport::Stats::MergeFrom(const FsReport::Stats& other) {
-  live_block_count += other.live_block_count;
-  live_block_bytes += other.live_block_bytes;
-  live_block_bytes_aligned += other.live_block_bytes_aligned;
-  lbm_container_count += other.lbm_container_count;
-  lbm_full_container_count += other.lbm_full_container_count;
+#define MERGE_STAT_COUNTER(c) \
+  (c) += other.c;
+
+  MERGE_STAT_COUNTER(live_block_count);
+  MERGE_STAT_COUNTER(live_block_bytes);
+  MERGE_STAT_COUNTER(live_block_bytes_aligned);
+  MERGE_STAT_COUNTER(lbm_container_count);
+  MERGE_STAT_COUNTER(lbm_full_container_count);
+  MERGE_STAT_COUNTER(lbm_dead_container_count);
+  MERGE_STAT_COUNTER(lbm_low_live_block_container_count);
+  MERGE_STAT_COUNTER(lbm_need_repunching_block_count);
+
+#undef MERGE_STAT_COUNTER
 }
 
 string FsReport::Stats::ToString() const {
