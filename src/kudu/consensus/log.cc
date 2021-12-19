@@ -758,7 +758,6 @@ Status Log::Open(LogOptions options,
                  uint32_t schema_version,
                  const scoped_refptr<MetricEntity>& metric_entity,
                  scoped_refptr<Log>* log) {
-
   string tablet_wal_path = fs_manager->GetTabletWalDir(tablet_id);
   RETURN_NOT_OK(env_util::CreateDirIfMissing(fs_manager->env(), tablet_wal_path));
 
@@ -808,6 +807,8 @@ Status Log::Init() {
     VLOG_WITH_PREFIX(1) << "Using existing " << reader_->num_segments()
                         << " segments from path: " << ctx_.fs_manager->GetWalsRootDir();
 
+    // TODO(yingchun): No need to copy all log segments, add an function to return the last seq num
+    // is OK.
     vector<scoped_refptr<ReadableLogSegment> > segments;
     reader_->GetSegmentsSnapshot(&segments);
     active_seg_seq_num = segments.back()->header().sequence_number();
