@@ -358,8 +358,8 @@ class Log : public RefCountedThreadSafe<Log> {
   // only refer to in-mem state that has been flushed are candidates for
   // garbage collection.
   //
-  // 'min_op_idx' is the minimum operation index required to be retained.
-  // If successful, num_gced is set to the number of deleted log segments.
+  // 'retention_indexes' is the minimum operation index required to be retained.
+  // If successful, 'num_gced' is set to the number of deleted log segments.
   //
   // This method is thread-safe.
   Status GC(RetentionIndexes retention_indexes, int* num_gced);
@@ -568,9 +568,6 @@ class LogEntryBatch {
   LogEntryBatch(LogEntryTypePB type, const LogEntryBatchPB& entry_batch_pb,
                 StatusCallback cb);
 
-  // Serializes contents of the entry to an internal buffer.
-  void Serialize();
-
   // Returns a Slice representing the serialized contents of the
   // entry.
   Slice data() const {
@@ -612,8 +609,6 @@ class LogEntryBatch {
   // synced to disk.
   StatusCallback callback_;
 
-  // Buffer to which 'phys_entries_' are serialized by call to
-  // 'Serialize()'
   faststring buffer_;
 
   // Tracks whether this batch was successfully append to the log.

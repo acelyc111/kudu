@@ -977,11 +977,11 @@ Status Log::Sync() {
 int GetPrefixSizeToGC(RetentionIndexes retention_indexes, const SegmentSequence& segments) {
   int rem_segs = segments.size();
   int prefix_size = 0;
-  for (const scoped_refptr<ReadableLogSegment>& segment : segments) {
-    if (rem_segs <= FLAGS_log_min_segments_to_retain) {
-      break;
-    }
+  if (rem_segs <= FLAGS_log_min_segments_to_retain) {
+    return prefix_size;
+  }
 
+  for (const scoped_refptr<ReadableLogSegment>& segment : segments) {
     if (!segment->HasFooter()) break;
 
     int64_t seg_max_idx = segment->footer().max_replicate_index();
