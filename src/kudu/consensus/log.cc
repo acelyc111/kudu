@@ -316,7 +316,7 @@ bool Log::AppendThread::GoIdle() {
   // - Wake() no-op because
   //   it's already triggered
 
-  // So, we first transition back to STOPPED state, and then re-check to see
+  // So, we first transition back to IDLE state, and then re-check to see
   // if there has been something enqueued in the meantime.
   auto old_state = base::subtle::NoBarrier_AtomicExchange(&thread_state_, IDLE);
   DCHECK_EQ(old_state, ACTIVE);
