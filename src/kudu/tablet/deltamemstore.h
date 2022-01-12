@@ -241,7 +241,7 @@ class DMSIterator : public DeltaIterator {
 
   std::string ToString() const override;
 
-  bool HasNext() override;
+  bool HasNext() const override;
 
   bool MayHaveDeltas() const override;
 

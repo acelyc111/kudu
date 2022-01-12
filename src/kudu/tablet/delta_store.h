@@ -362,7 +362,7 @@ class DeltaIterator : public PreparedDeltas {
   virtual Status PrepareBatch(size_t nrows, int prepare_flags) = 0;
 
   // Returns true if there are any more rows left in this iterator.
-  virtual bool HasNext() = 0;
+  virtual bool HasNext() const = 0;
 
   // Return a string representation suitable for debug printouts.
   virtual std::string ToString() const = 0;
@@ -501,7 +501,7 @@ class DeltaPreparer : public PreparedDeltas {
   const RowIteratorOptions opts_;
 
   // The row index at which the most recent batch preparation ended.
-  rowid_t cur_prepared_idx_;
+  rowid_t cur_prepared_idx_
 
   // The value of 'cur_prepared_idx_' from the previous batch.
   rowid_t prev_prepared_idx_;
@@ -558,7 +558,7 @@ class DeltaPreparer : public PreparedDeltas {
 
   // Used for PREPARED_FOR_APPLY mode.
   //
-  // Set to true in all of the spots where deleted, reinserted_, and updates_by_col_
+  // Set to true in all of the spots where deleted_, reinserted_, and updates_by_col_
   // are modified.
   bool may_have_deltas_;
 
