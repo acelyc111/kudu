@@ -793,7 +793,7 @@ static inline Schema GetRandomProjection(const Schema& schema,
   if (allow == AllowIsDeleted::YES && prng->Uniform(10) == 0) {
     bool read_default = false;
     projected_cols.emplace_back("is_deleted", IS_DELETED, /*is_nullable=*/ false,
-                                &read_default);
+                                /*update_if_null=*/ false, &read_default);
     projected_col_ids.emplace_back(schema.max_col_id() + 1);
   }
   return Schema(projected_cols, projected_col_ids, 0);
@@ -1016,8 +1016,9 @@ void RunDeltaFuzzTest(const DeltaStore& store,
       for (int j = 0; j < opts.projection->num_columns(); j++) {
         SCOPED_TRACE(Substitute("Column $0", j));
         bool col_is_nullable = opts.projection->column(j).is_nullable();
-        ScopedColumnBlock<UINT32> expected_scb(batch_size, col_is_nullable);
-        ScopedColumnBlock<UINT32> actual_scb(batch_size, col_is_nullable);
+        bool update_if_null = opts.projection->column(j).update_if_null();
+        ScopedColumnBlock<UINT32> expected_scb(batch_size, col_is_nullable, update_if_null);
+        ScopedColumnBlock<UINT32> actual_scb(batch_size, col_is_nullable, update_if_null);
         for (int k = 0; k < batch_size; k++) {
           expected_scb[k] = 0;
           actual_scb[k] = 0;

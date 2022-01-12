@@ -145,6 +145,10 @@ class CFileReader {
     return footer().is_type_nullable();
   }
 
+  bool update_if_null() const {
+    return footer().update_if_null();
+  }
+
   const CFileHeaderPB &header() const {
     DCHECK(init_once_.init_succeeded());
     return *DCHECK_NOTNULL(header_.get());

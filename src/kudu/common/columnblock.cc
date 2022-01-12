@@ -34,6 +34,11 @@ Status ColumnBlock::CopyTo(const SelectionVector& sel_vec,
   DCHECK_GE(nrows_, src_cell_off + num_cells);
   DCHECK_GE(dst->nrows_, dst_cell_off + num_cells);
 
+  DCHECK(is_nullable() || !update_if_null_);
+  if (update_if_null_ && !is_null(0)) {
+    return Status::OK();
+  }
+
   // Columns with indirect data need to be copied cell-by-cell in order to
   // perform arena relocation. Deselected cells must be skipped; the source
   // content could be garbage so it'd be unsafe to access it as indirect data.
@@ -42,7 +47,7 @@ Status ColumnBlock::CopyTo(const SelectionVector& sel_vec,
       if (sel_vec.IsRowSelected(src_cell_off + cell_idx)) {
         Cell s(cell(src_cell_off + cell_idx));
         Cell d(dst->cell(dst_cell_off + cell_idx));
-        RETURN_NOT_OK(CopyCell(s, &d, dst->arena())); // Also copies nullability.
+        RETURN_NOT_OK(CopyCell(s, &d, dst->arena(), update_if_null_)); // Also copies nullability.
       }
     }
   } else {

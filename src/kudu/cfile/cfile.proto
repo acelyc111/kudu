@@ -111,6 +111,8 @@ message CFileFooterPB {
   // old reader could safely ignore.
   optional uint32 incompatible_features = 10;
   optional uint32 compatible_features = 11;
+
+  optional bool update_if_null = 12 [default=false];
 }
 
 

@@ -381,7 +381,7 @@ class CFileTestBase : public KuduTest {
     opts.storage_attributes.encoding = encoding;
     opts.storage_attributes.compression = compression;
     CFileWriter w(opts, GetTypeInfo(DataGeneratorType::kDataType),
-                  DataGeneratorType::has_nulls(), std::move(sink));
+                  DataGeneratorType::has_nulls(), false, std::move(sink));
 
     ASSERT_OK(w.Start());
 

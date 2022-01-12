@@ -24,7 +24,6 @@
 #include <vector>
 
 #include <boost/optional/optional.hpp>
-#include <boost/type_traits/decay.hpp>
 
 #include "kudu/common/rowid.h"
 #include "kudu/common/timestamp.h"
@@ -241,7 +240,7 @@ class DMSIterator : public DeltaIterator {
 
   std::string ToString() const override;
 
-  bool HasNext() override;
+  bool HasNext() const override;
 
   bool MayHaveDeltas() const override;
 

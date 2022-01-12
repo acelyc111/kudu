@@ -344,6 +344,11 @@ KuduColumnSpec* KuduColumnSpec::Nullable() {
   return this;
 }
 
+KuduColumnSpec* KuduColumnSpec::UpdateIfNull() {
+  data_->update_if_null = true;
+  return this;
+}
+
 KuduColumnSpec* KuduColumnSpec::RemoveDefault() {
   data_->remove_default = true;
   return this;
@@ -452,6 +457,7 @@ Status KuduColumnSpec::ToColumnSchema(KuduColumnSchema* col) const {
   KuduColumnTypeAttributes type_attrs(precision, scale, length);
   DataType internal_type = ToInternalDataType(data_->type.value(), type_attrs);
   bool nullable = data_->nullable ? data_->nullable.value() : true;
+  bool update_if_null = data_->update_if_null ? data_->update_if_null.value() : false;
 
   void* default_val = nullptr;
   // TODO(unknown): distinguish between DEFAULT NULL and no default?
@@ -473,7 +479,7 @@ Status KuduColumnSpec::ToColumnSchema(KuduColumnSchema* col) const {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
   *col = KuduColumnSchema(data_->name, data_->type.value(), nullable,
-                          default_val,
+                          update_if_null, default_val,
                           KuduColumnStorageAttributes(encoding, compression, block_size),
                           type_attrs,
                           data_->comment ? data_->comment.value() : "");
@@ -731,6 +737,7 @@ string KuduColumnSchema::DataTypeToString(DataType type) {
 KuduColumnSchema::KuduColumnSchema(const string &name,
                                    DataType type,
                                    bool is_nullable,
+                                   bool update_if_null,
                                    const void* default_value,
                                    const KuduColumnStorageAttributes& storage_attributes,
                                    const KuduColumnTypeAttributes& type_attributes,
@@ -745,6 +752,7 @@ KuduColumnSchema::KuduColumnSchema(const string &name,
   type_attr_private.length = type_attributes.length();
   col_ = new ColumnSchema(name, ToInternalDataType(type, type_attributes),
                           is_nullable,
+                          update_if_null,
                           default_value, default_value, attr_private,
                           type_attr_private, comment);
 }
@@ -796,6 +804,10 @@ const string& KuduColumnSchema::name() const {
 
 bool KuduColumnSchema::is_nullable() const {
   return DCHECK_NOTNULL(col_)->is_nullable();
+}
+
+bool KuduColumnSchema::update_if_null() const {
+  return DCHECK_NOTNULL(col_)->update_if_null();
 }
 
 KuduColumnSchema::DataType KuduColumnSchema::type() const {
@@ -899,7 +911,7 @@ KuduColumnSchema KuduSchema::Column(size_t idx) const {
   KuduColumnTypeAttributes type_attrs(col.type_attributes().precision, col.type_attributes().scale,
                                       col.type_attributes().length);
   return KuduColumnSchema(col.name(), FromInternalDataType(col.type_info()->type()),
-                          col.is_nullable(), col.read_default_value(),
+                          col.is_nullable(), col.update_if_null(), col.read_default_value(),
                           attrs, type_attrs, col.comment());
 }
 

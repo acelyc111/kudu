@@ -177,6 +177,7 @@ Status DiskRowSetWriter::InitAdHocIndexWriter() {
       std::move(opts),
       GetTypeInfo(BINARY),
       false,
+      false,
       std::move(block)));
   return ad_hoc_index_writer_->Start();
 

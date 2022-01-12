@@ -205,6 +205,7 @@ public:
 // In the future, it may hold information about annotations, etc.
 class ColumnSchema {
  public:
+  // TODO(yingchun): update comments
   // name: column name
   // type: column type (e.g. UINT8, INT32, STRING, ...)
   // is_nullable: true if a row value can be null
@@ -222,9 +223,10 @@ class ColumnSchema {
   //   ColumnSchema col_c("c", INT32, false, &default_i32);
   //   Slice default_str("Hello");
   //   ColumnSchema col_d("d", STRING, false, &default_str);
-  ColumnSchema(std::string name,
+  explicit ColumnSchema(std::string name,
                DataType type,
                bool is_nullable = false,
+               bool update_if_null = false,
                const void* read_default = nullptr,
                const void* write_default = nullptr,
                ColumnStorageAttributes attributes = ColumnStorageAttributes(),
@@ -233,6 +235,7 @@ class ColumnSchema {
       : name_(std::move(name)),
         type_info_(GetTypeInfo(type)),
         is_nullable_(is_nullable),
+        update_if_null_(update_if_null),
         read_default_(read_default ? std::make_shared<Variant>(type, read_default) : nullptr),
         attributes_(attributes),
         type_attributes_(type_attributes),
@@ -250,6 +253,10 @@ class ColumnSchema {
 
   bool is_nullable() const {
     return is_nullable_;
+  }
+
+  bool update_if_null() const {
+    return update_if_null_;
   }
 
   const std::string& name() const {
@@ -321,12 +328,14 @@ class ColumnSchema {
   bool EqualsPhysicalType(const ColumnSchema& other) const {
     if (this == &other) return true;
     return is_nullable_ == other.is_nullable_ &&
+           update_if_null_ == other.update_if_null_ &&
            type_info()->physical_type() == other.type_info()->physical_type();
   }
 
   bool EqualsType(const ColumnSchema& other) const {
     if (this == &other) return true;
     return is_nullable_ == other.is_nullable_ &&
+           update_if_null_ == other.update_if_null_ &&
            type_info()->type() == other.type_info()->type() &&
            type_attributes().EqualsForType(other.type_attributes(), type_info()->type());
   }
@@ -436,6 +445,7 @@ class ColumnSchema {
   std::string name_;
   const TypeInfo* type_info_;
   bool is_nullable_;
+  bool update_if_null_;
   // use shared_ptr since the ColumnSchema is always copied around.
   std::shared_ptr<Variant> read_default_;
   std::shared_ptr<Variant> write_default_;
@@ -1038,16 +1048,23 @@ class SchemaBuilder {
   Status AddColumn(const ColumnSchema& column, bool is_key);
 
   Status AddColumn(const std::string& name, DataType type) {
-    return AddColumn(name, type, false, nullptr, nullptr);
+    return AddColumn(name, type, false, false, nullptr, nullptr);
   }
 
   Status AddNullableColumn(const std::string& name, DataType type) {
-    return AddColumn(name, type, true, nullptr, nullptr);
+    return AddColumn(name, type, true, false, nullptr, nullptr);
   }
 
   Status AddColumn(const std::string& name,
                    DataType type,
                    bool is_nullable,
+                   const void* read_default,
+                   const void* write_default);
+
+  Status AddColumn(const std::string& name,
+                   DataType type,
+                   bool is_nullable,
+                   bool update_if_null,
                    const void* read_default,
                    const void* write_default);
 
