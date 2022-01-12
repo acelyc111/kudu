@@ -60,7 +60,8 @@ Status DumpIterator(const CFileReader& reader,
   const TypeInfo *type = reader.type_info();
   size_t max_rows = kBufSize/type->size();
   uint8_t nulls[BitmapSize(max_rows)];
-  ColumnBlock cb(type, reader.is_nullable() ? nulls : nullptr, buf, max_rows, &mem);
+  ColumnBlock cb(type, reader.update_if_null(), reader.is_nullable() ? nulls : nullptr,
+                 buf, max_rows, &mem);
   SelectionVector sel(max_rows);
   ColumnMaterializationContext ctx(0, nullptr, &cb, &sel);
   string strbuf;

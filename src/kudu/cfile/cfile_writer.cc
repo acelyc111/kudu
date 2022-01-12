@@ -89,12 +89,14 @@ static const size_t kMinBlockSize = 512;
 CFileWriter::CFileWriter(WriterOptions options,
                          const TypeInfo* typeinfo,
                          bool is_nullable,
+                         bool update_if_null,
                          unique_ptr<WritableBlock> block)
   : block_(std::move(block)),
     off_(0),
     value_count_(0),
     options_(std::move(options)),
     is_nullable_(is_nullable),
+    update_if_null_(update_if_null),
     typeinfo_(typeinfo),
     state_(kWriterInitialized) {
   EncodingType encoding = options_.storage_attributes.encoding;
@@ -219,6 +221,7 @@ Status CFileWriter::FinishAndReleaseBlock(BlockCreationTransaction* transaction)
   CFileFooterPB footer;
   footer.set_data_type(typeinfo_->type());
   footer.set_is_type_nullable(is_nullable_);
+  footer.set_update_if_null(is_nullable_);
   footer.set_encoding(type_encoding_info_->encoding_type());
   footer.set_num_values(value_count_);
   footer.set_compression(compression_);

@@ -258,15 +258,15 @@ TEST_F(TestRowSet, TestRandomRead) {
 
   // Read un-updated row.
   NO_FATALS(VerifyRandomRead(*rs, "hello 000000000000050",
-                             R"((string key="hello 000000000000050", uint32 val=50))"));
+                             R"((string key="hello 000000000000050", uint32 val=50, uint32 val2=50))"));
 
   // Update the row.
   OperationResultPB result;
-  ASSERT_OK(UpdateRow(rs.get(), 50, 12345, &result));
+  ASSERT_OK(UpdateRow(rs.get(), 50, 12345, 12345, &result));
 
   // Read it again -- should see the updated value.
   NO_FATALS(VerifyRandomRead(*rs, "hello 000000000000050",
-                             R"((string key="hello 000000000000050", uint32 val=12345))"));
+                             R"((string key="hello 000000000000050", uint32 val=12345, uint32 val2=50))"));
 
   // Try to read a row which comes before the first key.
   // This should return no rows.
@@ -305,14 +305,14 @@ TEST_F(TestRowSet, TestDelete) {
     opts.snap_to_include = snap_before_delete;
     ASSERT_OK(DumpRowSet(*rs, opts, &rows));
     ASSERT_EQ(2, rows.size());
-    EXPECT_EQ(R"((string key="hello 000000000000000", uint32 val=0))", rows[0]);
-    EXPECT_EQ(R"((string key="hello 000000000000001", uint32 val=1))", rows[1]);
+    EXPECT_EQ(R"((string key="hello 000000000000000", uint32 val=0, uint32 val2=0))", rows[0]);
+    EXPECT_EQ(R"((string key="hello 000000000000001", uint32 val=1, uint32 val2=1))", rows[1]);
 
     // Reading the MVCC snapshot after the deletion should hide the row.
     opts.snap_to_include = snap_after_delete;
     ASSERT_OK(DumpRowSet(*rs, opts, &rows));
     ASSERT_EQ(1, rows.size());
-    EXPECT_EQ(R"((string key="hello 000000000000001", uint32 val=1))", rows[0]);
+    EXPECT_EQ(R"((string key="hello 000000000000001", uint32 val=1, uint32 val2=1))", rows[0]);
 
     // Trying to delete or update the same row again should fail.
     OperationResultPB result;
@@ -320,7 +320,7 @@ TEST_F(TestRowSet, TestDelete) {
     ASSERT_TRUE(s.IsNotFound()) << "bad status: " << s.ToString();
     ASSERT_EQ(0, result.mutated_stores_size());
     result.Clear();
-    s = UpdateRow(rs.get(), 0, 12345, &result);
+    s = UpdateRow(rs.get(), 0, 12345, 12345, &result);
     ASSERT_TRUE(s.IsNotFound()) << "bad status: " << s.ToString();
     ASSERT_EQ(0, result.mutated_stores_size());
 
@@ -397,6 +397,7 @@ TEST_F(TestRowSet, TestFlushedUpdatesRespectMVCC) {
     RowBuilder rb(&schema_);
     rb.AddString(key_slice);
     rb.AddUint32(1);
+    rb.AddUint32(1);
     ASSERT_OK_FAST(WriteRow(rb.data(), &drsw));
     ASSERT_OK(drsw.Finish());
   }
@@ -454,7 +455,7 @@ TEST_F(TestRowSet, TestFlushedUpdatesRespectMVCC) {
     unique_ptr<RowwiseIterator> iter;
     ASSERT_OK(rs->NewRowIterator(opts, &iter));
     string data = InitAndDumpIterator(iter.get());
-    EXPECT_EQ(StringPrintf(R"((string key="row", uint32 val=%d))", i + 1), data);
+    EXPECT_EQ(StringPrintf(R"((string key="row", uint32 val=%d, uint32 val2=1))", i + 1), data);
   }
 
   // Flush deltas to disk and ensure that the historical versions are still
@@ -469,7 +470,7 @@ TEST_F(TestRowSet, TestFlushedUpdatesRespectMVCC) {
     unique_ptr<RowwiseIterator> iter;
     ASSERT_OK(rs->NewRowIterator(opts, &iter));
     string data = InitAndDumpIterator(iter.get());
-    EXPECT_EQ(StringPrintf(R"((string key="row", uint32 val=%d))", i + 1), data);
+    EXPECT_EQ(StringPrintf(R"((string key="row", uint32 val=%d, uint32 val2=1))", i + 1), data);
   }
 }
 
@@ -725,6 +726,7 @@ class DiffScanRowSetTest : public KuduRowSetTest,
     CHECK_OK(builder.AddKeyColumn("key", UINT32));
     CHECK_OK(builder.AddColumn("val1", UINT32));
     CHECK_OK(builder.AddColumn("val2", UINT32));
+    CHECK_OK(builder.AddColumn("val3", UINT32, true, true, nullptr, nullptr));
     return builder.BuildWithoutIds();
   }
 
@@ -751,15 +753,20 @@ TEST_P(DiffScanRowSetTest, TestFuzz) {
   shared_ptr<DiskRowSet> rs;
   {
     DiskRowSetWriter drsw(rowset_meta_.get(), &schema_,
-                          BloomFilterSizing::BySizeAndFPRate(32 * 1024, 0.01f));
+                          BloomFilterSizing::BySizeAndFPRate(32 * 1024, 0.01F));
     ASSERT_OK(drsw.Open());
 
+    // 0  0  0  0
+    // 1  2  3  4
+    // 2  4  6  8
+    // 3  6  9  12
     RowBuilder rb(&schema_);
     for (int i = 0; i < 4; i++) {
       rb.Reset();
       rb.AddUint32(i);
       rb.AddUint32(i * 2);
       rb.AddUint32(i * 3);
+      rb.AddUint32(i * 4);
       ASSERT_OK(WriteRow(rb.data(), &drsw));
     }
     ASSERT_OK(drsw.Finish());
@@ -769,12 +776,13 @@ TEST_P(DiffScanRowSetTest, TestFuzz) {
 
   // Run the diff scan test. Scan time boundaries are given by 'ts1_val' and
   // 'ts2_val'. The expected results are given by 'expected_rows'.
-  using RowTuple = tuple<uint32_t, uint32_t, uint32_t, bool>;
+  using RowTuple = tuple<uint32_t, uint32_t, uint32_t, uint32_t, bool>;
   auto run_test = [&](uint64_t ts1_val,
                       uint64_t ts2_val,
                       vector<RowTuple> expected_rows) {
     bool include_deleted_rows = std::get<0>(GetParam());
     bool add_vc_is_deleted = std::get<1>(GetParam());
+    LOG(WARNING) << include_deleted_rows << " vs " << add_vc_is_deleted;
 
     // Create a projection of the schema, adding the IS_DELETED virtual
     // column if desired.
@@ -787,7 +795,7 @@ TEST_P(DiffScanRowSetTest, TestFuzz) {
     if (add_vc_is_deleted) {
       bool read_default = false;
       col_schemas.emplace_back("is_deleted", IS_DELETED, /*is_nullable=*/ false,
-                               &read_default);
+                               /*update_if_null=*/ false, &read_default);
       col_ids.emplace_back(schema_.max_col_id() + 1);
     }
     Schema projection(col_schemas, col_ids, 1);
@@ -812,7 +820,7 @@ TEST_P(DiffScanRowSetTest, TestFuzz) {
     if (!include_deleted_rows) {
       vector<RowTuple> without_deleted_rows;
       for (const auto& e : expected_rows) {
-        if (!std::get<3>(e)) {
+        if (!std::get<4>(e)) {
           without_deleted_rows.emplace_back(e);
         }
       }
@@ -821,15 +829,17 @@ TEST_P(DiffScanRowSetTest, TestFuzz) {
     ASSERT_EQ(expected_rows.size(), lines.size()) << lines;
     for (int i = 0; i < expected_rows.size(); i++) {
       string expected_is_deleted = add_vc_is_deleted ? Substitute(
-          ", is_deleted is_deleted=$0", std::get<3>(expected_rows[i])) : "";
+          ", is_deleted is_deleted=$0", std::get<4>(expected_rows[i])) : "";
       string expected_line = Substitute("(uint32 key=$0, "
                                         "uint32 val1=$1, "
-                                        "uint32 val2=$2$3)",
+                                        "uint32 val2=$2, "
+                                        "uint32 val3=$3$4)",
                                         std::get<0>(expected_rows[i]),
                                         std::get<1>(expected_rows[i]),
                                         std::get<2>(expected_rows[i]),
+                                        std::get<3>(expected_rows[i]),
                                         expected_is_deleted);
-      ASSERT_EQ(expected_line, lines[i]);
+      EXPECT_EQ(expected_line, lines[i]) << ts1_val << " " << ts2_val;
     }
   };
 
@@ -883,17 +893,41 @@ TEST_P(DiffScanRowSetTest, TestFuzz) {
     }
   };
 
+  // 0  0  0  0
+  // 1  2  3  4
+  // 2  4  6  8
+  // 3  6  9  12
   // Update the rows in the diskrowset.
   NO_FATALS(maybe_flush_compact());
   NO_FATALS(mutate_row(1, 2, 1000)); // ts 1
+  // 0  0  0      0
+  // 1  2  1000   4     +
+  // 2  4  6      8
+  // 3  6  9      12
   NO_FATALS(maybe_flush_compact());
   NO_FATALS(mutate_row(1, 1, 200)); // ts 2
+  // 0  0     0      0
+  // 1  200   1000   4  +
+  // 2  4     6      8
+  // 3  6     9      12
   NO_FATALS(maybe_flush_compact());
   NO_FATALS(mutate_row(2, 1, 300)); // ts 3
+  // 0  0     0      0
+  // 1  200   1000   4
+  // 2  300   6      8  +
+  // 3  6     9      12
   NO_FATALS(maybe_flush_compact());
   NO_FATALS(mutate_row(3, 1, 400)); // ts 4
+  // 0  0     0      0
+  // 1  200   1000   4
+  // 2  300   6      8
+  // 3  400   9      12 +
   NO_FATALS(maybe_flush_compact());
   NO_FATALS(mutate_row(3, 1, boost::none)); // ts 5
+  // 0  0     0      0
+  // 1  200   1000   4
+  // 2  300   6      8
+  // 3  400   9      12  deleted +
   NO_FATALS(maybe_flush_compact());
 
   // Run the diff scan test on every permutation of time bounds.
@@ -909,48 +943,48 @@ TEST_P(DiffScanRowSetTest, TestFuzz) {
   }
 
   NO_FATALS(run_test(0, 1, {}));
-  NO_FATALS(run_test(1, 2, { make_tuple(1, 2, 1000, false) }));
-  NO_FATALS(run_test(2, 3, { make_tuple(1, 200, 1000, false) }));
-  NO_FATALS(run_test(3, 4, { make_tuple(2, 300, 6, false) }));
-  NO_FATALS(run_test(4, 5, { make_tuple(3, 400, 9, false) }));
-  NO_FATALS(run_test(5, 6, { make_tuple(3, 400, 9, true) }));
+  NO_FATALS(run_test(1, 2, { make_tuple(1, 2,   1000, 4, false) }));
+  NO_FATALS(run_test(2, 3, { make_tuple(1, 200, 1000, 4, false) }));
+  NO_FATALS(run_test(3, 4, { make_tuple(2, 300, 6,    8, false) }));
+  NO_FATALS(run_test(4, 5, { make_tuple(3, 400, 9,    12, false) }));
+  NO_FATALS(run_test(5, 6, { make_tuple(3, 400, 9,    12, true) }));
 
-  NO_FATALS(run_test(0, 2, { make_tuple(1, 2, 1000, false) }));
-  NO_FATALS(run_test(1, 3, { make_tuple(1, 200, 1000, false) }));
-  NO_FATALS(run_test(2, 4, { make_tuple(1, 200, 1000, false),
-                             make_tuple(2, 300, 6, false) }));
-  NO_FATALS(run_test(3, 5, { make_tuple(2, 300, 6, false),
-                             make_tuple(3, 400, 9, false) }));
-  NO_FATALS(run_test(4, 6, { make_tuple(3, 400, 9, true) }));
+  NO_FATALS(run_test(0, 2, { make_tuple(1, 2,   1000, 4, false) }));
+  NO_FATALS(run_test(1, 3, { make_tuple(1, 200, 1000, 4, false) }));
+  NO_FATALS(run_test(2, 4, { make_tuple(1, 200, 1000, 4, false),
+                             make_tuple(2, 300, 6,    8, false) }));
+  NO_FATALS(run_test(3, 5, { make_tuple(2, 300, 6,    8, false),
+                             make_tuple(3, 400, 9,    12, false) }));
+  NO_FATALS(run_test(4, 6, { make_tuple(3, 400, 9,    12, true) }));
 
-  NO_FATALS(run_test(0, 3, { make_tuple(1, 200, 1000, false) }));
-  NO_FATALS(run_test(1, 4, { make_tuple(1, 200, 1000, false),
-                             make_tuple(2, 300, 6, false) }));
-  NO_FATALS(run_test(2, 5, { make_tuple(1, 200, 1000, false),
-                             make_tuple(2, 300, 6, false),
-                             make_tuple(3, 400, 9, false) }));
-  NO_FATALS(run_test(3, 6, { make_tuple(2, 300, 6, false),
-                             make_tuple(3, 400, 9, true) }));
+  NO_FATALS(run_test(0, 3, { make_tuple(1, 200, 1000, 4, false) }));
+  NO_FATALS(run_test(1, 4, { make_tuple(1, 200, 1000, 4, false),
+                             make_tuple(2, 300, 6,    8, false) }));
+  NO_FATALS(run_test(2, 5, { make_tuple(1, 200, 1000, 4, false),
+                             make_tuple(2, 300, 6,    8, false),
+                             make_tuple(3, 400, 9,    12, false) }));
+  NO_FATALS(run_test(3, 6, { make_tuple(2, 300, 6,    8, false),
+                             make_tuple(3, 400, 9,    12, true) }));
 
-  NO_FATALS(run_test(0, 4, { make_tuple(1, 200, 1000, false),
-                             make_tuple(2, 300, 6, false) }));
-  NO_FATALS(run_test(1, 5, { make_tuple(1, 200, 1000, false),
-                             make_tuple(2, 300, 6, false),
-                             make_tuple(3, 400, 9, false) }));
-  NO_FATALS(run_test(2, 6, { make_tuple(1, 200, 1000, false),
-                             make_tuple(2, 300, 6, false),
-                             make_tuple(3, 400, 9, true) }));
+  NO_FATALS(run_test(0, 4, { make_tuple(1, 200, 1000, 4, false),
+                             make_tuple(2, 300, 6,    8, false) }));
+  NO_FATALS(run_test(1, 5, { make_tuple(1, 200, 1000, 4, false),
+                             make_tuple(2, 300, 6,    8, false),
+                             make_tuple(3, 400, 9,    12, false) }));
+  NO_FATALS(run_test(2, 6, { make_tuple(1, 200, 1000, 4, false),
+                             make_tuple(2, 300, 6,    8, false),
+                             make_tuple(3, 400, 9,    12, true) }));
 
-  NO_FATALS(run_test(0, 5, { make_tuple(1, 200, 1000, false),
-                             make_tuple(2, 300, 6, false),
-                             make_tuple(3, 400, 9, false) }));
-  NO_FATALS(run_test(1, 6, { make_tuple(1, 200, 1000, false),
-                             make_tuple(2, 300, 6, false),
-                             make_tuple(3, 400, 9, true) }));
+  NO_FATALS(run_test(0, 5, { make_tuple(1, 200, 1000, 4, false),
+                             make_tuple(2, 300, 6,    8, false),
+                             make_tuple(3, 400, 9,    12, false) }));
+  NO_FATALS(run_test(1, 6, { make_tuple(1, 200, 1000, 4, false),
+                             make_tuple(2, 300, 6,    8, false),
+                             make_tuple(3, 400, 9,    12, true) }));
 
-  NO_FATALS(run_test(0, 6, { make_tuple(1, 200, 1000, false),
-                             make_tuple(2, 300, 6, false),
-                             make_tuple(3, 400, 9, true) }));
+  NO_FATALS(run_test(0, 6, { make_tuple(1, 200, 1000, 4, false),
+                             make_tuple(2, 300, 6,    8, false),
+                             make_tuple(3, 400, 9,    12, true) }));
 }
 
 } // namespace tablet

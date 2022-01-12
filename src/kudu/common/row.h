@@ -91,7 +91,14 @@ Status CopyCellData(const SrcCellType &src, DstCellType* dst, ArenaType *dst_are
 // This copies the data, and relocates indirect data into the given arena,
 // if it is not NULL.
 template <class SrcCellType, class DstCellType, class ArenaType>
-Status CopyCell(const SrcCellType &src, DstCellType* dst, ArenaType *dst_arena) {
+Status CopyCell(const SrcCellType &src, DstCellType* dst, ArenaType *dst_arena,
+                bool update_if_null) {
+  DCHECK(src.is_nullable() || !update_if_null);
+  if (update_if_null && !dst->is_null()) {
+    LOG(WARNING) << "skipped";
+    return Status::OK();
+  }
+
   if (src.is_nullable()) {
     // Copy the null state.
     dst->set_null(src.is_null());
@@ -118,7 +125,8 @@ inline Status CopyRow(const RowType1 &src_row, RowType2 *dst_row, ArenaType *dst
   for (int i = 0; i < src_row.schema()->num_columns(); i++) {
     typename RowType1::Cell src = src_row.cell(i);
     typename RowType2::Cell dst = dst_row->cell(i);
-    RETURN_NOT_OK(CopyCell(src, &dst, dst_arena));
+    const ColumnSchema& column_schema = src_row.schema()->column(i);
+    RETURN_NOT_OK(CopyCell(src, &dst, dst_arena, column_schema.update_if_null()));
   }
 
   return Status::OK();
@@ -232,7 +240,8 @@ class RowProjector {
     for (const auto& base_mapping : base_cols_mapping_) {
       typename RowType1::Cell src_cell = src_row.cell(base_mapping.second);
       typename RowType2::Cell dst_cell = dst_row->cell(base_mapping.first);
-      RETURN_NOT_OK(CopyCell(src_cell, &dst_cell, dst_arena));
+      RETURN_NOT_OK(CopyCell(src_cell, &dst_cell, dst_arena,
+                             base_schema_->column(base_mapping.second).update_if_null()));
     }
 
     // Fill with Defaults
@@ -242,7 +251,7 @@ class RowProjector {
                                         col_proj.write_default_value();
       SimpleConstCell src_cell(&col_proj, vdefault);
       typename RowType2::Cell dst_cell = dst_row->cell(proj_idx);
-      RETURN_NOT_OK(CopyCell(src_cell, &dst_cell, dst_arena));
+      RETURN_NOT_OK(CopyCell(src_cell, &dst_cell, dst_arena, col_proj.update_if_null()));
     }
 
     return Status::OK();
@@ -251,6 +260,7 @@ class RowProjector {
  private:
   DISALLOW_COPY_AND_ASSIGN(RowProjector);
 
+  // projection_ column index -> base_schema_ index
   std::vector<ProjectionIdxMapping> base_cols_mapping_;
   std::vector<size_t> projection_defaults_;
 
