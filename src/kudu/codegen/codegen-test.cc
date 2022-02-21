@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 
+// IWYU pragma: no_include "testing/base/public/gunit.h"
 #include <gflags/gflags_declare.h>
 #include <glog/logging.h>
 #include <glog/stl_logging.h> // IWYU pragma: keep
