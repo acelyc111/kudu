@@ -715,6 +715,9 @@ Status Tablet::ValidateMutateUnlocked(const RowOp& op) {
   return Status::OK();
 }
 
+//case RowOperationsPB::INSERT:
+//case RowOperationsPB::INSERT_IGNORE:
+//case RowOperationsPB::UPSERT:
 Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
                                       WriteOpState *op_state,
                                       RowOp* op,
@@ -727,6 +730,7 @@ Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
 
   if (op->present_in_rowset) {
     switch (op_type) {
+      // add UPSERT_IGNORE, and pass it to ApplyUpsertAsUpdate
       case RowOperationsPB::UPSERT:
         return ApplyUpsertAsUpdate(io_context, op_state, op, op->present_in_rowset, stats);
       case RowOperationsPB::INSERT_IGNORE:
@@ -774,6 +778,7 @@ Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
       op->SetFailed(s);
       return s;
     }
+    // imm: check immutable before insert
     const auto* txn_rowsets = DCHECK_NOTNULL(op_state->txn_rowsets());
     Status s = txn_rowsets->memrowset->Insert(ts, row, op_state->op_id());
     // TODO(awong): once we support transactional updates, update this to check
@@ -789,6 +794,7 @@ Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
     return s;
   }
 
+  // imm: check immutable before insert
   // Now try to op into memrowset. The memrowset itself will return
   // AlreadyPresent if it has already been inserted there.
   Status s = comps->memrowset->Insert(ts, row, op_state->op_id());
@@ -833,6 +839,8 @@ Status Tablet::ApplyUpsertAsUpdate(const IOContext* io_context,
     // values back to their defaults when unset.
     if (!BitmapTest(upsert->decoded_op.isset_bitmap, i)) continue;
     const auto& c = schema->column(i);
+    // check nullable and immutable: reject update on immutable and non-null columns
+    // also depends on RowOperationsPB_Type
     const void* val = c.is_nullable() ? row.nullable_cell_ptr(i) : row.cell_ptr(i);
     enc.AddColumnUpdate(c, schema->column_id(i), val);
   }
@@ -1296,6 +1304,7 @@ Status Tablet::ApplyRowOperation(const IOContext* io_context,
     case RowOperationsPB::UPSERT:
       s = InsertOrUpsertUnlocked(io_context, op_state, row_op, stats);
       if (s.IsAlreadyPresent()) {
+        // add cond on immutable column update
         return Status::OK();
       }
       return s;
