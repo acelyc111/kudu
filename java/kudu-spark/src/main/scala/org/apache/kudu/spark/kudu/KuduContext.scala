@@ -98,6 +98,7 @@ class KuduContext(
       case Insert => numInserts.add((tableName, count))
       case InsertIgnore => numInserts.add((tableName, count))
       case Upsert => numUpserts.add((tableName, count))
+      case UpsertIgnore => numUpserts.add((tableName, count))
       case Update => numUpdates.add((tableName, count))
       case UpdateIgnore => numUpdates.add((tableName, count))
       case Delete => numDeletes.add((tableName, count))
@@ -310,6 +311,23 @@ class KuduContext(
       writeOptions: KuduWriteOptions = new KuduWriteOptions): Unit = {
     log.info(s"upserting into table '$tableName'")
     writeRows(data, tableName, Upsert, writeOptions)
+    log.info(s"upserted ${numUpserts.value.get(tableName)} rows into table '$tableName'")
+  }
+
+  /**
+   * Upserts the rows of a [[DataFrame]] into a Kudu table, ignoring updating
+   * on immutable columns.
+   *
+   * @param data the data to upsert into Kudu
+   * @param tableName the Kudu table to upsert into
+   * @param writeOptions the Kudu write options
+   */
+  def upsertIgnoreRows(
+      data: DataFrame,
+      tableName: String,
+      writeOptions: KuduWriteOptions = new KuduWriteOptions): Unit = {
+    log.info(s"upserting into table '$tableName'")
+    writeRows(data, tableName, UpsertIgnore, writeOptions)
     log.info(s"upserted ${numUpserts.value.get(tableName)} rows into table '$tableName'")
   }
 

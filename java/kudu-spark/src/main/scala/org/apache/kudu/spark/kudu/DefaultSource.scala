@@ -277,6 +277,8 @@ class DefaultSource
       case "insert_ignore" => InsertIgnore
       case "insert-ignore" => InsertIgnore
       case "upsert" => Upsert
+      case "upsert_ignore" => UpsertIgnore
+      case "upsert-ignore" => UpsertIgnore
       case "update" => Update
       case "update_ignore" => UpdateIgnore
       case "update-ignore" => UpdateIgnore

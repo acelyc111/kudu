@@ -53,6 +53,11 @@ private[kudu] case object Upsert extends OperationType {
 
   override def toString(): String = "upsert"
 }
+private[kudu] case object UpsertIgnore extends OperationType {
+  override def operation(table: KuduTable): Operation = table.newUpsertIgnore()
+
+  override def toString(): String = "upsert_ignore"
+}
 private[kudu] case object Delete extends OperationType {
   override def operation(table: KuduTable): Operation = table.newDelete()
 
