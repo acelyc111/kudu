@@ -67,6 +67,7 @@ struct OpMetrics {
   int update_ignore_errors;
   int successful_deletes;
   int delete_ignore_errors;
+  int upsert_ignore_errors;
   uint64_t commit_wait_duration_usec;
 };
 

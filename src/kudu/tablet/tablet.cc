@@ -670,6 +670,7 @@ Status Tablet::ValidateOp(const RowOp& op) {
     case RowOperationsPB::INSERT:
     case RowOperationsPB::INSERT_IGNORE:
     case RowOperationsPB::UPSERT:
+    case RowOperationsPB::UPSERT_IGNORE:
       return ValidateInsertOrUpsertUnlocked(op);
 
     case RowOperationsPB::UPDATE:
@@ -698,7 +699,7 @@ Status Tablet::ValidateInsertOrUpsertUnlocked(const RowOp& op) {
 Status Tablet::ValidateMutateUnlocked(const RowOp& op) {
   RowChangeListDecoder rcl_decoder(op.decoded_op.changelist);
   RETURN_NOT_OK(rcl_decoder.Init());
-  if (rcl_decoder.is_reinsert()) {
+  if (PREDICT_FALSE(rcl_decoder.is_reinsert())) {
     // REINSERT mutations are the byproduct of an INSERT on top of a ghost
     // row, not something the user is allowed to specify on their own.
     return Status::InvalidArgument("User may not specify REINSERT mutations");
@@ -728,7 +729,14 @@ Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
   if (op->present_in_rowset) {
     switch (op_type) {
       case RowOperationsPB::UPSERT:
-        return ApplyUpsertAsUpdate(io_context, op_state, op, op->present_in_rowset, stats);
+      case RowOperationsPB::UPSERT_IGNORE: {
+        Status s = ApplyUpsertAsUpdate(io_context, op_state, op, op->present_in_rowset, stats);
+        if (s.IsInvalidArgument() && op_type == RowOperationsPB::UPSERT_IGNORE) {
+          op->SetErrorIgnored();
+          s = Status::OK();
+        }
+        return s;
+      }
       case RowOperationsPB::INSERT_IGNORE:
         op->SetErrorIgnored();
         return Status::OK();
@@ -745,6 +753,7 @@ Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
     }
   }
 
+  DCHECK(!op->present_in_rowset);
   Timestamp ts = op_state->timestamp();
   ConstContiguousRow row(schema().get(), op->decoded_op.row_data);
 
@@ -798,7 +807,14 @@ Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
     if (s.IsAlreadyPresent()) {
       switch (op_type) {
         case RowOperationsPB::UPSERT:
-          return ApplyUpsertAsUpdate(io_context, op_state, op, comps->memrowset.get(), stats);
+        case RowOperationsPB::UPSERT_IGNORE: {
+          Status s = ApplyUpsertAsUpdate(io_context, op_state, op, comps->memrowset.get(), stats);
+          if (s.IsInvalidArgument() && op_type == RowOperationsPB::UPSERT_IGNORE) {
+            op->SetErrorIgnored();
+            s = Status::OK();
+          }
+          return s;
+        }
         case RowOperationsPB::INSERT_IGNORE:
           op->SetErrorIgnored();
           return Status::OK();
@@ -825,14 +841,17 @@ Status Tablet::ApplyUpsertAsUpdate(const IOContext* io_context,
   ConstContiguousRow row(schema, upsert->decoded_op.row_data);
   faststring buf;
   RowChangeListEncoder enc(&buf);
-  for (int i = 0; i < schema->num_columns(); i++) {
-    if (schema->is_key_column(i)) continue;
-
+  for (int i = schema->num_key_columns(); i < schema->num_columns(); i++) {
     // If the user didn't explicitly set this column in the UPSERT, then we should
     // not turn it into an UPDATE. This prevents the UPSERT from updating
     // values back to their defaults when unset.
     if (!BitmapTest(upsert->decoded_op.isset_bitmap, i)) continue;
     const auto& c = schema->column(i);
+    if (c.is_immutable()) {
+      // TODO(yingchun): use a more specific error code?
+      return Status::InvalidArgument("UPDATE not allowed for immutable column", c.ToString());
+    }
+
     const void* val = c.is_nullable() ? row.nullable_cell_ptr(i) : row.cell_ptr(i);
     enc.AddColumnUpdate(c, schema->column_id(i), val);
   }
@@ -1294,8 +1313,10 @@ Status Tablet::ApplyRowOperation(const IOContext* io_context,
     case RowOperationsPB::INSERT:
     case RowOperationsPB::INSERT_IGNORE:
     case RowOperationsPB::UPSERT:
+    case RowOperationsPB::UPSERT_IGNORE:
       s = InsertOrUpsertUnlocked(io_context, op_state, row_op, stats);
-      if (s.IsAlreadyPresent()) {
+      if (s.IsAlreadyPresent() || s.IsInvalidArgument()) {
+        // add cond on immutable column update ?
         return Status::OK();
       }
       return s;

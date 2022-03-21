@@ -304,6 +304,10 @@ class KUDU_EXPORT KuduColumnSchema {
   bool is_nullable() const;
   ///@}
 
+  /// @return @c true iff the column schema has immutable attribute set.
+  bool is_immutable() const;
+  ///@}
+
   /// @return Type attributes of the column schema.
   KuduColumnTypeAttributes type_attributes() const;
 
@@ -339,6 +343,7 @@ class KUDU_EXPORT KuduColumnSchema {
       const std::string &name,
       DataType type,
       bool is_nullable = false,
+      bool is_immutable = false,
       const void* default_value = NULL, //NOLINT(modernize-use-nullptr)
       const KuduColumnStorageAttributes& storage_attributes = KuduColumnStorageAttributes(),
       const KuduColumnTypeAttributes& type_attributes = KuduColumnTypeAttributes(),
@@ -495,6 +500,11 @@ class KUDU_EXPORT KuduColumnSpec {
   ///
   /// @return Pointer to the modified object.
   KuduColumnSpec* Nullable();
+
+  /// Set the column to be immutable.
+  ///
+  /// @return Pointer to the modified object.
+  KuduColumnSpec* Immutable();
 
   /// Set the data type of the column.
   ///

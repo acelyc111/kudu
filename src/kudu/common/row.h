@@ -118,6 +118,8 @@ inline Status CopyRow(const RowType1 &src_row, RowType2 *dst_row, ArenaType *dst
   for (int i = 0; i < src_row.schema()->num_columns(); i++) {
     typename RowType1::Cell src = src_row.cell(i);
     typename RowType2::Cell dst = dst_row->cell(i);
+    // const ColumnSchema& column_schema = src_row.schema()->column(i);
+    // check immutable ?
     RETURN_NOT_OK(CopyCell(src, &dst, dst_arena));
   }
 
@@ -232,6 +234,7 @@ class RowProjector {
     for (const auto& base_mapping : base_cols_mapping_) {
       typename RowType1::Cell src_cell = src_row.cell(base_mapping.second);
       typename RowType2::Cell dst_cell = dst_row->cell(base_mapping.first);
+      // check immutable ?
       RETURN_NOT_OK(CopyCell(src_cell, &dst_cell, dst_arena));
     }
 
@@ -251,6 +254,7 @@ class RowProjector {
  private:
   DISALLOW_COPY_AND_ASSIGN(RowProjector);
 
+  // projection_ column index -> base_schema_ index
   std::vector<ProjectionIdxMapping> base_cols_mapping_;
   std::vector<size_t> projection_defaults_;
 

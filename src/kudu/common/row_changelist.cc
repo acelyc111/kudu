@@ -258,12 +258,11 @@ Status RowChangeListDecoder::MutateRowAndCaptureChanges(RowBlockRow* dst_row,
     out->EncodeColumnMutation(col_schema, dec.col_id, dst_cell.ptr());
 
     // copy the new cell to the row
+    // check immutable ?
     RETURN_NOT_OK(CopyCell(src, &dst_cell, arena));
   }
   return Status::OK();
 }
-
-
 
 Status RowChangeListDecoder::ApplyToOneColumn(size_t row_idx, ColumnBlock* dst_col,
                                               const Schema& dst_schema,
@@ -281,14 +280,15 @@ Status RowChangeListDecoder::ApplyToOneColumn(size_t row_idx, ColumnBlock* dst_c
     }
 
     int junk_col_idx;
-    const void* new_val;
+    const void* new_val = nullptr;
     RETURN_NOT_OK(dec.Validate(dst_schema, &junk_col_idx, &new_val));
     DCHECK_EQ(junk_col_idx, col_idx);
 
     SimpleConstCell src(&col_schema, new_val);
     ColumnBlock::Cell dst_cell = dst_col->cell(row_idx);
+    // check immutable ?
     RETURN_NOT_OK(CopyCell(src, &dst_cell, arena));
-    // TODO: could potentially break; here if we're guaranteed to only have one update
+    // TODO(unknown): could potentially break; here if we're guaranteed to only have one update
     // per column in a RowChangeList (which would make sense!)
   }
   return Status::OK();

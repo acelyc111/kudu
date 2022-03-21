@@ -151,7 +151,7 @@ class TestMultiThreadedRowSetDeltaCompaction : public TestRowSet {
   void UpdateRowSet(DiskRowSet *rs, uint32_t value) {
     for (uint32_t idx = 0; idx < n_rows_ && ShouldRun(); idx++) {
       OperationResultPB result;
-      ASSERT_OK_FAST(UpdateRow(rs, idx, value, &result));
+      ASSERT_OK_FAST(UpdateRow(rs, idx, value, value, &result));
     }
   }
 

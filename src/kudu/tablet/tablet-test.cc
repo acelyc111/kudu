@@ -38,11 +38,11 @@
 #include "kudu/common/iterator.h"
 #include "kudu/common/key_range.h"
 #include "kudu/common/partial_row.h"
+#include "kudu/common/row_operations.pb.h"
 #include "kudu/common/rowblock.h"
 #include "kudu/common/rowblock_memory.h"
 #include "kudu/common/schema.h"
 #include "kudu/common/timestamp.h"
-#include "kudu/common/wire_protocol.pb.h"
 #include "kudu/fs/block_id.h"
 #include "kudu/fs/block_manager.h"
 #include "kudu/gutil/port.h"
@@ -1622,7 +1622,7 @@ TYPED_TEST(TestTablet, TestDiffScanUnobservableOperations) {
     vector<ColumnSchema> col_schemas(this->client_schema().columns());
     bool read_default = false;
     col_schemas.emplace_back("is_deleted", IS_DELETED, /*is_nullable=*/ false,
-                             &read_default);
+                             /*is_immutable=*/ false, &read_default);
     Schema projection(col_schemas, this->client_schema().num_key_columns());
 
     // Do the diff scan.

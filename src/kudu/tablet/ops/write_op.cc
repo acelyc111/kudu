@@ -111,6 +111,7 @@ void AddWritePrivilegesForRowOperations(const RowOperationsPB::Type& op_type,
       InsertIfNotPresent(privileges, WritePrivilegeType::INSERT);
       break;
     case RowOperationsPB::UPSERT:
+    case RowOperationsPB::UPSERT_IGNORE:
       InsertIfNotPresent(privileges, WritePrivilegeType::INSERT);
       InsertIfNotPresent(privileges, WritePrivilegeType::UPDATE);
       break;
@@ -495,6 +496,13 @@ void WriteOpState::UpdateMetricsForOp(const RowOp& op) {
     case RowOperationsPB::UPSERT:
       DCHECK(!op.error_ignored);
       op_metrics_.successful_upserts++;
+      break;
+    case RowOperationsPB::UPSERT_IGNORE:
+      if (op.error_ignored) {
+        op_metrics_.upsert_ignore_errors++;
+      } else {
+        op_metrics_.successful_upserts++;
+      }
       break;
     case RowOperationsPB::UPDATE:
       DCHECK(!op.error_ignored);

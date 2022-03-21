@@ -68,6 +68,7 @@ class TestRowSet : public KuduRowSetTest {
     SchemaBuilder builder;
     CHECK_OK(builder.AddKeyColumn("key", STRING));
     CHECK_OK(builder.AddColumn("val", UINT32));
+    CHECK_OK(builder.AddColumn("val2", UINT32, true, true, nullptr, nullptr));
     return builder.BuildWithoutIds();
   }
 
@@ -121,6 +122,7 @@ class TestRowSet : public KuduRowSetTest {
         FormatKey(i, buf, sizeof(buf));
         rb.AddString(Slice(buf));
         rb.AddUint32(zero_vals ? 0 : i);
+        rb.AddUint32(zero_vals ? 0 : i);
         CHECK_OK(WriteRow(rb.data(), writer));
       }
       CHECK_OK(writer->Finish());
@@ -138,7 +140,9 @@ class TestRowSet : public KuduRowSetTest {
       uint32_t idx_to_update = random() % n_rows_;
       uint32_t new_val = idx_to_update * 5;
       update.Reset();
-      update.AddColumnUpdate(schema_.column(1), schema_.column_id(1), &new_val);
+      for (int j = 1; j < 3; j++) {
+        update.AddColumnUpdate(schema_.column(j), schema_.column_id(j), &new_val);
+      }
       OperationResultPB result;
       CHECK_OK(MutateRow(rs,
                          idx_to_update,
@@ -164,12 +168,14 @@ class TestRowSet : public KuduRowSetTest {
 
   Status UpdateRow(DiskRowSet *rs,
                    uint32_t row_idx,
-                   uint32_t new_val,
+                   uint32_t new_val1,
+                   uint32_t new_val2,
                    OperationResultPB* result)  {
     faststring update_buf;
     RowChangeListEncoder update(&update_buf);
     update.Reset();
-    update.AddColumnUpdate(schema_.column(1), schema_.column_id(1), &new_val);
+    update.AddColumnUpdate(schema_.column(1), schema_.column_id(1), &new_val1);
+    update.AddColumnUpdate(schema_.column(2), schema_.column_id(2), &new_val2);
 
     return MutateRow(rs, row_idx, RowChangeList(update_buf), result);
   }
@@ -215,7 +221,7 @@ class TestRowSet : public KuduRowSetTest {
 
   void VerifyUpdatesWithRowIter(const DiskRowSet &rs,
                                 const std::unordered_set<uint32_t> &updated) {
-    Schema proj_val = CreateProjection(schema_, { "val" });
+    Schema proj_val = CreateProjection(schema_, { "val", "val2" });
     RowIteratorOptions opts;
     opts.projection = &proj_val;
     std::unique_ptr<RowwiseIterator> row_iter;
@@ -231,6 +237,8 @@ class TestRowSet : public KuduRowSetTest {
       CHECK_OK(row_iter->NextBlock(&dst));
       VerifyUpdatedBlock(proj_val.ExtractColumnFromRow<UINT32>(dst.row(0), 0),
                          i, dst.nrows(), updated);
+      VerifyUpdatedBlock(proj_val.ExtractColumnFromRow<UINT32>(dst.row(0), 1),
+                         i, dst.nrows(), {});
       i += dst.nrows();
     }
   }

@@ -43,7 +43,7 @@ struct IteratorStats;
 
 namespace tablet {
 
-  // Construct. The base_iter and delta_iter should not be Initted.
+// Construct. The base_iter and delta_iter should not be Initted.
 DeltaApplier::DeltaApplier(RowIteratorOptions opts,
                            shared_ptr<CFileSet::Iterator> base_iter,
                            unique_ptr<DeltaIterator> delta_iter)

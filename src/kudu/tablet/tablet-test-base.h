@@ -362,6 +362,8 @@ class TabletTestBase : public KuduTabletTest {
         CHECK_OK(writer.InsertIgnore(row));
       } else if (type == RowOperationsPB::UPSERT) {
         CHECK_OK(writer.Upsert(row));
+      } else if (type == RowOperationsPB::UPSERT_IGNORE) {
+        CHECK_OK(writer.UpsertIgnore(row));
       } else {
         LOG(FATAL) << "bad type: " << type;
       }

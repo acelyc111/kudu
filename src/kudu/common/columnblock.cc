@@ -42,6 +42,7 @@ Status ColumnBlock::CopyTo(const SelectionVector& sel_vec,
       if (sel_vec.IsRowSelected(src_cell_off + cell_idx)) {
         Cell s(cell(src_cell_off + cell_idx));
         Cell d(dst->cell(dst_cell_off + cell_idx));
+        // check immutable ?
         RETURN_NOT_OK(CopyCell(s, &d, dst->arena())); // Also copies nullability.
       }
     }

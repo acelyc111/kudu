@@ -102,7 +102,7 @@ class TestDeltaMemStore : public KuduTest {
 
   static Schema CreateSchema() {
     SchemaBuilder builder;
-    CHECK_OK(builder.AddColumn("col1", STRING));
+    CHECK_OK(builder.AddColumn("col1", STRING, true, true, nullptr, nullptr));
     CHECK_OK(builder.AddColumn("col2", STRING));
     CHECK_OK(builder.AddColumn("col3", UINT32));
     return builder.Build();
@@ -153,6 +153,7 @@ class TestDeltaMemStore : public KuduTest {
   }
 
  protected:
+  static const int kUpdateIfNullStringColumn = 0;
   static const int kStringColumn = 1;
   static const int kIntColumn = 2;
 
@@ -393,8 +394,9 @@ TEST_F(TestDeltaMemStore, TestReUpdateSlice) {
     op.StartApplying();
     char buf[256] = "update 1";
     Slice s(buf);
-    update.AddColumnUpdate(schema_.column(0),
-                           schema_.column_id(0), &s);
+    update.AddColumnUpdate(schema_.column(kUpdateIfNullStringColumn),
+                           schema_.column_id(kUpdateIfNullStringColumn), &s);
+    update.AddColumnUpdate(schema_.column(kStringColumn), schema_.column_id(kStringColumn), &s);
     ASSERT_OK_FAST(dms_->Update(op.timestamp(), 123, RowChangeList(update_buf), op_id_));
     memset(buf, 0xff, sizeof(buf));
     op.FinishApplying();
@@ -408,8 +410,9 @@ TEST_F(TestDeltaMemStore, TestReUpdateSlice) {
     char buf[256] = "update 2";
     Slice s(buf);
     update.Reset();
-    update.AddColumnUpdate(schema_.column(0),
-                           schema_.column_id(0), &s);
+    update.AddColumnUpdate(schema_.column(kUpdateIfNullStringColumn),
+                           schema_.column_id(kUpdateIfNullStringColumn), &s);
+    update.AddColumnUpdate(schema_.column(kStringColumn), schema_.column_id(kStringColumn), &s);
     ASSERT_OK_FAST(dms_->Update(op.timestamp(), 123, RowChangeList(update_buf), op_id_));
     memset(buf, 0xff, sizeof(buf));
     op.FinishApplying();
@@ -423,10 +426,14 @@ TEST_F(TestDeltaMemStore, TestReUpdateSlice) {
   // Ensure that we ended up with the right data, and that the old MVCC snapshot
   // yields the correct old value.
   ScopedColumnBlock<STRING> read_back(1);
-  ApplyUpdates(snapshot_after_first_update, 123, 0, &read_back);
+  ApplyUpdates(snapshot_after_first_update, 123, kUpdateIfNullStringColumn, &read_back);
+  ASSERT_EQ("update 1", read_back[0].ToString());
+  ApplyUpdates(snapshot_after_first_update, 123, kStringColumn, &read_back);
   ASSERT_EQ("update 1", read_back[0].ToString());
 
-  ApplyUpdates(snapshot_after_second_update, 123, 0, &read_back);
+  ApplyUpdates(snapshot_after_second_update, 123, kUpdateIfNullStringColumn, &read_back);
+  ASSERT_EQ("update 1", read_back[0].ToString());
+  ApplyUpdates(snapshot_after_second_update, 123, kStringColumn, &read_back);
   ASSERT_EQ("update 2", read_back[0].ToString());
 }
 
@@ -485,6 +492,8 @@ TEST_F(TestDeltaMemStore, TestDMSBasic) {
 
     snprintf(buf, sizeof(buf), "hello %d", i);
     Slice s(buf);
+    update.AddColumnUpdate(schema_.column(kUpdateIfNullStringColumn),
+                           schema_.column_id(kUpdateIfNullStringColumn), &s);
     update.AddColumnUpdate(schema_.column(kStringColumn),
                            schema_.column_id(kStringColumn), &s);
 
@@ -497,20 +506,22 @@ TEST_F(TestDeltaMemStore, TestDMSBasic) {
   // Read back the values and check correctness.
   MvccSnapshot snap(mvcc_);
   ScopedColumnBlock<UINT32> read_back(1000);
-  ScopedColumnBlock<STRING> read_back_slices(1000);
+  ScopedColumnBlock<STRING> read_back_slices0(1000);
+  ScopedColumnBlock<STRING> read_back_slices1(1000);
   ApplyUpdates(snap, 0, kIntColumn, &read_back);
-  ApplyUpdates(snap, 0, kStringColumn, &read_back_slices);
+  ApplyUpdates(snap, 0, kUpdateIfNullStringColumn, &read_back_slices0);
+  ApplyUpdates(snap, 0, kStringColumn, &read_back_slices1);
 
   // When reading back the slice, do so into a different buffer -
   // otherwise if the slice references weren't properly copied above,
   // we'd be writing our comparison value into the same buffer that
   // we're comparing against!
-  char buf2[256];
   for (uint32_t i = 0; i < 1000; i++) {
     ASSERT_EQ(i * 10, read_back[i]) << "failed at iteration " << i;
-    snprintf(buf2, sizeof(buf2), "hello %d", i);
-    Slice s(buf2);
-    ASSERT_EQ(s, read_back_slices[i]);
+    snprintf(buf, sizeof(buf), "hello %d", i);
+    Slice s(buf);
+    ASSERT_EQ(s, read_back_slices0[i]);
+    ASSERT_EQ(s, read_back_slices1[i]);
   }
 
 
@@ -597,7 +608,7 @@ TEST_F(TestDeltaMemStore, TestCollectMutations) {
   opts.projection = &schema_;
   opts.snap_to_include = MvccSnapshot(mvcc_);
   unique_ptr<DeltaIterator> iter;
-  Status s =  dms_->NewDeltaIterator(opts, &iter);
+  Status s = dms_->NewDeltaIterator(opts, &iter);
   if (s.IsNotFound()) {
     FAIL() << "Iterator fell outside of the range of the snapshot";
   }
@@ -636,7 +647,7 @@ TEST_F(TestDeltaMemStore, TestCollectMutations) {
   }
 }
 
-// Generates a series of random deltas,  writes them to a DMS, reads them back
+// Generates a series of random deltas, writes them to a DMS, reads them back
 // using a DMSIterator, and verifies the results.
 TEST_F(TestDeltaMemStore, TestFuzz) {
   // Arbitrary constants to control the running time and coverage of the test.
@@ -651,6 +662,9 @@ TEST_F(TestDeltaMemStore, TestFuzz) {
   for (int i = 0; i < kNumColumns; i++) {
     if (prng.Uniform(10) == 0) {
       ASSERT_OK(sb.AddNullableColumn(Substitute("col$0", i), UINT32));
+    } else if (prng.Uniform(10) == 1) {
+      ASSERT_OK(sb.AddColumn(Substitute("col$0", i), UINT32, /*is_nullable=*/ true,
+                             /*is_immutable=*/ false, nullptr, nullptr));
     } else {
       ASSERT_OK(sb.AddColumn(Substitute("col$0", i), UINT32));
     }

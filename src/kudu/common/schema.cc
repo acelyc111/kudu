@@ -166,10 +166,11 @@ string ColumnSchema::ToString(ToStringMode mode) const {
 string ColumnSchema::TypeToString() const {
   string type_name = type_info_->name();
   ToUpperCase(type_name, &type_name);
-  return Substitute("$0$1 $2",
+  return Substitute("$0$1 $2$3",
                     type_name,
                     type_attributes().ToStringForType(type_info()->type()),
-                    is_nullable_ ? "NULLABLE" : "NOT NULL");
+                    is_nullable_ ? "NULLABLE" : "NOT NULL",
+                    is_immutable_ ? " IMMUTABLE" : "");
 }
 
 string ColumnSchema::AttrToString() const {
@@ -293,6 +294,11 @@ Status Schema::Reset(vector<ColumnSchema> cols,
     // The map uses the 'name' string from within the ColumnSchema object.
     if (!InsertIfNotPresent(&name_to_index_, col.name(), i++)) {
       return Status::InvalidArgument("Duplicate column name", col.name());
+    }
+
+    if (col.is_immutable() && col.is_nullable()) {
+      return Status::InvalidArgument(
+          "Unable to set immutable attribute to nullable column", col.name());
     }
 
     col_offsets_.push_back(off);
@@ -593,10 +599,21 @@ Status SchemaBuilder::AddColumn(const string& name,
                                 bool is_nullable,
                                 const void* read_default,
                                 const void* write_default) {
+  return AddColumn(name, type, is_nullable, false, read_default, write_default);
+}
+
+Status SchemaBuilder::AddColumn(const std::string& name,
+                                DataType type,
+                                bool is_nullable,
+                                bool is_immutable,
+                                const void* read_default,
+                                const void* write_default) {
   if (name.empty()) {
     return Status::InvalidArgument("column name must be non-empty");
   }
-  return AddColumn(ColumnSchema(name, type, is_nullable, read_default, write_default), false);
+
+  return AddColumn(ColumnSchema(name, type, is_nullable, is_immutable,
+                                read_default, write_default), false);
 }
 
 Status SchemaBuilder::RemoveColumn(const string& name) {
@@ -653,6 +670,10 @@ Status SchemaBuilder::RenameColumn(const string& old_name, const string& new_nam
 Status SchemaBuilder::AddColumn(const ColumnSchema& column, bool is_key) {
   if (ContainsKey(col_names_, column.name())) {
     return Status::AlreadyPresent("The column already exists", column.name());
+  }
+
+  if (column.is_immutable() && column.is_nullable()) {
+    return Status::InvalidArgument("Unable to set immutable attribute to nullable column");
   }
 
   col_names_.insert(column.name());

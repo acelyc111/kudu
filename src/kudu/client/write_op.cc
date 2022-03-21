@@ -46,6 +46,7 @@ RowOperationsPB_Type ToInternalWriteType(KuduWriteOperation::Type type) {
     case KuduWriteOperation::INSERT_IGNORE: return RowOperationsPB_Type_INSERT_IGNORE;
     case KuduWriteOperation::UPDATE_IGNORE: return RowOperationsPB_Type_UPDATE_IGNORE;
     case KuduWriteOperation::DELETE_IGNORE: return RowOperationsPB_Type_DELETE_IGNORE;
+    case KuduWriteOperation::UPSERT_IGNORE: return RowOperationsPB_Type_UPSERT_IGNORE;
     default: LOG(FATAL) << "Unexpected write operation type: " << type;
   }
 }

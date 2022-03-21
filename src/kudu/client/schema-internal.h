@@ -82,6 +82,7 @@ class KuduColumnSpec::Data {
   boost::optional<KuduColumnStorageAttributes::CompressionType> compression;
   boost::optional<int32_t> block_size;
   boost::optional<bool> nullable;
+  boost::optional<bool> immutable;
   bool primary_key;
   boost::optional<KuduValue*> default_val;  // Owned.
   bool remove_default;                      // For ALTER
