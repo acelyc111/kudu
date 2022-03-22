@@ -670,6 +670,7 @@ Status Tablet::ValidateOp(const RowOp& op) {
     case RowOperationsPB::INSERT:
     case RowOperationsPB::INSERT_IGNORE:
     case RowOperationsPB::UPSERT:
+    case RowOperationsPB::UPSERT_IGNORE:
       return ValidateInsertOrUpsertUnlocked(op);
 
     case RowOperationsPB::UPDATE:
@@ -715,9 +716,6 @@ Status Tablet::ValidateMutateUnlocked(const RowOp& op) {
   return Status::OK();
 }
 
-//case RowOperationsPB::INSERT:
-//case RowOperationsPB::INSERT_IGNORE:
-//case RowOperationsPB::UPSERT:
 Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
                                       WriteOpState *op_state,
                                       RowOp* op,
@@ -733,6 +731,10 @@ Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
       // add UPSERT_IGNORE, and pass it to ApplyUpsertAsUpdate
       case RowOperationsPB::UPSERT:
         return ApplyUpsertAsUpdate(io_context, op_state, op, op->present_in_rowset, stats);
+      case RowOperationsPB::UPSERT_IGNORE: {
+        // TODO
+        break;
+      }
       case RowOperationsPB::INSERT_IGNORE:
         op->SetErrorIgnored();
         return Status::OK();
@@ -805,6 +807,10 @@ Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
       switch (op_type) {
         case RowOperationsPB::UPSERT:
           return ApplyUpsertAsUpdate(io_context, op_state, op, comps->memrowset.get(), stats);
+        case RowOperationsPB::UPSERT_IGNORE: {
+          // TODO
+          break;
+        }
         case RowOperationsPB::INSERT_IGNORE:
           op->SetErrorIgnored();
           return Status::OK();
@@ -1302,6 +1308,7 @@ Status Tablet::ApplyRowOperation(const IOContext* io_context,
     case RowOperationsPB::INSERT:
     case RowOperationsPB::INSERT_IGNORE:
     case RowOperationsPB::UPSERT:
+    case RowOperationsPB::UPSERT_IGNORE:
       s = InsertOrUpsertUnlocked(io_context, op_state, row_op, stats);
       if (s.IsAlreadyPresent()) {
         // add cond on immutable column update

@@ -1681,7 +1681,8 @@ Status TabletBootstrap::ApplyOperations(const IOContext* io_context,
     switch (op->decoded_op.type) {
       case RowOperationsPB::INSERT:
       case RowOperationsPB::INSERT_IGNORE:
-      case RowOperationsPB::UPSERT: {
+      case RowOperationsPB::UPSERT:
+      case RowOperationsPB::UPSERT_IGNORE: {
         // TODO(unknown): should we have a separate counter for upserts?
         stats_.inserts_seen++;
         if (op->has_result()) {

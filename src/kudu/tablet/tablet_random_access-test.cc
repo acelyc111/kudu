@@ -226,6 +226,13 @@ class TestRandomAccess : public KuduTabletTest {
     return DoRowOp(RowOperationsPB::UPSERT, key, val, old_row, ops);
   }
 
+  optional<ExpectedKeyValueRow> UpsertIgnoreRow(int key,
+                                                int val,
+                                                const optional<ExpectedKeyValueRow>& old_row,
+                                                vector<LocalTabletWriter::RowOp>* ops) {
+    return DoRowOp(RowOperationsPB::UPSERT_IGNORE, key, val, old_row, ops);
+  }
+
   // Adds an update of the given key/value pair to 'ops', returning the expected value
   optional<ExpectedKeyValueRow> UpdateRow(int key,
                                           uint32_t new_val,
@@ -255,6 +262,7 @@ class TestRandomAccess : public KuduTabletTest {
 
     switch (type) {
       case RowOperationsPB::UPSERT:
+      case RowOperationsPB::UPSERT_IGNORE:
       case RowOperationsPB::UPDATE:
       case RowOperationsPB::UPDATE_IGNORE:
       case RowOperationsPB::INSERT:

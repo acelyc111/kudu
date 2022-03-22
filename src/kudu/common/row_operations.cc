@@ -69,6 +69,8 @@ string DecodedRowOperation::ToString(const Schema& schema) const {
       return "INSERT IGNORE " + schema.DebugRow(ConstContiguousRow(&schema, row_data));
     case RowOperationsPB::UPSERT:
       return "UPSERT " + schema.DebugRow(ConstContiguousRow(&schema, row_data));
+    case RowOperationsPB::UPSERT_IGNORE:
+      return "UPSERT IGNORE" + schema.DebugRow(ConstContiguousRow(&schema, row_data));
     case RowOperationsPB::UPDATE:
     case RowOperationsPB::UPDATE_IGNORE:
     case RowOperationsPB::DELETE:
@@ -711,6 +713,7 @@ Status RowOperationsPBDecoder::DecodeOp<DecoderMode::WRITE_OPS>(
     case RowOperationsPB::INSERT:
     case RowOperationsPB::INSERT_IGNORE:
     case RowOperationsPB::UPSERT:
+    case RowOperationsPB::UPSERT_IGNORE:
       RETURN_NOT_OK(DecodeInsertOrUpsert(prototype_row_storage, mapping, op));
       break;
     case RowOperationsPB::UPDATE:

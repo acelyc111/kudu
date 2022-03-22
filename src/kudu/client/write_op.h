@@ -73,7 +73,8 @@ class KUDU_EXPORT KuduWriteOperation {
     UPSERT = 4,
     INSERT_IGNORE = 5,
     UPDATE_IGNORE = 6,
-    DELETE_IGNORE = 7
+    DELETE_IGNORE = 7,
+    UPSERT_IGNORE = 8
   };
   virtual ~KuduWriteOperation();
 
