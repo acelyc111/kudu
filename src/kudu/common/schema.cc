@@ -296,9 +296,9 @@ Status Schema::Reset(vector<ColumnSchema> cols,
       return Status::InvalidArgument("Duplicate column name", col.name());
     }
 
-    if (!col.is_nullable() && col.update_if_null()) {
+    if (!col.is_mutable() && col.is_nullable()) {
       return Status::InvalidArgument(
-          "Unable to set update_if_null attribute to non-nullable column", col.name());
+          "Unable to set immutable attribute to nullable column", col.name());
     }
 
     col_offsets_.push_back(off);
@@ -672,8 +672,8 @@ Status SchemaBuilder::AddColumn(const ColumnSchema& column, bool is_key) {
     return Status::AlreadyPresent("The column already exists", column.name());
   }
 
-  if (!column.is_nullable() && column.update_if_null()) {
-    return Status::InvalidArgument("Unable to set update_if_null attribute to non-nullable column");
+  if (!column.is_mutable() && column.is_nullable()) {
+    return Status::InvalidArgument("Unable to set immutable attribute to nullable column");
   }
 
   col_names_.insert(column.name());
