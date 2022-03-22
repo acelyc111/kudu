@@ -223,10 +223,10 @@ class ColumnSchema {
   //   ColumnSchema col_c("c", INT32, false, &default_i32);
   //   Slice default_str("Hello");
   //   ColumnSchema col_d("d", STRING, false, &default_str);
-  explicit ColumnSchema(std::string name,
+  ColumnSchema(std::string name,
                DataType type,
                bool is_nullable = false,
-               bool update_if_null = false,
+               bool is_mutable = true,
                const void* read_default = nullptr,
                const void* write_default = nullptr,
                ColumnStorageAttributes attributes = ColumnStorageAttributes(),
@@ -235,7 +235,7 @@ class ColumnSchema {
       : name_(std::move(name)),
         type_info_(GetTypeInfo(type)),
         is_nullable_(is_nullable),
-        update_if_null_(update_if_null),
+        is_mutable_(is_mutable),
         read_default_(read_default ? std::make_shared<Variant>(type, read_default) : nullptr),
         attributes_(attributes),
         type_attributes_(type_attributes),
@@ -255,8 +255,8 @@ class ColumnSchema {
     return is_nullable_;
   }
 
-  bool update_if_null() const {
-    return update_if_null_;
+  bool is_mutable() const {
+    return is_mutable_;
   }
 
   const std::string& name() const {
@@ -328,14 +328,13 @@ class ColumnSchema {
   bool EqualsPhysicalType(const ColumnSchema& other) const {
     if (this == &other) return true;
     return is_nullable_ == other.is_nullable_ &&
-           update_if_null_ == other.update_if_null_ &&
            type_info()->physical_type() == other.type_info()->physical_type();
   }
 
   bool EqualsType(const ColumnSchema& other) const {
     if (this == &other) return true;
     return is_nullable_ == other.is_nullable_ &&
-           update_if_null_ == other.update_if_null_ &&
+           is_mutable_ == other.is_mutable_ &&
            type_info()->type() == other.type_info()->type() &&
            type_attributes().EqualsForType(other.type_attributes(), type_info()->type());
   }
@@ -445,7 +444,7 @@ class ColumnSchema {
   std::string name_;
   const TypeInfo* type_info_;
   bool is_nullable_;
-  bool update_if_null_;
+  bool is_mutable_;
   // use shared_ptr since the ColumnSchema is always copied around.
   std::shared_ptr<Variant> read_default_;
   std::shared_ptr<Variant> write_default_;

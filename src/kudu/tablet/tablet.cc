@@ -698,7 +698,7 @@ Status Tablet::ValidateInsertOrUpsertUnlocked(const RowOp& op) {
 Status Tablet::ValidateMutateUnlocked(const RowOp& op) {
   RowChangeListDecoder rcl_decoder(op.decoded_op.changelist);
   RETURN_NOT_OK(rcl_decoder.Init());
-  if (rcl_decoder.is_reinsert()) {
+  if (PREDICT_FALSE(rcl_decoder.is_reinsert())) {
     // REINSERT mutations are the byproduct of an INSERT on top of a ghost
     // row, not something the user is allowed to specify on their own.
     return Status::InvalidArgument("User may not specify REINSERT mutations");

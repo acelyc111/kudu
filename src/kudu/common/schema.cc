@@ -170,7 +170,7 @@ string ColumnSchema::TypeToString() const {
                     type_name,
                     type_attributes().ToStringForType(type_info()->type()),
                     is_nullable_ ? "NULLABLE" : "NOT NULL",
-                    update_if_null_ ? " UPDATE IF NULL" : "");
+                    is_mutable_ ? " MUTABLE" : " IMMUTABLE");
 }
 
 string ColumnSchema::AttrToString() const {
