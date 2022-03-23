@@ -1047,11 +1047,11 @@ class SchemaBuilder {
   Status AddColumn(const ColumnSchema& column, bool is_key);
 
   Status AddColumn(const std::string& name, DataType type) {
-    return AddColumn(name, type, false, true, nullptr, nullptr);
+    return AddColumn(name, type, false, false, nullptr, nullptr);
   }
 
   Status AddNullableColumn(const std::string& name, DataType type) {
-    return AddColumn(name, type, true, true, nullptr, nullptr);
+    return AddColumn(name, type, true, false, nullptr, nullptr);
   }
 
   Status AddColumn(const std::string& name,

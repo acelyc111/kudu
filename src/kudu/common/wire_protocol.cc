@@ -229,7 +229,7 @@ void ColumnSchemaToPB(const ColumnSchema& col_schema, ColumnSchemaPB *pb, int fl
   pb->Clear();
   pb->set_name(col_schema.name());
   pb->set_is_nullable(col_schema.is_nullable());
-  pb->set_update_if_null(col_schema.update_if_null());
+  pb->set_immutable(col_schema.immutable());
   DataType type = col_schema.type_info()->type();
   pb->set_type(type);
   // Only serialize precision and scale for decimal types.
@@ -331,9 +331,9 @@ Status ColumnSchemaFromPB(const ColumnSchemaPB& pb, boost::optional<ColumnSchema
   // in protobuf is the empty string. So, it's safe to use pb.comment() directly
   // regardless of whether has_comment() is true or false.
   // https://developers.google.com/protocol-buffers/docs/proto#optional
-  bool update_if_null = pb.has_update_if_null() ? pb.update_if_null() : false;
+  bool immutable = pb.has_immutable() ? pb.immutable() : false;
   *col_schema = ColumnSchema(pb.name(), pb.type(), pb.is_nullable(),
-                             update_if_null,
+                             immutable,
                              read_default_ptr, write_default_ptr,
                              attributes, type_attributes, pb.comment());
   return Status::OK();

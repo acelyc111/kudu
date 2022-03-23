@@ -264,8 +264,6 @@ Status RowChangeListDecoder::MutateRowAndCaptureChanges(RowBlockRow* dst_row,
   return Status::OK();
 }
 
-
-
 Status RowChangeListDecoder::ApplyToOneColumn(size_t row_idx, ColumnBlock* dst_col,
                                               const Schema& dst_schema,
                                               int col_idx, Arena *arena) {
