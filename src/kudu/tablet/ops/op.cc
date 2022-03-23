@@ -82,6 +82,7 @@ OpMetrics::OpMetrics()
       update_ignore_errors(0),
       successful_deletes(0),
       delete_ignore_errors(0),
+      upsert_ignore_errors(0),
       commit_wait_duration_usec(0) {
 }
 
@@ -93,6 +94,7 @@ void OpMetrics::Reset() {
   update_ignore_errors = 0;
   successful_deletes = 0;
   delete_ignore_errors = 0;
+  upsert_ignore_errors = 0;
   commit_wait_duration_usec = 0;
 }
 

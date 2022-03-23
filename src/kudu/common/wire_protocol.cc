@@ -229,7 +229,7 @@ void ColumnSchemaToPB(const ColumnSchema& col_schema, ColumnSchemaPB *pb, int fl
   pb->Clear();
   pb->set_name(col_schema.name());
   pb->set_is_nullable(col_schema.is_nullable());
-  pb->set_immutable(col_schema.immutable());
+  pb->set_immutable(col_schema.is_immutable());
   DataType type = col_schema.type_info()->type();
   pb->set_type(type);
   // Only serialize precision and scale for decimal types.

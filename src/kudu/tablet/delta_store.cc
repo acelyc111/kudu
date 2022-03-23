@@ -309,6 +309,7 @@ Status DeltaPreparer<Traits>::AddDelta(const DeltaKey& key, Slice val, bool* fin
           // This column isn't being projected.
           continue;
         }
+        int col_size = opts_.projection->column(col_idx).type_info()->size();
 
         // If we already have an earlier update for the same column, we can
         // just overwrite that one.

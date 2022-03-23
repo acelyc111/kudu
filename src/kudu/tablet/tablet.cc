@@ -729,13 +729,14 @@ Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
   if (op->present_in_rowset) {
     switch (op_type) {
       case RowOperationsPB::UPSERT:
-      case RowOperationsPB::UPSERT_IGNORE:
+      case RowOperationsPB::UPSERT_IGNORE: {
         Status s = ApplyUpsertAsUpdate(io_context, op_state, op, op->present_in_rowset, stats);
         if (s.IsInvalidArgument() && op_type == RowOperationsPB::UPSERT_IGNORE) {
           op->SetErrorIgnored();
           s = Status::OK();
         }
         return s;
+      }
       case RowOperationsPB::INSERT_IGNORE:
         op->SetErrorIgnored();
         return Status::OK();
@@ -806,13 +807,14 @@ Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
     if (s.IsAlreadyPresent()) {
       switch (op_type) {
         case RowOperationsPB::UPSERT:
-        case RowOperationsPB::UPSERT_IGNORE:
+        case RowOperationsPB::UPSERT_IGNORE: {
           Status s = ApplyUpsertAsUpdate(io_context, op_state, op, comps->memrowset.get(), stats);
           if (s.IsInvalidArgument() && op_type == RowOperationsPB::UPSERT_IGNORE) {
             op->SetErrorIgnored();
             s = Status::OK();
           }
           return s;
+        }
         case RowOperationsPB::INSERT_IGNORE:
           op->SetErrorIgnored();
           return Status::OK();

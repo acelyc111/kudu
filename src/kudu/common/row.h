@@ -118,7 +118,7 @@ inline Status CopyRow(const RowType1 &src_row, RowType2 *dst_row, ArenaType *dst
   for (int i = 0; i < src_row.schema()->num_columns(); i++) {
     typename RowType1::Cell src = src_row.cell(i);
     typename RowType2::Cell dst = dst_row->cell(i);
-    const ColumnSchema& column_schema = src_row.schema()->column(i);
+    // const ColumnSchema& column_schema = src_row.schema()->column(i);
     // check immutable ?
     RETURN_NOT_OK(CopyCell(src, &dst, dst_arena));
   }
