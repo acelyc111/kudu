@@ -1737,7 +1737,7 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
       opts.write_posidx = true;
       CFileWriter writer(
           opts, GetTypeInfo(StringDataGenerator<false>::kDataType),
-          StringDataGenerator<false>::has_nulls(), false, std::move(block));
+          StringDataGenerator<false>::has_nulls(), std::move(block));
       ASSERT_OK(writer.Start());
       generator.Build(kNumEntries);
       ASSERT_OK_FAST(writer.AppendEntries(generator.values(), kNumEntries));
@@ -1970,7 +1970,7 @@ TEST_F(ToolTest, TestFsDumpCFile) {
   WriterOptions opts;
   opts.write_posidx = true;
   CFileWriter writer(opts, GetTypeInfo(StringDataGenerator<false>::kDataType),
-                     StringDataGenerator<false>::has_nulls(), false, std::move(block));
+                     StringDataGenerator<false>::has_nulls(), std::move(block));
   ASSERT_OK(writer.Start());
   generator.Build(kNumEntries);
   ASSERT_OK_FAST(writer.AppendEntries(generator.values(), kNumEntries));
