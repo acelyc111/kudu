@@ -34,7 +34,7 @@ class ScopedColumnBlock : public ColumnBlock {
  public:
   typedef typename TypeTraits<type>::cpp_type cpp_type;
 
-  explicit ScopedColumnBlock(size_t n_rows, bool allow_nulls = true, bool update_if_null = false)
+  explicit ScopedColumnBlock(size_t n_rows, bool allow_nulls = true)
       : ColumnBlock(GetTypeInfo(type),
                     allow_nulls ? new uint8_t[BitmapSize(n_rows)] : nullptr,
                     new cpp_type[n_rows],

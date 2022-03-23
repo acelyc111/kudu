@@ -258,7 +258,8 @@ Status RowChangeListDecoder::MutateRowAndCaptureChanges(RowBlockRow* dst_row,
     out->EncodeColumnMutation(col_schema, dec.col_id, dst_cell.ptr());
 
     // copy the new cell to the row
-    RETURN_NOT_OK(CopyCell(src, &dst_cell, arena, col_schema.update_if_null()));
+    // check immutable ?
+    RETURN_NOT_OK(CopyCell(src, &dst_cell, arena));
   }
   return Status::OK();
 }
@@ -272,7 +273,6 @@ Status RowChangeListDecoder::ApplyToOneColumn(size_t row_idx, ColumnBlock* dst_c
 
   const ColumnSchema& col_schema = dst_schema.column(col_idx);
   ColumnId col_id = dst_schema.column_id(col_idx);
-  bool update_if_null = col_schema.update_if_null();
 
   while (HasNext()) {
     DecodedUpdate dec;
@@ -288,7 +288,8 @@ Status RowChangeListDecoder::ApplyToOneColumn(size_t row_idx, ColumnBlock* dst_c
 
     SimpleConstCell src(&col_schema, new_val);
     ColumnBlock::Cell dst_cell = dst_col->cell(row_idx);
-    RETURN_NOT_OK(CopyCell(src, &dst_cell, arena, update_if_null));
+    // check immutable ?
+    RETURN_NOT_OK(CopyCell(src, &dst_cell, arena));
     // TODO(unknown): could potentially break; here if we're guaranteed to only have one update
     // per column in a RowChangeList (which would make sense!)
   }

@@ -1016,9 +1016,8 @@ void RunDeltaFuzzTest(const DeltaStore& store,
       for (int j = 0; j < opts.projection->num_columns(); j++) {
         SCOPED_TRACE(Substitute("Column $0", j));
         bool col_is_nullable = opts.projection->column(j).is_nullable();
-        bool update_if_null = opts.projection->column(j).update_if_null();
-        ScopedColumnBlock<UINT32> expected_scb(batch_size, col_is_nullable, update_if_null);
-        ScopedColumnBlock<UINT32> actual_scb(batch_size, col_is_nullable, update_if_null);
+        ScopedColumnBlock<UINT32> expected_scb(batch_size, col_is_nullable);
+        ScopedColumnBlock<UINT32> actual_scb(batch_size, col_is_nullable);
         for (int k = 0; k < batch_size; k++) {
           expected_scb[k] = 0;
           actual_scb[k] = 0;

@@ -304,7 +304,7 @@ class KUDU_EXPORT KuduColumnSchema {
   bool is_nullable() const;
   ///@}
 
-  /// @return @c true iff the column schema has UPDATE IF NULL attribute set.
+  /// @return @c true iff the column schema has immutable attribute set.
   bool is_immutable() const;
   ///@}
 
