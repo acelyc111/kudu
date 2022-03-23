@@ -226,7 +226,7 @@ class ColumnSchema {
   ColumnSchema(std::string name,
                DataType type,
                bool is_nullable = false,
-               bool is_mutable = true,
+               bool is_immutable = false,
                const void* read_default = nullptr,
                const void* write_default = nullptr,
                ColumnStorageAttributes attributes = ColumnStorageAttributes(),
@@ -235,7 +235,7 @@ class ColumnSchema {
       : name_(std::move(name)),
         type_info_(GetTypeInfo(type)),
         is_nullable_(is_nullable),
-        is_mutable_(is_mutable),
+        is_immutable_(is_immutable),
         read_default_(read_default ? std::make_shared<Variant>(type, read_default) : nullptr),
         attributes_(attributes),
         type_attributes_(type_attributes),
@@ -255,8 +255,8 @@ class ColumnSchema {
     return is_nullable_;
   }
 
-  bool is_mutable() const {
-    return is_mutable_;
+  bool is_immutable() const {
+    return is_immutable_;
   }
 
   const std::string& name() const {
@@ -334,7 +334,7 @@ class ColumnSchema {
   bool EqualsType(const ColumnSchema& other) const {
     if (this == &other) return true;
     return is_nullable_ == other.is_nullable_ &&
-           is_mutable_ == other.is_mutable_ &&
+           is_immutable_ == other.is_immutable_ &&
            type_info()->type() == other.type_info()->type() &&
            type_attributes().EqualsForType(other.type_attributes(), type_info()->type());
   }
@@ -444,7 +444,7 @@ class ColumnSchema {
   std::string name_;
   const TypeInfo* type_info_;
   bool is_nullable_;
-  bool is_mutable_;
+  bool is_immutable_;
   // use shared_ptr since the ColumnSchema is always copied around.
   std::shared_ptr<Variant> read_default_;
   std::shared_ptr<Variant> write_default_;
@@ -1063,7 +1063,7 @@ class SchemaBuilder {
   Status AddColumn(const std::string& name,
                    DataType type,
                    bool is_nullable,
-                   bool is_mutable,
+                   bool is_immutable,
                    const void* read_default,
                    const void* write_default);
 

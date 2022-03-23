@@ -730,11 +730,13 @@ Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
     switch (op_type) {
       // add UPSERT_IGNORE, and pass it to ApplyUpsertAsUpdate
       case RowOperationsPB::UPSERT:
-        return ApplyUpsertAsUpdate(io_context, op_state, op, op->present_in_rowset, stats);
-      case RowOperationsPB::UPSERT_IGNORE: {
-        // TODO
-        break;
-      }
+      case RowOperationsPB::UPSERT_IGNORE:
+        Status s = ApplyUpsertAsUpdate(io_context, op_state, op, op->present_in_rowset, stats);
+        if (s.IsInvalidArgument() && op_type == RowOperationsPB::UPSERT_IGNORE) {
+          op->SetErrorIgnored();
+          s = Status::OK();
+        }
+        return s;
       case RowOperationsPB::INSERT_IGNORE:
         op->SetErrorIgnored();
         return Status::OK();
@@ -751,6 +753,7 @@ Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
     }
   }
 
+  DCHECK(!op->present_in_rowset);
   Timestamp ts = op_state->timestamp();
   ConstContiguousRow row(schema().get(), op->decoded_op.row_data);
 
@@ -806,11 +809,13 @@ Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
     if (s.IsAlreadyPresent()) {
       switch (op_type) {
         case RowOperationsPB::UPSERT:
-          return ApplyUpsertAsUpdate(io_context, op_state, op, comps->memrowset.get(), stats);
-        case RowOperationsPB::UPSERT_IGNORE: {
-          // TODO
-          break;
-        }
+        case RowOperationsPB::UPSERT_IGNORE:
+          Status s = ApplyUpsertAsUpdate(io_context, op_state, op, comps->memrowset.get(), stats);
+          if (s.IsInvalidArgument() && op_type == RowOperationsPB::UPSERT_IGNORE) {
+            op->SetErrorIgnored();
+            s = Status::OK();
+          }
+          return s;
         case RowOperationsPB::INSERT_IGNORE:
           op->SetErrorIgnored();
           return Status::OK();
@@ -837,16 +842,17 @@ Status Tablet::ApplyUpsertAsUpdate(const IOContext* io_context,
   ConstContiguousRow row(schema, upsert->decoded_op.row_data);
   faststring buf;
   RowChangeListEncoder enc(&buf);
-  for (int i = 0; i < schema->num_columns(); i++) {
-    if (schema->is_key_column(i)) continue;
-
+  for (int i = schema->num_key_columns(); i < schema->num_columns(); i++) {
     // If the user didn't explicitly set this column in the UPSERT, then we should
     // not turn it into an UPDATE. This prevents the UPSERT from updating
     // values back to their defaults when unset.
     if (!BitmapTest(upsert->decoded_op.isset_bitmap, i)) continue;
     const auto& c = schema->column(i);
-    // check nullable and immutable: reject update on immutable and non-null columns
-    // also depends on RowOperationsPB_Type
+    if (c.is_immutable()) {
+      // TODO(yingchun): use a more specific error code?
+      return Status::InvalidArgument("UPDATE not allowed for immutable column", c.ToString());
+    }
+
     const void* val = c.is_nullable() ? row.nullable_cell_ptr(i) : row.cell_ptr(i);
     enc.AddColumnUpdate(c, schema->column_id(i), val);
   }

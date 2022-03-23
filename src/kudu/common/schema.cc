@@ -170,7 +170,7 @@ string ColumnSchema::TypeToString() const {
                     type_name,
                     type_attributes().ToStringForType(type_info()->type()),
                     is_nullable_ ? "NULLABLE" : "NOT NULL",
-                    is_mutable_ ? " MUTABLE" : " IMMUTABLE");
+                    is_immutable_ ? " IMMUTABLE" : "");
 }
 
 string ColumnSchema::AttrToString() const {
@@ -296,7 +296,7 @@ Status Schema::Reset(vector<ColumnSchema> cols,
       return Status::InvalidArgument("Duplicate column name", col.name());
     }
 
-    if (!col.is_mutable() && col.is_nullable()) {
+    if (col.is_immutable() && col.is_nullable()) {
       return Status::InvalidArgument(
           "Unable to set immutable attribute to nullable column", col.name());
     }
@@ -599,20 +599,20 @@ Status SchemaBuilder::AddColumn(const string& name,
                                 bool is_nullable,
                                 const void* read_default,
                                 const void* write_default) {
-  return AddColumn(name, type, is_nullable, true, read_default, write_default);
+  return AddColumn(name, type, is_nullable, false, read_default, write_default);
 }
 
 Status SchemaBuilder::AddColumn(const std::string& name,
                                 DataType type,
                                 bool is_nullable,
-                                bool is_mutable,
+                                bool is_immutable,
                                 const void* read_default,
                                 const void* write_default) {
   if (name.empty()) {
     return Status::InvalidArgument("column name must be non-empty");
   }
 
-  return AddColumn(ColumnSchema(name, type, is_nullable, is_mutable,
+  return AddColumn(ColumnSchema(name, type, is_nullable, is_immutable,
                                 read_default, write_default), false);
 }
 
@@ -672,7 +672,7 @@ Status SchemaBuilder::AddColumn(const ColumnSchema& column, bool is_key) {
     return Status::AlreadyPresent("The column already exists", column.name());
   }
 
-  if (!column.is_mutable() && column.is_nullable()) {
+  if (column.is_immutable() && column.is_nullable()) {
     return Status::InvalidArgument("Unable to set immutable attribute to nullable column");
   }
 

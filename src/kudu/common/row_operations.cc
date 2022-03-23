@@ -566,6 +566,13 @@ Status RowOperationsPBDecoder::DecodeUpdateOrDelete(const ClientServerMapping& m
       const ColumnSchema& col = tablet_schema_->column(tablet_col_idx);
 
       if (BitmapTest(client_isset_map, client_col_idx)) {
+        if (col.is_immutable()) {
+          op->SetFailureStatusOnce(Status::InvalidArgument(
+              "UPDATE not allowed for immutable column", col.ToString()));
+          RETURN_NOT_OK(ReadColumnAndDiscard(col));
+          // Use 'continue' not 'break' to consume the rest row data?
+          continue;
+        }
         bool client_set_to_null = client_schema_->has_nullables() &&
           BitmapTest(client_null_map, client_col_idx);
         uint8_t scratch[kLargestTypeSize];
