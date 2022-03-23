@@ -95,7 +95,6 @@ class CFileWriter {
   explicit CFileWriter(WriterOptions options,
                        const TypeInfo* typeinfo,
                        bool is_nullable,
-                       bool update_if_null,
                        std::unique_ptr<fs::WritableBlock> block);
 
   ~CFileWriter();

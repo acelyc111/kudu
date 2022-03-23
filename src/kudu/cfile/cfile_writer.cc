@@ -219,7 +219,6 @@ Status CFileWriter::FinishAndReleaseBlock(BlockCreationTransaction* transaction)
   CFileFooterPB footer;
   footer.set_data_type(typeinfo_->type());
   footer.set_is_type_nullable(is_nullable_);
-  footer.set_update_if_null(is_nullable_);
   footer.set_encoding(type_encoding_info_->encoding_type());
   footer.set_num_values(value_count_);
   footer.set_compression(compression_);

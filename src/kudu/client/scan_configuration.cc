@@ -240,7 +240,7 @@ Status ScanConfiguration::AddIsDeletedColumn() {
   ColumnSchema is_deleted(col_name,
                           IS_DELETED,
                           /*is_nullable=*/false,
-                          /*update_if_null=*/false,
+                          /*is_immutable=*/false,
                           &read_default);
   cols.emplace_back(std::move(is_deleted));
 
