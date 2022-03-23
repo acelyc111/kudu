@@ -88,7 +88,7 @@ class TestEncoding : public KuduTest {
   template<DataType type>
   void CopyOne(BlockDecoder *decoder,
                typename TypeTraits<type>::cpp_type *ret) {
-    ColumnBlock cb(GetTypeInfo(type), false, nullptr, ret, 1, &memory_);
+    ColumnBlock cb(GetTypeInfo(type), nullptr, ret, 1, &memory_);
     ColumnDataView cdv(&cb);
     size_t n = 1;
     ASSERT_OK(decoder->CopyNextValues(&n, &cdv));
@@ -463,7 +463,7 @@ class TestEncoding : public KuduTest {
     vector<CppType> decoded;
     decoded.resize(size);
 
-    ColumnBlock dst_block(GetTypeInfo(Type), false, nullptr, &decoded[0], size, &memory_);
+    ColumnBlock dst_block(GetTypeInfo(Type), nullptr, &decoded[0], size, &memory_);
     ColumnDataView view(&dst_block);
     int dec_count = 0;
     while (bd->HasNext()) {
@@ -581,7 +581,7 @@ class TestEncoding : public KuduTest {
     vector<CppType> decoded;
     decoded.resize(to_insert.size());
 
-    ColumnBlock dst_block(GetTypeInfo(IntType), false, nullptr,
+    ColumnBlock dst_block(GetTypeInfo(IntType), nullptr,
                           &decoded[0],
                           to_insert.size(),
                           &memory_);
@@ -665,7 +665,7 @@ class TestEncoding : public KuduTest {
     vector<uint8_t> decoded;
     decoded.resize(to_insert.size());
 
-    ColumnBlock dst_block(GetTypeInfo(BOOL), false, nullptr,
+    ColumnBlock dst_block(GetTypeInfo(BOOL), nullptr,
                           &decoded[0],
                           to_insert.size(),
                           &memory_);

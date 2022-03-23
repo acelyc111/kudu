@@ -169,7 +169,6 @@ class TestCFile : public CFileTestBase {
     size_t fetched = 0;
     while (fetched < 10000) {
       ColumnBlock advancing_block(out.type_info(),
-                                  false,
                                   nullptr,
                                   out.data() + (fetched * out.stride()),
                                   out.nrows() - fetched,
@@ -273,7 +272,7 @@ class TestCFile : public CFileTestBase {
     opts.storage_attributes.cfile_block_size = FLAGS_cfile_test_block_size;
     opts.storage_attributes.compression = compression;
     opts.storage_attributes.encoding = PLAIN_ENCODING;
-    CFileWriter w(opts, GetTypeInfo(STRING), false, false, std::move(sink));
+    CFileWriter w(opts, GetTypeInfo(STRING), false, std::move(sink));
     ASSERT_OK(w.Start());
     for (uint32_t i = 0; i < num_entries; i++) {
       vector<Slice> slices;
@@ -441,7 +440,7 @@ INSTANTIATE_TEST_SUITE_P(CacheMemoryTypes, TestCFileBothCacheMemoryTypes,
 
 template <DataType type>
 void CopyOne(CFileIterator* it, typename TypeTraits<type>::cpp_type* ret, RowBlockMemory* mem) {
-  ColumnBlock cb(GetTypeInfo(type), false, nullptr, ret, 1, mem);
+  ColumnBlock cb(GetTypeInfo(type), nullptr, ret, 1, mem);
   SelectionVector sel(1);
   ColumnMaterializationContext ctx(0, nullptr, &cb, &sel);
   ctx.SetDecoderEvalNotSupported();
@@ -783,7 +782,7 @@ TEST_P(TestCFileBothCacheMemoryTypes, TestMetadata) {
     ASSERT_OK(fs_manager_->CreateNewBlock({}, &sink));
     block_id = sink->id();
     WriterOptions opts;
-    CFileWriter w(opts, GetTypeInfo(INT32), false, false, std::move(sink));
+    CFileWriter w(opts, GetTypeInfo(INT32), false, std::move(sink));
 
     w.AddMetadataPair("key_in_header", "header value");
     ASSERT_OK(w.Start());
@@ -825,7 +824,7 @@ TEST_P(TestCFileBothCacheMemoryTypes, TestDefaultColumnIter) {
   // Test Int Default Value
   uint32_t int_value = 15;
   DefaultColumnValueIterator iter(GetTypeInfo(UINT32), &int_value);
-  ColumnBlock int_col(GetTypeInfo(UINT32), false, nullptr, data, kNumItems, nullptr);
+  ColumnBlock int_col(GetTypeInfo(UINT32), nullptr, data, kNumItems, nullptr);
   SelectionVector sel(kNumItems);
   ColumnMaterializationContext int_ctx = CreateNonDecoderEvalContext(&int_col, &sel);
   ASSERT_OK(iter.Scan(&int_ctx));
@@ -836,7 +835,7 @@ TEST_P(TestCFileBothCacheMemoryTypes, TestDefaultColumnIter) {
   // Test Int Nullable Default Value
   int_value = 321;
   DefaultColumnValueIterator nullable_iter(GetTypeInfo(UINT32), &int_value);
-  ColumnBlock nullable_col(GetTypeInfo(UINT32), false, non_null_bitmap, data, kNumItems, nullptr);
+  ColumnBlock nullable_col(GetTypeInfo(UINT32), non_null_bitmap, data, kNumItems, nullptr);
   ColumnMaterializationContext nullable_ctx = CreateNonDecoderEvalContext(&nullable_col, &sel);
   ASSERT_OK(nullable_iter.Scan(&nullable_ctx));
   for (size_t i = 0; i < nullable_col.nrows(); ++i) {
@@ -846,7 +845,7 @@ TEST_P(TestCFileBothCacheMemoryTypes, TestDefaultColumnIter) {
 
   // Test NULL Default Value
   DefaultColumnValueIterator null_iter(GetTypeInfo(UINT32),  nullptr);
-  ColumnBlock null_col(GetTypeInfo(UINT32), false, non_null_bitmap, data, kNumItems, nullptr);
+  ColumnBlock null_col(GetTypeInfo(UINT32), non_null_bitmap, data, kNumItems, nullptr);
   ColumnMaterializationContext null_ctx = CreateNonDecoderEvalContext(&null_col, &sel);
   ASSERT_OK(null_iter.Scan(&null_ctx));
   for (size_t i = 0; i < null_col.nrows(); ++i) {
@@ -858,7 +857,7 @@ TEST_P(TestCFileBothCacheMemoryTypes, TestDefaultColumnIter) {
   Slice str_value("Hello");
   RowBlockMemory mem;
   DefaultColumnValueIterator str_iter(GetTypeInfo(STRING), &str_value);
-  ColumnBlock str_col(GetTypeInfo(STRING), false, nullptr, str_data, kNumItems, &mem);
+  ColumnBlock str_col(GetTypeInfo(STRING), nullptr, str_data, kNumItems, &mem);
   ColumnMaterializationContext str_ctx = CreateNonDecoderEvalContext(&str_col, &sel);
   ASSERT_OK(str_iter.Scan(&str_ctx));
   for (size_t i = 0; i < str_col.nrows(); ++i) {
@@ -900,7 +899,7 @@ TEST_P(TestCFileBothCacheMemoryTypes, TestDataCorruption) {
   opts.write_validx = false;
   opts.storage_attributes.cfile_block_size = FLAGS_cfile_test_block_size;
   opts.storage_attributes.encoding = PLAIN_ENCODING;
-  CFileWriter w(opts, GetTypeInfo(STRING), false, false, std::move(sink));
+  CFileWriter w(opts, GetTypeInfo(STRING), false, std::move(sink));
   w.AddMetadataPair("header_key", "header_value");
   ASSERT_OK(w.Start());
   vector<Slice> slices;
@@ -976,7 +975,7 @@ TEST_P(TestCFileBothCacheMemoryTypes, TestReleaseBlock) {
   ASSERT_OK(fs_manager_->CreateNewBlock({}, &sink));
   ASSERT_EQ(WritableBlock::CLEAN, sink->state());
   WriterOptions opts;
-  CFileWriter w(opts, GetTypeInfo(STRING), false, false, std::move(sink));
+  CFileWriter w(opts, GetTypeInfo(STRING), false, std::move(sink));
   ASSERT_OK(w.Start());
   BlockManager* bm = fs_manager_->block_manager();
   unique_ptr<fs::BlockCreationTransaction> transaction = bm->NewCreationTransaction();

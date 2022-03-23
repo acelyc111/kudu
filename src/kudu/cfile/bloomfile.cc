@@ -111,7 +111,6 @@ BloomFileWriter::BloomFileWriter(unique_ptr<WritableBlock> block,
   writer_.reset(new cfile::CFileWriter(std::move(opts),
                                        GetTypeInfo(BINARY),
                                        false,
-                                       false,
                                        std::move(block)));
 }
 

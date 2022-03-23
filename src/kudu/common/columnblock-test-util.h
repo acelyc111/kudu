@@ -36,7 +36,6 @@ class ScopedColumnBlock : public ColumnBlock {
 
   explicit ScopedColumnBlock(size_t n_rows, bool allow_nulls = true, bool update_if_null = false)
       : ColumnBlock(GetTypeInfo(type),
-                    update_if_null,
                     allow_nulls ? new uint8_t[BitmapSize(n_rows)] : nullptr,
                     new cpp_type[n_rows],
                     n_rows,

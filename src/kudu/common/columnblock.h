@@ -46,7 +46,6 @@ class ColumnBlock {
   typedef ColumnBlockCell Cell;
 
   ColumnBlock(const TypeInfo* type,
-              bool update_if_null,
               uint8_t* non_null_bitmap,
               void* data,
               size_t nrows,
