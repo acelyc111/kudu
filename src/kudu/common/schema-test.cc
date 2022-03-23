@@ -492,7 +492,7 @@ TEST_F(TestSchema, TestGetMappedReadProjection) {
   const bool kReadDefault = false;
   Schema projection({ ColumnSchema("key", STRING),
                       ColumnSchema("deleted", IS_DELETED,
-                                   /*is_nullable=*/false, /*update_if_null=*/false,
+                                   /*is_nullable=*/false, /*is_immutable=*/false,
                                    /*read_default=*/&kReadDefault) },
                     1);
 
@@ -521,7 +521,7 @@ TEST_F(TestSchema, TestGetMappedReadProjection) {
   Status s = nullable_projection.Reset({ ColumnSchema("key", STRING),
                                          ColumnSchema("deleted", IS_DELETED,
                                                       /*is_nullable=*/true,
-                                                      /*update_if_null=*/false,
+                                                      /*is_immutable=*/false,
                                                       /*read_default=*/&kReadDefault) },
                                        1);
   ASSERT_FALSE(s.ok());
@@ -531,7 +531,7 @@ TEST_F(TestSchema, TestGetMappedReadProjection) {
   s = no_default_projection.Reset({ ColumnSchema("key", STRING),
                                     ColumnSchema("deleted", IS_DELETED,
                                                  /*is_nullable=*/false,
-                                                 /*update_if_null=*/false,
+                                                 /*is_immutable=*/false,
                                                  /*read_default=*/nullptr) },
                                   1);
   ASSERT_FALSE(s.ok());

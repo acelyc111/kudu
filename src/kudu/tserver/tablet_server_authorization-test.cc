@@ -594,7 +594,7 @@ class ScanPrivilegeAuthzTest : public AuthzTabletServerTestBase,
       auto* projected_column = pb.add_projected_columns();
       bool default_bool = false;
       ColumnSchemaToPB(ColumnSchema("is_deleted", DataType::IS_DELETED, /*is_nullable=*/false,
-                                    /*update_if_null=*/false,
+                                    /*is_immutable=*/false,
                                     /*read_default=*/&default_bool, nullptr), projected_column);
     }
     CHECK_OK(GenerateScanAuthzToken(privilege, pb.mutable_authz_token()));

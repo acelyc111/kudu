@@ -273,7 +273,6 @@ Status RowChangeListDecoder::ApplyToOneColumn(size_t row_idx, ColumnBlock* dst_c
   const ColumnSchema& col_schema = dst_schema.column(col_idx);
   ColumnId col_id = dst_schema.column_id(col_idx);
   bool update_if_null = col_schema.update_if_null();
-  // LOG(WARNING) << "update_if_null: " << update_if_null;
 
   while (HasNext()) {
     DecodedUpdate dec;

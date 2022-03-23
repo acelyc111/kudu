@@ -400,10 +400,7 @@ Status DeltaPreparer<Traits>::ApplyUpdates(size_t col_to_apply, ColumnBlock* dst
     }
     SimpleConstCell src(col_schema, cu.new_val_ptr);
     ColumnBlock::Cell dst_cell = dst->cell(idx_in_block);
-    // LOG(WARNING) << "update_if_null: " << update_if_null;
-    // LOG(WARNING) << "dst value: " << dst->ToString();
     RETURN_NOT_OK(CopyCell(src, &dst_cell, dst->arena(), update_if_null));
-    // LOG(WARNING) << "dst value: " << dst->ToString();
   }
 
   return Status::OK();

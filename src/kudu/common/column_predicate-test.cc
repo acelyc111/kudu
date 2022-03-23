@@ -1463,7 +1463,7 @@ TEST_F(TestColumnPredicate, TestEquals) {
 
   const int kDefaultOf3 = 3;
   ColumnSchema c1dflt("c1", INT32, /*is_nullable=*/false,
-                      /*update_if_null=*/false, /*read_default=*/&kDefaultOf3);
+                      /*is_immutable=*/false, /*read_default=*/&kDefaultOf3);
   ASSERT_NE(ColumnPredicate::None(c1), ColumnPredicate::None(c1dflt));
 }
 

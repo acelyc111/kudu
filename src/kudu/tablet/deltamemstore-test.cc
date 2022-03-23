@@ -664,7 +664,7 @@ TEST_F(TestDeltaMemStore, TestFuzz) {
       ASSERT_OK(sb.AddNullableColumn(Substitute("col$0", i), UINT32));
     } else if (prng.Uniform(10) == 1) {
       ASSERT_OK(sb.AddColumn(Substitute("col$0", i), UINT32, /*is_nullable=*/ true,
-                             /*update_if_null=*/ true, nullptr, nullptr));
+                             /*is_immutable=*/ false, nullptr, nullptr));
     } else {
       ASSERT_OK(sb.AddColumn(Substitute("col$0", i), UINT32));
     }
