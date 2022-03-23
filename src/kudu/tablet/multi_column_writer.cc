@@ -88,7 +88,6 @@ Status MultiColumnWriter::Open() {
         std::move(opts),
         col.type_info(),
         col.is_nullable(),
-        col.update_if_null(),
         std::move(block)));
     RETURN_NOT_OK_PREPEND(writer->Start(),
                           "Unable to Start() writer for column " + col.ToString());

@@ -799,7 +799,6 @@ Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
     return s;
   }
 
-  // imm: check immutable before insert
   // Now try to op into memrowset. The memrowset itself will return
   // AlreadyPresent if it has already been inserted there.
   Status s = comps->memrowset->Insert(ts, row, op_state->op_id());
