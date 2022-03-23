@@ -622,7 +622,6 @@ Status DeltaFileIterator<Type>::PrepareBatch(size_t nrows, int prepare_flags) {
   if (!delta_blocks_.empty()) {
     PreparedDeltaBlock& block = *delta_blocks_.front();
     int i = 0;
-    // TODO 结束条件是 block.prepared_block_start_idx_ + block.decoder_->Count() 吧？
     for (i = block.prepared_block_start_idx_;
          i < block.decoder_->Count();
          i++) {
@@ -666,7 +665,6 @@ Status DeltaFileIterator<Type>::AddDeltas(rowid_t start_row, rowid_t stop_row) {
     }
 
     bool finished_row = false;
-    // TODO 同上
     for (int i = block->prepared_block_start_idx_; i < bpd.Count(); i++) {
       Slice slice = bpd.string_at_index(i);
 

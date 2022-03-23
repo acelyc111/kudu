@@ -728,7 +728,6 @@ Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
 
   if (op->present_in_rowset) {
     switch (op_type) {
-      // add UPSERT_IGNORE, and pass it to ApplyUpsertAsUpdate
       case RowOperationsPB::UPSERT:
       case RowOperationsPB::UPSERT_IGNORE:
         Status s = ApplyUpsertAsUpdate(io_context, op_state, op, op->present_in_rowset, stats);
@@ -783,7 +782,6 @@ Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
       op->SetFailed(s);
       return s;
     }
-    // imm: check immutable before insert
     const auto* txn_rowsets = DCHECK_NOTNULL(op_state->txn_rowsets());
     Status s = txn_rowsets->memrowset->Insert(ts, row, op_state->op_id());
     // TODO(awong): once we support transactional updates, update this to check
@@ -1315,8 +1313,8 @@ Status Tablet::ApplyRowOperation(const IOContext* io_context,
     case RowOperationsPB::UPSERT:
     case RowOperationsPB::UPSERT_IGNORE:
       s = InsertOrUpsertUnlocked(io_context, op_state, row_op, stats);
-      if (s.IsAlreadyPresent()) {
-        // add cond on immutable column update
+      if (s.IsAlreadyPresent() || s.IsInvalidArgument()) {
+        // add cond on immutable column update ?
         return Status::OK();
       }
       return s;

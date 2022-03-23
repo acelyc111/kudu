@@ -306,16 +306,13 @@ Status DeltaPreparer<Traits>::AddDelta(const DeltaKey& key, Slice val, bool* fin
         const void* col_val;
         RETURN_NOT_OK(dec.Validate(*opts_.projection, &col_idx, &col_val));
         if (col_idx == -1) {
-          // TODO 可否直接跳过？
           // This column isn't being projected.
           continue;
         }
 
         // If we already have an earlier update for the same column, we can
         // just overwrite that one.
-        // TODO 更新注释
         if (updates_by_col_[col_idx].empty() ||
-            // TODO 这是什么意思？
             updates_by_col_[col_idx].back().row_id != key.row_idx()) {
           updates_by_col_[col_idx].emplace_back();
         }
@@ -323,18 +320,12 @@ Status DeltaPreparer<Traits>::AddDelta(const DeltaKey& key, Slice val, bool* fin
         ColumnUpdate& cu = updates_by_col_[col_idx].back();
         cu.row_id = key.row_idx();
         if (col_val == nullptr) {
-          if (!opts_.projection->column(col_idx).update_if_null()) {
-            cu.new_val_ptr = nullptr;
-          }
+          cu.new_val_ptr = nullptr;
         } else {
-          if (!opts_.projection->column(col_idx).update_if_null() || cu.new_val_ptr == nullptr) {
-            int col_size = opts_.projection->column(col_idx).type_info()->size();
-            DCHECK_LE(col_size, 16);
-            memcpy(cu.new_val_buf, col_val, col_size);
-            // NOTE: we're constructing a pointer here to an element inside the deque.
-            // This is safe because deques never invalidate pointers to their elements.
-            cu.new_val_ptr = cu.new_val_buf;
-          }
+          memcpy(cu.new_val_buf, col_val, col_size);
+          // NOTE: we're constructing a pointer here to an element inside the deque.
+          // This is safe because deques never invalidate pointers to their elements.
+          cu.new_val_ptr = cu.new_val_buf;
         }
         may_have_deltas_ = true;
       }
@@ -390,8 +381,6 @@ Status DeltaPreparer<Traits>::ApplyUpdates(size_t col_to_apply, ColumnBlock* dst
   }
 
   const ColumnSchema* col_schema = &opts_.projection->column(col_to_apply);
-  bool update_if_null = col_schema->update_if_null();
-  // LOG(WARNING) << "updates_by_col_[col_to_apply] size: " << updates_by_col_[col_to_apply].size();
   for (const ColumnUpdate& cu : updates_by_col_[col_to_apply]) {
     int32_t idx_in_block = cu.row_id - prev_prepared_idx_;
     DCHECK_GE(idx_in_block, 0);
@@ -400,7 +389,8 @@ Status DeltaPreparer<Traits>::ApplyUpdates(size_t col_to_apply, ColumnBlock* dst
     }
     SimpleConstCell src(col_schema, cu.new_val_ptr);
     ColumnBlock::Cell dst_cell = dst->cell(idx_in_block);
-    RETURN_NOT_OK(CopyCell(src, &dst_cell, dst->arena(), update_if_null));
+    // check immutable
+    RETURN_NOT_OK(CopyCell(src, &dst_cell, dst->arena()));
   }
 
   return Status::OK();

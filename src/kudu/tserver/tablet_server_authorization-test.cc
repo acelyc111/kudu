@@ -474,7 +474,7 @@ string GenerateEncodedKey(int32_t val, const Schema& schema) {
 // Returns a column schema PB that matches 'col', but has a different name.
 void MisnamedColumnSchemaToPB(const ColumnSchema& col, ColumnSchemaPB* pb) {
   ColumnSchemaToPB(ColumnSchema(kDummyColumn, col.type_info()->physical_type(), col.is_nullable(),
-                                col.update_if_null(), col.read_default_value(),
+                                col.is_immutable(), col.read_default_value(),
                                 col.write_default_value(), col.attributes(),
                                 col.type_attributes()), pb);
 }
