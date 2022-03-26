@@ -731,7 +731,7 @@ Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
       case RowOperationsPB::UPSERT:
       case RowOperationsPB::UPSERT_IGNORE: {
         Status s = ApplyUpsertAsUpdate(io_context, op_state, op, op->present_in_rowset, stats);
-        if (s.IsInvalidArgument() && op_type == RowOperationsPB::UPSERT_IGNORE) {
+        if (s.IsImmutable() && op_type == RowOperationsPB::UPSERT_IGNORE) {
           op->SetErrorIgnored();
           s = Status::OK();
         }
@@ -809,7 +809,7 @@ Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
         case RowOperationsPB::UPSERT:
         case RowOperationsPB::UPSERT_IGNORE: {
           Status s = ApplyUpsertAsUpdate(io_context, op_state, op, comps->memrowset.get(), stats);
-          if (s.IsInvalidArgument() && op_type == RowOperationsPB::UPSERT_IGNORE) {
+          if (s.IsImmutable() && op_type == RowOperationsPB::UPSERT_IGNORE) {
             op->SetErrorIgnored();
             s = Status::OK();
           }
@@ -837,6 +837,8 @@ Status Tablet::ApplyUpsertAsUpdate(const IOContext* io_context,
                                    RowOp* upsert,
                                    RowSet* rowset,
                                    ProbeStats* stats) {
+  auto op_type = upsert->decoded_op.type;
+  bool error_ignored = false;
   const auto* schema = this->schema().get();
   ConstContiguousRow row(schema, upsert->decoded_op.row_data);
   faststring buf;
@@ -848,8 +850,13 @@ Status Tablet::ApplyUpsertAsUpdate(const IOContext* io_context,
     if (!BitmapTest(upsert->decoded_op.isset_bitmap, i)) continue;
     const auto& c = schema->column(i);
     if (c.is_immutable()) {
-      // TODO(yingchun): use a more specific error code?
-      return Status::InvalidArgument("UPDATE not allowed for immutable column", c.ToString());
+      if (op_type == RowOperationsPB::UPSERT) {
+        return Status::Immutable("UPDATE not allowed for immutable column (2)", c.ToString());
+      } else {
+        DCHECK_EQ(op_type, RowOperationsPB::UPSERT_IGNORE);
+        error_ignored = true;
+        continue;
+      }
     }
 
     const void* val = c.is_nullable() ? row.nullable_cell_ptr(i) : row.cell_ptr(i);
@@ -864,6 +871,9 @@ Status Tablet::ApplyUpsertAsUpdate(const IOContext* io_context,
       op_state->pb_arena());
   if (enc.is_empty()) {
     upsert->SetMutateSucceeded(result);
+    if (error_ignored) {
+      upsert->error_ignored = true;
+    }
     return Status::OK();
   }
 

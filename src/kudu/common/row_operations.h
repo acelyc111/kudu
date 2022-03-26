@@ -93,6 +93,9 @@ struct DecodedRowOperation {
   // Per-row result status.
   Status result;
 
+  // True if an ignore op was ignored due to an error.
+  bool error_ignored = false;
+
   // Stringifies, including redaction when appropriate.
   std::string ToString(const Schema& schema) const;
 

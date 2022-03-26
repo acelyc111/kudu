@@ -2973,7 +2973,7 @@ static Status ApplyUpdateIgnoreToSession(KuduSession* session,
   }
   if (non_null_with_default) {
     RETURN_NOT_OK(update_ignore->mutable_row()->SetInt32("non_null_with_default",
-                                                  non_null_with_default.get()));
+                                                         non_null_with_default.get()));
   }
   if (immutable_val) {
     RETURN_NOT_OK(update_ignore->mutable_row()->SetInt32("immutable_val",
@@ -3136,27 +3136,41 @@ TEST_F(ClientTest, TestUpdateOnImmutable) {
   {
     // UPDATE on the row with immutable updates.
     Status s = ApplyUpdateToSession(session.get(), client_table_,
-                                    1, 2, boost::none, boost::none, 9990);
-    ASSERT_TRUE(s.IsInvalidArgument());
+                                    1, 2, boost::none, boost::none, 999);
+    ASSERT_FALSE(s.ok());
+    ASSERT_EQ(1, session->CountPendingErrors());
+    vector<KuduError*> errors;
+    bool overflowed = false;
+    session->GetPendingErrors(&errors, &overflowed);
+    ASSERT_EQ(1, errors.size());
+    LOG(INFO) << errors[0]->status().ToString();
+    ASSERT_TRUE(errors[0]->status().IsImmutable());
     DoTestVerifyRows(client_table_, 1);
 
     // UPDATE on the row with immutable updates.
     s = ApplyUpdateToSession(session.get(), client_table_,
-                             1, 2, boost::none, boost::none, boost::none, 9990);
-    ASSERT_TRUE(s.IsInvalidArgument());
+                             1, 2, boost::none, boost::none, boost::none, 999);
+    ASSERT_FALSE(s.ok());
+    ASSERT_EQ(1, session->CountPendingErrors());
+    session->GetPendingErrors(&errors, &overflowed);
+    ASSERT_EQ(1, errors.size());
+    LOG(INFO) << errors[0]->status().ToString();
+    ASSERT_TRUE(errors[0]->status().IsImmutable());
     DoTestVerifyRows(client_table_, 1);
   }
 
   {
     // UPDATE_IGNORE on the row with immutable updates.
     ASSERT_OK(ApplyUpdateIgnoreToSession(session.get(), client_table_,
-                                         1, boost::none, boost::none, 9990));
-    DoTestVerifyRow(client_table_, 1, 2, "hello 1", 3, 999, 54321);
+                                         1, 2, boost::none, boost::none,
+                                         999));
+    DoTestVerifyRows(client_table_, 1);
 
     // UPDATE_IGNORE on the row with immutable updates.
     ASSERT_OK(ApplyUpdateIgnoreToSession(session.get(), client_table_,
-                                         1, boost::none, boost::none, boost::none, 12345));
-    DoTestVerifyRow(client_table_, 1, 2, "hello 1", 3, 999, 54321);
+                                         1, 2, boost::none, boost::none,
+                                         boost::none, 999));
+    DoTestVerifyRows(client_table_, 1);
   }
 }
 
