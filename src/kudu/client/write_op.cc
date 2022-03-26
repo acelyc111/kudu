@@ -145,6 +145,13 @@ KuduUpsert::KuduUpsert(const shared_ptr<KuduTable>& table)
 
 KuduUpsert::~KuduUpsert() {}
 
+// UpsertIgnore -----------------------------------------------------------------
+
+KuduUpsertIgnore::KuduUpsertIgnore(const shared_ptr<KuduTable>& table)
+    : KuduWriteOperation(table) {
+}
+
+KuduUpsertIgnore::~KuduUpsertIgnore() {}
 
 } // namespace client
 } // namespace kudu

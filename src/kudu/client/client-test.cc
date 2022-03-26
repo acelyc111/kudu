@@ -2962,13 +2962,13 @@ static Status ApplyUpdateIgnoreToSession(KuduSession* session,
                                          boost::optional<int> non_null_with_default = boost::none,
                                          boost::optional<int> immutable_val = boost::none,
                                          boost::optional<int> immutable_val_with_default = boost::none) {
-  unique_ptr<UpdateIgnore> update_ignore(table->NewUpdateIgnore());
+  unique_ptr<KuduUpdateIgnore> update_ignore(table->NewUpdateIgnore());
   RETURN_NOT_OK(update_ignore->mutable_row()->SetInt32("key", key));
   if (int_val) {
-    RETURN_NOT_OK(update_ignore->mutable_row()->SetInt32("int_val", int_val));
+    RETURN_NOT_OK(update_ignore->mutable_row()->SetInt32("int_val", int_val.get()));
   }
   if (string_val) {
-    RETURN_NOT_OK(update_ignore->mutable_row()->SetStringCopy("string_val", string_val));
+    RETURN_NOT_OK(update_ignore->mutable_row()->SetStringCopy("string_val", string_val.get()));
   }
   if (non_null_with_default) {
     RETURN_NOT_OK(update_ignore->mutable_row()->SetInt32("non_null_with_default",
@@ -3065,13 +3065,18 @@ static Status ApplyUpsertIgnoreToSession(KuduSession* session,
                                          int row_key,
                                          int int_val,
                                          const char* string_val,
-                                         boost::optional<int> immutable_val = boost::none) {
-  unique_ptr<KuduUpsertIgnore> upsert(table->NewUpsert());
+                                         boost::optional<int> immutable_val = boost::none,
+                                         boost::optional<int> immutable_val_with_default = boost::none) {
+  unique_ptr<KuduUpsertIgnore> upsert(table->NewUpsertIgnore());
   RETURN_NOT_OK(upsert->mutable_row()->SetInt32("key", row_key));
   RETURN_NOT_OK(upsert->mutable_row()->SetInt32("int_val", int_val));
   RETURN_NOT_OK(upsert->mutable_row()->SetStringCopy("string_val", string_val));
   if (immutable_val) {
     RETURN_NOT_OK(upsert->mutable_row()->SetInt32("immutable_val", immutable_val.get()));
+  }
+  if (immutable_val_with_default) {
+    RETURN_NOT_OK(upsert->mutable_row()->SetInt32("immutable_val_with_default",
+                                                  immutable_val_with_default.get()));
   }
   return session->Apply(upsert.release());
 }
@@ -3082,7 +3087,8 @@ static Status ApplyUpdateToSession(KuduSession* session,
                                    int int_val,
                                    boost::optional<const char*> string_val = boost::none,
                                    boost::optional<int> non_null_with_default = boost::none,
-                                   boost::optional<int> immutable_val = boost::none) {
+                                   boost::optional<int> immutable_val = boost::none,
+                                   boost::optional<int> immutable_val_with_default = boost::none) {
   unique_ptr<KuduUpdate> update(table->NewUpdate());
   RETURN_NOT_OK(update->mutable_row()->SetInt32("key", row_key));
   RETURN_NOT_OK(update->mutable_row()->SetInt32("int_val", int_val));
@@ -3090,11 +3096,15 @@ static Status ApplyUpdateToSession(KuduSession* session,
     RETURN_NOT_OK(update->mutable_row()->SetStringCopy("string_val", string_val.get()));
   }
   if (non_null_with_default) {
-    RETURN_NOT_OK(insert->mutable_row()->SetInt32("non_null_with_default",
+    RETURN_NOT_OK(update->mutable_row()->SetInt32("non_null_with_default",
                                                   non_null_with_default.get()));
   }
   if (immutable_val) {
-    RETURN_NOT_OK(upsert->mutable_row()->SetInt32("immutable_val", immutable_val.get()));
+    RETURN_NOT_OK(update->mutable_row()->SetInt32("immutable_val", immutable_val.get()));
+  }
+  if (immutable_val_with_default) {
+    RETURN_NOT_OK(update->mutable_row()->SetInt32("immutable_val_with_default",
+                                                  immutable_val_with_default.get()));
   }
   return session->Apply(update.release());
 }
@@ -3124,29 +3134,28 @@ TEST_F(ClientTest, TestUpdateOnImmutable) {
 
   {
     // UPDATE on the row with immutable updates.
-    Status s = ApplyUpdateToSession(session, client_table_,
-                                    1, boost::none, boost::none, 9990);
-    ASSERT(s.IsInvalidArgument());
+    Status s = ApplyUpdateToSession(session.get(), client_table_,
+                                    1, 2, boost::none, boost::none, 9990);
+    ASSERT_TRUE(s.IsInvalidArgument());
     DoTestVerifyRows(client_table_, 1);
 
     // UPDATE on the row with immutable updates.
-    s = ApplyUpdateToSession(session, client_table_,
-                                   1, boost::none, boost::none, boost::none, 12345);
-    ASSERT(s.IsInvalidArgument());
+    s = ApplyUpdateToSession(session.get(), client_table_,
+                             1, 2, boost::none, boost::none, boost::none, 9990);
+    ASSERT_TRUE(s.IsInvalidArgument());
     DoTestVerifyRows(client_table_, 1);
   }
 
-
   {
     // UPDATE_IGNORE on the row with immutable updates.
-    ASSERT_OK(ApplyUpdateIgnoreToSession(session, client_table_,
+    ASSERT_OK(ApplyUpdateIgnoreToSession(session.get(), client_table_,
                                          1, boost::none, boost::none, 9990));
-    DoTestVerifyRow(client_table_, 1, 999, "hello world", 999, 54321);
+    DoTestVerifyRow(client_table_, 1, 2, "hello 1", 3, 999, 54321);
 
     // UPDATE_IGNORE on the row with immutable updates.
-    ASSERT_OK(ApplyUpdateIgnoreToSession(session, client_table_,
+    ASSERT_OK(ApplyUpdateIgnoreToSession(session.get(), client_table_,
                                          1, boost::none, boost::none, boost::none, 12345));
-    DoTestVerifyRow(client_table_, 1, 999, "hello world", 999, 54321);
+    DoTestVerifyRow(client_table_, 1, 2, "hello 1", 3, 999, 54321);
   }
 }
 
@@ -3170,9 +3179,9 @@ TEST_F(ClientTest, TestUpdateIgnore) {
 
   {
     // UPDATE_IGNORE on the row successfully.
-    ASSERT_OK(ApplyUpdateIgnoreToSession(session, client_table_,
-                                         1, 999, "hello world", 999));
-    DoTestVerifyRow(client_table_, 1, 999, "hello world", 999, 54321);
+    ASSERT_OK(ApplyUpdateIgnoreToSession(session.get(), client_table_,
+                                         1, 2, "hello world", 999));
+    DoTestVerifyRow(client_table_, 1, 2, "hello world", 3, 999, 54321);
   }
 }
 
@@ -4589,27 +4598,27 @@ TEST_F(ClientTest, TestUpsertOnImmutable) {
 
   {
     // UPSERT on the row with immutable updates.
-    Status s = ApplyUpsertToSession(session, client_table_,
+    Status s = ApplyUpsertToSession(session.get(), client_table_,
                                     1, 1, "hello world", 9990);
-    ASSERT(s.IsInvalidArgument());
+    ASSERT_TRUE(s.IsInvalidArgument());
     DoTestVerifyRows(client_table_, 1);
 
     // UPSERT on the row with immutable updates.
-    s = ApplyUpsertToSession(session, client_table_,
+    s = ApplyUpsertToSession(session.get(), client_table_,
                              1, 1, "hello world", boost::none, 9990);
-    ASSERT(s.IsInvalidArgument());
+    ASSERT_TRUE(s.IsInvalidArgument());
     DoTestVerifyRows(client_table_, 1);
   }
 
   {
     // UPSERT_IGNORE on the row with immutable updates.
-    ASSERT_OK(ApplyUpsertToSession(session, client_table_,
-                                   1, 1, "hello world", 9990));
+    ASSERT_OK(ApplyUpsertIgnoreToSession(session.get(), client_table_,
+                                         1, 1, "hello world", 9990));
     DoTestVerifyRows(client_table_, 1);
 
     // UPSERT_IGNORE on the row with immutable updates.
-    ASSERT_OK(ApplyUpsertToSession(session, client_table_,
-                                   1, 1, "hello world", boost::none, 9990));
+    ASSERT_OK(ApplyUpsertIgnoreToSession(session.get(), client_table_,
+                                         1, 1, "hello world", boost::none, 9990));
     DoTestVerifyRows(client_table_, 1);
   }
 }

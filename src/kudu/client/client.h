@@ -107,6 +107,7 @@ class KuduTabletServer;
 class KuduUpdate;
 class KuduUpdateIgnore;
 class KuduUpsert;
+class KuduUpsertIgnore;
 class KuduValue;
 class KuduWriteOperation;
 class ResourceMetrics;
