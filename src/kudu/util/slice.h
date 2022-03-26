@@ -225,7 +225,7 @@ class KUDU_EXPORT Slice {
   ///   large enough to fit the data.
   void relocate(uint8_t* d) {
     if (data_ != d) {
-      memcpy(d, data_, size_);   // 内置类型使用=是否有性能提升？
+      memcpy(d, data_, size_);
       data_ = d;
     }
   }

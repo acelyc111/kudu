@@ -1671,7 +1671,6 @@ void TabletServiceImpl::Write(const WriteRequestPB* req,
         new RpcOpCompletionCallback<WriteResponsePB>(context, resp)));
 
     // Submit the write operation. The RPC will be responded asynchronously.
-    // imm
     s = replica->SubmitWrite(std::move(op_state));
   } else {
     if (!FLAGS_enable_txn_system_client_init) {
@@ -1699,7 +1698,6 @@ void TabletServiceImpl::Write(const WriteRequestPB* req,
       return server_->tablet_manager()->SchedulePreliminaryTasksForTxnWrite(
           std::move(replica), txn_id, username, deadline, std::move(began_txn_cb));
     };
-    // imm
     s = replica->SubmitTxnWrite(std::move(op_state), scheduler);
     VLOG(2) << Substitute("submitting txn write op: $0", s.ToString());
   }
