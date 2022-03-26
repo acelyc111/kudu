@@ -74,8 +74,7 @@ class TestDeltaCompaction : public KuduTest {
 
   static Schema CreateSchema() {
     SchemaBuilder builder;
-    CHECK_OK(builder.AddColumn("val1", UINT32));
-    CHECK_OK(builder.AddColumn("val2", UINT32, true, true, nullptr, nullptr));
+    CHECK_OK(builder.AddColumn("val", UINT32));
     return builder.Build();
   }
 
@@ -116,24 +115,13 @@ TEST_F(TestDeltaCompaction, TestMergeMultipleSchemas) {
   SchemaBuilder builder(schema_);
   schemas.push_back(builder.Build());
 
-  // Add an int column with default
-  uint32_t default_c3 = 13;
-  ASSERT_OK(builder.AddColumn("c3", UINT32, false, &default_c3, &default_c3));
+  uint32_t default_c2 = 10;
+  ASSERT_OK(builder.AddColumn("c2", UINT32, false, &default_c2, &default_c2));
   schemas.push_back(builder.Build());
 
   // add a string column with default
-  Slice default_c4("Hello World");
-  ASSERT_OK(builder.AddColumn("c4", STRING, false, &default_c4, &default_c4));
-  schemas.push_back(builder.Build());
-
-  // Add an int column with default and
-  uint32_t default_c5 = 15;
-  ASSERT_OK(builder.AddColumn("c5", UINT32, true, true, &default_c5, &default_c5));
-  schemas.push_back(builder.Build());
-
-  // add a string column with default
-  Slice default_c6("Goodbye World");
-  ASSERT_OK(builder.AddColumn("c6", STRING, true, true, &default_c6, &default_c6));
+  Slice default_c3("Hello World");
+  ASSERT_OK(builder.AddColumn("c3", STRING, false, &default_c3, &default_c3));
   schemas.push_back(builder.Build());
 
   vector<shared_ptr<DeltaStore> > inputs;

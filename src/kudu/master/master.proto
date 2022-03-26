@@ -1112,7 +1112,7 @@ enum MasterFeatures {
   // Whether the cluster supports INSERT_IGNORE, DELETE_IGNORE, UPDATE_IGNORE, and UPSERT_IGNORE operations.
   // Though this is technically a tserver feature, it's unreasonable to check if every
   // tablet server supports this feature. Instead we use the master as a proxy.
-  IGNORE_OPERATIONS = 7;  // todo
+  IGNORE_OPERATIONS = 7;
 }
 
 service MasterService {
