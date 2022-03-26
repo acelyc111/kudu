@@ -1317,6 +1317,31 @@ TEST_F(TxnParticipantTest, TestInsertIgnoreInTransactionMRS) {
   ASSERT_EQ(1, rows.size());
 }
 
+// Test that INSERT_IGNORE ops work when the row exists in the transactional
+// MRS.
+//TEST_F(TxnParticipantTest, TestInsertIgnoreInTransactionMRS) {
+//  ASSERT_OK(CallParticipantOpCheckResp(kTxnId, ParticipantOpPB::BEGIN_TXN, -1));
+//
+//  // Insert into a new transactional MRS, and then INSERT_IGNORE as a part of a
+//  // transaction.
+//  vector<string> rows;
+//  ASSERT_OK(Write(0, kTxnId));
+//  ASSERT_OK(IterateToStrings(&rows));
+//  ASSERT_TRUE(rows.empty());
+//
+//  Status s = Write(0, kTxnId);
+//  ASSERT_TRUE(s.IsAlreadyPresent()) << s.ToString();
+//  ASSERT_EQ(0, tablet_replica_->tablet()->metrics()->insert_ignore_errors->value());
+//
+//  ASSERT_OK(Write(0, kTxnId, RowOperationsPB::INSERT_IGNORE));
+//  ASSERT_EQ(1, tablet_replica_->tablet()->metrics()->insert_ignore_errors->value());
+//  ASSERT_OK(CallParticipantOpCheckResp(kTxnId, ParticipantOpPB::BEGIN_COMMIT, -1));
+//  ASSERT_OK(CallParticipantOpCheckResp(kTxnId, ParticipantOpPB::FINALIZE_COMMIT,
+//                                       clock()->Now().value()));
+//  ASSERT_OK(IterateToStrings(&rows));
+//  ASSERT_EQ(1, rows.size());
+//}
+
 // Test that INSERT_IGNORE ops work when the row exists in the main MRS.
 TEST_F(TxnParticipantTest, TestInsertIgnoreInMainMRS) {
   // Disable the partition lock as there are concurrent transactions.
@@ -1342,6 +1367,31 @@ TEST_F(TxnParticipantTest, TestInsertIgnoreInMainMRS) {
   ASSERT_OK(IterateToStrings(&rows));
   ASSERT_EQ(1, rows.size());
 }
+
+//TEST_F(TxnParticipantTest, TestInsertIgnoreInMainMRS) {
+//  // Disable the partition lock as there are concurrent transactions.
+//  // TODO(awong): update this when implementing finer grained locking.
+//  FLAGS_enable_txn_partition_lock = false;
+//  ASSERT_OK(CallParticipantOpCheckResp(kTxnId, ParticipantOpPB::BEGIN_TXN, -1));
+//  // Insert into the main MRS, and then INSERT_IGNORE as a part of a
+//  // transaction.
+//  vector<string> rows;
+//  ASSERT_OK(Write(0));
+//  ASSERT_OK(IterateToStrings(&rows));
+//  ASSERT_EQ(1, rows.size());
+//
+//  Status s = Write(0, kTxnId);
+//  ASSERT_TRUE(s.IsAlreadyPresent()) << s.ToString();
+//  ASSERT_EQ(0, tablet_replica_->tablet()->metrics()->insert_ignore_errors->value());
+//
+//  ASSERT_OK(Write(0, kTxnId, RowOperationsPB::INSERT_IGNORE));
+//  ASSERT_EQ(1, tablet_replica_->tablet()->metrics()->insert_ignore_errors->value());
+//  ASSERT_OK(CallParticipantOpCheckResp(kTxnId, ParticipantOpPB::BEGIN_COMMIT, -1));
+//  ASSERT_OK(CallParticipantOpCheckResp(kTxnId, ParticipantOpPB::FINALIZE_COMMIT,
+//                                       clock()->Now().value()));
+//  ASSERT_OK(IterateToStrings(&rows));
+//  ASSERT_EQ(1, rows.size());
+//}
 
 // Test that the live row count accounts for transactional MRSs.
 TEST_F(TxnParticipantTest, TestLiveRowCountAccountsForTransactionalMRSs) {
