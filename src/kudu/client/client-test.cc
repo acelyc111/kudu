@@ -2950,7 +2950,8 @@ static void DoTestVerifyRows(const shared_ptr<KuduTable>& tbl, int num_rows) {
   for (int i = 0; i < num_rows; i++) {
     int key = i + 1;
     ASSERT_EQ(StringPrintf("(int32 key=%d, int32 int_val=%d, string string_val=\"hello %d\", "
-        "int32 non_null_with_default=%d)", key, key*2, key, key*3), rows[i]);
+        "int32 non_null_with_default=%d, int32 immutable_val=%d, "
+        "int32 immutable_val_with_default=%d)", key, key*2, key, key*3, key*4, 54321), rows[i]);
   }
 }
 
