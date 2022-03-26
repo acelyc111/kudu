@@ -115,6 +115,7 @@ TEST_F(TestDeltaCompaction, TestMergeMultipleSchemas) {
   SchemaBuilder builder(schema_);
   schemas.push_back(builder.Build());
 
+  // Add an int column with default
   uint32_t default_c2 = 10;
   ASSERT_OK(builder.AddColumn("c2", UINT32, false, &default_c2, &default_c2));
   schemas.push_back(builder.Build());
