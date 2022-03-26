@@ -143,7 +143,6 @@ Status DuplicatingRowSet::NewCompactionInput(const Schema* /*projection*/,
   return Status::OK();
 }
 
-// immu
 Status DuplicatingRowSet::MutateRow(Timestamp timestamp,
                                     const RowSetKeyProbe &probe,
                                     const RowChangeList &update,
@@ -162,7 +161,6 @@ Status DuplicatingRowSet::MutateRow(Timestamp timestamp,
   // First mutate the relevant input rowset.
   bool updated = false;
   for (const shared_ptr<RowSet> &rowset : old_rowsets_) {
-    // rowset has been checked
     Status s = rowset->MutateRow(timestamp, probe, update, op_id, io_context, stats, result);
     if (s.ok()) {
       updated = true;

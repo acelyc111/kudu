@@ -1736,8 +1736,7 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
       WriterOptions opts;
       opts.write_posidx = true;
       CFileWriter writer(
-          opts, GetTypeInfo(StringDataGenerator<false>::kDataType),
-          StringDataGenerator<false>::has_nulls(), std::move(block));
+          opts, GetTypeInfo(generator.kDataType), generator.has_nulls(), std::move(block));
       ASSERT_OK(writer.Start());
       generator.Build(kNumEntries);
       ASSERT_OK_FAST(writer.AppendEntries(generator.values(), kNumEntries));
@@ -1773,7 +1772,7 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
     ASSERT_EQ("op_type: CREATE", stdout[5]);
     ASSERT_STR_MATCHES(stdout[6], "^timestamp_us: [0-9]+$");
     ASSERT_STR_MATCHES(stdout[7], "^offset: [0-9]+$");
-    ASSERT_EQ("length: 155", stdout[8]);
+    ASSERT_EQ("length: 153", stdout[8]);
     ASSERT_EQ("", stdout[9]);
   }
 
@@ -1801,7 +1800,7 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
     ASSERT_EQ("op_type: CREATE", stdout[13]);
     ASSERT_STR_MATCHES(stdout[14], "^timestamp_us: [0-9]+$");
     ASSERT_STR_MATCHES(stdout[15], "^offset: [0-9]+$");
-    ASSERT_EQ("length: 155", stdout[16]);
+    ASSERT_EQ("length: 153", stdout[16]);
     ASSERT_EQ("", stdout[17]);
   }
 
@@ -1813,7 +1812,7 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
     ASSERT_EQ(kNumCFileBlocks, stdout.size());
     ASSERT_STR_MATCHES(stdout[0],
         "^0\tblock_id \\{ id: [0-9]+ \\} op_type: CREATE "
-        "timestamp_us: [0-9]+ offset: [0-9]+ length: 155$");
+        "timestamp_us: [0-9]+ offset: [0-9]+ length: 153$");
   }
 
   // Test dump --json
@@ -1824,7 +1823,7 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
     ASSERT_EQ(kNumCFileBlocks, stdout.size());
     ASSERT_STR_MATCHES(stdout[0],
         R"(^\{"blockId":\{"id":"[0-9]+"\},"opType":"CREATE",)"
-        R"("timestampUs":"[0-9]+","offset":"[0-9]+","length":"155"\}$$)");
+        R"("timestampUs":"[0-9]+","offset":"[0-9]+","length":"153"\}$$)");
   }
 
   // Test dump --json_pretty
@@ -1840,7 +1839,7 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
     ASSERT_EQ(R"( "opType": "CREATE",)", stdout[4]);
     ASSERT_STR_MATCHES(stdout[5], R"( "timestampUs": "[0-9]+",)");
     ASSERT_STR_MATCHES(stdout[6], R"( "offset": "[0-9]+",)");
-    ASSERT_EQ(R"( "length": "155")", stdout[7]);
+    ASSERT_EQ(R"( "length": "153")", stdout[7]);
     ASSERT_EQ(R"(})", stdout[8]);
     ASSERT_EQ("", stdout[9]);
   }
@@ -1872,7 +1871,7 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
     ASSERT_EQ(kNumCFileBlocks, stdout_lines.size());
     ASSERT_STR_MATCHES(stdout_lines[0],
                        "^0\tblock_id \\{ id: [0-9]+ \\} op_type: DELETE "
-                       "timestamp_us: [0-9]+ offset: [0-9]+ length: 155$");
+                       "timestamp_us: [0-9]+ offset: [0-9]+ length: 153$");
 
     // Make sure no backup file was written.
     bool found_backup;
@@ -1894,7 +1893,7 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
     ASSERT_EQ(kNumCFileBlocks, stdout_lines.size());
     ASSERT_STR_MATCHES(stdout_lines[0],
                        "^0\tblock_id \\{ id: [0-9]+ \\} op_type: CREATE "
-                       "timestamp_us: [0-9]+ offset: [0-9]+ length: 155$");
+                       "timestamp_us: [0-9]+ offset: [0-9]+ length: 153$");
 
     // Make sure no backup file was written.
     bool found_backup;
@@ -1952,7 +1951,7 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
     ASSERT_EQ(kNumCFileBlocks, stdout.size());
     ASSERT_STR_MATCHES(stdout[0],
                        "^0\tblock_id \\{ id: [0-9]+ \\} op_type: DELETE "
-                       "timestamp_us: [0-9]+ offset: [0-9]+ length: 155$");
+                       "timestamp_us: [0-9]+ offset: [0-9]+ length: 153$");
   }
 }
 
@@ -1969,8 +1968,8 @@ TEST_F(ToolTest, TestFsDumpCFile) {
   StringDataGenerator<false> generator("hello %04d");
   WriterOptions opts;
   opts.write_posidx = true;
-  CFileWriter writer(opts, GetTypeInfo(StringDataGenerator<false>::kDataType),
-                     StringDataGenerator<false>::has_nulls(), std::move(block));
+  CFileWriter writer(opts, GetTypeInfo(generator.kDataType),
+                     generator.has_nulls(), std::move(block));
   ASSERT_OK(writer.Start());
   generator.Build(kNumEntries);
   ASSERT_OK_FAST(writer.AppendEntries(generator.values(), kNumEntries));
