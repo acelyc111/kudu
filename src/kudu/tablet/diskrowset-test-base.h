@@ -237,20 +237,20 @@ class TestRowSet : public KuduRowSetTest {
 
   void VerifyUpdatedBlock(const uint32_t *from_file, int start_row, size_t n_rows,
                           const std::unordered_set<uint32_t> &updated) {
-    for (int j = 0; j < n_rows; j++) {
-      uint32_t idx_in_file = start_row + j;
-      int expected;
-      if (updated.count(idx_in_file) > 0) {
-        expected = idx_in_file * 5;
-      } else {
-        expected = idx_in_file;
-      }
+      for (int j = 0; j < n_rows; j++) {
+        uint32_t idx_in_file = start_row + j;
+        int expected;
+        if (updated.count(idx_in_file) > 0) {
+          expected = idx_in_file * 5;
+        } else {
+          expected = idx_in_file;
+        }
 
-      if (from_file[j] != expected) {
-        FAIL() << "Incorrect value at idx " << idx_in_file
-               << ": expected=" << expected << " got=" << from_file[j];
+        if (from_file[j] != expected) {
+          FAIL() << "Incorrect value at idx " << idx_in_file
+                 << ": expected=" << expected << " got=" << from_file[j];
+        }
       }
-    }
   }
 
   // Perform a random read of the given row key,

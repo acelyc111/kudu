@@ -490,21 +490,21 @@ TEST_F(TestRowSet, TestDeltaApplicationPerformance) {
     ASSERT_OK(OpenTestRowSet(&rs));
 
     BenchmarkIterationPerformance(*rs.get(),
-                                  StringPrintf("Reading %zd rows prior to updates %d times",
-                                               n_rows_, FLAGS_n_read_passes));
+      StringPrintf("Reading %zd rows prior to updates %d times",
+                   n_rows_, FLAGS_n_read_passes));
 
     UpdateExistingRows(rs.get(), FLAGS_update_fraction, nullptr);
 
     BenchmarkIterationPerformance(*rs.get(),
-                                  StringPrintf("Reading %zd rows with %.2f%% updates %d times (updates in DMS)",
-                                               n_rows_, FLAGS_update_fraction * 100.0f,
-                                               FLAGS_n_read_passes));
+      StringPrintf("Reading %zd rows with %.2f%% updates %d times (updates in DMS)",
+                   n_rows_, FLAGS_update_fraction * 100.0f,
+                   FLAGS_n_read_passes));
     ASSERT_OK(rs->FlushDeltas(nullptr));
 
     BenchmarkIterationPerformance(*rs.get(),
-                                  StringPrintf("Reading %zd rows with %.2f%% updates %d times (updates on disk)",
-                                               n_rows_, FLAGS_update_fraction * 100.0f,
-                                               FLAGS_n_read_passes));
+      StringPrintf("Reading %zd rows with %.2f%% updates %d times (updates on disk)",
+                   n_rows_, FLAGS_update_fraction * 100.0f,
+                   FLAGS_n_read_passes));
   }
 }
 
@@ -549,8 +549,8 @@ TEST_F(TestRowSet, TestMakeDeltaIteratorMergerUnlocked) {
                                                 &compacted_blocks, &merge_iter));
   vector<string> results;
   ASSERT_OK(DebugDumpDeltaIterator(REDO, merge_iter.get(), schema_,
-                                   ITERATE_OVER_ALL_ROWS,
-                                   &results));
+                                          ITERATE_OVER_ALL_ROWS,
+                                          &results));
   for (const string &str : results) {
     VLOG(1) << str;
   }
@@ -821,14 +821,14 @@ TEST_P(DiffScanRowSetTest, TestFuzz) {
     ASSERT_EQ(expected_rows.size(), lines.size()) << lines;
     for (int i = 0; i < expected_rows.size(); i++) {
       string expected_is_deleted = add_vc_is_deleted ? Substitute(
-                                                           ", is_deleted is_deleted=$0", std::get<3>(expected_rows[i])) : "";
+          ", is_deleted is_deleted=$0", std::get<3>(expected_rows[i])) : "";
       string expected_line = Substitute("(uint32 key=$0, "
-          "uint32 val1=$1, "
-          "uint32 val2=$2$3)",
-          std::get<0>(expected_rows[i]),
-          std::get<1>(expected_rows[i]),
-          std::get<2>(expected_rows[i]),
-          expected_is_deleted);
+                                        "uint32 val1=$1, "
+                                        "uint32 val2=$2$3)",
+                                        std::get<0>(expected_rows[i]),
+                                        std::get<1>(expected_rows[i]),
+                                        std::get<2>(expected_rows[i]),
+                                        expected_is_deleted);
       ASSERT_EQ(expected_line, lines[i]);
     }
   };
@@ -918,39 +918,39 @@ TEST_P(DiffScanRowSetTest, TestFuzz) {
   NO_FATALS(run_test(0, 2, { make_tuple(1, 2, 1000, false) }));
   NO_FATALS(run_test(1, 3, { make_tuple(1, 200, 1000, false) }));
   NO_FATALS(run_test(2, 4, { make_tuple(1, 200, 1000, false),
-                            make_tuple(2, 300, 6, false) }));
+                             make_tuple(2, 300, 6, false) }));
   NO_FATALS(run_test(3, 5, { make_tuple(2, 300, 6, false),
-                            make_tuple(3, 400, 9, false) }));
+                             make_tuple(3, 400, 9, false) }));
   NO_FATALS(run_test(4, 6, { make_tuple(3, 400, 9, true) }));
 
   NO_FATALS(run_test(0, 3, { make_tuple(1, 200, 1000, false) }));
   NO_FATALS(run_test(1, 4, { make_tuple(1, 200, 1000, false),
-                            make_tuple(2, 300, 6, false) }));
+                             make_tuple(2, 300, 6, false) }));
   NO_FATALS(run_test(2, 5, { make_tuple(1, 200, 1000, false),
-                            make_tuple(2, 300, 6, false),
-                            make_tuple(3, 400, 9, false) }));
+                             make_tuple(2, 300, 6, false),
+                             make_tuple(3, 400, 9, false) }));
   NO_FATALS(run_test(3, 6, { make_tuple(2, 300, 6, false),
-                            make_tuple(3, 400, 9, true) }));
+                             make_tuple(3, 400, 9, true) }));
 
   NO_FATALS(run_test(0, 4, { make_tuple(1, 200, 1000, false),
-                            make_tuple(2, 300, 6, false) }));
+                             make_tuple(2, 300, 6, false) }));
   NO_FATALS(run_test(1, 5, { make_tuple(1, 200, 1000, false),
-                            make_tuple(2, 300, 6, false),
-                            make_tuple(3, 400, 9, false) }));
+                             make_tuple(2, 300, 6, false),
+                             make_tuple(3, 400, 9, false) }));
   NO_FATALS(run_test(2, 6, { make_tuple(1, 200, 1000, false),
-                            make_tuple(2, 300, 6, false),
-                            make_tuple(3, 400, 9, true) }));
+                             make_tuple(2, 300, 6, false),
+                             make_tuple(3, 400, 9, true) }));
 
   NO_FATALS(run_test(0, 5, { make_tuple(1, 200, 1000, false),
-                            make_tuple(2, 300, 6, false),
-                            make_tuple(3, 400, 9, false) }));
+                             make_tuple(2, 300, 6, false),
+                             make_tuple(3, 400, 9, false) }));
   NO_FATALS(run_test(1, 6, { make_tuple(1, 200, 1000, false),
-                            make_tuple(2, 300, 6, false),
-                            make_tuple(3, 400, 9, true) }));
+                             make_tuple(2, 300, 6, false),
+                             make_tuple(3, 400, 9, true) }));
 
   NO_FATALS(run_test(0, 6, { make_tuple(1, 200, 1000, false),
-                            make_tuple(2, 300, 6, false),
-                            make_tuple(3, 400, 9, true) }));
+                             make_tuple(2, 300, 6, false),
+                             make_tuple(3, 400, 9, true) }));
 }
 
 } // namespace tablet
