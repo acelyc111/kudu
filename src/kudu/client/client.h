@@ -1561,6 +1561,11 @@ class KUDU_EXPORT KuduTable : public sp::enable_shared_from_this<KuduTable> {
   ///   KuduSession::Apply().
   KuduUpsert* NewUpsert();
 
+  /// @return New @c UPSERT_IGNORE operation for this table. It is the
+  ///   caller's responsibility to free the result, unless it is passed to
+  ///   KuduSession::Apply().
+  KuduUpsertIgnore* NewUpsertIgnore();
+
   /// @return New @c UPDATE operation for this table. It is the caller's
   ///   responsibility to free the result, unless it is passed to
   ///   KuduSession::Apply().

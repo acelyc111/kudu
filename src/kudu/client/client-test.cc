@@ -240,6 +240,9 @@ class ClientTest : public KuduTest {
     b.AddColumn("string_val")->Type(KuduColumnSchema::STRING)->Nullable();
     b.AddColumn("non_null_with_default")->Type(KuduColumnSchema::INT32)->NotNull()
       ->Default(KuduValue::FromInt(12345));
+    b.AddColumn("immutable_val")->Type(KuduColumnSchema::INT32)->NotNull()->Immutable();
+    b.AddColumn("immutable_val_with_default")->Type(KuduColumnSchema::INT32)->NotNull()->Immutable()
+      ->Default(KuduValue::FromInt(54321));
     CHECK_OK(b.Build(&schema_));
   }
 
@@ -489,6 +492,7 @@ class ClientTest : public KuduTest {
     CHECK_OK(row->SetInt32(1, index * 2));
     CHECK_OK(row->SetStringCopy(2, Slice(StringPrintf("hello %d", index))));
     CHECK_OK(row->SetInt32(3, index * 3));
+    CHECK_OK(row->SetInt32(4, index * 4));
   }
 
   static unique_ptr<KuduUpdate> UpdateTestRow(KuduTable* table, int index) {
@@ -2920,6 +2924,24 @@ TEST_F(ClientTest, TestInsertSingleRowManualBatch) {
   FlushSessionOrDie(session);
 }
 
+static void DoTestVerifyRow(const shared_ptr<KuduTable>& table,
+                            int key,
+                            int int_val,
+                            const string& string_val,
+                            int non_null_with_default,
+                            int immutable_val,
+                            int immutable_val_with_default) {
+  vector<string> rows;
+  KuduScanner scanner(table.get());
+  ASSERT_OK(ScanToStrings(&scanner, &rows));
+  ASSERT_EQ(1, rows.size());
+  ASSERT_EQ(Substitute("(int32 key=$0, int32 int_val=$1, string string_val=\"$2\", "
+                       "int32 non_null_with_default=$3, int32 immutable_val=￥4, "
+                       "int32 immutable_val_with_default=$5)",
+                       key, int_val, string_val, non_null_with_default,
+                       immutable_val, immutable_val_with_default), rows[0]);
+}
+
 static void DoTestVerifyRows(const shared_ptr<KuduTable>& tbl, int num_rows) {
   vector<string> rows;
   KuduScanner scanner(tbl.get());
@@ -2930,6 +2952,37 @@ static void DoTestVerifyRows(const shared_ptr<KuduTable>& tbl, int num_rows) {
     ASSERT_EQ(StringPrintf("(int32 key=%d, int32 int_val=%d, string string_val=\"hello %d\", "
         "int32 non_null_with_default=%d)", key, key*2, key, key*3), rows[i]);
   }
+}
+
+static Status ApplyUpdateIgnoreToSession(KuduSession* session,
+                                         const shared_ptr<KuduTable>& table,
+                                         int key,
+                                         boost::optional<int> int_val = boost::none,
+                                         boost::optional<const char*> string_val = boost::none,
+                                         boost::optional<int> non_null_with_default = boost::none,
+                                         boost::optional<int> immutable_val = boost::none,
+                                         boost::optional<int> immutable_val_with_default = boost::none) {
+  unique_ptr<UpdateIgnore> update_ignore(table->NewUpdateIgnore());
+  RETURN_NOT_OK(update_ignore->mutable_row()->SetInt32("key", key));
+  if (int_val) {
+    RETURN_NOT_OK(update_ignore->mutable_row()->SetInt32("int_val", int_val));
+  }
+  if (string_val) {
+    RETURN_NOT_OK(update_ignore->mutable_row()->SetStringCopy("string_val", string_val));
+  }
+  if (non_null_with_default) {
+    RETURN_NOT_OK(update_ignore->mutable_row()->SetInt32("non_null_with_default",
+                                                  non_null_with_default.get()));
+  }
+  if (immutable_val) {
+    RETURN_NOT_OK(update_ignore->mutable_row()->SetInt32("immutable_val",
+                                                         immutable_val.get()));
+  }
+  if (immutable_val_with_default) {
+    RETURN_NOT_OK(update_ignore->mutable_row()->SetInt32("immutable_val_with_default",
+                                                         immutable_val_with_default.get()));
+  }
+  return session->Apply(update_ignore.release());
 }
 
 TEST_F(ClientTest, TestInsertIgnore) {
@@ -2969,6 +3022,134 @@ TEST_F(ClientTest, TestInsertIgnore) {
   }
 }
 
+static Status ApplyInsertToSession(KuduSession* session,
+                                   const shared_ptr<KuduTable>& table,
+                                   int row_key,
+                                   int int_val,
+                                   const char* string_val,
+                                   boost::optional<int> non_null_with_default = boost::none) {
+  unique_ptr<KuduInsert> insert(table->NewInsert());
+  RETURN_NOT_OK(insert->mutable_row()->SetInt32("key", row_key));
+  RETURN_NOT_OK(insert->mutable_row()->SetInt32("int_val", int_val));
+  RETURN_NOT_OK(insert->mutable_row()->SetStringCopy("string_val", string_val));
+  if (non_null_with_default) {
+    RETURN_NOT_OK(insert->mutable_row()->SetInt32("non_null_with_default",
+                                                  non_null_with_default.get()));
+  }
+  return session->Apply(insert.release());
+}
+
+static Status ApplyUpsertToSession(KuduSession* session,
+                                   const shared_ptr<KuduTable>& table,
+                                   int row_key,
+                                   int int_val,
+                                   const char* string_val,
+                                   boost::optional<int> immutable_val = boost::none,
+                                   boost::optional<int> immutable_val_with_default = boost::none) {
+  unique_ptr<KuduUpsert> upsert(table->NewUpsert());
+  RETURN_NOT_OK(upsert->mutable_row()->SetInt32("key", row_key));
+  RETURN_NOT_OK(upsert->mutable_row()->SetInt32("int_val", int_val));
+  RETURN_NOT_OK(upsert->mutable_row()->SetStringCopy("string_val", string_val));
+  if (immutable_val) {
+    RETURN_NOT_OK(upsert->mutable_row()->SetInt32("immutable_val", immutable_val.get()));
+  }
+  if (immutable_val_with_default) {
+    RETURN_NOT_OK(upsert->mutable_row()->SetInt32("immutable_val_with_default",
+                                                  immutable_val_with_default.get()));
+  }
+  return session->Apply(upsert.release());
+}
+
+static Status ApplyUpsertIgnoreToSession(KuduSession* session,
+                                         const shared_ptr<KuduTable>& table,
+                                         int row_key,
+                                         int int_val,
+                                         const char* string_val,
+                                         boost::optional<int> immutable_val = boost::none) {
+  unique_ptr<KuduUpsertIgnore> upsert(table->NewUpsert());
+  RETURN_NOT_OK(upsert->mutable_row()->SetInt32("key", row_key));
+  RETURN_NOT_OK(upsert->mutable_row()->SetInt32("int_val", int_val));
+  RETURN_NOT_OK(upsert->mutable_row()->SetStringCopy("string_val", string_val));
+  if (immutable_val) {
+    RETURN_NOT_OK(upsert->mutable_row()->SetInt32("immutable_val", immutable_val.get()));
+  }
+  return session->Apply(upsert.release());
+}
+
+static Status ApplyUpdateToSession(KuduSession* session,
+                                   const shared_ptr<KuduTable>& table,
+                                   int row_key,
+                                   int int_val,
+                                   boost::optional<const char*> string_val = boost::none,
+                                   boost::optional<int> non_null_with_default = boost::none,
+                                   boost::optional<int> immutable_val = boost::none) {
+  unique_ptr<KuduUpdate> update(table->NewUpdate());
+  RETURN_NOT_OK(update->mutable_row()->SetInt32("key", row_key));
+  RETURN_NOT_OK(update->mutable_row()->SetInt32("int_val", int_val));
+  if (string_val) {
+    RETURN_NOT_OK(update->mutable_row()->SetStringCopy("string_val", string_val.get()));
+  }
+  if (non_null_with_default) {
+    RETURN_NOT_OK(insert->mutable_row()->SetInt32("non_null_with_default",
+                                                  non_null_with_default.get()));
+  }
+  if (immutable_val) {
+    RETURN_NOT_OK(upsert->mutable_row()->SetInt32("immutable_val", immutable_val.get()));
+  }
+  return session->Apply(update.release());
+}
+
+static Status ApplyDeleteToSession(KuduSession* session,
+                                   const shared_ptr<KuduTable>& table,
+                                   int row_key,
+                                   boost::optional<int> int_val = boost::none) {
+  unique_ptr<KuduDelete> del(table->NewDelete());
+  RETURN_NOT_OK(del->mutable_row()->SetInt32("key", row_key));
+  if (int_val) {
+    RETURN_NOT_OK(del->mutable_row()->SetInt32("int_val", int_val.get()));
+  }
+  return session->Apply(del.release());
+}
+
+TEST_F(ClientTest, TestUpdateOnImmutable) {
+  shared_ptr<KuduSession> session = client_->NewSession();
+  session->SetTimeoutMillis(10000);
+  ASSERT_OK(session->SetFlushMode(KuduSession::AUTO_FLUSH_SYNC));
+
+  {
+    unique_ptr<KuduInsert> insert(BuildTestInsert(client_table_.get(), 1));
+    ASSERT_OK(session->Apply(insert.release()));
+    DoTestVerifyRows(client_table_, 1);
+  }
+
+  {
+    // UPDATE on the row with immutable updates.
+    Status s = ApplyUpdateToSession(session, client_table_,
+                                    1, boost::none, boost::none, 9990);
+    ASSERT(s.IsInvalidArgument());
+    DoTestVerifyRows(client_table_, 1);
+
+    // UPDATE on the row with immutable updates.
+    s = ApplyUpdateToSession(session, client_table_,
+                                   1, boost::none, boost::none, boost::none, 12345);
+    ASSERT(s.IsInvalidArgument());
+    DoTestVerifyRows(client_table_, 1);
+  }
+
+
+  {
+    // UPDATE_IGNORE on the row with immutable updates.
+    ASSERT_OK(ApplyUpdateIgnoreToSession(session, client_table_,
+                                         1, boost::none, boost::none, 9990));
+    DoTestVerifyRow(client_table_, 1, 999, "hello world", 999, 54321);
+
+    // UPDATE_IGNORE on the row with immutable updates.
+    ASSERT_OK(ApplyUpdateIgnoreToSession(session, client_table_,
+                                         1, boost::none, boost::none, boost::none, 12345));
+    DoTestVerifyRow(client_table_, 1, 999, "hello world", 999, 54321);
+  }
+}
+
 TEST_F(ClientTest, TestUpdateIgnore) {
   shared_ptr<KuduSession> session = client_->NewSession();
   session->SetTimeoutMillis(10000);
@@ -2988,20 +3169,10 @@ TEST_F(ClientTest, TestUpdateIgnore) {
   }
 
   {
-    // UPDATE IGNORE can update row.
-    unique_ptr<KuduUpdateIgnore> update_ignore(client_table_->NewUpdateIgnore());
-    ASSERT_OK(update_ignore->mutable_row()->SetInt32("key", 1));
-    ASSERT_OK(update_ignore->mutable_row()->SetInt32("int_val", 999));
-    ASSERT_OK(update_ignore->mutable_row()->SetStringCopy("string_val", "hello world"));
-    ASSERT_OK(update_ignore->mutable_row()->SetInt32("non_null_with_default", 999));
-    ASSERT_OK(session->Apply(update_ignore.release()));
-
-    vector<string> rows;
-    KuduScanner scanner(client_table_.get());
-    ASSERT_OK(ScanToStrings(&scanner, &rows));
-    ASSERT_EQ(1, rows.size());
-    ASSERT_EQ("(int32 key=1, int32 int_val=999, string string_val=\"hello world\", "
-              "int32 non_null_with_default=999)", rows[0]);
+    // UPDATE_IGNORE on the row successfully.
+    ASSERT_OK(ApplyUpdateIgnoreToSession(session, client_table_,
+                                         1, 999, "hello world", 999));
+    DoTestVerifyRow(client_table_, 1, 999, "hello world", 999, 54321);
   }
 }
 
@@ -3056,57 +3227,6 @@ TEST_F(ClientTest, TestInsertAutoFlushSync) {
     ASSERT_OK(insert->mutable_row()->SetStringCopy("string_val", "hello world"));
     ASSERT_OK(session->Apply(insert.release()));
   }
-}
-
-static Status ApplyInsertToSession(KuduSession* session,
-                                   const shared_ptr<KuduTable>& table,
-                                   int row_key,
-                                   int int_val,
-                                   const char* string_val,
-                                   boost::optional<int> non_null_with_default = boost::none) {
-  unique_ptr<KuduInsert> insert(table->NewInsert());
-  RETURN_NOT_OK(insert->mutable_row()->SetInt32("key", row_key));
-  RETURN_NOT_OK(insert->mutable_row()->SetInt32("int_val", int_val));
-  RETURN_NOT_OK(insert->mutable_row()->SetStringCopy("string_val", string_val));
-  if (non_null_with_default) {
-    RETURN_NOT_OK(insert->mutable_row()->SetInt32("non_null_with_default",
-                                                  non_null_with_default.get()));
-  }
-  return session->Apply(insert.release());
-}
-
-static Status ApplyUpsertToSession(KuduSession* session,
-                                   const shared_ptr<KuduTable>& table,
-                                   int row_key,
-                                   int int_val,
-                                   const char* string_val) {
-  unique_ptr<KuduUpsert> upsert(table->NewUpsert());
-  RETURN_NOT_OK(upsert->mutable_row()->SetInt32("key", row_key));
-  RETURN_NOT_OK(upsert->mutable_row()->SetInt32("int_val", int_val));
-  RETURN_NOT_OK(upsert->mutable_row()->SetStringCopy("string_val", string_val));
-  return session->Apply(upsert.release());
-}
-
-static Status ApplyUpdateToSession(KuduSession* session,
-                                   const shared_ptr<KuduTable>& table,
-                                   int row_key,
-                                   int int_val) {
-  unique_ptr<KuduUpdate> update(table->NewUpdate());
-  RETURN_NOT_OK(update->mutable_row()->SetInt32("key", row_key));
-  RETURN_NOT_OK(update->mutable_row()->SetInt32("int_val", int_val));
-  return session->Apply(update.release());
-}
-
-static Status ApplyDeleteToSession(KuduSession* session,
-                                   const shared_ptr<KuduTable>& table,
-                                   int row_key,
-                                   boost::optional<int> int_val = boost::none) {
-  unique_ptr<KuduDelete> del(table->NewDelete());
-  RETURN_NOT_OK(del->mutable_row()->SetInt32("key", row_key));
-  if (int_val) {
-    RETURN_NOT_OK(del->mutable_row()->SetInt32("int_val", int_val.get()));
-  }
-  return session->Apply(del.release());
 }
 
 TEST_F(ClientTest, TestWriteTimeout) {
@@ -4454,17 +4574,75 @@ TEST_F(ClientTest, TestUpsert) {
     EXPECT_EQ(R"((int32 key=1, int32 int_val=2, string string_val="upserted row", )"
               "int32 non_null_with_default=12345)", rows[0]);
   }
+}
+
+TEST_F(ClientTest, TestUpsertOnImmutable) {
+  shared_ptr<KuduSession> session = client_->NewSession();
+  session->SetTimeoutMillis(10000);
+  ASSERT_OK(session->SetFlushMode(KuduSession::AUTO_FLUSH_SYNC));
+
+  {
+    unique_ptr<KuduInsert> insert(BuildTestInsert(client_table_.get(), 1));
+    ASSERT_OK(session->Apply(insert.release()));
+    DoTestVerifyRows(client_table_, 1);
+  }
+
+  {
+    // UPSERT on the row with immutable updates.
+    Status s = ApplyUpsertToSession(session, client_table_,
+                                    1, 1, "hello world", 9990);
+    ASSERT(s.IsInvalidArgument());
+    DoTestVerifyRows(client_table_, 1);
+
+    // UPSERT on the row with immutable updates.
+    s = ApplyUpsertToSession(session, client_table_,
+                             1, 1, "hello world", boost::none, 9990);
+    ASSERT(s.IsInvalidArgument());
+    DoTestVerifyRows(client_table_, 1);
+  }
+
+  {
+    // UPSERT_IGNORE on the row with immutable updates.
+    ASSERT_OK(ApplyUpsertToSession(session, client_table_,
+                                   1, 1, "hello world", 9990));
+    DoTestVerifyRows(client_table_, 1);
+
+    // UPSERT_IGNORE on the row with immutable updates.
+    ASSERT_OK(ApplyUpsertToSession(session, client_table_,
+                                   1, 1, "hello world", boost::none, 9990));
+    DoTestVerifyRows(client_table_, 1);
+  }
+}
+
+TEST_F(ClientTest, TestUpsertIgnore) {
+  shared_ptr<KuduSession> session = client_->NewSession();
+  ASSERT_OK(session->SetFlushMode(KuduSession::MANUAL_FLUSH));
+
+  // Perform and verify UPSERT which acts as an INSERT.
+  ASSERT_OK(ApplyUpsertToSession(session.get(), client_table_, 1, 1, "original row", 1));
+  FlushSessionOrDie(session);
+  {
+    vector<string> rows;
+    ASSERT_OK(ScanTableToStrings(client_table_.get(), &rows));
+    ASSERT_EQ(1, rows.size());
+    EXPECT_EQ(R"((int32 key=1, int32 int_val=1, string string_val="original row", )"
+              "int32 non_null_with_default=12345, int32 immutable_val=1)", rows[0]);
+  }
+
+  // Perform and verify UPSERT which acts as an UPDATE.
+  ASSERT_OK(ApplyUpsertToSession(session.get(), client_table_, 1, 2, "upserted row"));
+  FlushSessionOrDie(session);
+  {
+    vector<string> rows;
+    ASSERT_OK(ScanTableToStrings(client_table_.get(), &rows));
+    ASSERT_EQ(1, rows.size());
+    EXPECT_EQ(R"((int32 key=1, int32 int_val=2, string string_val="upserted row", )"
+              "int32 non_null_with_default=12345, int32 immutable_val=1)", rows[0]);
+  }
 
   // Apply an UPDATE including the column that has a default and verify it.
-  {
-    unique_ptr<KuduUpdate> update(client_table_->NewUpdate());
-    KuduPartialRow* row = update->mutable_row();
-    ASSERT_OK(row->SetInt32("key", 1));
-    ASSERT_OK(row->SetStringCopy("string_val", "updated row"));
-    ASSERT_OK(row->SetInt32("non_null_with_default", 999));
-    ASSERT_OK(session->Apply(update.release()));
-    FlushSessionOrDie(session);
-  }
+  ASSERT_OK(ApplyUpdateToSession(session.get(), client_table_, 1, 1, "updated row", 999));
+  FlushSessionOrDie(session);
   {
     vector<string> rows;
     ASSERT_OK(ScanTableToStrings(client_table_.get(), &rows));

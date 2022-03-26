@@ -216,6 +216,33 @@ class KUDU_EXPORT KuduUpsert : public KuduWriteOperation {
 };
 
 
+/// @brief A single row upsert ignore to be sent to the cluster, update on immutable row
+///   errors are ignored.
+///
+/// See KuduUpsert for more details.
+class KUDU_EXPORT KuduUpsertIgnore : public KuduWriteOperation {
+ public:
+  virtual ~KuduUpsertIgnore();
+
+  /// @copydoc KuduWriteOperation::ToString()
+  virtual std::string ToString() const OVERRIDE { return "UPSERT IGNORE " + row_.ToString(); }
+
+ protected:
+  /// @cond PROTECTED_MEMBERS_DOCUMENTED
+
+  /// @copydoc KuduWriteOperation::type()
+  virtual Type type() const OVERRIDE {
+    return UPSERT_IGNORE;
+  }
+
+  /// @endcond
+
+ private:
+  friend class KuduTable;
+  explicit KuduUpsertIgnore(const sp::shared_ptr<KuduTable>& table);
+};
+
+
 /// @brief A single row update to be sent to the cluster.
 ///
 /// @pre An update requires the key columns and at least one other column
@@ -242,7 +269,8 @@ class KUDU_EXPORT KuduUpdate : public KuduWriteOperation {
   explicit KuduUpdate(const sp::shared_ptr<KuduTable>& table);
 };
 
-/// @brief A single row update ignore to be sent to the cluster, missing row errors are ignored.
+/// @brief A single row update ignore to be sent to the cluster, missing row errors or
+///   update on immutable row errors are ignored.
 ///
 /// @pre An update ignore requires the key columns and at least one other column
 ///   in the schema to be set in the embedded KuduPartialRow object.

@@ -1152,6 +1152,10 @@ KuduUpsert* KuduTable::NewUpsert() {
   return new KuduUpsert(shared_from_this());
 }
 
+KuduUpsertIgnore* KuduTable::NewUpsertIgnore() {
+  return new KuduUpsertIgnore(shared_from_this());
+}
+
 KuduUpdate* KuduTable::NewUpdate() {
   return new KuduUpdate(shared_from_this());
 }
