@@ -672,7 +672,6 @@ Status DiskRowSet::NewCompactionInput(const Schema* projection,
   return CompactionInput::Create(*this, projection, snap, io_context, out);
 }
 
-// immu
 Status DiskRowSet::MutateRow(Timestamp timestamp,
                              const RowSetKeyProbe &probe,
                              const RowChangeList &update,
@@ -703,8 +702,6 @@ Status DiskRowSet::MutateRow(Timestamp timestamp,
   if (deleted) {
     return Status::NotFound("row not found");
   }
-
-  // check if any col is immutable and where we are going to update that col
 
   RETURN_NOT_OK(delta_tracker_->Update(timestamp, *row_idx, update, op_id, result));
 

@@ -390,7 +390,6 @@ Status DeltaPreparer<Traits>::ApplyUpdates(size_t col_to_apply, ColumnBlock* dst
     }
     SimpleConstCell src(col_schema, cu.new_val_ptr);
     ColumnBlock::Cell dst_cell = dst->cell(idx_in_block);
-    // check immutable
     RETURN_NOT_OK(CopyCell(src, &dst_cell, dst->arena()));
   }
 

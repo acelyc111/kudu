@@ -258,7 +258,6 @@ Status RowChangeListDecoder::MutateRowAndCaptureChanges(RowBlockRow* dst_row,
     out->EncodeColumnMutation(col_schema, dec.col_id, dst_cell.ptr());
 
     // copy the new cell to the row
-    // check immutable ?
     RETURN_NOT_OK(CopyCell(src, &dst_cell, arena));
   }
   return Status::OK();

@@ -310,6 +310,7 @@ void WriteOp::Finish(OpResult result) {
     metrics->rows_inserted->IncrementBy(op_m.successful_inserts);
     metrics->insert_ignore_errors->IncrementBy(op_m.insert_ignore_errors);
     metrics->rows_upserted->IncrementBy(op_m.successful_upserts);
+    metrics->upsert_ignore_errors->IncrementBy(op_m.upsert_ignore_errors);
     metrics->rows_updated->IncrementBy(op_m.successful_updates);
     metrics->update_ignore_errors->IncrementBy(op_m.update_ignore_errors);
     metrics->rows_deleted->IncrementBy(op_m.successful_deletes);

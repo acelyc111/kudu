@@ -241,7 +241,6 @@ Status MemRowSet::Reinsert(Timestamp timestamp, const ConstContiguousRow& row, M
   return Status::OK();
 }
 
-// immu
 Status MemRowSet::MutateRow(Timestamp timestamp,
                             const RowSetKeyProbe &probe,
                             const RowChangeList &delta,
@@ -265,8 +264,6 @@ Status MemRowSet::MutateRow(Timestamp timestamp,
     if (row.IsGhost()) {
       return Status::NotFound("not in memrowset (ghost)");
     }
-
-    // check if any col is immutable and where we are going to update that col
 
     // Append to the linked list of mutations for this row.
     Mutation *mut = Mutation::CreateInArena(arena_.get(), timestamp, delta);
