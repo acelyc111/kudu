@@ -3045,12 +3045,17 @@ static Status ApplyUpsertToSession(KuduSession* session,
                                    int row_key,
                                    int int_val,
                                    const char* string_val,
+                                   boost::optional<int> non_null_with_default = boost::none,
                                    boost::optional<int> immutable_val = boost::none,
                                    boost::optional<int> immutable_val_with_default = boost::none) {
   unique_ptr<KuduUpsert> upsert(table->NewUpsert());
   RETURN_NOT_OK(upsert->mutable_row()->SetInt32("key", row_key));
   RETURN_NOT_OK(upsert->mutable_row()->SetInt32("int_val", int_val));
   RETURN_NOT_OK(upsert->mutable_row()->SetStringCopy("string_val", string_val));
+  if (non_null_with_default) {
+    RETURN_NOT_OK(upsert->mutable_row()->SetInt32("non_null_with_default",
+                                                  non_null_with_default.get()));
+  }
   if (immutable_val) {
     RETURN_NOT_OK(upsert->mutable_row()->SetInt32("immutable_val", immutable_val.get()));
   }
@@ -3195,8 +3200,8 @@ TEST_F(ClientTest, TestUpdateIgnore) {
   {
     // UPDATE_IGNORE on the row successfully.
     ASSERT_OK(ApplyUpdateIgnoreToSession(session.get(), client_table_,
-                                         1, 2, "hello world", 999));
-    DoTestVerifyRow(client_table_, 1, 2, "hello world", 3, 999, 54321);
+                                         1, 2, boost::none, boost::none, 999));
+    DoTestVerifyRows(client_table_, 1);
   }
 }
 
@@ -4576,28 +4581,20 @@ TEST_F(ClientTest, TestUpsert) {
   ASSERT_OK(session->SetFlushMode(KuduSession::MANUAL_FLUSH));
 
   // Perform and verify UPSERT which acts as an INSERT.
-  ASSERT_OK(ApplyUpsertToSession(session.get(), client_table_, 1, 1, "original row"));
+  ASSERT_OK(ApplyUpsertToSession(session.get(), client_table_,
+                                 1, 2, "original row", 3, 4, 5));
   FlushSessionOrDie(session);
 
-  {
-    vector<string> rows;
-    ASSERT_OK(ScanTableToStrings(client_table_.get(), &rows));
-    ASSERT_EQ(1, rows.size());
-    EXPECT_EQ(R"((int32 key=1, int32 int_val=1, string string_val="original row", )"
-              "int32 non_null_with_default=12345)", rows[0]);
-  }
+  DoTestVerifyRow(client_table_,
+                  1, 2, "original row", 3, 4, 5);
 
   // Perform and verify UPSERT which acts as an UPDATE.
-  ASSERT_OK(ApplyUpsertToSession(session.get(), client_table_, 1, 2, "upserted row"));
+  ASSERT_OK(ApplyUpsertToSession(session.get(), client_table_,
+                                 1, 2, "upserted row"));
   FlushSessionOrDie(session);
 
-  {
-    vector<string> rows;
-    ASSERT_OK(ScanTableToStrings(client_table_.get(), &rows));
-    ASSERT_EQ(1, rows.size());
-    EXPECT_EQ(R"((int32 key=1, int32 int_val=2, string string_val="upserted row", )"
-              "int32 non_null_with_default=12345)", rows[0]);
-  }
+  DoTestVerifyRow(client_table_,
+                  1, 2, "upserted row", 3, 4, 5);
 }
 
 TEST_F(ClientTest, TestUpsertOnImmutable) {
