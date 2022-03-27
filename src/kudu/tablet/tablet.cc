@@ -733,9 +733,11 @@ Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
         Status s = ApplyUpsertAsUpdate(io_context, op_state, op, op->present_in_rowset, stats);
         if (s.IsImmutable() && op_type == RowOperationsPB::UPSERT_IGNORE) {
           op->SetErrorIgnored();
-          s = Status::OK();
+          return Status::OK();
+        } else {
+          op->SetFailed(s);
+          return s;
         }
-        return s;
       }
       case RowOperationsPB::INSERT_IGNORE:
         op->SetErrorIgnored();
@@ -811,9 +813,11 @@ Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
           Status s = ApplyUpsertAsUpdate(io_context, op_state, op, comps->memrowset.get(), stats);
           if (s.IsImmutable() && op_type == RowOperationsPB::UPSERT_IGNORE) {
             op->SetErrorIgnored();
-            s = Status::OK();
+            return Status::OK();
+          } else {
+            op->SetFailed(s);
+            return s;
           }
-          return s;
         }
         case RowOperationsPB::INSERT_IGNORE:
           op->SetErrorIgnored();
@@ -1325,8 +1329,8 @@ Status Tablet::ApplyRowOperation(const IOContext* io_context,
     case RowOperationsPB::UPSERT:
     case RowOperationsPB::UPSERT_IGNORE:
       s = InsertOrUpsertUnlocked(io_context, op_state, row_op, stats);
-      if (s.IsAlreadyPresent() || s.IsInvalidArgument()) {
-        // add cond on immutable column update ?
+      LOG(ERROR) << s.ToString();
+      if (s.IsAlreadyPresent() || s.IsImmutable()) {
         return Status::OK();
       }
       return s;
