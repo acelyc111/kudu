@@ -482,7 +482,7 @@ Status RowOperationsPBDecoder::DecodeInsertOrUpsert(const uint8_t* prototype_row
     } else {
       // If the client didn't provide a value, then the column must either be nullable or
       // have a default (which was already set in the prototype row).
-      if (PREDICT_FALSE(!(col.is_nullable() || col.has_write_default() || col.is_immutable()))) {
+      if (PREDICT_FALSE(!(col.is_nullable() || col.has_write_default()))) {
         op->SetFailureStatusOnce(Status::InvalidArgument("No value provided for required column",
                                                          col.ToString()));
       }
@@ -569,7 +569,7 @@ Status RowOperationsPBDecoder::DecodeUpdateOrDelete(const ClientServerMapping& m
         if (col.is_immutable()) {
           if (op->type == RowOperationsPB::UPDATE) {
             op->SetFailureStatusOnce(
-                Status::Immutable("UPDATE not allowed for immutable column (1)", col.ToString()));
+                Status::Immutable("UPDATE not allowed for immutable column", col.ToString()));
           } else {
             op->error_ignored = true;
           }

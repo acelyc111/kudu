@@ -861,7 +861,7 @@ Status Tablet::ApplyUpsertAsUpdate(const IOContext* io_context,
     const auto& c = schema->column(i);
     if (c.is_immutable()) {
       if (op_type == RowOperationsPB::UPSERT) {
-        return Status::Immutable("UPDATE not allowed for immutable column (2)", c.ToString());
+        return Status::Immutable("UPDATE not allowed for immutable column", c.ToString());
       } else {
         DCHECK_EQ(op_type, RowOperationsPB::UPSERT_IGNORE);
         error_ignored = true;
