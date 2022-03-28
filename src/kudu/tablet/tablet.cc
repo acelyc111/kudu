@@ -731,6 +731,9 @@ Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
       case RowOperationsPB::UPSERT:
       case RowOperationsPB::UPSERT_IGNORE: {
         Status s = ApplyUpsertAsUpdate(io_context, op_state, op, op->present_in_rowset, stats);
+        if (s.ok()) {
+          return Status::OK();
+        }
         if (s.IsImmutable() && op_type == RowOperationsPB::UPSERT_IGNORE) {
           op->SetErrorIgnored();
           return Status::OK();
@@ -811,6 +814,9 @@ Status Tablet::InsertOrUpsertUnlocked(const IOContext* io_context,
         case RowOperationsPB::UPSERT:
         case RowOperationsPB::UPSERT_IGNORE: {
           Status s = ApplyUpsertAsUpdate(io_context, op_state, op, comps->memrowset.get(), stats);
+          if (s.ok()) {
+            return Status::OK();
+          }
           if (s.IsImmutable() && op_type == RowOperationsPB::UPSERT_IGNORE) {
             op->SetErrorIgnored();
             return Status::OK();

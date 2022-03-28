@@ -3071,12 +3071,17 @@ static Status ApplyUpsertIgnoreToSession(KuduSession* session,
                                          int row_key,
                                          int int_val,
                                          const char* string_val,
+                                         boost::optional<int> non_null_with_default = boost::none,
                                          boost::optional<int> immutable_val = boost::none,
                                          boost::optional<int> immutable_val_with_default = boost::none) {
   unique_ptr<KuduUpsertIgnore> upsert(table->NewUpsertIgnore());
   RETURN_NOT_OK(upsert->mutable_row()->SetInt32("key", row_key));
   RETURN_NOT_OK(upsert->mutable_row()->SetInt32("int_val", int_val));
   RETURN_NOT_OK(upsert->mutable_row()->SetStringCopy("string_val", string_val));
+  if (non_null_with_default) {
+    RETURN_NOT_OK(upsert->mutable_row()->SetInt32("non_null_with_default",
+                                                  non_null_with_default.get()));
+  }
   if (immutable_val) {
     RETURN_NOT_OK(upsert->mutable_row()->SetInt32("immutable_val", immutable_val.get()));
   }
@@ -4615,29 +4620,43 @@ TEST_F(ClientTest, TestUpsertOnImmutable) {
     DoTestVerifyRows(client_table_, 1);
   }
 
-  {
-    // UPSERT on the row with immutable updates.
-    Status s = ApplyUpsertToSession(session.get(), client_table_,
-                                    1, 1, "hello world", 9990);
-    ASSERT_TRUE(s.IsInvalidArgument());
-    DoTestVerifyRows(client_table_, 1);
-
-    // UPSERT on the row with immutable updates.
-    s = ApplyUpsertToSession(session.get(), client_table_,
-                             1, 1, "hello world", boost::none, 9990);
-    ASSERT_TRUE(s.IsInvalidArgument());
-    DoTestVerifyRows(client_table_, 1);
-  }
+//  {
+//    // UPSERT on the row with immutable updates.
+//    Status s = ApplyUpsertToSession(session.get(), client_table_,
+//                                    1, 2, "hello world", 3, 9990);
+//    LOG(INFO) << s.ToString();
+//    ASSERT_FALSE(s.ok());
+//    ASSERT_EQ(1, session->CountPendingErrors());
+//    vector<KuduError*> errors;
+//    bool overflowed = false;
+//    session->GetPendingErrors(&errors, &overflowed);
+//    ASSERT_EQ(1, errors.size());
+//    LOG(INFO) << errors[0]->status().ToString();
+//    ASSERT_TRUE(errors[0]->status().IsImmutable());
+//    DoTestVerifyRows(client_table_, 1);
+//
+//    // UPSERT on the row with immutable updates.
+//    s = ApplyUpsertToSession(session.get(), client_table_,
+//                             1, 2, "hello world", 3, 4, 9990);
+//    LOG(INFO) << s.ToString();
+//    ASSERT_FALSE(s.ok());
+//    ASSERT_EQ(1, session->CountPendingErrors());
+//    session->GetPendingErrors(&errors, &overflowed);
+//    ASSERT_EQ(1, errors.size());
+//    LOG(INFO) << errors[0]->status().ToString();
+//    ASSERT_TRUE(errors[0]->status().IsImmutable());
+//    DoTestVerifyRows(client_table_, 1);
+//  }
 
   {
     // UPSERT_IGNORE on the row with immutable updates.
     ASSERT_OK(ApplyUpsertIgnoreToSession(session.get(), client_table_,
-                                         1, 1, "hello world", 9990));
+                                         1, 2, "hello 1", 3, 9990));
     DoTestVerifyRows(client_table_, 1);
 
     // UPSERT_IGNORE on the row with immutable updates.
     ASSERT_OK(ApplyUpsertIgnoreToSession(session.get(), client_table_,
-                                         1, 1, "hello world", boost::none, 9990));
+                                         1, 2, "hello 1", 3, 4, 9990));
     DoTestVerifyRows(client_table_, 1);
   }
 }
