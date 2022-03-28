@@ -482,7 +482,7 @@ Status RowOperationsPBDecoder::DecodeInsertOrUpsert(const uint8_t* prototype_row
     } else {
       // If the client didn't provide a value, then the column must either be nullable or
       // have a default (which was already set in the prototype row).
-      if (PREDICT_FALSE(!(col.is_nullable() || col.has_write_default()))) {
+      if (PREDICT_FALSE(!(col.is_nullable() || col.has_write_default() || col.is_immutable()))) {
         op->SetFailureStatusOnce(Status::InvalidArgument("No value provided for required column",
                                                          col.ToString()));
       }

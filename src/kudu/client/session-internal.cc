@@ -342,7 +342,7 @@ Status CheckForNonNullableColumns(const KuduWriteOperation& op) {
   const auto num_columns = schema->num_columns();
   for (auto idx = 0; idx < num_columns; ++idx) {
     const ColumnSchema& col = schema->column(idx);
-    if (!col.is_nullable() && !col.has_write_default() &&
+    if (!col.is_nullable() && !col.has_write_default() && !col.is_immutable() &&
         !row.IsColumnSet(idx)) {
       return Status::IllegalState(Substitute(
           "non-nullable column '$0' is not set", schema->column(idx).name()),
