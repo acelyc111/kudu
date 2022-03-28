@@ -8713,5 +8713,283 @@ TEST_F(ReplicationFactorLimitsTest, MaxReplicationFactor) {
   }
 }
 
+class ImmutableColumnTest : public ClientTest {
+ public:
+  ImmutableColumnTest() {
+    KuduSchemaBuilder b;
+    b.AddColumn("key")->Type(KuduColumnSchema::INT32)->NotNull()->PrimaryKey();
+    b.AddColumn("int_val")->Type(KuduColumnSchema::INT32)->NotNull();
+    b.AddColumn("string_val")->Type(KuduColumnSchema::STRING)->Nullable();
+    b.AddColumn("non_null_with_default")
+        ->Type(KuduColumnSchema::INT32)
+        ->NotNull()
+        ->Default(KuduValue::FromInt(12345));
+    b.AddColumn("immutable_val")->Type(KuduColumnSchema::INT32)->NotNull()->Immutable();
+    b.AddColumn("immutable_val_with_default")
+        ->Type(KuduColumnSchema::INT32)
+        ->NotNull()
+        ->Immutable()
+        ->Default(KuduValue::FromInt(54321));
+    CHECK_OK(b.Build(&schema_));
+  }
+
+  static Status ApplyInsertToSession(KuduSession* session,
+                                     const shared_ptr<KuduTable>& table,
+                                     int row_key,
+                                     int int_val,
+                                     const char* string_val,
+                                     boost::optional<int> non_null_with_default = boost::none,
+                                     boost::optional<int> immutable_val = boost::none,
+                                     boost::optional<int> immutable_val_with_default = boost::none) {
+    unique_ptr<KuduInsert> insert(table->NewInsert());
+    RETURN_NOT_OK(insert->mutable_row()->SetInt32("key", row_key));
+    RETURN_NOT_OK(insert->mutable_row()->SetInt32("int_val", int_val));
+    RETURN_NOT_OK(insert->mutable_row()->SetStringCopy("string_val", string_val));
+    if (non_null_with_default) {
+      RETURN_NOT_OK(insert->mutable_row()->SetInt32("non_null_with_default",
+                                                    non_null_with_default.get()));
+    }
+    if (immutable_val) {
+      RETURN_NOT_OK(insert->mutable_row()->SetInt32("immutable_val", immutable_val.get()));
+    }
+    if (immutable_val_with_default) {
+      RETURN_NOT_OK(insert->mutable_row()->SetInt32("immutable_val_with_default",
+                                                    immutable_val_with_default.get()));
+    }
+    return session->Apply(insert.release());
+  }
+
+  static Status ApplyUpdateToSession(KuduSession* session,
+                                     const shared_ptr<KuduTable>& table,
+                                     int row_key,
+                                     boost::optional<int> int_val = boost::none,
+                                     boost::optional<const char*> string_val = boost::none,
+                                     boost::optional<int> non_null_with_default = boost::none,
+                                     boost::optional<int> immutable_val = boost::none,
+                                     boost::optional<int> immutable_val_with_default = boost::none) {
+    unique_ptr<KuduUpdate> update(table->NewUpdate());
+    RETURN_NOT_OK(update->mutable_row()->SetInt32("key", row_key));
+    if (int_val) {
+      RETURN_NOT_OK(update->mutable_row()->SetInt32("int_val", int_val.get()));
+    }
+    if (string_val) {
+      RETURN_NOT_OK(update->mutable_row()->SetStringCopy("string_val", string_val.get()));
+    }
+    if (non_null_with_default) {
+      RETURN_NOT_OK(update->mutable_row()->SetInt32("non_null_with_default",
+                                                    non_null_with_default.get()));
+    }
+    if (immutable_val) {
+      RETURN_NOT_OK(update->mutable_row()->SetInt32("immutable_val", immutable_val.get()));
+    }
+    if (immutable_val_with_default) {
+      RETURN_NOT_OK(update->mutable_row()->SetInt32("immutable_val_with_default",
+                                                    immutable_val_with_default.get()));
+    }
+    return session->Apply(update.release());
+  }
+
+  static void DoTestVerifyRow(const shared_ptr<KuduTable>& table,
+                              int key,
+                              int int_val,
+                              const string& string_val,
+                              int non_null_with_default,
+                              int immutable_val,
+                              int immutable_val_with_default) {
+    vector<string> rows;
+    KuduScanner scanner(table.get());
+    ASSERT_OK(ScanToStrings(&scanner, &rows));
+    ASSERT_EQ(1, rows.size());
+    ASSERT_EQ(Substitute("(int32 key=$0, int32 int_val=$1, string string_val=\"$2\", "
+                         "int32 non_null_with_default=$3, int32 immutable_val=$4, "
+                         "int32 immutable_val_with_default=$5)",
+                         key, int_val, string_val, non_null_with_default,
+                         immutable_val, immutable_val_with_default), rows[0]);
+  }
+};
+
+TEST_F(ImmutableColumnTest, TestInsert) {
+  shared_ptr<KuduSession> session = client_->NewSession();
+  session->SetTimeoutMillis(10000);
+  ASSERT_OK(session->SetFlushMode(KuduSession::AUTO_FLUSH_SYNC));
+
+  // INSERT success with immutable columns.
+  ASSERT_OK(ApplyInsertToSession(session.get(), client_table_,
+                                 1, 2, "origin row", 3, 4));
+  DoTestVerifyRow(client_table_, 1, 2, "origin row", 3, 4, 54321);
+  DeleteTestRows(client_table_, 1, 1);
+
+  // INSERT success with immutable columns, and the immutable column with default value.
+  ASSERT_OK(ApplyInsertToSession(session.get(), client_table_,
+                                 1, 2, "origin row", 3, 4, 5));
+  DoTestVerifyRow(client_table_, 1, 2, "origin row", 3, 4, 5);
+}
+
+TEST_F(ImmutableColumnTest, TestInsertIgnore) {
+  shared_ptr<KuduSession> session = client_->NewSession();
+  session->SetTimeoutMillis(10000);
+  ASSERT_OK(session->SetFlushMode(KuduSession::AUTO_FLUSH_SYNC));
+
+  // INSERT_IGNORE success with immutable columns.
+  ASSERT_OK(ApplyInsertIgnoreToSession(session.get(), client_table_,
+                                       1, 2, "origin row", 3, 4));
+  DoTestVerifyRow(client_table_, 1, 2, "origin row", 3, 4, 54321);
+  DeleteTestRows(client_table_, 1, 1);
+
+  // INSERT_IGNORE success with immutable columns, and the immutable column with default value.
+  ASSERT_OK(ApplyInsertIgnoreToSession(session.get(), client_table_,
+                                       1, 2, "origin row", 3, 4, 5));
+  DoTestVerifyRow(client_table_, 1, 2, "origin row", 3, 4, 5);
+}
+
+TEST_F(ImmutableColumnTest, TestUpdate) {
+  shared_ptr<KuduSession> session = client_->NewSession();
+  session->SetTimeoutMillis(10000);
+  ASSERT_OK(session->SetFlushMode(KuduSession::AUTO_FLUSH_SYNC));
+
+  ASSERT_OK(ApplyInsertToSession(session.get(), client_table_, 1, 2, "origin row", 3, 4));
+  DoTestVerifyRow(client_table_, 1, 2, "origin row", 3, 4, 54321);
+
+  {
+    // UPDATE the immutable column.
+    Status s = ApplyUpdateToSession(session.get(), client_table_, 1,
+                                    boost::none, boost::none, boost::none, 999);
+    ASSERT_TRUE(s.IsIOError());
+    ASSERT_EQ(1, session->CountPendingErrors());
+    vector<KuduError*> errors;
+    bool overflowed = false;
+    session->GetPendingErrors(&errors, &overflowed);
+    ASSERT_EQ(1, errors.size());
+    ASSERT_TRUE(errors[0]->status().IsImmutable());
+    DoTestVerifyRow(client_table_, 1, 2, "origin row", 3, 4, 54321);
+  }
+
+  {
+    // UPDATE the immutable column with default value.
+    Status s = ApplyUpdateToSession(session.get(), client_table_, 1,
+                                    boost::none, boost::none, boost::none, boost::none, 999);
+    ASSERT_TRUE(s.IsIOError());
+    ASSERT_EQ(1, session->CountPendingErrors());
+    vector<KuduError*> errors;
+    bool overflowed = false;
+    session->GetPendingErrors(&errors, &overflowed);
+    ASSERT_EQ(1, errors.size());
+    ASSERT_TRUE(errors[0]->status().IsImmutable());
+    DoTestVerifyRow(client_table_, 1, 2, "origin row", 3, 4, 54321);
+  }
+
+  {
+    // UPDATE the non-immutable columns.
+    ASSERT_OK(ApplyUpdateToSession(session.get(), client_table_, 1,
+                                   4, "update row", 6));
+    DoTestVerifyRow(client_table_, 1, 4, "update row", 6, 4, 54321);
+  }
+}
+
+TEST_F(ImmutableColumnTest, TestUpdateIgnore) {
+  shared_ptr<KuduSession> session = client_->NewSession();
+  session->SetTimeoutMillis(10000);
+  ASSERT_OK(session->SetFlushMode(KuduSession::AUTO_FLUSH_SYNC));
+
+  ASSERT_OK(ApplyInsertToSession(session.get(), client_table_,
+                                 1, 2, "origin row", 3, 4));
+  DoTestVerifyRow(client_table_, 1, 2, "origin row", 3, 4, 54321);
+
+  {
+    // UPDATE_IGNORE on the row with immutable updates.
+    ASSERT_OK(ApplyUpdateIgnoreToSession(
+        session.get(), client_table_, 1, boost::none, boost::none, boost::none, 999));
+    DoTestVerifyRow(client_table_, 1, 2, "origin row", 3, 4, 54321);
+  }
+
+  {
+    // UPDATE_IGNORE on the row with immutable updates.
+    ASSERT_OK(ApplyUpdateIgnoreToSession(session.get(), client_table_, 1,
+                                         boost::none, boost::none, boost::none, boost::none, 999));
+    DoTestVerifyRow(client_table_, 1, 2, "origin row", 3, 4, 54321);
+  }
+
+  {
+    // UPDATE the non-immutable columns.
+    ASSERT_OK(ApplyUpdateToSession(session.get(), client_table_, 1,
+                                   4, "update row", 6));
+    DoTestVerifyRow(client_table_, 1, 4, "update row", 6, 4, 54321);
+  }
+}
+
+TEST_F(ImmutableColumnTest, TestUpsert) {
+  shared_ptr<KuduSession> session = client_->NewSession();
+  session->SetTimeoutMillis(10000);
+  ASSERT_OK(session->SetFlushMode(KuduSession::AUTO_FLUSH_SYNC));
+
+  ASSERT_OK(ApplyUpsertToSession(session.get(), client_table_, 1, 2, "origin row", 3, 4));
+  DoTestVerifyRow(client_table_, 1, 2, "origin row", 3, 4, 54321);
+
+  {
+    // UPSERT the immutable column.
+    Status s = ApplyUpsertToSession(session.get(), client_table_, 1,
+                                    4, "update row", 6, 999);
+    ASSERT_TRUE(s.IsIOError());
+    ASSERT_EQ(1, session->CountPendingErrors());
+    vector<KuduError*> errors;
+    bool overflowed = false;
+    session->GetPendingErrors(&errors, &overflowed);
+    ASSERT_EQ(1, errors.size());
+    ASSERT_TRUE(errors[0]->status().IsImmutable());
+    DoTestVerifyRow(client_table_, 1, 2, "origin row", 3, 4, 54321);
+  }
+
+  {
+    // UPSERT the immutable column with default value.
+    Status s = ApplyUpsertToSession(session.get(), client_table_, 1,
+                                    4, "update row", 6, boost::none, 999);
+    ASSERT_TRUE(s.IsIOError());
+    ASSERT_EQ(1, session->CountPendingErrors());
+    vector<KuduError*> errors;
+    bool overflowed = false;
+    session->GetPendingErrors(&errors, &overflowed);
+    ASSERT_EQ(1, errors.size());
+    ASSERT_TRUE(errors[0]->status().IsImmutable());
+    DoTestVerifyRow(client_table_, 1, 2, "origin row", 3, 4, 54321);
+  }
+
+  {
+    // UPSERT the non-immutable columns.
+    ASSERT_OK(ApplyUpdateToSession(session.get(), client_table_, 1,
+                                   4, "update row", 6));
+    DoTestVerifyRow(client_table_, 1, 4, "update row", 6, 4, 54321);
+  }
+}
+
+TEST_F(ImmutableColumnTest, TestUpsertIgnore) {
+  shared_ptr<KuduSession> session = client_->NewSession();
+  session->SetTimeoutMillis(10000);
+  ASSERT_OK(session->SetFlushMode(KuduSession::AUTO_FLUSH_SYNC));
+
+  ASSERT_OK(ApplyUpsertIgnoreToSession(session.get(), client_table_, 1, 2, "origin row", 3, 4));
+  DoTestVerifyRow(client_table_, 1, 2, "origin row", 3, 4, 54321);
+
+  {
+    // UPSERT_IGNORE the immutable column.
+    ASSERT_OK(ApplyUpsertIgnoreToSession(session.get(), client_table_, 1,
+                                         4, "update row", 6, 999));
+    DoTestVerifyRow(client_table_, 1, 4, "update row", 6, 4, 54321);
+  }
+
+  {
+    // UPSERT the immutable column with default value.
+    ASSERT_OK(ApplyUpsertToSession(session.get(), client_table_, 1,
+                                   6, "update row2", 8, boost::none, 999));
+    DoTestVerifyRow(client_table_, 1, 6, "update row2", 8, 4, 54321);
+  }
+
+  {
+    // UPSERT the non-immutable columns.
+    ASSERT_OK(ApplyUpdateToSession(session.get(), client_table_, 1,
+                                   8, "update row3", 10));
+    DoTestVerifyRow(client_table_, 1, 8, "update row3", 10, 4, 54321);
+  }
+}
+
 } // namespace client
 } // namespace kudu
