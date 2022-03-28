@@ -8820,8 +8820,7 @@ TEST_F(ImmutableColumnTest, TestInsert) {
   session->SetTimeoutMillis(10000);
   ASSERT_OK(session->SetFlushMode(KuduSession::AUTO_FLUSH_SYNC));
 
-  for (auto type : set<KuduWriteOperation::Type>({KuduWriteOperation::Type::INSERT,
-                                                  KuduWriteOperation::Type::INSERT_IGNORE})) {
+  for (auto type : set<KuduWriteOperation::Type>({KuduWriteOperation::Type::INSERT})) {
     {
       // Insert success with immutable columns.
       ASSERT_OK(ApplyOperateToSession(session.get(), client_table_, type,
@@ -8842,9 +8841,15 @@ TEST_F(ImmutableColumnTest, TestInsert) {
       // Insert failed if not provide immutable column.
       Status s = ApplyOperateToSession(session.get(), client_table_, type,
                                        1, 6, "origin row3", 8);
-      CheckFailedReason(session.get(), s,
-                        "^Invalid argument: No value provided for required column: immutable_val");
-
+      if (type == KuduWriteOperation::Type::INSERT) {
+        ASSERT_STR_MATCHES(
+            s.ToString(),
+            "^Illegal state: non-nullable column 'immutable_val' is not set:") << s.ToString();
+      } else {
+        CheckFailedReason(
+            session.get(), s,
+            "^Invalid argument: No value provided for required column: immutable_val");
+      }
       vector<string> rows;
       KuduScanner scanner(client_table_.get());
       ASSERT_OK(ScanToStrings(&scanner, &rows));
@@ -8930,6 +8935,16 @@ TEST_F(ImmutableColumnTest, TestUpdateIgnore) {
                                     1, 4, "update row", 6));
     DoTestVerifyRow(client_table_, 1, 4, "update row", 6, 4, 54321);
   }
+
+  {
+    // UpdateIgnore the immutable and non-immutable columns together successfully:
+    // immutable column updates will be ignored, but non-immutable column updates
+    // will be applied.
+    ASSERT_OK(ApplyOperateToSession(session.get(), client_table_,
+                                    KuduWriteOperation::Type::UPDATE_IGNORE,
+                                    1, 6, "update row", 8, 999, 999));
+    DoTestVerifyRow(client_table_, 1, 6, "update row", 8, 4, 54321);
+  }
 }
 
 TEST_F(ImmutableColumnTest, TestUpsert) {
@@ -8958,24 +8973,29 @@ TEST_F(ImmutableColumnTest, TestUpsert) {
   }
 
   {
-    // Upsert the immutable column with default value failed.
+    // Upsert the immutable column with default value failed, but we will got Illegal error first.
     Status s = ApplyOperateToSession(session.get(), client_table_,
                                      KuduWriteOperation::Type::UPSERT,
                                      1, 4, boost::none, boost::none, boost::none, 999);
-    CheckFailedReason(session.get(), s,
-                      "^Immutable: UPDATE not allowed for immutable column: "
-                      "immutable_val_with_default");
+    ASSERT_TRUE(s.IsIllegalState()) << s.ToString();
+    ASSERT_STR_MATCHES(
+        s.ToString(),
+        "Illegal state: non-nullable column 'immutable_val' is not set:") << s.ToString();
 
-    // And other columns are not changed.
     DoTestVerifyRow(client_table_, 1, 2, "origin row", 3, 4, 54321);
   }
 
   {
-    // UpdateIgnore the non-immutable columns successfully.
-    ASSERT_OK(ApplyOperateToSession(session.get(), client_table_,
-                                    KuduWriteOperation::Type::UPSERT,
-                                    1, 4, "update row", 6));
-    DoTestVerifyRow(client_table_, 1, 4, "update row", 6, 4, 54321);
+    // Upsert the non-immutable columns failed, non-nullable columns must be set.
+    Status s = ApplyOperateToSession(session.get(), client_table_,
+                                     KuduWriteOperation::Type::UPSERT,
+                                     1, 4, "update row", 6);
+    ASSERT_TRUE(s.IsIllegalState()) << s.ToString();
+    ASSERT_STR_MATCHES(
+        s.ToString(),
+        "Illegal state: non-nullable column 'immutable_val' is not set:") << s.ToString();
+
+    DoTestVerifyRow(client_table_, 1, 2, "origin row", 3, 4, 54321);
   }
 }
 
@@ -8991,27 +9011,33 @@ TEST_F(ImmutableColumnTest, TestUpsertIgnore) {
   DoTestVerifyRow(client_table_, 1, 2, "origin row", 3, 4, 54321);
 
   {
-    // UPSERT_IGNORE the immutable column.
+    // UpdateIgnore the immutable column failed but ignored.
     ASSERT_OK(ApplyOperateToSession(session.get(), client_table_,
                                     KuduWriteOperation::Type::UPSERT_IGNORE,
-                                    1, 4, "update row", 6, 999));
-    DoTestVerifyRow(client_table_, 1, 4, "update row", 6, 4, 54321);
+                                    1, 4, boost::none, boost::none, 999));
+    DoTestVerifyRow(client_table_, 1, 4, "origin row", 3, 4, 54321);
   }
 
   {
-    // UPSERT_IGNORE the immutable column with default value.
-    ASSERT_OK(ApplyOperateToSession(session.get(), client_table_,
-                                   KuduWriteOperation::Type::UPSERT_IGNORE,
-                                   1, 6, "update row2", 8, boost::none, 999));
-    DoTestVerifyRow(client_table_, 1, 6, "update row2", 8, 4, 54321);
+    // UpdateIgnore the immutable column with default value.
+    Status s = ApplyOperateToSession(session.get(), client_table_,
+                                     KuduWriteOperation::Type::UPSERT_IGNORE,
+                                     1, 6, boost::none, boost::none, boost::none, 999);
+    CheckFailedReason(
+        session.get(), s,
+        "^Invalid argument: No value provided for required column: immutable_val");
+    DoTestVerifyRow(client_table_, 1, 4, "origin row", 3, 4, 54321);
   }
 
   {
     // UPSERT_IGNORE the non-immutable columns.
-    ASSERT_OK(ApplyOperateToSession(session.get(), client_table_,
-                                    KuduWriteOperation::Type::UPSERT_IGNORE,
-                                    1, 8, "update row3", 10));
-    DoTestVerifyRow(client_table_, 1, 8, "update row3", 10, 4, 54321);
+    Status s = ApplyOperateToSession(session.get(), client_table_,
+                                     KuduWriteOperation::Type::UPSERT_IGNORE,
+                                     1, 8, "update row", 10);
+    CheckFailedReason(
+        session.get(), s,
+        "^Invalid argument: No value provided for required column: immutable_val");
+    DoTestVerifyRow(client_table_, 1, 4, "origin row", 3, 4, 54321);
   }
 }
 
