@@ -8794,6 +8794,7 @@ class ImmutableColumnTest : public ClientTest {
     ASSERT_TRUE(apply_status.IsIOError()) << apply_status.ToString();
     ASSERT_EQ(1, session->CountPendingErrors());
     vector<KuduError*> errors;
+    ElementDeleter drop(&errors);
     bool overflowed = false;
     session->GetPendingErrors(&errors, &overflowed);
     ASSERT_EQ(1, errors.size());
