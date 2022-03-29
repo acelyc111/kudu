@@ -1335,7 +1335,6 @@ Status Tablet::ApplyRowOperation(const IOContext* io_context,
     case RowOperationsPB::UPSERT:
     case RowOperationsPB::UPSERT_IGNORE:
       s = InsertOrUpsertUnlocked(io_context, op_state, row_op, stats);
-      LOG(ERROR) << s.ToString();
       if (s.IsAlreadyPresent() || s.IsImmutable()) {
         return Status::OK();
       }
