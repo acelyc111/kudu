@@ -5513,6 +5513,58 @@ class ClientTest : public KuduTest {
 //  }
 //}
 //
+TEST_F(ClientTest, TestCreateAndAlterTableWithImmutableColumns) {
+  string table_name = "table_with_immutable_columns";
+  {
+    // Create table with nullable and immutable column failed.
+    KuduSchemaBuilder b;
+    b.AddColumn("key")->Type(KuduColumnSchema::INT32)->NotNull()->PrimaryKey();
+    b.AddColumn("immutable_val")->Type(KuduColumnSchema::INT32)->Nullable()->Immutable();
+    Status s = b.Build(&schema_);
+    ASSERT_TRUE(s.IsInvalidArgument());
+    ASSERT_STR_MATCHES(
+        s.ToString(), "Unable to set immutable attribute to nullable column: immutable_val");
+  }
+
+  {
+    // Create table with non-nullable and immutable column successfully.
+    KuduSchemaBuilder b;
+    b.AddColumn("key")->Type(KuduColumnSchema::INT32)->NotNull()->PrimaryKey();
+    b.AddColumn("immutable_val")->Type(KuduColumnSchema::INT32)->NotNull()->Immutable();
+    ASSERT_OK(b.Build(&schema_));
+
+    unique_ptr<KuduTableCreator> table_creator(client_->NewTableCreator());
+    ASSERT_OK(table_creator->table_name(table_name)
+                  .schema(&schema_)
+                  .set_range_partition_columns({ "key" })
+                  .num_replicas(1)
+                  .Create());
+  }
+
+  shared_ptr<KuduClient> alter_client;
+  ASSERT_OK(KuduClientBuilder()
+                .add_master_server_addr(cluster_->mini_master()->bound_rpc_addr().ToString())
+                .Build(&alter_client));
+  {
+    // Add nullable and immutable column failed.
+    unique_ptr<KuduTableAlterer> alterer(alter_client->NewTableAlterer(table_name));
+    alterer->AddColumn("immutable_val2")->Type(KuduColumnSchema::INT32)->Nullable()->Immutable();
+    Status s = alterer->Alter();
+    ASSERT_TRUE(s.IsInvalidArgument()) << s.ToString();
+    ASSERT_STR_MATCHES(
+        s.ToString(), "Unable to set immutable attribute to nullable column: immutable_val2");
+  }
+
+  {
+    // Add non-nullable and immutable column successfully.
+    unique_ptr<KuduTableAlterer> alterer(alter_client->NewTableAlterer(table_name));
+    alterer->AddColumn("immutable_val2")->Type(KuduColumnSchema::INT32)
+        ->NotNull()->Default(KuduValue::FromInt(12345))
+        ->Immutable();
+    ASSERT_OK(alterer->Alter());
+  }
+}
+
 //// Test trying to insert a row with an encoded key that is too large.
 //TEST_F(ClientTest, TestInsertTooLongEncodedPrimaryKey) {
 //  const string kLongValue(10000, 'x');

@@ -673,7 +673,8 @@ Status SchemaBuilder::AddColumn(const ColumnSchema& column, bool is_key) {
   }
 
   if (column.is_immutable() && column.is_nullable()) {
-    return Status::InvalidArgument("Unable to set immutable attribute to nullable column");
+    return Status::InvalidArgument("Unable to set immutable attribute to nullable column",
+                                   column.name());
   }
 
   col_names_.insert(column.name());
