@@ -587,7 +587,7 @@ Status RowOperationsPBDecoder::DecodeUpdateOrDelete(const ClientServerMapping& m
           val_to_add = scratch;
         } else if (PREDICT_FALSE(!col.is_nullable())) {
           op->SetFailureStatusOnce(Status::InvalidArgument(
-              "NULL value not allowed for non-nullable column (1)", col.ToString()));
+              "NULL value not allowed for non-nullable column", col.ToString()));
           RETURN_NOT_OK(ReadColumnAndDiscard(col));
           continue;
         }
