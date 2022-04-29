@@ -1105,7 +1105,7 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
   if (PREDICT_FALSE(/*metadata_size >= kMinimumValidLength &&*/
                     s_data.IsNotFound())) {
     // TODO: scan rocksdb
-//    Status read_status;
+    Status read_status;
 //    BlockIdSet live_blocks;
 //    unique_ptr<RandomAccessFile> reader;
 //    RandomAccessFileOptions opts;
@@ -1137,7 +1137,7 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
     }
     // TODO: other error
     // If the read failed for some unexpected reason, propagate the error.
-    if (/*!read_status.IsEndOfFile() && !read_status.IsIncomplete()*/) {
+    if (/*!read_status.IsEndOfFile() && !read_status.IsIncomplete()*/false) {
       RETURN_NOT_OK_CONTAINER_DISK_FAILURE(read_status);
     }
   }
@@ -1167,6 +1167,7 @@ Status LogBlockContainer::ProcessRecords(
     vector<LogBlockRefPtr>* dead_blocks,
     uint64_t* max_block_id,
     ProcessRecordType type) {
+  Status read_status;
   // TODO: scan from rocksdb, prefixed with metadata_path
 //  string metadata_path = metadata_file_->filename();
 //  unique_ptr<RandomAccessFile> metadata_reader;
@@ -3134,7 +3135,7 @@ Status LogBlockManager::Repair(
 //        WARN_NOT_OK_LBM_DISK_FAILURE(s, "could not delete incomplete container metadata file");
 //      }
 
-      s = env_->DeleteFile(StrCat(ic.container, kContainerDataFileSuffix));
+      Status s = env_->DeleteFile(StrCat(ic.container, kContainerDataFileSuffix));
       if (!s.ok() && !s.IsNotFound()) {
         WARN_NOT_OK_LBM_DISK_FAILURE(s, "could not delete incomplete container data file");
       }
