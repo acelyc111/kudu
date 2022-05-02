@@ -656,7 +656,7 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
   }
 
   bool ShouldCompact() const {
-    shared_lock<RWMutex> l(metadata_compact_lock_);
+//    shared_lock<RWMutex> l(metadata_compact_lock_);
     return ShouldCompactUnlocked();
   }
 
@@ -750,7 +750,7 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
   // Protect 'metadata_file_', only rewriting should add write lock,
   // appending and syncing only need read lock, cause there is an
   // internal lock for these operations in WritablePBContainerFile.
-  mutable RWMutex metadata_compact_lock_;
+//  mutable RWMutex metadata_compact_lock_;
   // Opened file handles to the container's files.
 //  unique_ptr<WritablePBContainerFile> metadata_file_;
   shared_ptr<RWFile> data_file_;
@@ -812,7 +812,7 @@ LogBlockContainer::LogBlockContainer(
       data_dir_(data_dir),
       max_num_blocks_(FindOrDie(block_manager->block_limits_by_data_dir_,
                                 data_dir)),
-      metadata_compact_lock_(RWMutex::Priority::PREFER_READING),
+//      metadata_compact_lock_(RWMutex::Priority::PREFER_READING),
 //      metadata_file_(std::move(metadata_file)),
       data_file_(std::move(data_file)),
       next_block_offset_(0),
@@ -3181,8 +3181,8 @@ Status LogBlockManager::Repair(
 
   // "Compact" metadata files with few live blocks by rewriting them with only
   // the live block records.
-  std::atomic<int64_t> metadata_files_compacted = 0;
-  std::atomic<int64_t> metadata_bytes_delta = 0;
+//  std::atomic<int64_t> metadata_files_compacted = 0;
+//  std::atomic<int64_t> metadata_bytes_delta = 0;
   std::atomic<bool> seen_fatal_error = false;
   Status first_fatal_error;
   SCOPED_LOG_TIMING(INFO, "loading block containers with low live blocks");
@@ -3242,12 +3242,12 @@ Status LogBlockManager::Repair(
   // TODO(awong): The below will only be true with persistent disk states.
   // Disk failures do not suffer from this issue because, on the next startup,
   // the entire directory will not be used.
-  if (metadata_files_compacted.load() > 0) {
-    Status s = env_->SyncDir(dir->dir());
-    RETURN_NOT_OK_LBM_DISK_FAILURE_PREPEND(s, "Could not sync data directory");
-    LOG(INFO) << Substitute("Compacted $0 metadata files ($1 metadata bytes)",
-                            metadata_files_compacted.load(), metadata_bytes_delta.load());
-  }
+//  if (metadata_files_compacted.load() > 0) {
+//    Status s = env_->SyncDir(dir->dir());
+//    RETURN_NOT_OK_LBM_DISK_FAILURE_PREPEND(s, "Could not sync data directory");
+//    LOG(INFO) << Substitute("Compacted $0 metadata files ($1 metadata bytes)",
+//                            metadata_files_compacted.load(), metadata_bytes_delta.load());
+//  }
 
   return Status::OK();
 }
