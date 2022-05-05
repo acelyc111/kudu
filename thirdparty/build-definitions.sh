@@ -1142,3 +1142,25 @@ build_jwt_cpp() {
   make -j$PARALLEL install
   popd
 }
+
+build_rocksdb() {
+  ROCKSDB_BUILD_DIR=$TP_BUILD_DIR/$ROCKSDB_NAME$MODE_SUFFIX
+  mkdir -p $ROCKSDB_BUILD_DIR
+  pushd $ROCKSDB_BUILD_DIR
+  cmake \
+    -DFAIL_ON_WARNINGS=OFF \
+    -DWITH_BENCHMARK_TOOLS=OFF \
+    -DWITH_TOOLS=OFF \
+    -DWITH_LZ4=ON \
+    -DWITH_ZSTD=OFF \
+    -DWITH_SNAPPY=ON \
+    -DWITH_BZ2=OFF \
+    -DWITH_TESTS=OFF \
+    -DWITH_GFLAGS=OFF \
+    -DUSE_RTTI=ON \
+    -DCMAKE_BUILD_TYPE=release \
+    -DCMAKE_INSTALL_PREFIX=$PREFIX \
+    $ROCKSDB_SOURCE
+  make -j$PARALLEL install
+  popd
+}

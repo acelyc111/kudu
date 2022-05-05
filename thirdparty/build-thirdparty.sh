@@ -108,6 +108,7 @@ else
       "oatpp")        F_OATPP=1 ;;
       "oatpp-swagger") F_OATPP_SWAGGER=1 ;;
       "jwt-cpp")      F_JWT_CPP=1;;
+      "rocksdb")      F_ROCKSDB=1;;
       *)              echo "Unknown module: $arg"; exit 1 ;;
     esac
   done
@@ -426,6 +427,10 @@ if [ -n "$F_UNINSTRUMENTED" -o -n "$F_JWT_CPP" ]; then
   build_jwt_cpp
 fi
 
+if [ -n "$F_UNINSTRUMENTED" -o -n "$F_ROCKSDB" ]; then
+  build_rocksdb
+fi
+
 restore_env
 
 # If we're on macOS best to exit here, otherwise single dependency builds will try to
@@ -618,6 +623,10 @@ fi
 
 if [ -n "$F_TSAN" -o -n "$F_JWT_CPP" ]; then
   build_jwt_cpp
+fi
+
+if [ -n "$F_TSAN" -o -n "$F_ROCKSDB" ]; then
+  build_rocksdb
 fi
 
 restore_env
