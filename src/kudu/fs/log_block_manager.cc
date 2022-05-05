@@ -844,16 +844,20 @@ LogBlockContainer::~LogBlockContainer() {
         "Could not delete dead container data file " + data_file_name;
 //    string metadata_failure_msg =
 //        "Could not delete dead container metadata file " + metadata_file_name;
+
+    // TODO: del range from rocksdb
+    WriteOptions del_opt;
+    rocksdb::Slice begin_key = data_file_->filename();
+    rocksdb::Slice end_key = data_file_->filename(); // TODO: begin_key + 1
+    auto s = data_dir_->rdb()->DeleteRange(del_opt, DefaultColumnFamily(), begin_key, end_key);
     if (PREDICT_TRUE(block_manager_->file_cache_)) {
       CONTAINER_DISK_FAILURE(block_manager_->file_cache_->DeleteFile(data_file_name),
                              data_failure_msg);
-      // TODO: del range from rocksdb
 //      CONTAINER_DISK_FAILURE(block_manager_->file_cache_->DeleteFile(metadata_file_name),
 //                             metadata_failure_msg);
     } else {
       CONTAINER_DISK_FAILURE(block_manager_->env_->DeleteFile(data_file_name),
                              data_failure_msg);
-      // TODO: del range from rocksdb
 //      CONTAINER_DISK_FAILURE(block_manager_->env_->DeleteFile(metadata_file_name),
 //                             metadata_failure_msg);
     }
@@ -953,13 +957,16 @@ Status LogBlockContainer::Create(LogBlockManager* block_manager,
                                    block_manager->oid_generator()->Next());
 //    metadata_path = StrCat(common_path, LogBlockManager::kContainerMetadataFileSuffix);
     data_path = StrCat(common_path, LogBlockManager::kContainerDataFileSuffix);
-
+    // TODO: del range from rocksdb
+    WriteOptions del_opt;
+    rocksdb::Slice begin_key = data_file_->filename();
+    rocksdb::Slice end_key = data_file_->filename(); // TODO: begin_key + 1
+    auto s = data_dir_->rdb()->DeleteRange(del_opt, DefaultColumnFamily(), begin_key, end_key);
     if (PREDICT_TRUE(block_manager->file_cache_)) {
 //      if (metadata_writer) {
 //        WARN_NOT_OK(block_manager->file_cache_->DeleteFile(metadata_path),
 //                    "could not delete orphaned metadata file thru file cache");
 //      }
-      // TODO: delete key(metadata_path) in rocksdb??
       if (data_file) {
         WARN_NOT_OK(block_manager->file_cache_->DeleteFile(data_path),
                     "could not delete orphaned data file thru file cache");
@@ -1097,6 +1104,20 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
     return Status::Aborted(Substitute("orphaned empty or invalid length file $0", common_path));
   }
 
+  // TODO: scan rocksdb
+  bool has_metadata = false;
+  Status read_status;
+  WriteOptions del_opt;
+  rocksdb::Slice begin_key = data_file_->filename();
+  rocksdb::Slice end_key = data_file_->filename(); // TODO: begin_key + 1
+  rocksdb::ReadOptions options;
+  options.iterate_upper_bound = &end_key;
+  std::unique_ptr<rocksdb::Iterator> it(_db->NewIterator(options, DefaultColumnFamily()));
+  it->Seek(start);
+  if (it->Valid()) {
+    has_metadata = true;
+  }
+
   // Handle a half-present container whose data file has gone missing and
   // the metadata file has no live blocks. If that's true, the (orphaned)
   // metadata file will be deleted when repairing.
@@ -1104,8 +1125,6 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
   // Open the metadata file and quickly check whether or not there is any live blocks.
   if (PREDICT_FALSE(/*metadata_size >= kMinimumValidLength &&*/
                     s_data.IsNotFound())) {
-    // TODO: scan rocksdb
-    Status read_status;
 //    BlockIdSet live_blocks;
 //    unique_ptr<RandomAccessFile> reader;
 //    RandomAccessFileOptions opts;
@@ -1130,14 +1149,16 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
 //      }
 //    }
     // TODO: if any key found
-    if (/*read_status.IsEndOfFile() && live_blocks.empty()*/false) {
+//    if (read_status.IsEndOfFile() && live_blocks.empty()) {
+    if (has_metadata) {
       report->incomplete_container_check->entries.emplace_back(common_path);
       return Status::Aborted(Substitute("orphaned metadata file with no live blocks $0",
                                         common_path));
     }
     // TODO: other error
     // If the read failed for some unexpected reason, propagate the error.
-    if (/*!read_status.IsEndOfFile() && !read_status.IsIncomplete()*/false) {
+//    if (!read_status.IsEndOfFile() && !read_status.IsIncomplete()) {
+    if (!it->status().ok()) {
       RETURN_NOT_OK_CONTAINER_DISK_FAILURE(read_status);
     }
   }
@@ -1145,6 +1166,7 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
   // Except the special cases above, returns error status if any.
   if (s_data.IsNotFound()) RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_data);
 //  if (s_meta.IsNotFound()) RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_meta);
+  if (!has_metadata) RETURN_NOT_OK_CONTAINER_DISK_FAILURE(Status::NotFound("empty metadata"));
 
   return Status::OK();
 }
@@ -1169,6 +1191,29 @@ Status LogBlockContainer::ProcessRecords(
     ProcessRecordType type) {
   Status read_status;
   // TODO: scan from rocksdb, prefixed with metadata_path
+  bool has_metadata = false;
+  Status read_status;
+  WriteOptions del_opt;
+  rocksdb::Slice begin_key = data_file_->filename();
+  rocksdb::Slice end_key = data_file_->filename(); // TODO: begin_key + 1
+  rocksdb::ReadOptions options;
+  options.iterate_upper_bound = &end_key;
+  std::unique_ptr<rocksdb::Iterator> it(_db->NewIterator(options, DefaultColumnFamily()));
+  it->Seek(start);
+  while (it->Valid()) {
+    has_metadata = true;
+    BlockRecordPB record;
+    if (!record.ParseFromArray(it->value().data(), it->value().size())) {
+      read_status = Status::Corruption(Substitute("Invalid BlockRecordPB, key=$0", it->key()));
+      break;
+    }
+
+    // TODO: check correction
+    RETURN_NOT_OK(ProcessRecord(&record, report,
+                                live_blocks, live_block_records, dead_blocks,
+                                &data_file_size, max_block_id, type));
+    it->Next();
+  }
 //  string metadata_path = metadata_file_->filename();
 //  unique_ptr<RandomAccessFile> metadata_reader;
 //  RandomAccessFileOptions opts;

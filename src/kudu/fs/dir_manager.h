@@ -27,6 +27,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <rocksdb/db.h>
+
 #include "kudu/gutil/macros.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/util/locks.h"
@@ -156,6 +158,8 @@ class Dir {
   // value of -1 means 1% of the disk space in a directory will be reserved.
   virtual int reserved_bytes() const = 0;
 
+  rocksdb::DB* rdb() { return db_; }
+
  private:
   Env* env_;
   DirMetrics* metrics_;
@@ -173,6 +177,8 @@ class Dir {
 
   // The available bytes of this dir, updated by RefreshAvailableSpace.
   int64_t available_bytes_;
+
+  rocksdb::DB* db_;  // TODO: need init
 
   DISALLOW_COPY_AND_ASSIGN(Dir);
 };
