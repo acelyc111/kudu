@@ -1443,6 +1443,12 @@ Status LogBlockContainer::ReadVData(int64_t offset, ArrayView<Slice> results) co
 
 Status LogBlockContainer::AppendMetadata(const BlockRecordPB& pb) {
   // TODO: write data to rocksdb
+  string buf;
+  pb.SerializeToString(&buf);
+  WriteOptions options;
+  Slice key(data_file_->filename() + "." + id().ToString());  // 逻辑序
+  rocksdb::Status s = data_dir_->rdb()->Put(options, key, rocksdb::Slice(buf));
+  // RETURN_NOT_OK_HANDLE_ERROR(s);   TODO: rocksdb的status
 //  RETURN_NOT_OK_HANDLE_ERROR(read_only_status());
 //  // Note: We don't check for sufficient disk space for metadata writes in
 //  // order to allow for block deletion on full disks.
@@ -2766,6 +2772,9 @@ Status LogBlockManager::RemoveLogBlocks(vector<BlockId> block_ids,
             "Unable to append deletion record to block metadata");
       }
     } else {
+      WriteOptions options;
+      Slice key(data_file_->filename() + "." + id().ToString());
+      rocksdb::Status s = data_dir_->rdb()->Delete(options, key);
       // Metadata files of containers with very few live blocks will be compacted.
 //      if (!lb->container()->read_only() &&
 //          FLAGS_log_container_metadata_runtime_compact &&
@@ -3132,6 +3141,7 @@ Status LogBlockManager::Repair(
   // Truncate partial metadata records.
   //
   // This is a fatal inconsistency; if the repair fails, we cannot proceed.
+  // TODO: check if repair needed when rdb
 //  if (report->partial_record_check) {
 //    for (auto& pr : report->partial_record_check->entries) {
 //      LogBlockContainerRefPtr container = FindPtrOrNull(containers_by_name, pr.container);
@@ -3172,6 +3182,7 @@ Status LogBlockManager::Repair(
   //
   // This is a non-fatal inconsistency; we can just as easily ignore the
   // leftover container files.
+  // TODO: check if repair needed when rdb
   if (report->incomplete_container_check) {
     for (auto& ic : report->incomplete_container_check->entries) {
 //      Status s = env_->DeleteFile(
