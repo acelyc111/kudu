@@ -41,7 +41,8 @@ add_library(kudu_fs
 target_link_libraries(kudu_fs
   fs_proto
   kudu_util
-  gutil)
+  gutil
+  rocksdb)
 
 add_library(kudu_fs_test_util
   log_block_manager-test-util.cc)

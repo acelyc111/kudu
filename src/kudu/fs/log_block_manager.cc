@@ -38,6 +38,8 @@
 #include <boost/optional/optional.hpp>
 #include <gflags/gflags.h>
 #include <glog/logging.h>
+#include <rocksdb/db.h>
+#include <rocksdb/options.h>
 
 #include "kudu/fs/block_manager_metrics.h"
 #include "kudu/fs/data_dirs.h"
@@ -489,7 +491,7 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
   // Appends 'pb' to this container's metadata file.
   //
   // The on-disk effects of this call are made durable only after SyncMetadata().
-  Status AppendMetadata(const BlockRecordPB& pb);
+  Status AppendMetadata(const BlockId& block_id, const BlockRecordPB& pb);
 
   // Asynchronously flush this container's data file from 'offset' through
   // to 'length'.
@@ -622,6 +624,7 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
   bool dead() const { return dead_.Load(); }
   const LogBlockManagerMetrics* metrics() const { return metrics_; }
   Dir* data_dir() const { return data_dir_; }
+  shared_ptr<RWFile> data_file() const { return data_file_; }
   const DirInstanceMetadataPB* instance() const { return data_dir_->instance()->metadata(); }
 
   // Adjusts the number of blocks being written.
@@ -846,10 +849,10 @@ LogBlockContainer::~LogBlockContainer() {
 //        "Could not delete dead container metadata file " + metadata_file_name;
 
     // TODO: del range from rocksdb
-    WriteOptions del_opt;
+    rocksdb::WriteOptions del_opt;
     rocksdb::Slice begin_key = data_file_->filename();
     rocksdb::Slice end_key = data_file_->filename(); // TODO: begin_key + 1
-    auto s = data_dir_->rdb()->DeleteRange(del_opt, DefaultColumnFamily(), begin_key, end_key);
+    auto s = data_dir_->rdb()->DeleteRange(del_opt, data_dir_->rdb()->DefaultColumnFamily(), begin_key, end_key);
     if (PREDICT_TRUE(block_manager_->file_cache_)) {
       CONTAINER_DISK_FAILURE(block_manager_->file_cache_->DeleteFile(data_file_name),
                              data_failure_msg);
@@ -958,10 +961,10 @@ Status LogBlockContainer::Create(LogBlockManager* block_manager,
 //    metadata_path = StrCat(common_path, LogBlockManager::kContainerMetadataFileSuffix);
     data_path = StrCat(common_path, LogBlockManager::kContainerDataFileSuffix);
     // TODO: del range from rocksdb
-    WriteOptions del_opt;
-    rocksdb::Slice begin_key = data_file_->filename();
-    rocksdb::Slice end_key = data_file_->filename(); // TODO: begin_key + 1
-    auto s = data_dir_->rdb()->DeleteRange(del_opt, DefaultColumnFamily(), begin_key, end_key);
+    rocksdb::WriteOptions del_opt;
+    rocksdb::Slice begin_key = common_path;
+    rocksdb::Slice end_key = common_path; // TODO: begin_key + 1
+    auto s = dir->rdb()->DeleteRange(del_opt, dir->rdb()->DefaultColumnFamily(), begin_key, end_key);
     if (PREDICT_TRUE(block_manager->file_cache_)) {
 //      if (metadata_writer) {
 //        WARN_NOT_OK(block_manager->file_cache_->DeleteFile(metadata_path),
@@ -1107,13 +1110,13 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
   // TODO: scan rocksdb
   bool has_metadata = false;
   Status read_status;
-  WriteOptions del_opt;
-  rocksdb::Slice begin_key = data_file_->filename();
-  rocksdb::Slice end_key = data_file_->filename(); // TODO: begin_key + 1
+  rocksdb::WriteOptions del_opt;
+  rocksdb::Slice begin_key = common_path;
+  rocksdb::Slice end_key = common_path; // TODO: begin_key + 1
   rocksdb::ReadOptions options;
   options.iterate_upper_bound = &end_key;
-  std::unique_ptr<rocksdb::Iterator> it(_db->NewIterator(options, DefaultColumnFamily()));
-  it->Seek(start);
+  std::unique_ptr<rocksdb::Iterator> it(dir->rdb()->NewIterator(options, dir->rdb()->DefaultColumnFamily()));
+  it->Seek(begin_key);
   if (it->Valid()) {
     has_metadata = true;
   }
@@ -1192,19 +1195,19 @@ Status LogBlockContainer::ProcessRecords(
   Status read_status;
   // TODO: scan from rocksdb, prefixed with metadata_path
   bool has_metadata = false;
-  Status read_status;
-  WriteOptions del_opt;
+  uint64_t data_file_size = 0;
+  rocksdb::WriteOptions del_opt;
   rocksdb::Slice begin_key = data_file_->filename();
   rocksdb::Slice end_key = data_file_->filename(); // TODO: begin_key + 1
   rocksdb::ReadOptions options;
   options.iterate_upper_bound = &end_key;
-  std::unique_ptr<rocksdb::Iterator> it(_db->NewIterator(options, DefaultColumnFamily()));
-  it->Seek(start);
+  std::unique_ptr<rocksdb::Iterator> it(data_dir_->rdb()->NewIterator(options, data_dir_->rdb()->DefaultColumnFamily()));
+  it->Seek(begin_key);
   while (it->Valid()) {
     has_metadata = true;
     BlockRecordPB record;
     if (!record.ParseFromArray(it->value().data(), it->value().size())) {
-      read_status = Status::Corruption(Substitute("Invalid BlockRecordPB, key=$0", it->key()));
+      read_status = Status::Corruption(Substitute("Invalid BlockRecordPB, key=$0", it->key().ToString()));
       break;
     }
 
@@ -1441,12 +1444,12 @@ Status LogBlockContainer::ReadVData(int64_t offset, ArrayView<Slice> results) co
   return Status::OK();
 }
 
-Status LogBlockContainer::AppendMetadata(const BlockRecordPB& pb) {
+Status LogBlockContainer::AppendMetadata(const BlockId& block_id, const BlockRecordPB& pb) {
   // TODO: write data to rocksdb
   string buf;
   pb.SerializeToString(&buf);
-  WriteOptions options;
-  Slice key(data_file_->filename() + "." + id().ToString());  // 逻辑序
+  rocksdb::WriteOptions options;
+  rocksdb::Slice key(data_file_->filename() + "." + block_id.ToString());  // 逻辑序
   rocksdb::Status s = data_dir_->rdb()->Put(options, key, rocksdb::Slice(buf));
   // RETURN_NOT_OK_HANDLE_ERROR(s);   TODO: rocksdb的status
 //  RETURN_NOT_OK_HANDLE_ERROR(read_only_status());
@@ -2105,7 +2108,7 @@ Status LogWritableBlock::AppendMetadata() {
   record.set_timestamp_us(GetCurrentTimeMicros());
   record.set_offset(block_offset_);
   record.set_length(block_length_);
-  return container_->AppendMetadata(record);
+  return container_->AppendMetadata(id(), record);
 }
 
 ////////////////////////////////////////////////////////////
@@ -2757,7 +2760,7 @@ Status LogBlockManager::RemoveLogBlocks(vector<BlockId> block_ids,
     lb->block_id().CopyToPB(record.mutable_block_id());
     record.set_op_type(DELETE);
     record.set_timestamp_us(GetCurrentTimeMicros());
-    Status s = lb->container()->AppendMetadata(record);
+    Status s = lb->container()->AppendMetadata(lb->block_id(), record);
 
     // We don't bother fsyncing the metadata append for deletes in order to avoid
     // the disk overhead. Even if we did fsync it, we'd still need to account for
@@ -2772,9 +2775,9 @@ Status LogBlockManager::RemoveLogBlocks(vector<BlockId> block_ids,
             "Unable to append deletion record to block metadata");
       }
     } else {
-      WriteOptions options;
-      Slice key(data_file_->filename() + "." + id().ToString());
-      rocksdb::Status s = data_dir_->rdb()->Delete(options, key);
+      rocksdb::WriteOptions options;
+      rocksdb::Slice key(lb->container()->data_file()->filename() + "." + lb->block_id().ToString());
+      rocksdb::Status s = lb->container()->data_dir()->rdb()->Delete(options, key);
       // Metadata files of containers with very few live blocks will be compacted.
 //      if (!lb->container()->read_only() &&
 //          FLAGS_log_container_metadata_runtime_compact &&

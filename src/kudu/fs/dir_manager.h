@@ -158,7 +158,7 @@ class Dir {
   // value of -1 means 1% of the disk space in a directory will be reserved.
   virtual int reserved_bytes() const = 0;
 
-  rocksdb::DB* rdb() { return db_; }
+  rocksdb::DB* rdb() const { return db_; }
 
  private:
   Env* env_;
