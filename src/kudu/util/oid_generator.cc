@@ -62,4 +62,11 @@ Status ObjectIdGenerator::Canonicalize(const string& input,
   }
 }
 
+string ObjectIdGenerator::NextOf(const string& id) {
+  DCHECK(!id.empty());
+  string next = id;
+  next[next.size() - 1] += 1;
+  return next;
+}
+
 } // namespace kudu

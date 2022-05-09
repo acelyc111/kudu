@@ -18,6 +18,7 @@
 #include "kudu/util/oid_generator.h"
 
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -25,6 +26,7 @@
 #include "kudu/util/test_macros.h"
 
 using std::string;
+using std::vector;
 
 namespace kudu {
 
@@ -47,6 +49,20 @@ TEST(ObjectIdGeneratorTest, TestCanoicalizeUuid) {
   ASSERT_OK(gen.Canonicalize(
       "0123456789AbCdEf0123456789aBcDeF", &canonicalized));
   ASSERT_EQ(kExpectedCanonicalized, canonicalized);
+}
+
+TEST(ObjectIdGeneratorTest, TestNextOf) {
+  vector<int> single_chars;
+  for (int i = '0'; i < '9'; i++) {
+    single_chars.emplace_back(i);
+  }
+  for (int i = 'a'; i < 'z'; i++) {
+    single_chars.emplace_back(i);
+  }
+  for (int i : single_chars) {
+    ASSERT_EQ(string("0123456789abcdef0123456789abcde") + char(i + 1),
+              ObjectIdGenerator::NextOf(string("0123456789abcdef0123456789abcde") + char(i)));
+  }
 }
 
 } // namespace kudu

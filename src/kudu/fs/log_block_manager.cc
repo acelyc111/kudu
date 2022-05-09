@@ -680,7 +680,7 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
   static std::vector<BlockRecordPB> SortRecords(LogBlockManager::BlockRecordMap live_block_records);
 
  private:
-  LogBlockContainer(LogBlockManager* block_manager, Dir* data_dir,
+  LogBlockContainer(LogBlockManager* block_manager, Dir* data_dir, const string& id,
                     unique_ptr<WritablePBContainerFile> metadata_file,
                     shared_ptr<RWFile> data_file);
 
@@ -703,6 +703,7 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
   static Status CheckContainerFiles(LogBlockManager* block_manager,
                                     FsReport* report,
                                     const Dir* dir,
+                                    const string& id,
                                     const string& common_path,
                                     const string& data_path,
                                     const string& metadata_path);
@@ -744,6 +745,8 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
 
   // The data directory where the container lives.
   Dir* data_dir_;
+
+  string id_;
 
   const boost::optional<int64_t> max_num_blocks_;
 
@@ -809,10 +812,12 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
 LogBlockContainer::LogBlockContainer(
     LogBlockManager* block_manager,
     Dir* data_dir,
+    const string& id,
     unique_ptr<WritablePBContainerFile> metadata_file,
     shared_ptr<RWFile> data_file)
     : block_manager_(block_manager),
       data_dir_(data_dir),
+      id_(id),
       max_num_blocks_(FindOrDie(block_manager->block_limits_by_data_dir_,
                                 data_dir)),
 //      metadata_compact_lock_(RWMutex::Priority::PREFER_READING),
@@ -850,8 +855,8 @@ LogBlockContainer::~LogBlockContainer() {
 
     // TODO: del range from rocksdb
     rocksdb::WriteOptions del_opt;
-    rocksdb::Slice begin_key = data_file_->filename();
-    rocksdb::Slice end_key = data_file_->filename(); // TODO: begin_key + 1
+    rocksdb::Slice begin_key = id_;
+    rocksdb::Slice end_key = ObjectIdGenerator::NextOf(id_);
     auto s = data_dir_->rdb()->DeleteRange(del_opt, data_dir_->rdb()->DefaultColumnFamily(), begin_key, end_key);
     if (PREDICT_TRUE(block_manager_->file_cache_)) {
       CONTAINER_DISK_FAILURE(block_manager_->file_cache_->DeleteFile(data_file_name),
@@ -944,6 +949,7 @@ void LogBlockContainer::HandleError(const Status& s) const {
 Status LogBlockContainer::Create(LogBlockManager* block_manager,
                                  Dir* dir,
                                  LogBlockContainerRefPtr* container) {
+  string id;
   string common_path;
 //  string metadata_path;
   string data_path;
@@ -956,14 +962,14 @@ Status LogBlockContainer::Create(LogBlockManager* block_manager,
   //
   // When looping, we delete any created-and-orphaned files.
   do {
-    common_path = JoinPathSegments(dir->dir(),
-                                   block_manager->oid_generator()->Next());
+    id = block_manager->oid_generator()->Next();
+    common_path = JoinPathSegments(dir->dir(), id);
 //    metadata_path = StrCat(common_path, LogBlockManager::kContainerMetadataFileSuffix);
     data_path = StrCat(common_path, LogBlockManager::kContainerDataFileSuffix);
     // TODO: del range from rocksdb
     rocksdb::WriteOptions del_opt;
-    rocksdb::Slice begin_key = common_path;
-    rocksdb::Slice end_key = common_path; // TODO: begin_key + 1
+    rocksdb::Slice begin_key = id;
+    rocksdb::Slice end_key = ObjectIdGenerator::NextOf(id);
     auto s = dir->rdb()->DeleteRange(del_opt, dir->rdb()->DefaultColumnFamily(), begin_key, end_key);
     if (PREDICT_TRUE(block_manager->file_cache_)) {
 //      if (metadata_writer) {
@@ -1007,6 +1013,7 @@ Status LogBlockContainer::Create(LogBlockManager* block_manager,
 //    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(metadata_file->CreateNew(BlockRecordPB()));
     container->reset(new LogBlockContainer(block_manager,
                                            dir,
+                                           id,
                                            //std::move(metadata_file),
                                            nullptr,
                                            std::move(data_file)));
@@ -1029,7 +1036,7 @@ Status LogBlockContainer::Open(LogBlockManager* block_manager,
   string common_path = JoinPathSegments(dir->dir(), id);
   string data_path = StrCat(common_path, LogBlockManager::kContainerDataFileSuffix);
 //  string metadata_path = StrCat(common_path, LogBlockManager::kContainerMetadataFileSuffix);
-  RETURN_NOT_OK(CheckContainerFiles(block_manager, report, dir,
+  RETURN_NOT_OK(CheckContainerFiles(block_manager, report, dir, id,
                                     common_path, data_path, /*metadata_path*/ ""));
 
   // Open the existing metadata and data files for writing.
@@ -1063,6 +1070,7 @@ Status LogBlockContainer::Open(LogBlockManager* block_manager,
   // Create the in-memory container and populate it.
   LogBlockContainerRefPtr open_container(new LogBlockContainer(block_manager,
                                                                dir,
+                                                               id,
                                                                //std::move(metadata_pb_writer),
                                                                nullptr,
                                                                std::move(data_file)));
@@ -1075,6 +1083,7 @@ Status LogBlockContainer::Open(LogBlockManager* block_manager,
 Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
                                               FsReport* report,
                                               const Dir* dir,
+                                              const string& id,
                                               const string& common_path,
                                               const string& data_path,
                                               const string& metadata_path) {
@@ -1111,8 +1120,8 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
   bool has_metadata = false;
   Status read_status;
   rocksdb::WriteOptions del_opt;
-  rocksdb::Slice begin_key = common_path;
-  rocksdb::Slice end_key = common_path; // TODO: begin_key + 1
+  rocksdb::Slice begin_key = id;
+  rocksdb::Slice end_key = ObjectIdGenerator::NextOf(id);
   rocksdb::ReadOptions options;
   options.iterate_upper_bound = &end_key;
   std::unique_ptr<rocksdb::Iterator> it(dir->rdb()->NewIterator(options, dir->rdb()->DefaultColumnFamily()));
@@ -1197,8 +1206,8 @@ Status LogBlockContainer::ProcessRecords(
   bool has_metadata = false;
   uint64_t data_file_size = 0;
   rocksdb::WriteOptions del_opt;
-  rocksdb::Slice begin_key = data_file_->filename();
-  rocksdb::Slice end_key = data_file_->filename(); // TODO: begin_key + 1
+  rocksdb::Slice begin_key = id_;
+  rocksdb::Slice end_key = ObjectIdGenerator::NextOf(id_);
   rocksdb::ReadOptions options;
   options.iterate_upper_bound = &end_key;
   std::unique_ptr<rocksdb::Iterator> it(data_dir_->rdb()->NewIterator(options, data_dir_->rdb()->DefaultColumnFamily()));

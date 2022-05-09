@@ -120,7 +120,7 @@ Status Dir::Init() {
   tbl_opts.block_cache = s_block_cache_;
   tbl_opts.filter_policy.reset(rocksdb::NewBloomFilterPolicy(9.9));
   opts.table_factory.reset(NewBlockBasedTableFactory(tbl_opts));
-  opts.prefix_extractor.reset(rocksdb::NewFixedPrefixTransform(32)); // uuid length
+  opts.prefix_extractor.reset(rocksdb::NewFixedPrefixTransform(ObjectIdGenerator::IdLength()));
   opts.memtable_prefix_bloom_size_ratio = 0.1;
 //  ReadOptions prefix_same_as_start = true;
 
@@ -550,7 +550,7 @@ Status DirManager::Open() {
   // Load the instance files from disk.
   bool has_healthy_instances = true;
   vector<unique_ptr<DirInstanceMetadataFile>> loaded_instances;
-  RETURN_NOT_OK_PREPEND(LoadInstances(&loaded_instances, &has_healthy_instances),  // old, create_if_missing
+  RETURN_NOT_OK_PREPEND(LoadInstances(&loaded_instances, &has_healthy_instances),  // TODO(yingchun): old, create_if_missing
       "failed to load instance files");
   if (!has_healthy_instances) {
     return Status::NotFound(
@@ -561,7 +561,7 @@ Status DirManager::Open() {
   if (!opts_.read_only && opts_.dir_type != "file" &&
       opts_.update_instances != UpdateInstanceBehavior::DONT_UPDATE) {
     RETURN_NOT_OK_PREPEND(
-        CreateNewDirectoriesAndUpdateInstances(std::move(loaded_instances)),  // new, error_if_exists
+        CreateNewDirectoriesAndUpdateInstances(std::move(loaded_instances)),  // TODO(yingchun): new, error_if_exists
         "could not add new directories");
     vector<unique_ptr<DirInstanceMetadataFile>> new_loaded_instances;
     RETURN_NOT_OK_PREPEND(LoadInstances(&new_loaded_instances, &has_healthy_instances),
