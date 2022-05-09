@@ -27,8 +27,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include <rocksdb/db.h>
-
 #include "kudu/gutil/macros.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/util/locks.h"
@@ -36,6 +34,11 @@
 #include "kudu/util/monotime.h"
 #include "kudu/util/random.h"
 #include "kudu/util/status.h"
+
+namespace rocksdb {
+class Cache;
+class DB;
+} // namespace rocksdb
 
 namespace kudu {
 
@@ -102,6 +105,8 @@ class Dir {
       std::unique_ptr<DirInstanceMetadataFile> metadata_file,
       std::unique_ptr<ThreadPool> pool);
   virtual ~Dir();
+
+  Status Init();
 
   // Shuts down this dir's thread pool, waiting for any closures submitted via
   // ExecClosure() to finish first.
@@ -178,7 +183,8 @@ class Dir {
   // The available bytes of this dir, updated by RefreshAvailableSpace.
   int64_t available_bytes_;
 
-  rocksdb::DB* db_;  // TODO: need init
+  rocksdb::DB* db_;
+  static std::shared_ptr<rocksdb::Cache> s_block_cache_;
 
   DISALLOW_COPY_AND_ASSIGN(Dir);
 };

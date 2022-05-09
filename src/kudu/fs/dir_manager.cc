@@ -31,6 +31,9 @@
 #include <vector>
 
 #include <glog/logging.h>
+#include <rocksdb/db.h>
+#include <rocksdb/filter_policy.h>
+#include <rocksdb/table.h>
 
 #include "kudu/fs/dir_util.h"
 #include "kudu/fs/fs.pb.h"
@@ -49,6 +52,7 @@
 #include "kudu/util/threadpool.h"
 
 using std::set;
+using std::shared_ptr;
 using std::string;
 using std::unique_ptr;
 using std::unordered_map;
@@ -71,6 +75,8 @@ void DeleteTmpFilesRecursively(Env* env, const string& path) {
 } // anonymous namespace
 namespace fs {
 
+shared_ptr<rocksdb::Cache> Dir::s_block_cache_;
+
 Dir::Dir(Env* env,
          DirMetrics* metrics,
          FsType fs_type,
@@ -90,6 +96,35 @@ Dir::Dir(Env* env,
 
 Dir::~Dir() {
   Shutdown();
+}
+
+Status Dir::Init() {
+  rocksdb::Options opts;
+  opts.create_if_missing = true;
+//  opts.use_fsync = FLAGS_enable_data_block_fsync;   TODO(yingchun): issue a Flush when batch commit instead.
+//  opts.error_if_exists = true;  TODO(yingchun): open
+//  opts.db_log_dir = ;  TODO(yingchun): consider put it into FLAGS_log_dir
+//  opts.wal_dir = ;  TODO(yingchun): consider put it into FLAGS_fs_wal_dir
+  opts.max_log_file_size = 1 << 30;
+  opts.keep_log_file_num = 5;
+  opts.max_manifest_file_size = 100 << 20;
+  opts.max_background_jobs = 4;
+  opts.write_buffer_size = 64 << 20;  // TODO(yingchun): this is default value, try to use gflag
+
+  rocksdb::BlockBasedTableOptions tbl_opts;
+  static std::once_flag flag;
+  std::call_once(flag, [&]() {
+    s_block_cache_ = rocksdb::NewLRUCache(1 << 30);  // TODO(yingchun): use gflag
+  });
+  tbl_opts.block_cache = s_block_cache_;
+  tbl_opts.filter_policy.reset(rocksdb::NewBloomFilterPolicy(9.9));
+  opts.table_factory.reset(NewBlockBasedTableFactory(tbl_opts));
+
+  rocksdb::Status s = rocksdb::DB::Open(opts, dir_, &db_);
+  if (!s.ok()) {
+    return Status::IOError("open RocksDB failed, path: ", dir_);
+  }
+  return Status::OK();
 }
 
 void Dir::Shutdown() {
