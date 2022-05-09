@@ -472,7 +472,7 @@ if ("${KUDU_LINK}" STREQUAL "a")
 endif()
 
 include("KuduLinker")
-#APPEND_LINKER_FLAGS()
+APPEND_LINKER_FLAGS()
 
 if ("${KUDU_USE_ASAN}" OR "${KUDU_USE_TSAN}" OR "${KUDU_USE_UBSAN}")
   # GCC 4.8 and 4.9 (latest as of this writing) don't allow you to specify a
@@ -1095,8 +1095,8 @@ ADD_THIRDPARTY_LIB(oatpp-swagger
   STATIC_LIB "${OATPP_SWAGGER_STATIC_LIB}")
 
 ## jwt-cpp
-#find_package(JwtCpp REQUIRED)
-#include_directories(${JWT_CPP_INCLUDE_DIR})
+find_package(JwtCpp REQUIRED)
+include_directories(${JWT_CPP_INCLUDE_DIR})
 
 ## OpenSSL
 ##
