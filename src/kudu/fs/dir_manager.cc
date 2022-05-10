@@ -90,6 +90,7 @@ Dir::Dir(Env* env,
       dir_(std::move(dir)),
       metadata_file_(std::move(metadata_file)),
       pool_(std::move(pool)),
+      is_init_(false),
       is_shutdown_(false),
       is_full_(false),
       available_bytes_(0) {
@@ -100,6 +101,9 @@ Dir::~Dir() {
 }
 
 Status Dir::Init() {
+  if (is_init_) {
+    return Status::OK();
+  }
   rocksdb::Options opts;
   opts.create_if_missing = true;
 //  opts.use_fsync = FLAGS_enable_data_block_fsync;   TODO(yingchun): issue a Flush when batch commit instead.
@@ -128,6 +132,7 @@ Status Dir::Init() {
   if (!s.ok()) {
     return Status::IOError(Substitute("$0, open RocksDB failed, path: $0", s.ToString(), dir_));
   }
+  is_init_ = true;
   return Status::OK();
 }
 

@@ -173,6 +173,8 @@ class Dir {
   const std::unique_ptr<DirInstanceMetadataFile> metadata_file_;
   const std::unique_ptr<ThreadPool> pool_;
 
+  // TODO(yingchun): use 1 variable
+  bool is_init_;
   bool is_shutdown_;
 
   // Protects 'last_space_check_', 'is_full_' and 'available_bytes_'.

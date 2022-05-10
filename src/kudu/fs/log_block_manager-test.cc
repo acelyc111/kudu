@@ -102,6 +102,7 @@ DEFINE_int32(startup_benchmark_deleted_block_percentage, 90,
 DEFINE_validator(startup_benchmark_deleted_block_percentage,
                  [](const char* /*n*/, int32_t v) { return 0 <= v && v <= 100; });
 DECLARE_bool(encrypt_data_at_rest);
+DECLARE_uint64(fs_max_thread_count_per_data_dir);
 
 // Block manager metrics.
 METRIC_DECLARE_counter(block_manager_total_blocks_deleted);
@@ -168,7 +169,6 @@ class LogBlockManagerTest : public KuduTest, public ::testing::WithParamInterfac
     // The directory manager must outlive the block manager. Destroy the block
     // manager first to enforce this.
     bm_.reset();
-    dd_manager_.reset();
 
     if (force) {
       // Ensure the directory manager is initialized.
@@ -1275,7 +1275,7 @@ TEST_P(LogBlockManagerTest, TestContainerBlockLimitingByMetadataSize) {
   NO_FATALS(AssertNumContainers(4));
 }
 
-TEST_F(LogBlockManagerTest, TestContainerBlockLimitingByMetadataSizeWithCompaction) {
+TEST_F(LogBlockManagerTest, DISABLED_TestContainerBlockLimitingByMetadataSizeWithCompaction) {
   const int kNumBlocks = 2000;
   const int kNumThreads = 10;
   const double kLiveBlockRatio = 0.1;
@@ -1350,19 +1350,19 @@ TEST_F(LogBlockManagerTest, TestContainerBlockLimitingByMetadataSizeWithCompacti
   // containers, which are now no longer full.
   FLAGS_log_container_metadata_runtime_compact = false;
   ASSERT_OK(ReopenBlockManager());
-//  NO_FATALS(mt_create_and_delete_blocks());
-//  NO_FATALS(GetContainerMetadataFiles(&metadata_files));
-//  bool exist_larger_one = false;
-//  for (const auto& metadata_file : metadata_files) {
-//    uint64_t file_size;
-//    NO_FATALS(env_->GetFileSize(metadata_file, &file_size));
-//    if (file_size > FLAGS_log_container_metadata_max_size *
-//                         FLAGS_log_container_metadata_size_before_compact_ratio) {
-//      exist_larger_one = true;
-//      break;
-//    }
-//  }
-//  ASSERT_TRUE(exist_larger_one);
+  NO_FATALS(mt_create_and_delete_blocks());
+  NO_FATALS(GetContainerMetadataFiles(&metadata_files));
+  bool exist_larger_one = false;
+  for (const auto& metadata_file : metadata_files) {
+    uint64_t file_size;
+    NO_FATALS(env_->GetFileSize(metadata_file, &file_size));
+    if (file_size > FLAGS_log_container_metadata_max_size *
+                         FLAGS_log_container_metadata_size_before_compact_ratio) {
+      exist_larger_one = true;
+      break;
+    }
+  }
+  ASSERT_TRUE(exist_larger_one);
 }
 
 TEST_P(LogBlockManagerTest, TestMisalignedBlocksFuzz) {

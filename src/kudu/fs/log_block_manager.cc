@@ -1126,7 +1126,7 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
   options.iterate_upper_bound = &end_key;
   std::unique_ptr<rocksdb::Iterator> it(dir->rdb()->NewIterator(options, dir->rdb()->DefaultColumnFamily()));
   it->Seek(begin_key);
-  if (it->Valid()) {
+  if (it->Valid() && it->key().starts_with(begin_key)) {
     has_metadata = true;
   }
 
@@ -1201,8 +1201,6 @@ Status LogBlockContainer::ProcessRecords(
     uint64_t* max_block_id,
     ProcessRecordType type) {
   Status read_status;
-  // TODO: scan from rocksdb, prefixed with metadata_path
-  bool has_metadata = false;
   uint64_t data_file_size = 0;
   rocksdb::WriteOptions del_opt;
   rocksdb::Slice begin_key = id_;
@@ -1211,14 +1209,15 @@ Status LogBlockContainer::ProcessRecords(
   options.iterate_upper_bound = &end_key;
   std::unique_ptr<rocksdb::Iterator> it(data_dir_->rdb()->NewIterator(options, data_dir_->rdb()->DefaultColumnFamily()));
   it->Seek(begin_key);
-  while (it->Valid()) {
-    has_metadata = true;
+  int count = 0;
+  while (it->Valid() && it->key().starts_with(begin_key)) {
+    count++;
     BlockRecordPB record;
-    LOG(INFO) << "key: " << it->key().ToString();
     if (!record.ParseFromArray(it->value().data(), it->value().size())) {
       read_status = Status::Corruption(Substitute("Invalid BlockRecordPB, key=$0", it->key().ToString()));
       break;
     }
+    LOG(INFO) << it->key().ToString() << " -> " << record.block_id().id();
 
     // TODO: check correction
     RETURN_NOT_OK(ProcessRecord(&record, report,
@@ -1226,6 +1225,7 @@ Status LogBlockContainer::ProcessRecords(
                                 &data_file_size, max_block_id, type));
     it->Next();
   }
+  LOG(INFO) << "Scaned " << count << " live blocks in " << id_;
 //  string metadata_path = metadata_file_->filename();
 //  unique_ptr<RandomAccessFile> metadata_reader;
 //  RandomAccessFileOptions opts;
@@ -1320,7 +1320,7 @@ Status LogBlockContainer::ProcessRecord(
         break;
       }
 
-      LOG(INFO) << Substitute("Found CREATE block $0 at offset $1 with length $2",
+      VLOG(2) << Substitute("Found CREATE block $0 at offset $1 with length $2",
                             block_id.ToString(),
                             record->offset(), record->length());
 
@@ -1458,7 +1458,18 @@ Status LogBlockContainer::AppendMetadata(const BlockId& block_id, const BlockRec
   pb.SerializeToString(&buf);
   rocksdb::WriteOptions options;
   rocksdb::Slice key(id_ + "." + block_id.ToString());
-  rocksdb::Status s = data_dir_->rdb()->Put(options, key, rocksdb::Slice(buf));
+  rocksdb::Status s;
+  switch (pb.op_type()) {
+    case CREATE:
+      s = data_dir_->rdb()->Put(options, key, rocksdb::Slice(buf));
+      break;
+    case DELETE:
+      s = data_dir_->rdb()->Delete(options, key);
+      break;
+    default:
+      LOG(FATAL) << Substitute("Write a record with unknown type $0", pb.op_type());
+      break;
+  }
   // RETURN_NOT_OK_HANDLE_ERROR(s);   TODO: rocksdb的status
 //  RETURN_NOT_OK_HANDLE_ERROR(read_only_status());
 //  // Note: We don't check for sufficient disk space for metadata writes in
@@ -2906,10 +2917,9 @@ void LogBlockManager::OpenDataDir(
 
     // Load the container's records asynchronously.
     auto* r = results->back().get();
-    LOG(INFO) << "LoadContainer: " << container_name;
-    dir->ExecClosure([this, dir, container, r]() {
+//    dir->ExecClosure([this, dir, container, r]() {
       this->LoadContainer(dir, container, r);
-    });
+//    });
   }
 }
 
