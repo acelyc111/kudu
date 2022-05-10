@@ -1117,7 +1117,6 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
     return Status::Aborted(Substitute("orphaned empty or invalid length file $0", common_path));
   }
 
-  // TODO: scan rocksdb
   bool has_metadata = false;
   Status read_status;
   rocksdb::WriteOptions del_opt;
@@ -1179,7 +1178,6 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
   // Except the special cases above, returns error status if any.
   if (s_data.IsNotFound()) RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_data);
 //  if (s_meta.IsNotFound()) RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_meta);
-  if (!has_metadata) RETURN_NOT_OK_CONTAINER_DISK_FAILURE(Status::NotFound("empty metadata"));
 
   return Status::OK();
 }
@@ -1216,6 +1214,7 @@ Status LogBlockContainer::ProcessRecords(
   while (it->Valid()) {
     has_metadata = true;
     BlockRecordPB record;
+    LOG(INFO) << "key: " << it->key().ToString();
     if (!record.ParseFromArray(it->value().data(), it->value().size())) {
       read_status = Status::Corruption(Substitute("Invalid BlockRecordPB, key=$0", it->key().ToString()));
       break;
@@ -1321,7 +1320,7 @@ Status LogBlockContainer::ProcessRecord(
         break;
       }
 
-      VLOG(2) << Substitute("Found CREATE block $0 at offset $1 with length $2",
+      LOG(INFO) << Substitute("Found CREATE block $0 at offset $1 with length $2",
                             block_id.ToString(),
                             record->offset(), record->length());
 
@@ -1349,7 +1348,7 @@ Status LogBlockContainer::ProcessRecord(
         report->malformed_record_check->entries.emplace_back(ToString(), record);
         break;
       }
-      VLOG(2) << Substitute("Found DELETE block $0", block_id.ToString());
+      LOG(INFO) << Substitute("Found DELETE block $0", block_id.ToString());
       if (type == ProcessRecordType::kReadAndUpdate) {
         BlockDeleted(lb);
       }
@@ -2316,6 +2315,8 @@ LogBlockManager::~LogBlockManager() {
   for (auto& mb : managed_block_shards_) {
     mb.blocks_by_block_id->clear();
   }
+  managed_block_shards_.clear();
+  LOG(INFO) << "managed_block_shards_.clear()";
 
   // Containers may have outstanding tasks running on data directories; wait
   // for them to complete before destroying the containers.
@@ -2905,6 +2906,7 @@ void LogBlockManager::OpenDataDir(
 
     // Load the container's records asynchronously.
     auto* r = results->back().get();
+    LOG(INFO) << "LoadContainer: " << container_name;
     dir->ExecClosure([this, dir, container, r]() {
       this->LoadContainer(dir, container, r);
     });
@@ -2914,6 +2916,7 @@ void LogBlockManager::OpenDataDir(
 void LogBlockManager::LoadContainer(Dir* dir,
                                     LogBlockContainerRefPtr container,
                                     internal::LogBlockContainerLoadResult* result) {
+  LOG(INFO) << "LoadContainer: " << container->id();
   // Process the records, building a container-local map for live blocks and
   // a list of dead blocks.
   //

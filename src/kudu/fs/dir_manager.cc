@@ -124,9 +124,9 @@ Status Dir::Init() {
   opts.memtable_prefix_bloom_size_ratio = 0.1;
 //  ReadOptions prefix_same_as_start = true;
 
-  rocksdb::Status s = rocksdb::DB::Open(opts, dir_, &db_);
+  rocksdb::Status s = rocksdb::DB::Open(opts, JoinPathSegments(dir_, "rdb"), &db_);
   if (!s.ok()) {
-    return Status::IOError("open RocksDB failed, path: ", dir_);
+    return Status::IOError(Substitute("$0, open RocksDB failed, path: $0", s.ToString(), dir_));
   }
   return Status::OK();
 }
@@ -138,6 +138,10 @@ void Dir::Shutdown() {
 
   WaitOnClosures();
   pool_->Shutdown();
+
+  delete db_;
+  db_ = nullptr;
+
   is_shutdown_ = true;
 }
 
@@ -611,6 +615,7 @@ Status DirManager::Open() {
                   .Build(&pool));
     unique_ptr<Dir> new_dir = CreateNewDir(env_, metrics_.get(), fs_type, dir, std::move(instance),
                                            std::move(pool));
+    RETURN_NOT_OK(new_dir->Init());
     dirs.emplace_back(std::move(new_dir));
   }
 
