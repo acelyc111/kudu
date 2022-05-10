@@ -594,6 +594,7 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
 
   // Simple accessors.
   LogBlockManager* block_manager() const { return block_manager_; }
+  const string& id() const { return id_; }
   int64_t next_block_offset() const { return next_block_offset_.Load(); }
   int64_t total_bytes() const { return total_bytes_.Load(); }
   int64_t total_blocks() const { return total_blocks_.Load(); }
@@ -1454,11 +1455,10 @@ Status LogBlockContainer::ReadVData(int64_t offset, ArrayView<Slice> results) co
 }
 
 Status LogBlockContainer::AppendMetadata(const BlockId& block_id, const BlockRecordPB& pb) {
-  // TODO: write data to rocksdb
   string buf;
   pb.SerializeToString(&buf);
   rocksdb::WriteOptions options;
-  rocksdb::Slice key(data_file_->filename() + "." + block_id.ToString());  // 逻辑序
+  rocksdb::Slice key(id_ + "." + block_id.ToString());
   rocksdb::Status s = data_dir_->rdb()->Put(options, key, rocksdb::Slice(buf));
   // RETURN_NOT_OK_HANDLE_ERROR(s);   TODO: rocksdb的status
 //  RETURN_NOT_OK_HANDLE_ERROR(read_only_status());
@@ -2785,7 +2785,7 @@ Status LogBlockManager::RemoveLogBlocks(vector<BlockId> block_ids,
       }
     } else {
       rocksdb::WriteOptions options;
-      rocksdb::Slice key(lb->container()->data_file()->filename() + "." + lb->block_id().ToString());
+      rocksdb::Slice key(lb->container()->id() + "." + lb->block_id().ToString());
       rocksdb::Status s = lb->container()->data_dir()->rdb()->Delete(options, key);
       // Metadata files of containers with very few live blocks will be compacted.
 //      if (!lb->container()->read_only() &&
