@@ -2388,6 +2388,7 @@ Status LogBlockManager::Open(FsReport* report, std::atomic<int>* containers_proc
           dd->dir(), *limit);
     }
     InsertOrDie(&block_limits_by_data_dir_, dd.get(), limit);
+    RETURN_NOT_OK(dd->InitRdb());
   }
 
   // Open containers in each data dirs.

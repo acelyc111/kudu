@@ -106,7 +106,7 @@ class Dir {
       std::unique_ptr<ThreadPool> pool);
   virtual ~Dir();
 
-  Status Init();
+  Status InitRdb();
 
   // Shuts down this dir's thread pool, waiting for any closures submitted via
   // ExecClosure() to finish first.

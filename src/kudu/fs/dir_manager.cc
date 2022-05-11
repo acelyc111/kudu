@@ -100,7 +100,7 @@ Dir::~Dir() {
   Shutdown();
 }
 
-Status Dir::Init() {
+Status Dir::InitRdb() {
   if (is_init_) {
     return Status::OK();
   }
@@ -620,7 +620,6 @@ Status DirManager::Open() {
                   .Build(&pool));
     unique_ptr<Dir> new_dir = CreateNewDir(env_, metrics_.get(), fs_type, dir, std::move(instance),
                                            std::move(pool));
-    RETURN_NOT_OK(new_dir->Init());
     dirs.emplace_back(std::move(new_dir));
   }
 
