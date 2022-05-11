@@ -124,14 +124,15 @@ Status Dir::InitRdb() {
   tbl_opts.block_cache = s_block_cache_;
   tbl_opts.filter_policy.reset(rocksdb::NewBloomFilterPolicy(9.9));
   opts.table_factory.reset(NewBlockBasedTableFactory(tbl_opts));
-  opts.prefix_extractor.reset(rocksdb::NewFixedPrefixTransform(ObjectIdGenerator::IdLength()));
-  opts.memtable_prefix_bloom_size_ratio = 0.1;
+//  opts.prefix_extractor.reset(rocksdb::NewFixedPrefixTransform(ObjectIdGenerator::IdLength()));
+//  opts.memtable_prefix_bloom_size_ratio = 0.1;
 //  ReadOptions prefix_same_as_start = true;
 
   rocksdb::Status s = rocksdb::DB::Open(opts, JoinPathSegments(dir_, "rdb"), &db_);
   if (!s.ok()) {
     return Status::IOError(Substitute("$0, open RocksDB failed, path: $0", s.ToString(), dir_));
   }
+//  LOG(INFO) << Substitute("rocksdb::DB::Open $0", dir_);
   is_init_ = true;
   return Status::OK();
 }
@@ -144,8 +145,11 @@ void Dir::Shutdown() {
   WaitOnClosures();
   pool_->Shutdown();
 
-  delete db_;
-  db_ = nullptr;
+  if (is_init_) {
+    delete db_;
+    db_ = nullptr;
+//    LOG(INFO) << Substitute("rocksdb::DB::Close $0", dir_);
+  }
 
   is_shutdown_ = true;
 }

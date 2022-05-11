@@ -52,6 +52,8 @@ TEST(ObjectIdGeneratorTest, TestCanoicalizeUuid) {
 }
 
 TEST(ObjectIdGeneratorTest, TestNextOf) {
+  ASSERT_EQ(string("4fd2307d3c3e40d98da2b268ae5ae9b9"),
+            ObjectIdGenerator::NextOf(string("4fd2307d3c3e40d98da2b268ae5ae9b8")));
   vector<int> single_chars;
   for (int i = '0'; i < '9'; i++) {
     single_chars.emplace_back(i);
