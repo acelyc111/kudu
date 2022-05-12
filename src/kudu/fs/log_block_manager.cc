@@ -1130,7 +1130,6 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
 
   bool has_metadata = false;
   Status read_status;
-  rocksdb::WriteOptions del_opt;
   rocksdb::Slice begin_key = id;
   string next = ObjectIdGenerator::NextOf(id);
 //  rocksdb::Slice end_key = next;
@@ -1214,7 +1213,6 @@ Status LogBlockContainer::ProcessRecords(
     ProcessRecordType type) {
   Status read_status;
   uint64_t data_file_size = 0;
-  rocksdb::WriteOptions del_opt;
   rocksdb::Slice begin_key = id_;
   string next = ObjectIdGenerator::NextOf(id_);
 //  rocksdb::Slice end_key = next;
@@ -1230,6 +1228,7 @@ Status LogBlockContainer::ProcessRecords(
     if (!record.ParseFromArray(it->value().data(), it->value().size())) {
       read_status = Status::Corruption(Substitute("Invalid BlockRecordPB, key=$0", it->key().ToString()));
       break;
+      // TODO: corrupt
     }
     LOG(INFO) << "Scanned: " << id_ << " " << it->key().ToString() << " " << it->key().size();
 
@@ -1238,6 +1237,9 @@ Status LogBlockContainer::ProcessRecords(
                                 live_blocks, live_block_records, dead_blocks,
                                 &data_file_size, max_block_id, type));
     it->Next();
+  }
+  if (!it->status().ok()) {
+    LOG(FATAL) << it->status().ToString();
   }
 //  LOG(INFO) << "Scaned " << count << " live blocks in " << id_;
 //  string metadata_path = metadata_file_->filename();
@@ -1468,6 +1470,47 @@ Status LogBlockContainer::ReadVData(int64_t offset, ArrayView<Slice> results) co
 }
 
 Status LogBlockContainer::AppendMetadata(const BlockId& block_id, const BlockRecordPB& pb) {
+  {
+    rocksdb::Slice key1(id_ + "_" + block_id.ToString());
+    rocksdb::WriteOptions wopt;
+    rocksdb::Status s;
+
+    LOG(INFO) << "Put: " << id_ << " " << key1.ToString() << " " << key1.size();
+    s = data_dir_->rdb()->Put(wopt, key1, rocksdb::Slice("value"));
+    if (!s.ok()) {
+      LOG(FATAL) << s.ToString();
+    }
+
+    rocksdb::Slice key2(id_ + "_" + block_id.ToString());
+    LOG(INFO) << "Delete: " << id_ << " " << key2.ToString() << " " << key2.size();
+    s = data_dir_->rdb()->Delete(wopt, key2);
+    if (!s.ok()) {
+      LOG(FATAL) << s.ToString();
+    }
+
+    rocksdb::ReadOptions ropt;
+
+    rocksdb::Slice key3(id_ + "_" + block_id.ToString());
+    string value;
+    s = data_dir_->rdb()->Get(ropt, key3, &value);
+    if (!s.ok() && !s.IsNotFound()) {
+      LOG(FATAL) << s.ToString();
+    } else if (s.ok()) {
+      LOG(INFO) << "Get: " << id_ << " " << key3.ToString() << " " << key3.size() << " -> " << value;
+    }
+
+    rocksdb::Slice key4(id_);
+    ropt.readahead_size = 2 << 20;
+    std::unique_ptr<rocksdb::Iterator> it(data_dir_->rdb()->NewIterator(ropt, data_dir_->rdb()->DefaultColumnFamily()));
+    it->Seek(key4);
+    while (it->Valid() && it->key().starts_with(id_)) {
+      LOG(INFO) << "Scanned: " << id_ << " " << it->key().ToString() << " " << it->key().size();
+      it->Next();
+    }
+    if (!it->status().ok()) {
+      LOG(FATAL) << it->status().ToString();
+    }
+  }
   string buf;
   pb.SerializeToString(&buf);
   rocksdb::WriteOptions options;
@@ -1479,8 +1522,24 @@ Status LogBlockContainer::AppendMetadata(const BlockId& block_id, const BlockRec
       s = data_dir_->rdb()->Put(options, key, rocksdb::Slice(buf));
       break;
     case DELETE:
-      LOG(INFO) << "Delete: " << id_ << " " << key.ToString() << " " << key.size();
-      s = data_dir_->rdb()->Delete(options, key);
+      // TODO: will remove
+      {
+        rocksdb::ReadOptions rd_options;
+        string value;
+        s = data_dir_->rdb()->Get(rd_options, key, &value);
+        if (!s.ok() && !s.IsNotFound()) {
+          LOG(FATAL) << s.ToString();
+        } else if (s.ok()) {
+          LOG(INFO) << "Get: " << id_ << " " << key.ToString() << " " << key.size() << " -> "
+                    << value;
+        }
+      }
+      {
+        rocksdb::Slice key(id_ + "." + block_id.ToString());
+        LOG(INFO) << "Delete: " << id_ << " " << key.ToString() << " " << key.size();
+        options.sync = true;
+        s = data_dir_->rdb()->Delete(options, key);
+      }
       break;
     default:
       LOG(FATAL) << Substitute("Write a record with unknown type $0", pb.op_type());
@@ -1490,18 +1549,29 @@ Status LogBlockContainer::AppendMetadata(const BlockId& block_id, const BlockRec
     LOG(FATAL) << s.ToString();
   }
 
-//  virtual Status Get(const ReadOptions& options, const Slice& key,
-//                     std::string* value) {
+  rocksdb::FlushOptions fopts;
+  s = data_dir_->rdb()->Flush(fopts);
+  if (!s.ok()) {
+    LOG(FATAL) << s.ToString();
+  }
 
   // TODO: will remove
   if (pb.op_type() == DELETE) {
     rocksdb::ReadOptions rd_options;
-    string value;
-    s = data_dir_->rdb()->Get(rd_options, key, &value);
-    if (!s.ok() && !s.IsNotFound()) {
-      LOG(FATAL) << s.ToString();
-    } else if (s.ok()) {
-      LOG(INFO) << "Get: " << id_ << " " << key.ToString() << " " << key.size() << " -> " << value;
+    rocksdb::Slice begin_key(id_);
+    string next = ObjectIdGenerator::NextOf(id_);
+    //  rocksdb::Slice end_key = next;
+    rocksdb::ReadOptions options;
+    options.readahead_size = 2 << 20;
+    //  options.iterate_upper_bound = &end_key;
+    std::unique_ptr<rocksdb::Iterator> it(data_dir_->rdb()->NewIterator(options, data_dir_->rdb()->DefaultColumnFamily()));
+    it->Seek(begin_key);
+    while (it->Valid() && it->key().starts_with(begin_key)) {
+      LOG(INFO) << "Scanned: " << id_ << " " << it->key().ToString() << " " << it->key().size();
+      it->Next();
+    }
+    if (!it->status().ok()) {
+      LOG(FATAL) << it->status().ToString();
     }
   }
 //  RETURN_NOT_OK_HANDLE_ERROR(read_only_status());

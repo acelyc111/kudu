@@ -1370,7 +1370,7 @@ TEST_P(LogBlockManagerTest, TestMisalignedBlocksFuzz) {
   EnableEncryption(GetParam());
 
   FLAGS_log_container_preallocate_bytes = 0;
-  const int kNumBlocks = 100;
+  const int kNumBlocks = 10;
 
   // Create one container.
   unique_ptr<WritableBlock> block;
