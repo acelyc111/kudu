@@ -857,7 +857,6 @@ LogBlockContainer::~LogBlockContainer() {
 //    string metadata_failure_msg =
 //        "Could not delete dead container metadata file " + metadata_file_name;
 
-    // TODO: del range from rocksdb
     rocksdb::WriteOptions del_opt;
     rocksdb::Slice begin_key = id_;
     string next = ObjectIdGenerator::NextOf(id_);
@@ -3005,7 +3004,7 @@ void LogBlockManager::LoadContainer(Dir* dir,
   for (const auto& e : live_blocks) {
     if (PREDICT_FALSE(e.second->offset() %
                       container->instance()->filesystem_block_size_bytes() != 0)) {
-      LOG(INFO) << container->id() << "." << e.first.ToString();
+//      LOG(INFO) << container->id() << "." << e.first.ToString();
       result->report.misaligned_block_check->entries.emplace_back(
           container->ToString(), e.first);
 

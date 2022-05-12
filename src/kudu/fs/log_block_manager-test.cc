@@ -52,6 +52,7 @@
 #include "kudu/gutil/casts.h"
 #include "kudu/gutil/map-util.h"
 #include "kudu/gutil/ref_counted.h"
+#include "kudu/gutil/strings/split.h"
 #include "kudu/gutil/strings/strip.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/gutil/strings/util.h"
@@ -77,6 +78,8 @@ using std::unique_ptr;
 using std::unordered_map;
 using std::unordered_set;
 using std::vector;
+using strings::SkipEmpty;
+using strings::Split;
 using strings::Substitute;
 
 DECLARE_bool(cache_force_single_shard);
@@ -143,6 +146,29 @@ class LogBlockManagerTest : public KuduTest, public ::testing::WithParamInterfac
     ASSERT_OK(bm_->Open(&report));
     ASSERT_OK(dd_manager_->CreateDataDirGroup(test_tablet_name_));
     ASSERT_OK(dd_manager_->GetDataDirGroupPB(test_tablet_name_, &test_group_pb_));
+  }
+
+  Status DeleteMetadataFromRdb(const string& dir, const string& container_name) {
+    Dir* pdir = nullptr;
+    for (const auto& d : dd_manager_->dirs()) {
+      if (d->dir() == dir) {
+        pdir = d.get();
+        break;
+      }
+    }
+    CHECK(pdir);
+
+    rocksdb::WriteOptions del_opt;
+    rocksdb::Slice begin_key = container_name;
+    string next = ObjectIdGenerator::NextOf(container_name);
+    rocksdb::Slice end_key = next;
+    auto s = pdir->rdb()->DeleteRange(
+        del_opt, pdir->rdb()->DefaultColumnFamily(), begin_key, end_key);
+    if (!s.ok()) {
+      LOG(FATAL) << s.ToString();
+    }
+
+    return Status::OK();
   }
 
  protected:
@@ -2271,6 +2297,8 @@ TEST_P(LogBlockManagerTest, TestHalfPresentContainer) {
   BlockId block_id;
   string data_file_name;
   string metadata_file_name;
+  string dir;
+  string container_name;
   MetricRegistry registry;
   scoped_refptr<MetricEntity> entity = METRIC_ENTITY_server.Instantiate(&registry, "test");
 
@@ -2286,6 +2314,13 @@ TEST_P(LogBlockManagerTest, TestHalfPresentContainer) {
     ASSERT_OK(writer->Close());
     NO_FATALS(GetOnlyContainerDataFile(&data_file_name));
 //    NO_FATALS(GetOnlyContainerMetadataFile(&metadata_file_name));
+    dir = DirName(data_file_name);
+    string file_name = BaseName(data_file_name);
+    vector<string> tmp = Split(file_name, ".", SkipEmpty());
+    CHECK(!tmp.empty());
+    container_name = tmp[0];
+
+    LOG(INFO) << "dir: " << dir << ", container_name: " << container_name;
   };
 
   const auto CreateMetadataFile = [&] () {
@@ -2352,7 +2387,7 @@ TEST_P(LogBlockManagerTest, TestHalfPresentContainer) {
     NO_FATALS(CreateContainer());
 
     // Delete the metadata file.
-    // TODO: test delete range from rdb
+    NO_FATALS(DeleteMetadataFromRdb(dir, container_name));
 //    ASSERT_OK(env_->DeleteFile(metadata_file_name));
 
     // The container has been repaired.
