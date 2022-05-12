@@ -1108,6 +1108,7 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
     s_data = s_data.CloneAndPrepend("unable to determine data file size");
     RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_data);
   }
+  vector<string> corrupt_block_ids;
   bool has_metadata = false;
   Status read_status;
   rocksdb::Slice begin_key = id;
@@ -1117,18 +1118,32 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
   //  options.iterate_upper_bound = &end_key;
   std::unique_ptr<rocksdb::Iterator> it(dir->rdb()->NewIterator(options, dir->rdb()->DefaultColumnFamily()));
   it->Seek(begin_key);
-  if (it->Valid() && it->key().starts_with(begin_key)) {
+  while (it->Valid() && it->key().starts_with(begin_key)) {
+    LOG(INFO) << it->key().ToString();
     // TODO: maybe not needed
     BlockRecordPB record;
     if (!record.ParseFromArray(it->value().data(), it->value().size())) {
+      corrupt_block_ids.push_back(it->key().ToString());
       read_status = Status::Corruption(Substitute("Invalid BlockRecordPB, key=$0", it->key().ToString()));
-      LOG(FATAL) << it->status().ToString();
+      LOG(ERROR) << "record.ParseFromArray failed. key: " << it->key().ToString();
+      it->Next();
+      continue;
     }
     has_metadata = true;
+    break;
   }
+  LOG(INFO) << has_metadata;
   if (!it->status().ok()) {
     LOG(FATAL) << it->status().ToString();
   }
+
+//  if (!corrupt_block_ids.empty()) {
+//    for (const auto& corrupt_block_id : corrupt_block_ids) {
+//      report->incomplete_container_check->entries.emplace_back(common_path);
+//    }
+    // TODO: Aborted will be continue in upper layer
+//    return Status::Aborted(Substitute("orphaned empty or invalid length file $0", common_path));
+//  }
 //  uint64_t metadata_size = 0;
 //  Status s_meta = env->GetFileSize(metadata_path, &metadata_size);
 //  if (!s_meta.ok() && !s_meta.IsNotFound()) {
@@ -1148,6 +1163,7 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
   if (PREDICT_FALSE(/*metadata_size < kMinimumValidLength &&*/
                     !has_metadata &&
                     data_size <= kEncryptionHeaderSize)) {
+    LOG(INFO) << "incomplete_container_check";
     report->incomplete_container_check->entries.emplace_back(common_path);
     return Status::Aborted(Substitute("orphaned empty or invalid length file $0", common_path));
   }
@@ -1201,6 +1217,7 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
   // Except the special cases above, returns error status if any.
   if (s_data.IsNotFound()) RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_data);
 //  if (s_meta.IsNotFound()) RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_meta);
+  if (!has_metadata) RETURN_NOT_OK_CONTAINER_DISK_FAILURE(Status::NotFound("missing rdb metadata"));
 
   return Status::OK();
 }
@@ -1223,6 +1240,7 @@ Status LogBlockContainer::ProcessRecords(
     vector<LogBlockRefPtr>* dead_blocks,
     uint64_t* max_block_id,
     ProcessRecordType type) {
+  LOG(INFO) << "ProcessRecords";
   Status read_status;
   uint64_t data_file_size = 0;
   rocksdb::Slice begin_key = id_;
@@ -1238,8 +1256,9 @@ Status LogBlockContainer::ProcessRecords(
     count++;
     BlockRecordPB record;
     if (!record.ParseFromArray(it->value().data(), it->value().size())) {
+      LOG(INFO) << it->key().ToString();
       read_status = Status::Corruption(Substitute("Invalid BlockRecordPB, key=$0", it->key().ToString()));
-      break;
+      continue;
       // TODO: corrupt
     }
 //    LOG(INFO) << "Scanned: " << id_ << " " << it->key().ToString() << " " << it->key().size();
@@ -2905,9 +2924,11 @@ void LogBlockManager::OpenDataDir(
     return;
   }
 
+  // TODO: if data file is not exist, but metadata in rdb exists, we should check this case.
   // Find all containers and open them.
   unordered_set<string> containers_seen;
-  results->reserve(children.size() / 2);
+  results->reserve(children.size());
+//  results->reserve(children.size() / 2);
   for (const string& child : children) {
     string container_name;
     if (!TryStripSuffixString(
@@ -2955,16 +2976,15 @@ void LogBlockManager::OpenDataDir(
 
     // Load the container's records asynchronously.
     auto* r = results->back().get();
-//    dir->ExecClosure([this, dir, container, r]() {
+    dir->ExecClosure([this, dir, container, r]() {
       this->LoadContainer(dir, container, r);
-//    });
+    });
   }
 }
 
 void LogBlockManager::LoadContainer(Dir* dir,
                                     LogBlockContainerRefPtr container,
                                     internal::LogBlockContainerLoadResult* result) {
-//  LOG(INFO) << "LoadContainer: " << container->id();
   // Process the records, building a container-local map for live blocks and
   // a list of dead blocks.
   //
@@ -3004,7 +3024,6 @@ void LogBlockManager::LoadContainer(Dir* dir,
   for (const auto& e : live_blocks) {
     if (PREDICT_FALSE(e.second->offset() %
                       container->instance()->filesystem_block_size_bytes() != 0)) {
-//      LOG(INFO) << container->id() << "." << e.first.ToString();
       result->report.misaligned_block_check->entries.emplace_back(
           container->ToString(), e.first);
 
