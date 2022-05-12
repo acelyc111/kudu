@@ -52,6 +52,7 @@
 #include "kudu/gutil/map-util.h"
 #include "kudu/gutil/port.h"
 #include "kudu/gutil/strings/numbers.h"
+#include "kudu/gutil/strings/split.h"
 #include "kudu/gutil/strings/strcat.h"
 #include "kudu/gutil/strings/strip.h"
 #include "kudu/gutil/strings/substitute.h"
@@ -223,6 +224,8 @@ using std::unique_ptr;
 using std::unordered_map;
 using std::unordered_set;
 using std::vector;
+using strings::SkipEmpty;
+using strings::Split;
 using strings::Substitute;
 
 bool ValidateMetadataCompactFlags() {
@@ -859,7 +862,7 @@ LogBlockContainer::~LogBlockContainer() {
     rocksdb::Slice begin_key = id_;
     string next = ObjectIdGenerator::NextOf(id_);
     rocksdb::Slice end_key = next;
-    LOG(INFO) << "DeleteRange: " << begin_key.ToString() << " -> " << end_key.ToString();
+//    LOG(INFO) << "DeleteRange: " << begin_key.ToString() << " -> " << end_key.ToString();
     auto s = data_dir_->rdb()->DeleteRange(del_opt, data_dir_->rdb()->DefaultColumnFamily(), begin_key, end_key);
     if (!s.ok()) {
       LOG(FATAL) << s.ToString();
@@ -978,7 +981,7 @@ Status LogBlockContainer::Create(LogBlockManager* block_manager,
     string next = ObjectIdGenerator::NextOf(id);
     rocksdb::Slice end_key = next;
 //    LOG(INFO) << "id: " << id << ", next: " << next << ", next: " << ObjectIdGenerator::NextOf(id);
-    LOG(INFO) << "DeleteRange: " << begin_key.ToString() << " -> " << end_key.ToString();
+//    LOG(INFO) << "DeleteRange: " << begin_key.ToString() << " -> " << end_key.ToString();
     auto s = dir->rdb()->DeleteRange(del_opt, dir->rdb()->DefaultColumnFamily(), begin_key, end_key);
     if (!s.ok()) {
       LOG(FATAL) << s.ToString() << ", begin_key: " << begin_key.ToString() << ", end_key: " << end_key.ToString();
@@ -1106,6 +1109,27 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
     s_data = s_data.CloneAndPrepend("unable to determine data file size");
     RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_data);
   }
+  bool has_metadata = false;
+  Status read_status;
+  rocksdb::Slice begin_key = id;
+  string next = ObjectIdGenerator::NextOf(id);
+  //  rocksdb::Slice end_key = next;
+  rocksdb::ReadOptions options;
+  //  options.iterate_upper_bound = &end_key;
+  std::unique_ptr<rocksdb::Iterator> it(dir->rdb()->NewIterator(options, dir->rdb()->DefaultColumnFamily()));
+  it->Seek(begin_key);
+  if (it->Valid() && it->key().starts_with(begin_key)) {
+    // TODO: maybe not needed
+    BlockRecordPB record;
+    if (!record.ParseFromArray(it->value().data(), it->value().size())) {
+      read_status = Status::Corruption(Substitute("Invalid BlockRecordPB, key=$0", it->key().ToString()));
+      LOG(FATAL) << it->status().ToString();
+    }
+    has_metadata = true;
+  }
+  if (!it->status().ok()) {
+    LOG(FATAL) << it->status().ToString();
+  }
 //  uint64_t metadata_size = 0;
 //  Status s_meta = env->GetFileSize(metadata_path, &metadata_size);
 //  if (!s_meta.ok() && !s_meta.IsNotFound()) {
@@ -1123,22 +1147,10 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
   // safely delete. And another case is that the metadata and data files exist,
   // but the lengths are invalid.
   if (PREDICT_FALSE(/*metadata_size < kMinimumValidLength &&*/
+                    !has_metadata &&
                     data_size <= kEncryptionHeaderSize)) {
     report->incomplete_container_check->entries.emplace_back(common_path);
     return Status::Aborted(Substitute("orphaned empty or invalid length file $0", common_path));
-  }
-
-  bool has_metadata = false;
-  Status read_status;
-  rocksdb::Slice begin_key = id;
-  string next = ObjectIdGenerator::NextOf(id);
-//  rocksdb::Slice end_key = next;
-  rocksdb::ReadOptions options;
-//  options.iterate_upper_bound = &end_key;
-  std::unique_ptr<rocksdb::Iterator> it(dir->rdb()->NewIterator(options, dir->rdb()->DefaultColumnFamily()));
-  it->Seek(begin_key);
-  if (it->Valid() && it->key().starts_with(begin_key)) {
-    has_metadata = true;
   }
 
   // Handle a half-present container whose data file has gone missing and
@@ -1147,6 +1159,7 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
   //
   // Open the metadata file and quickly check whether or not there is any live blocks.
   if (PREDICT_FALSE(/*metadata_size >= kMinimumValidLength &&*/
+                    has_metadata &&
                     s_data.IsNotFound())) {
 //    BlockIdSet live_blocks;
 //    unique_ptr<RandomAccessFile> reader;
@@ -1173,7 +1186,7 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
 //    }
     // TODO: if any key found
 //    if (read_status.IsEndOfFile() && live_blocks.empty()) {
-    if (has_metadata) {
+    if (!has_metadata) {
       report->incomplete_container_check->entries.emplace_back(common_path);
       return Status::Aborted(Substitute("orphaned metadata file with no live blocks $0",
                                         common_path));
@@ -1222,7 +1235,7 @@ Status LogBlockContainer::ProcessRecords(
   std::unique_ptr<rocksdb::Iterator> it(data_dir_->rdb()->NewIterator(options, data_dir_->rdb()->DefaultColumnFamily()));
   it->Seek(begin_key);
   int count = 0;
-  while (it->Valid() && it->key().starts_with(begin_key) && it->status().ok()) {
+  while (it->Valid() && it->key().starts_with(begin_key)) {
     count++;
     BlockRecordPB record;
     if (!record.ParseFromArray(it->value().data(), it->value().size())) {
@@ -1230,7 +1243,7 @@ Status LogBlockContainer::ProcessRecords(
       break;
       // TODO: corrupt
     }
-    LOG(INFO) << "Scanned: " << id_ << " " << it->key().ToString() << " " << it->key().size();
+//    LOG(INFO) << "Scanned: " << id_ << " " << it->key().ToString() << " " << it->key().size();
 
     // TODO: check correction
     RETURN_NOT_OK(ProcessRecord(&record, report,
@@ -1470,76 +1483,21 @@ Status LogBlockContainer::ReadVData(int64_t offset, ArrayView<Slice> results) co
 }
 
 Status LogBlockContainer::AppendMetadata(const BlockId& block_id, const BlockRecordPB& pb) {
-  {
-    rocksdb::Slice key1(id_ + "_" + block_id.ToString());
-    rocksdb::WriteOptions wopt;
-    rocksdb::Status s;
-
-    LOG(INFO) << "Put: " << id_ << " " << key1.ToString() << " " << key1.size();
-    s = data_dir_->rdb()->Put(wopt, key1, rocksdb::Slice("value"));
-    if (!s.ok()) {
-      LOG(FATAL) << s.ToString();
-    }
-
-    rocksdb::Slice key2(id_ + "_" + block_id.ToString());
-    LOG(INFO) << "Delete: " << id_ << " " << key2.ToString() << " " << key2.size();
-    s = data_dir_->rdb()->Delete(wopt, key2);
-    if (!s.ok()) {
-      LOG(FATAL) << s.ToString();
-    }
-
-    rocksdb::ReadOptions ropt;
-
-    rocksdb::Slice key3(id_ + "_" + block_id.ToString());
-    string value;
-    s = data_dir_->rdb()->Get(ropt, key3, &value);
-    if (!s.ok() && !s.IsNotFound()) {
-      LOG(FATAL) << s.ToString();
-    } else if (s.ok()) {
-      LOG(INFO) << "Get: " << id_ << " " << key3.ToString() << " " << key3.size() << " -> " << value;
-    }
-
-    rocksdb::Slice key4(id_);
-    ropt.readahead_size = 2 << 20;
-    std::unique_ptr<rocksdb::Iterator> it(data_dir_->rdb()->NewIterator(ropt, data_dir_->rdb()->DefaultColumnFamily()));
-    it->Seek(key4);
-    while (it->Valid() && it->key().starts_with(id_)) {
-      LOG(INFO) << "Scanned: " << id_ << " " << it->key().ToString() << " " << it->key().size();
-      it->Next();
-    }
-    if (!it->status().ok()) {
-      LOG(FATAL) << it->status().ToString();
-    }
-  }
   string buf;
   pb.SerializeToString(&buf);
   rocksdb::WriteOptions options;
-  rocksdb::Slice key(id_ + "." + block_id.ToString());
+  string tmp_key = id_ + "." + block_id.ToString();
+  rocksdb::Slice key(tmp_key);
   rocksdb::Status s;
   switch (pb.op_type()) {
     case CREATE:
-      LOG(INFO) << "Put: " << id_ << " " << key.ToString() << " " << key.size();
+//      LOG(INFO) << "Put: " << id_ << " " << key.ToString() << " " << key.size();
       s = data_dir_->rdb()->Put(options, key, rocksdb::Slice(buf));
       break;
     case DELETE:
       // TODO: will remove
-      {
-        rocksdb::ReadOptions rd_options;
-        string value;
-        s = data_dir_->rdb()->Get(rd_options, key, &value);
-        if (!s.ok() && !s.IsNotFound()) {
-          LOG(FATAL) << s.ToString();
-        } else if (s.ok()) {
-          LOG(INFO) << "Get: " << id_ << " " << key.ToString() << " " << key.size() << " -> "
-                    << value;
-        }
-      }
-      {
-        rocksdb::Slice key(id_ + "." + block_id.ToString());
-        LOG(INFO) << "Delete: " << id_ << " " << key.ToString() << " " << key.size();
-        options.sync = true;
-        s = data_dir_->rdb()->Delete(options, key);
-      }
+//      LOG(INFO) << "Delete: " << id_ << " " << key.ToString() << " " << key.size();
+      s = data_dir_->rdb()->Delete(options, key);
       break;
     default:
       LOG(FATAL) << Substitute("Write a record with unknown type $0", pb.op_type());
@@ -1549,31 +1507,6 @@ Status LogBlockContainer::AppendMetadata(const BlockId& block_id, const BlockRec
     LOG(FATAL) << s.ToString();
   }
 
-  rocksdb::FlushOptions fopts;
-  s = data_dir_->rdb()->Flush(fopts);
-  if (!s.ok()) {
-    LOG(FATAL) << s.ToString();
-  }
-
-  // TODO: will remove
-  if (pb.op_type() == DELETE) {
-    rocksdb::ReadOptions rd_options;
-    rocksdb::Slice begin_key(id_);
-    string next = ObjectIdGenerator::NextOf(id_);
-    //  rocksdb::Slice end_key = next;
-    rocksdb::ReadOptions options;
-    options.readahead_size = 2 << 20;
-    //  options.iterate_upper_bound = &end_key;
-    std::unique_ptr<rocksdb::Iterator> it(data_dir_->rdb()->NewIterator(options, data_dir_->rdb()->DefaultColumnFamily()));
-    it->Seek(begin_key);
-    while (it->Valid() && it->key().starts_with(begin_key)) {
-      LOG(INFO) << "Scanned: " << id_ << " " << it->key().ToString() << " " << it->key().size();
-      it->Next();
-    }
-    if (!it->status().ok()) {
-      LOG(FATAL) << it->status().ToString();
-    }
-  }
 //  RETURN_NOT_OK_HANDLE_ERROR(read_only_status());
 //  // Note: We don't check for sufficient disk space for metadata writes in
 //  // order to allow for block deletion on full disks.
@@ -3317,6 +3250,21 @@ Status LogBlockManager::Repair(
   // TODO: check if repair needed when rdb
   if (report->incomplete_container_check) {
     for (auto& ic : report->incomplete_container_check->entries) {
+      {
+        vector<string> kv = Split(ic.container, "/", SkipEmpty());
+        CHECK(!kv.empty());
+        string id = kv[kv.size() - 1];
+        rocksdb::WriteOptions del_opt;
+        rocksdb::Slice begin_key = id;
+        string next = ObjectIdGenerator::NextOf(id);
+        rocksdb::Slice end_key = next;
+        //    LOG(INFO) << "DeleteRange: " << begin_key.ToString() << " -> " << end_key.ToString();
+        auto s =
+            dir->rdb()->DeleteRange(del_opt, dir->rdb()->DefaultColumnFamily(), begin_key, end_key);
+        if (!s.ok()) {
+          LOG(FATAL) << s.ToString();
+        }
+      }
 //      Status s = env_->DeleteFile(
 //          StrCat(ic.container, kContainerMetadataFileSuffix));
 //      if (!s.ok() && !s.IsNotFound()) {

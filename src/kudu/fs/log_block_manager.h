@@ -226,6 +226,7 @@ class LogBlockManager : public BlockManager {
   FRIEND_TEST(LogBlockManagerTest, TestBumpBlockIds);
   FRIEND_TEST(LogBlockManagerTest, TestReuseBlockIds);
   FRIEND_TEST(LogBlockManagerTest, TestFailMultipleTransactionsPerContainer);
+  FRIEND_TEST(LogBlockManagerTest, TestRdb);
 
   friend class internal::LogBlockContainer;
   friend class internal::LogBlockDeletionTransaction;

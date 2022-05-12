@@ -266,8 +266,17 @@ Status LBMCorruptor::AddMalformedRecordToContainer() {
   record.set_length(kBlockSize);
   record.set_timestamp_us(0);
 
-  unique_ptr<WritablePBContainerFile> metadata_writer;
-  RETURN_NOT_OK(OpenMetadataWriter(*c, &metadata_writer));
+  Dir* pdir = nullptr;
+  for (const auto& dir : dd_manager_->dirs()) {
+    if (dir->dir() == c->dir) {
+      pdir = dir.get();
+      break;
+    }
+  }
+  CHECK(pdir);
+
+//  unique_ptr<WritablePBContainerFile> metadata_writer;
+//  RETURN_NOT_OK(OpenMetadataWriter(*c, &metadata_writer));
 
   // Corrupt the record in some way. Kinds of malformed records (as per the
   // malformed record checking code in log_block_manager.cc):
@@ -277,7 +286,7 @@ Status LBMCorruptor::AddMalformedRecordToContainer() {
   // 2. Negative block offset.
   // 3. Negative block length.
   // 4. Offset + length > data file size.
-  // 5. Two CREATEs for same block ID.
+  // 5. Two CREATEs for same block ID.   // TODO no such error for rdb
   // 6. DELETE without first matching CREATE.
   // 7. Unrecognized op type.
   int r = rand_.Uniform(8);
@@ -291,9 +300,9 @@ Status LBMCorruptor::AddMalformedRecordToContainer() {
     record.set_length(-1);
   } else if (r == 4) {
     record.set_offset(kint64max / 2);
-  } else if (r == 5) {
-    RETURN_NOT_OK(metadata_writer->Append(record));
-  } else if (r == 6) {
+  } else if (r == 5 ||
+//    RETURN_NOT_OK(metadata_writer->Append(record));
+             r == 6) {
     record.clear_offset();
     record.clear_length();
     record.set_op_type(DELETE);
@@ -302,8 +311,20 @@ Status LBMCorruptor::AddMalformedRecordToContainer() {
     record.set_op_type(UNKNOWN);
   }
 
+  string buf;
+  record.SerializeToString(&buf);
+  rocksdb::WriteOptions options;
+  string tmp(c->name + "." + block_id.ToString());
+  rocksdb::Slice key(tmp);
+  //  LOG(INFO) << "Put: " << c->name << " " << key.ToString() << " " << key.size();
+  rocksdb::Status s = pdir->rdb()->Put(options, key, rocksdb::Slice(buf));
+  if (!s.ok()) {
+    LOG(FATAL) << s.ToString();
+  }
+
   LOG(INFO) << "Added malformed record to container " << c->name;
-  return metadata_writer->Append(record);
+  return Status::OK();
+//  return metadata_writer->Append(record);
 }
 
 Status LBMCorruptor::AddMisalignedBlockToContainer() {
@@ -404,14 +425,47 @@ Status LBMCorruptor::AddPartialRecordToContainer() {
 
   // Corrupt the record by truncating one byte off the end of it.
   {
-    RWFileOptions opts;
-    opts.mode = Env::MUST_EXIST;
-    opts.is_sensitive = true;
-    unique_ptr<RWFile> metadata_file;
-    RETURN_NOT_OK(env_->NewRWFile(opts, c->metadata_filename, &metadata_file));
-    uint64_t initial_metadata_size;
-    RETURN_NOT_OK(metadata_file->Size(&initial_metadata_size));
-    RETURN_NOT_OK(metadata_file->Truncate(initial_metadata_size - 1));
+    bool has_metadata = false;
+    BlockRecordPB record;
+    rocksdb::Slice begin_key = c->name;
+    rocksdb::ReadOptions options;
+    std::unique_ptr<rocksdb::Iterator> it(pdir->rdb()->NewIterator(options, pdir->rdb()->DefaultColumnFamily()));
+    it->Seek(begin_key);
+    if (it->Valid() && it->key().starts_with(begin_key)) {
+      if (!record.ParseFromArray(it->value().data(), it->value().size())) {
+        LOG(FATAL) << it->status().ToString();
+      }
+      has_metadata = true;
+    }
+    if (!it->status().ok()) {
+      LOG(FATAL) << it->status().ToString();
+    }
+    CHECK(has_metadata);
+
+    string tmp_key = c->name + "." + BlockId::FromPB(record.block_id()).ToString();
+    rocksdb::Slice key(tmp_key);
+    string value;
+    rocksdb::ReadOptions ropt;
+    rocksdb::Status s = pdir->rdb()->Get(ropt, key, &value);
+    if (!s.ok()) {
+      LOG(FATAL) << s.ToString();
+    }
+
+    value.substr(value.size() - 1);
+
+    rocksdb::WriteOptions wopt;
+    s = pdir->rdb()->Put(wopt, key, rocksdb::Slice(value));
+    if (!s.ok()) {
+      LOG(FATAL) << s.ToString();
+    }
+//    RWFileOptions opts;
+//    opts.mode = Env::MUST_EXIST;
+//    opts.is_sensitive = true;
+//    unique_ptr<RWFile> metadata_file;
+//    RETURN_NOT_OK(env_->NewRWFile(opts, c->metadata_filename, &metadata_file));
+//    uint64_t initial_metadata_size;
+//    RETURN_NOT_OK(metadata_file->Size(&initial_metadata_size));
+//    RETURN_NOT_OK(metadata_file->Truncate(initial_metadata_size - 1));
   }
 
   // Once a container has a partial record, it cannot be further corrupted by
@@ -510,8 +564,9 @@ Status LBMCorruptor::AppendCreateRecord(Dir* dir,
   string buf;
   record.SerializeToString(&buf);
   rocksdb::WriteOptions options;
-  rocksdb::Slice key(id + "." + block_id.ToString());
-  LOG(INFO) << "Put: " << id << " " << key.ToString() << " " << key.size();
+  string tmp(id + "." + block_id.ToString());
+  rocksdb::Slice key(tmp);
+//  LOG(INFO) << "Put: " << id << " " << key.ToString() << " " << key.size();
   rocksdb::Status s = dir->rdb()->Put(options, key, rocksdb::Slice(buf));
   if (!s.ok()) {
     LOG(FATAL) << s.ToString();
@@ -533,8 +588,9 @@ Status LBMCorruptor::AppendDeleteRecord(Dir* dir,
                                         const std::string& id,
                                         BlockId block_id) {
   rocksdb::WriteOptions options;
-  rocksdb::Slice key(id + "." + block_id.ToString());
-  LOG(INFO) << "Delete: " << id << " " << key.ToString() << " " << key.size();
+  string tmp(id + "." + block_id.ToString());
+  rocksdb::Slice key(tmp);
+//  LOG(INFO) << "Delete: " << id << " " << key.ToString() << " " << key.size();
   rocksdb::Status s = dir->rdb()->Delete(options, key);
   if (!s.ok()) {
     LOG(FATAL) << s.ToString();
