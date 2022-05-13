@@ -2795,7 +2795,7 @@ bool LogBlockManager::AddLogBlock(LogBlockRefPtr lb) {
   return true;
 }
 
-Status LogBlockManager::RemoveLogBlocks(vector<BlockId> block_ids,
+Status LogBlockManager::RemoveLogBlocks(const vector<BlockId>& block_ids,
                                         vector<LogBlockRefPtr>* log_blocks,
                                         vector<BlockId>* deleted) {
   Status first_failure;
