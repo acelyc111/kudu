@@ -2441,7 +2441,6 @@ Status LogBlockManager::Open(FsReport* report, std::atomic<int>* containers_proc
           dd->dir(), *limit);
     }
     InsertOrDie(&block_limits_by_data_dir_, dd.get(), limit);
-    RETURN_NOT_OK(dd->InitRdb());
   }
 
   // Open containers in each data dirs.
@@ -2451,6 +2450,13 @@ Status LogBlockManager::Open(FsReport* report, std::atomic<int>* containers_proc
   int i = -1;
   for (const auto& dd : dd_manager_->dirs()) {
     i++;
+
+    Status rdb_s = dd->InitRdb();
+    if (rdb_s.IsIOError()) {
+      statuses[i] = Status::IOError("Data directory failed", rdb_s.ToString(), EIO);
+      continue;
+    }
+
     int uuid_idx;
     CHECK(dd_manager_->FindUuidIndexByDir(dd.get(), &uuid_idx));
     // TODO(awong): store Statuses for each directory in the directory manager
