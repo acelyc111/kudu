@@ -360,9 +360,10 @@ class LogBlockManager : public BlockManager {
   // failure, an effort is made to delete the temporary file.
   //
   // Note: the new file is synced but its parent directory is not.
-//  Status RewriteMetadataFile(const internal::LogBlockContainer& container,
-//                             const std::vector<BlockRecordPB>& records,
-//                             int64_t* file_bytes_delta);
+  // TODO: no rdb
+  Status RewriteMetadataFile(const internal::LogBlockContainer& container,
+                             const std::vector<BlockRecordPB>& records,
+                             int64_t* file_bytes_delta);
 
   // Opens a particular data directory belonging to the block manager. The
   // results of consistency checking are written to 'results'.
