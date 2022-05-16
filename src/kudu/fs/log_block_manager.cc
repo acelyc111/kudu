@@ -665,7 +665,7 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
   }
 
   bool ShouldCompact() const {
-//    shared_lock<RWMutex> l(metadata_compact_lock_);
+    shared_lock<RWMutex> l(metadata_compact_lock_);
     return ShouldCompactUnlocked();
   }
 
@@ -1568,6 +1568,15 @@ Status LogBlockContainer::ReadVData(int64_t offset, ArrayView<Slice> results) co
   return Status::OK();
 }
 
+//Status LogBlockContainer::AppendMetadata(const BlockId& block_id, const BlockRecordPB& pb) {
+//  RETURN_NOT_OK_HANDLE_ERROR(read_only_status());
+//  // Note: We don't check for sufficient disk space for metadata writes in
+//  // order to allow for block deletion on full disks.
+//  shared_lock<RWMutex> l(metadata_compact_lock_);
+//  RETURN_NOT_OK_HANDLE_ERROR(metadata_file_->Append(pb));
+//  return Status::OK();
+//}
+
 Status LogBlockContainer::AppendMetadata(const BlockId& block_id, const BlockRecordPB& pb) {
   string buf;
   pb.SerializeToString(&buf);
@@ -1577,12 +1586,12 @@ Status LogBlockContainer::AppendMetadata(const BlockId& block_id, const BlockRec
   rocksdb::Status s;
   switch (pb.op_type()) {
     case CREATE:
-//      LOG(INFO) << "Put: " << id_ << " " << key.ToString() << " " << key.size();
+      //      LOG(INFO) << "Put: " << id_ << " " << key.ToString() << " " << key.size();
       s = data_dir_->rdb()->Put(options, key, rocksdb::Slice(buf));
       break;
     case DELETE:
       // TODO: will remove
-//      LOG(INFO) << "Delete: " << id_ << " " << key.ToString() << " " << key.size();
+      //      LOG(INFO) << "Delete: " << id_ << " " << key.ToString() << " " << key.size();
       s = data_dir_->rdb()->Delete(options, key);
       break;
     default:
@@ -1593,11 +1602,6 @@ Status LogBlockContainer::AppendMetadata(const BlockId& block_id, const BlockRec
     LOG(FATAL) << s.ToString();
   }
 
-//  RETURN_NOT_OK_HANDLE_ERROR(read_only_status());
-//  // Note: We don't check for sufficient disk space for metadata writes in
-//  // order to allow for block deletion on full disks.
-//  shared_lock<RWMutex> l(metadata_compact_lock_);
-//  RETURN_NOT_OK_HANDLE_ERROR(metadata_file_->Append(pb));
   return Status::OK();
 }
 
@@ -2448,7 +2452,6 @@ LogBlockManager::~LogBlockManager() {
   for (auto& mb : managed_block_shards_) {
     mb.blocks_by_block_id->clear();
   }
-  managed_block_shards_.clear();
 
   // Containers may have outstanding tasks running on data directories; wait
   // for them to complete before destroying the containers.
@@ -3343,6 +3346,7 @@ Status LogBlockManager::Repair(
   if (report->incomplete_container_check) {
     for (auto& ic : report->incomplete_container_check->entries) {
       {
+        // TODO: maybe delete only corrupt block ids
         vector<string> kv = Split(ic.container, "/", SkipEmpty());
         CHECK(!kv.empty());
         string id = kv[kv.size() - 1];
@@ -3357,13 +3361,13 @@ Status LogBlockManager::Repair(
           LOG(FATAL) << s.ToString();
         }
       }
-//      Status s = env_->DeleteFile(
-//          StrCat(ic.container, kContainerMetadataFileSuffix));
-//      if (!s.ok() && !s.IsNotFound()) {
-//        WARN_NOT_OK_LBM_DISK_FAILURE(s, "could not delete incomplete container metadata file");
-//      }
+      Status s = env_->DeleteFile(
+          StrCat(ic.container, kContainerMetadataFileSuffix));
+      if (!s.ok() && !s.IsNotFound()) {
+        WARN_NOT_OK_LBM_DISK_FAILURE(s, "could not delete incomplete container metadata file");
+      }
 
-      Status s = env_->DeleteFile(StrCat(ic.container, kContainerDataFileSuffix));
+      s = env_->DeleteFile(StrCat(ic.container, kContainerDataFileSuffix));
       if (!s.ok() && !s.IsNotFound()) {
         WARN_NOT_OK_LBM_DISK_FAILURE(s, "could not delete incomplete container data file");
       }
@@ -3471,12 +3475,12 @@ Status LogBlockManager::Repair(
   // TODO(awong): The below will only be true with persistent disk states.
   // Disk failures do not suffer from this issue because, on the next startup,
   // the entire directory will not be used.
-//  if (metadata_files_compacted.load() > 0) {
-//    Status s = env_->SyncDir(dir->dir());
-//    RETURN_NOT_OK_LBM_DISK_FAILURE_PREPEND(s, "Could not sync data directory");
-//    LOG(INFO) << Substitute("Compacted $0 metadata files ($1 metadata bytes)",
-//                            metadata_files_compacted.load(), metadata_bytes_delta.load());
-//  }
+  if (metadata_files_compacted.load() > 0) {
+    Status s = env_->SyncDir(dir->dir());
+    RETURN_NOT_OK_LBM_DISK_FAILURE_PREPEND(s, "Could not sync data directory");
+    LOG(INFO) << Substitute("Compacted $0 metadata files ($1 metadata bytes)",
+                            metadata_files_compacted.load(), metadata_bytes_delta.load());
+  }
 
   return Status::OK();
 }
