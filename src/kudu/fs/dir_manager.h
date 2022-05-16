@@ -155,7 +155,8 @@ class Dir {
     return available_bytes_;
   }
 
-  // The amount of time to cache the amount of available space in this  // directory.
+  // The amount of time to cache the amount of available space in this
+  // directory.
   virtual int available_space_cache_secs() const = 0;
 
   // The number of bytes to reserve in each directory for non-Kudu usage. A

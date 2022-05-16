@@ -1108,6 +1108,90 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
     s_data = s_data.CloneAndPrepend("unable to determine data file size");
     RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_data);
   }
+  uint64_t metadata_size = 0;
+  Status s_meta = env->GetFileSize(metadata_path, &metadata_size);
+  if (!s_meta.ok() && !s_meta.IsNotFound()) {
+    s_meta = s_meta.CloneAndPrepend("unable to determine metadata file size");
+    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_meta);
+  }
+
+  const auto kEncryptionHeaderSize = env->GetEncryptionHeaderSize();
+  const auto kMinimumValidLength = pb_util::kPBContainerMinimumValidLength + kEncryptionHeaderSize;
+
+  // Check that both the metadata and data files exist and have valid lengths.
+  // This covers a commonly seen case at startup, where the previous incarnation
+  // of the server crashed due to "too many open files" just as it was trying
+  // to create a file. This orphans an empty or invalid length file, which we can
+  // safely delete. And another case is that the metadata and data files exist,
+  // but the lengths are invalid.
+  if (PREDICT_FALSE(metadata_size < kMinimumValidLength &&
+                    data_size <= kEncryptionHeaderSize)) {
+    report->incomplete_container_check->entries.emplace_back(common_path);
+    return Status::Aborted(Substitute("orphaned empty or invalid length file $0", common_path));
+  }
+
+  // Handle a half-present container whose data file has gone missing and
+  // the metadata file has no live blocks. If that's true, the (orphaned)
+  // metadata file will be deleted when repairing.
+  //
+  // Open the metadata file and quickly check whether or not there is any live blocks.
+  if (PREDICT_FALSE(metadata_size >= kMinimumValidLength &&
+                    s_data.IsNotFound())) {
+    BlockIdSet live_blocks;
+    unique_ptr<RandomAccessFile> reader;
+    RandomAccessFileOptions opts;
+    opts.is_sensitive = true;
+    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(env->NewRandomAccessFile(opts, metadata_path, &reader));
+    ReadablePBContainerFile pb_reader(std::move(reader));
+    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(pb_reader.Open());
+    while (true) {
+      BlockRecordPB record;
+      read_status = pb_reader.ReadNextPB(&record);
+      if (!read_status.ok()) break;
+      switch (record.op_type()) {
+        case CREATE:
+          live_blocks.emplace(BlockId::FromPB(record.block_id()));
+          break;
+        case DELETE:
+          live_blocks.erase(BlockId::FromPB(record.block_id()));
+          break;
+        default:
+          LOG(WARNING) << Substitute("Found a record with unknown type $0", record.op_type());
+          break;
+      }
+    }
+    if (read_status.IsEndOfFile() && live_blocks.empty()) {
+      report->incomplete_container_check->entries.emplace_back(common_path);
+      return Status::Aborted(Substitute("orphaned metadata file with no live blocks $0",
+                                        common_path));
+    }
+    // If the read failed for some unexpected reason, propagate the error.
+    if (!read_status.IsEndOfFile() && !read_status.IsIncomplete()) {
+      RETURN_NOT_OK_CONTAINER_DISK_FAILURE(read_status);
+    }
+  }
+
+  // Except the special cases above, returns error status if any.
+  if (s_data.IsNotFound()) RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_data);
+  if (s_meta.IsNotFound()) RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_meta);
+
+  return Status::OK();
+}
+
+Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
+                                              FsReport* report,
+                                              const Dir* dir,
+                                              const string& id,
+                                              const string& common_path,
+                                              const string& data_path,
+                                              const string& metadata_path) {
+  Env* env = block_manager->env();
+  uint64_t data_size = 0;
+  Status s_data = env->GetFileSize(data_path, &data_size);
+  if (!s_data.ok() && !s_data.IsNotFound()) {
+    s_data = s_data.CloneAndPrepend("unable to determine data file size");
+    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_data);
+  }
   vector<string> corrupt_block_ids;
   bool has_metadata = false;
   Status read_status;
@@ -1120,7 +1204,6 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
   it->Seek(begin_key);
   while (it->Valid() && it->key().starts_with(begin_key)) {
     LOG(INFO) << it->key().ToString();
-    // TODO: maybe not needed
     BlockRecordPB record;
     if (!record.ParseFromArray(it->value().data(), it->value().size())) {
       corrupt_block_ids.push_back(it->key().ToString());
@@ -1137,19 +1220,12 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
     LOG(FATAL) << it->status().ToString();
   }
 
-//  if (!corrupt_block_ids.empty()) {
-//    for (const auto& corrupt_block_id : corrupt_block_ids) {
-//      report->incomplete_container_check->entries.emplace_back(common_path);
-//    }
-    // TODO: Aborted will be continue in upper layer
-//    return Status::Aborted(Substitute("orphaned empty or invalid length file $0", common_path));
-//  }
-//  uint64_t metadata_size = 0;
-//  Status s_meta = env->GetFileSize(metadata_path, &metadata_size);
-//  if (!s_meta.ok() && !s_meta.IsNotFound()) {
-//    s_meta = s_meta.CloneAndPrepend("unable to determine metadata file size");
-//    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_meta);
-//  }
+  if (!corrupt_block_ids.empty()) {
+    for (const auto& corrupt_block_id : corrupt_block_ids) {
+      report->incomplete_container_check->entries.emplace_back(common_path);
+    }
+    return Status::Aborted(Substitute("orphaned empty or invalid length file $0", common_path));
+  }
 
   const auto kEncryptionHeaderSize = env->GetEncryptionHeaderSize();
   const auto kMinimumValidLength = pb_util::kPBContainerMinimumValidLength + kEncryptionHeaderSize;
@@ -1160,10 +1236,8 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
   // to create a file. This orphans an empty or invalid length file, which we can
   // safely delete. And another case is that the metadata and data files exist,
   // but the lengths are invalid.
-  if (PREDICT_FALSE(/*metadata_size < kMinimumValidLength &&*/
-                    !has_metadata &&
+  if (PREDICT_FALSE(!has_metadata &&
                     data_size <= kEncryptionHeaderSize)) {
-    LOG(INFO) << "incomplete_container_check";
     report->incomplete_container_check->entries.emplace_back(common_path);
     return Status::Aborted(Substitute("orphaned empty or invalid length file $0", common_path));
   }
@@ -1173,34 +1247,8 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
   // metadata file will be deleted when repairing.
   //
   // Open the metadata file and quickly check whether or not there is any live blocks.
-  if (PREDICT_FALSE(/*metadata_size >= kMinimumValidLength &&*/
-                    has_metadata &&
+  if (PREDICT_FALSE(metadata_size >= kMinimumValidLength &&
                     s_data.IsNotFound())) {
-//    BlockIdSet live_blocks;
-//    unique_ptr<RandomAccessFile> reader;
-//    RandomAccessFileOptions opts;
-//    opts.is_sensitive = true;
-//    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(env->NewRandomAccessFile(opts, metadata_path, &reader));
-//    ReadablePBContainerFile pb_reader(std::move(reader));
-//    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(pb_reader.Open());
-//    while (true) {
-//      BlockRecordPB record;
-//      read_status = pb_reader.ReadNextPB(&record);
-//      if (!read_status.ok()) break;
-//      switch (record.op_type()) {
-//        case CREATE:
-//          live_blocks.emplace(BlockId::FromPB(record.block_id()));
-//          break;
-//        case DELETE:
-//          live_blocks.erase(BlockId::FromPB(record.block_id()));
-//          break;
-//        default:
-//          LOG(WARNING) << Substitute("Found a record with unknown type $0", record.op_type());
-//          break;
-//      }
-//    }
-    // TODO: if any key found
-//    if (read_status.IsEndOfFile() && live_blocks.empty()) {
     if (!has_metadata) {
       report->incomplete_container_check->entries.emplace_back(common_path);
       return Status::Aborted(Substitute("orphaned metadata file with no live blocks $0",
@@ -1208,7 +1256,6 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
     }
     // TODO: other error
     // If the read failed for some unexpected reason, propagate the error.
-//    if (!read_status.IsEndOfFile() && !read_status.IsIncomplete()) {
     if (!it->status().ok()) {
       RETURN_NOT_OK_CONTAINER_DISK_FAILURE(read_status);
     }
@@ -1216,7 +1263,6 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
 
   // Except the special cases above, returns error status if any.
   if (s_data.IsNotFound()) RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_data);
-//  if (s_meta.IsNotFound()) RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_meta);
   if (!has_metadata) RETURN_NOT_OK_CONTAINER_DISK_FAILURE(Status::NotFound("missing rdb metadata"));
 
   return Status::OK();
@@ -1240,15 +1286,62 @@ Status LogBlockContainer::ProcessRecords(
     vector<LogBlockRefPtr>* dead_blocks,
     uint64_t* max_block_id,
     ProcessRecordType type) {
-  LOG(INFO) << "ProcessRecords";
+  string metadata_path = metadata_file_->filename();
+  unique_ptr<RandomAccessFile> metadata_reader;
+  RandomAccessFileOptions opts;
+  opts.is_sensitive = true;
+  RETURN_NOT_OK_HANDLE_ERROR(block_manager()->env()->NewRandomAccessFile(
+      opts, metadata_path, &metadata_reader));
+  ReadablePBContainerFile pb_reader(std::move(metadata_reader));
+  RETURN_NOT_OK_HANDLE_ERROR(pb_reader.Open());
+
+  uint64_t data_file_size = 0;
+  Status read_status;
+  while (true) {
+    BlockRecordPB record;
+    read_status = pb_reader.ReadNextPB(&record);
+    if (!read_status.ok()) {
+      break;
+    }
+    RETURN_NOT_OK(ProcessRecord(&record, report,
+                                live_blocks, live_block_records, dead_blocks,
+                                &data_file_size, max_block_id, type));
+  }
+
+  // NOTE: 'read_status' will never be OK here.
+  if (PREDICT_TRUE(read_status.IsEndOfFile())) {
+    // We've reached the end of the file without any problems.
+    return Status::OK();
+  }
+  if (read_status.IsIncomplete()) {
+    // We found a partial trailing record in a version of the pb container file
+    // format that can reliably detect this. Consider this a failed partial
+    // write and truncate the metadata file to remove this partial record.
+    report->partial_record_check->entries.emplace_back(ToString(),
+                                                       pb_reader.offset());
+    return Status::OK();
+  }
+  // If we've made it here, we've found (and are returning) an unrecoverable error.
+  // Handle any errors we can, e.g. disk failures.
+  HandleError(read_status);
+  return read_status;
+}
+
+Status LogBlockContainer::ProcessRecords(
+    FsReport* report,
+    LogBlockManager::UntrackedBlockMap* live_blocks,
+    LogBlockManager::BlockRecordMap* live_block_records,
+    vector<LogBlockRefPtr>* dead_blocks,
+    uint64_t* max_block_id,
+    ProcessRecordType type) {
   Status read_status;
   uint64_t data_file_size = 0;
   rocksdb::Slice begin_key = id_;
   string next = ObjectIdGenerator::NextOf(id_);
-//  rocksdb::Slice end_key = next;
+  //  rocksdb::Slice end_key = next;
   rocksdb::ReadOptions options;
   options.readahead_size = 2 << 20;
-//  options.iterate_upper_bound = &end_key;
+  //  options.iterate_upper_bound = &end_key;
   std::unique_ptr<rocksdb::Iterator> it(data_dir_->rdb()->NewIterator(options, data_dir_->rdb()->DefaultColumnFamily()));
   it->Seek(begin_key);
   int count = 0;
@@ -1259,9 +1352,8 @@ Status LogBlockContainer::ProcessRecords(
       LOG(INFO) << it->key().ToString();
       read_status = Status::Corruption(Substitute("Invalid BlockRecordPB, key=$0", it->key().ToString()));
       continue;
-      // TODO: corrupt
     }
-//    LOG(INFO) << "Scanned: " << id_ << " " << it->key().ToString() << " " << it->key().size();
+    //    LOG(INFO) << "Scanned: " << id_ << " " << it->key().ToString() << " " << it->key().size();
 
     // TODO: check correction
     RETURN_NOT_OK(ProcessRecord(&record, report,
@@ -1272,42 +1364,14 @@ Status LogBlockContainer::ProcessRecords(
   if (!it->status().ok()) {
     LOG(FATAL) << it->status().ToString();
   }
-//  LOG(INFO) << "Scaned " << count << " live blocks in " << id_;
-//  string metadata_path = metadata_file_->filename();
-//  unique_ptr<RandomAccessFile> metadata_reader;
-//  RandomAccessFileOptions opts;
-//  opts.is_sensitive = true;
-//  RETURN_NOT_OK_HANDLE_ERROR(block_manager()->env()->NewRandomAccessFile(
-//      opts, metadata_path, &metadata_reader));
-//  ReadablePBContainerFile pb_reader(std::move(metadata_reader));
-//  RETURN_NOT_OK_HANDLE_ERROR(pb_reader.Open());
-//
-//  uint64_t data_file_size = 0;
-//  Status read_status;
-//  while (true) {
-//    BlockRecordPB record;
-//    read_status = pb_reader.ReadNextPB(&record);
-//    if (!read_status.ok()) {
-//      break;
-//    }
-//    RETURN_NOT_OK(ProcessRecord(&record, report,
-//                                live_blocks, live_block_records, dead_blocks,
-//                                &data_file_size, max_block_id, type));
-//  }
+  //  LOG(INFO) << "Scaned " << count << " live blocks in " << id_;
 
   // NOTE: 'read_status' will never be OK here.
-  if (/*PREDICT_TRUE(read_status.IsEndOfFile())*/true) {
+  if (true) {
     // We've reached the end of the file without any problems.
     return Status::OK();
   }
-//  if (read_status.IsIncomplete()) {
-//    // We found a partial trailing record in a version of the pb container file
-//    // format that can reliably detect this. Consider this a failed partial
-//    // write and truncate the metadata file to remove this partial record.
-//    report->partial_record_check->entries.emplace_back(ToString(),
-//                                                       pb_reader.offset());
-//    return Status::OK();
-//  }
+
   // If we've made it here, we've found (and are returning) an unrecoverable error.
   // Handle any errors we can, e.g. disk failures.
   HandleError(read_status);

@@ -2383,6 +2383,7 @@ TEST_P(LogBlockManagerTest, TestHalfPresentContainer) {
   // Case1: the metadata file has gone missing and
   //        the size of the existing data file is 0.
   {
+    LOG(INFO) << "000";
     // Create a container.
     NO_FATALS(CreateContainer());
 
@@ -2397,6 +2398,7 @@ TEST_P(LogBlockManagerTest, TestHalfPresentContainer) {
   // Case2: the metadata file has gone missing and
   //        the size of the existing data file is >0.
   {
+    LOG(INFO) << "000";
     // Create a container.
     NO_FATALS(CreateContainer(true));
 
@@ -2414,6 +2416,7 @@ TEST_P(LogBlockManagerTest, TestHalfPresentContainer) {
   // Case3: the size of the existing metadata file is <MIN and
   //        the data file has gone missing.
   {
+    LOG(INFO) << "000";
     // Create a container.
     NO_FATALS(CreateContainer());
 
@@ -2432,6 +2435,7 @@ TEST_P(LogBlockManagerTest, TestHalfPresentContainer) {
   // Case4: the size of the existing metadata file is <MIN and
   //        the size of the existing data file is 0.
   {
+    LOG(INFO) << "000";
     // Create a container.
     NO_FATALS(CreateContainer());
 
@@ -2469,6 +2473,7 @@ TEST_P(LogBlockManagerTest, TestHalfPresentContainer) {
   // Case5: the size of the existing metadata file is <MIN and
   //        the size of the existing data file is >0.
   {
+    LOG(INFO) << "000";
     // Create a container.
     NO_FATALS(CreateContainer(true));
 
@@ -2511,6 +2516,7 @@ TEST_P(LogBlockManagerTest, TestHalfPresentContainer) {
   // Case6: the existing metadata file has no live blocks and
   //        the data file has gone missing.
   {
+    LOG(INFO) << "000";
     NO_FATALS(CreateContainer(true));
 
     // Delete the only block.
@@ -2527,6 +2533,7 @@ TEST_P(LogBlockManagerTest, TestHalfPresentContainer) {
   // Case7: the existing metadata file has no live blocks and
   //        the size of the existing data file is 0.
   {
+    LOG(INFO) << "000";
     NO_FATALS(CreateContainer(true));
 
     // Delete the only block.
@@ -2551,6 +2558,7 @@ TEST_P(LogBlockManagerTest, TestHalfPresentContainer) {
   // Case8: the existing metadata file has no live blocks and
   //        the size of the existing data file is >0.
   {
+    LOG(INFO) << "000";
     NO_FATALS(CreateContainer(true));
 
     // Delete the only block.
@@ -2565,6 +2573,7 @@ TEST_P(LogBlockManagerTest, TestHalfPresentContainer) {
   // Case9: the existing metadata file has live blocks and
   //        the data file has gone missing.
   {
+    LOG(INFO) << "000";
     // Create a container.
     NO_FATALS(CreateContainer(true));
 
@@ -2582,6 +2591,7 @@ TEST_P(LogBlockManagerTest, TestHalfPresentContainer) {
   // Case10: the existing metadata file has live blocks and
   //         the size of the existing data file is 0.
   {
+    LOG(INFO) << "000";
     // Create a container.
     NO_FATALS(CreateContainer(true));
 
@@ -2602,6 +2612,7 @@ TEST_P(LogBlockManagerTest, TestHalfPresentContainer) {
   // Case11: the existing metadata file has live blocks and
   //         the size of the existing data file is >0.
   {
+    LOG(INFO) << "000";
     // Create a container.
     NO_FATALS(CreateContainer(true));
 

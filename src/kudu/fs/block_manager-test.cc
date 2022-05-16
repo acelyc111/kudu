@@ -207,8 +207,8 @@ class BlockManagerTest : public KuduTest {
   void RunBlockDistributionTest(const vector<string>& paths);
 
   static Status CountFilesCb(int* num_files, Env::FileType type,
-                      const string& dirname,
-                      const string& basename) {
+                             const string& dirname,
+                             const string& basename) {
     if (basename == kInstanceMetadataFileName) {
       return Status::OK();
     }
