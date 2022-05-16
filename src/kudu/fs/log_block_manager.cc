@@ -1094,6 +1094,90 @@ Status LogBlockContainer::Open(LogBlockManager* block_manager,
   return Status::OK();
 }
 
+//Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
+//                                              FsReport* report,
+//                                              const Dir* dir,
+//                                              const string& id,
+//                                              const string& common_path,
+//                                              const string& data_path,
+//                                              const string& metadata_path) {
+//  Env* env = block_manager->env();
+//  uint64_t data_size = 0;
+//  Status s_data = env->GetFileSize(data_path, &data_size);
+//  if (!s_data.ok() && !s_data.IsNotFound()) {
+//    s_data = s_data.CloneAndPrepend("unable to determine data file size");
+//    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_data);
+//  }
+//  uint64_t metadata_size = 0;
+//  Status s_meta = env->GetFileSize(metadata_path, &metadata_size);
+//  if (!s_meta.ok() && !s_meta.IsNotFound()) {
+//    s_meta = s_meta.CloneAndPrepend("unable to determine metadata file size");
+//    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_meta);
+//  }
+//
+//  const auto kEncryptionHeaderSize = env->GetEncryptionHeaderSize();
+//  const auto kMinimumValidLength = pb_util::kPBContainerMinimumValidLength + kEncryptionHeaderSize;
+//
+//  // Check that both the metadata and data files exist and have valid lengths.
+//  // This covers a commonly seen case at startup, where the previous incarnation
+//  // of the server crashed due to "too many open files" just as it was trying
+//  // to create a file. This orphans an empty or invalid length file, which we can
+//  // safely delete. And another case is that the metadata and data files exist,
+//  // but the lengths are invalid.
+//  if (PREDICT_FALSE(metadata_size < kMinimumValidLength &&
+//                    data_size <= kEncryptionHeaderSize)) {
+//    report->incomplete_container_check->entries.emplace_back(common_path);
+//    return Status::Aborted(Substitute("orphaned empty or invalid length file $0", common_path));
+//  }
+//
+//  // Handle a half-present container whose data file has gone missing and
+//  // the metadata file has no live blocks. If that's true, the (orphaned)
+//  // metadata file will be deleted when repairing.
+//  //
+//  // Open the metadata file and quickly check whether or not there is any live blocks.
+//  if (PREDICT_FALSE(metadata_size >= kMinimumValidLength &&
+//                    s_data.IsNotFound())) {
+//    BlockIdSet live_blocks;
+//    unique_ptr<RandomAccessFile> reader;
+//    RandomAccessFileOptions opts;
+//    opts.is_sensitive = true;
+//    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(env->NewRandomAccessFile(opts, metadata_path, &reader));
+//    ReadablePBContainerFile pb_reader(std::move(reader));
+//    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(pb_reader.Open());
+//    while (true) {
+//      BlockRecordPB record;
+//      read_status = pb_reader.ReadNextPB(&record);
+//      if (!read_status.ok()) break;
+//      switch (record.op_type()) {
+//        case CREATE:
+//          live_blocks.emplace(BlockId::FromPB(record.block_id()));
+//          break;
+//        case DELETE:
+//          live_blocks.erase(BlockId::FromPB(record.block_id()));
+//          break;
+//        default:
+//          LOG(WARNING) << Substitute("Found a record with unknown type $0", record.op_type());
+//          break;
+//      }
+//    }
+//    if (read_status.IsEndOfFile() && live_blocks.empty()) {
+//      report->incomplete_container_check->entries.emplace_back(common_path);
+//      return Status::Aborted(Substitute("orphaned metadata file with no live blocks $0",
+//                                        common_path));
+//    }
+//    // If the read failed for some unexpected reason, propagate the error.
+//    if (!read_status.IsEndOfFile() && !read_status.IsIncomplete()) {
+//      RETURN_NOT_OK_CONTAINER_DISK_FAILURE(read_status);
+//    }
+//  }
+//
+//  // Except the special cases above, returns error status if any.
+//  if (s_data.IsNotFound()) RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_data);
+//  if (s_meta.IsNotFound()) RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_meta);
+//
+//  return Status::OK();
+//}
+
 Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
                                               FsReport* report,
                                               const Dir* dir,
@@ -1108,91 +1192,8 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
     s_data = s_data.CloneAndPrepend("unable to determine data file size");
     RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_data);
   }
-  uint64_t metadata_size = 0;
-  Status s_meta = env->GetFileSize(metadata_path, &metadata_size);
-  if (!s_meta.ok() && !s_meta.IsNotFound()) {
-    s_meta = s_meta.CloneAndPrepend("unable to determine metadata file size");
-    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_meta);
-  }
-
-  const auto kEncryptionHeaderSize = env->GetEncryptionHeaderSize();
-  const auto kMinimumValidLength = pb_util::kPBContainerMinimumValidLength + kEncryptionHeaderSize;
-
-  // Check that both the metadata and data files exist and have valid lengths.
-  // This covers a commonly seen case at startup, where the previous incarnation
-  // of the server crashed due to "too many open files" just as it was trying
-  // to create a file. This orphans an empty or invalid length file, which we can
-  // safely delete. And another case is that the metadata and data files exist,
-  // but the lengths are invalid.
-  if (PREDICT_FALSE(metadata_size < kMinimumValidLength &&
-                    data_size <= kEncryptionHeaderSize)) {
-    report->incomplete_container_check->entries.emplace_back(common_path);
-    return Status::Aborted(Substitute("orphaned empty or invalid length file $0", common_path));
-  }
-
-  // Handle a half-present container whose data file has gone missing and
-  // the metadata file has no live blocks. If that's true, the (orphaned)
-  // metadata file will be deleted when repairing.
-  //
-  // Open the metadata file and quickly check whether or not there is any live blocks.
-  if (PREDICT_FALSE(metadata_size >= kMinimumValidLength &&
-                    s_data.IsNotFound())) {
-    BlockIdSet live_blocks;
-    unique_ptr<RandomAccessFile> reader;
-    RandomAccessFileOptions opts;
-    opts.is_sensitive = true;
-    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(env->NewRandomAccessFile(opts, metadata_path, &reader));
-    ReadablePBContainerFile pb_reader(std::move(reader));
-    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(pb_reader.Open());
-    while (true) {
-      BlockRecordPB record;
-      read_status = pb_reader.ReadNextPB(&record);
-      if (!read_status.ok()) break;
-      switch (record.op_type()) {
-        case CREATE:
-          live_blocks.emplace(BlockId::FromPB(record.block_id()));
-          break;
-        case DELETE:
-          live_blocks.erase(BlockId::FromPB(record.block_id()));
-          break;
-        default:
-          LOG(WARNING) << Substitute("Found a record with unknown type $0", record.op_type());
-          break;
-      }
-    }
-    if (read_status.IsEndOfFile() && live_blocks.empty()) {
-      report->incomplete_container_check->entries.emplace_back(common_path);
-      return Status::Aborted(Substitute("orphaned metadata file with no live blocks $0",
-                                        common_path));
-    }
-    // If the read failed for some unexpected reason, propagate the error.
-    if (!read_status.IsEndOfFile() && !read_status.IsIncomplete()) {
-      RETURN_NOT_OK_CONTAINER_DISK_FAILURE(read_status);
-    }
-  }
-
-  // Except the special cases above, returns error status if any.
-  if (s_data.IsNotFound()) RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_data);
-  if (s_meta.IsNotFound()) RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_meta);
-
-  return Status::OK();
-}
-
-Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
-                                              FsReport* report,
-                                              const Dir* dir,
-                                              const string& id,
-                                              const string& common_path,
-                                              const string& data_path,
-                                              const string& metadata_path) {
-  Env* env = block_manager->env();
-  uint64_t data_size = 0;
-  Status s_data = env->GetFileSize(data_path, &data_size);
-  if (!s_data.ok() && !s_data.IsNotFound()) {
-    s_data = s_data.CloneAndPrepend("unable to determine data file size");
-    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_data);
-  }
-  vector<string> corrupt_block_ids;
+  int corrupt_block_id_count = 0;
+  int normal_block_id_count = 0;
   bool has_metadata = false;
   Status read_status;
   rocksdb::Slice begin_key = id;
@@ -1204,15 +1205,16 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
   it->Seek(begin_key);
   while (it->Valid() && it->key().starts_with(begin_key)) {
     LOG(INFO) << it->key().ToString();
+    has_metadata = true;
     BlockRecordPB record;
     if (!record.ParseFromArray(it->value().data(), it->value().size())) {
-      corrupt_block_ids.push_back(it->key().ToString());
+      corrupt_block_id_count++;
       read_status = Status::Corruption(Substitute("Invalid BlockRecordPB, key=$0", it->key().ToString()));
       LOG(ERROR) << "record.ParseFromArray failed. key: " << it->key().ToString();
       it->Next();
       continue;
     }
-    has_metadata = true;
+    normal_block_id_count++;
     break;
   }
   LOG(INFO) << has_metadata;
@@ -1220,10 +1222,9 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
     LOG(FATAL) << it->status().ToString();
   }
 
-  if (!corrupt_block_ids.empty()) {
-    for (const auto& corrupt_block_id : corrupt_block_ids) {
-      report->incomplete_container_check->entries.emplace_back(common_path);
-    }
+  if (corrupt_block_id_count != 0) {
+    report->incomplete_container_check->entries.emplace_back(common_path);
+    // TODO: update message
     return Status::Aborted(Substitute("orphaned empty or invalid length file $0", common_path));
   }
 
@@ -1247,9 +1248,9 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
   // metadata file will be deleted when repairing.
   //
   // Open the metadata file and quickly check whether or not there is any live blocks.
-  if (PREDICT_FALSE(metadata_size >= kMinimumValidLength &&
+  if (PREDICT_FALSE(has_metadata &&
                     s_data.IsNotFound())) {
-    if (!has_metadata) {
+    if (normal_block_id_count == 0) {
       report->incomplete_container_check->entries.emplace_back(common_path);
       return Status::Aborted(Substitute("orphaned metadata file with no live blocks $0",
                                         common_path));
