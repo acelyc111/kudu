@@ -1038,10 +1038,10 @@ TYPED_TEST(BlockManagerTest, TestMetadataOkayDespiteFailure) {
         ASSERT_OK(read_a_block(id));
       }
       // TODO: no metadata in rdb, cause missing rdb metadata error
-//      ASSERT_OK(this->ReopenBlockManager(scoped_refptr<MetricEntity>(),
-//                                         shared_ptr<MemTracker>(),
-//                                         { GetTestDataDirectory() },
-//                                         false /* create */));
+      ASSERT_OK(this->ReopenBlockManager(scoped_refptr<MetricEntity>(),
+                                         shared_ptr<MemTracker>(),
+                                         { GetTestDataDirectory() },
+                                         false /* create */));
     }
   }
 }
@@ -1193,10 +1193,13 @@ TYPED_TEST(BlockManagerTest, TestBlockTransaction) {
   deleted_blocks.clear();
   Status s = deletion_transaction->CommitDeletedBlocks(&deleted_blocks);
   // TODO: write metadata will inject error, but imcompelete for rdb
-//  ASSERT_TRUE(s.IsIOError()) << s.ToString();
-//  ASSERT_STR_CONTAINS(s.ToString(), Substitute("only deleted $0 blocks, "
-//                                               "first failure",
-//                                               deleted_blocks.size()));
+  if (FLAGS_block_manager != "logr") {
+    ASSERT_TRUE(s.IsIOError()) << s.ToString();
+    ASSERT_STR_CONTAINS(s.ToString(),
+                        Substitute("only deleted $0 blocks, "
+                                   "first failure",
+                                   deleted_blocks.size()));
+  }
 }
 
 } // namespace fs

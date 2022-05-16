@@ -1222,7 +1222,8 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
   }
   LOG(INFO) << has_metadata;
   if (!it->status().ok()) {
-    LOG(FATAL) << it->status().ToString();
+    LOG(ERROR) << it->status().ToString();
+    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(Status::Corruption(Substitute("rdb error: $0", it->status().ToString())));
   }
 
   if (corrupt_block_id_count != 0) {
@@ -1239,6 +1240,7 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
   // to create a file. This orphans an empty or invalid length file, which we can
   // safely delete. And another case is that the metadata and data files exist,
   // but the lengths are invalid.
+  LOG(INFO) << "data_size: " << data_size << ", kEncryptionHeaderSize: " << kEncryptionHeaderSize;
   if (PREDICT_FALSE(!has_metadata &&
                     data_size <= kEncryptionHeaderSize)) {
     report->incomplete_container_check->entries.emplace_back(common_path);
@@ -1266,7 +1268,6 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
 
   // Except the special cases above, returns error status if any.
   if (s_data.IsNotFound()) RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_data);
-  if (!has_metadata) RETURN_NOT_OK_CONTAINER_DISK_FAILURE(Status::NotFound("missing rdb metadata"));
 
   return Status::OK();
 }
