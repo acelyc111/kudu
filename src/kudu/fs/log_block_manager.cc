@@ -760,9 +760,9 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
   // Protect 'metadata_file_', only rewriting should add write lock,
   // appending and syncing only need read lock, cause there is an
   // internal lock for these operations in WritablePBContainerFile.
-//  mutable RWMutex metadata_compact_lock_;
+  mutable RWMutex metadata_compact_lock_;
   // Opened file handles to the container's files.
-//  unique_ptr<WritablePBContainerFile> metadata_file_;
+  unique_ptr<WritablePBContainerFile> metadata_file_;
   shared_ptr<RWFile> data_file_;
 
   // The offset of the next block to be written to the container.
@@ -824,8 +824,8 @@ LogBlockContainer::LogBlockContainer(
       id_(id),
       max_num_blocks_(FindOrDie(block_manager->block_limits_by_data_dir_,
                                 data_dir)),
-//      metadata_compact_lock_(RWMutex::Priority::PREFER_READING),
-//      metadata_file_(std::move(metadata_file)),
+      metadata_compact_lock_(RWMutex::Priority::PREFER_READING),
+      metadata_file_(std::move(metadata_file)),
       data_file_(std::move(data_file)),
       next_block_offset_(0),
       total_bytes_(0),
@@ -1280,53 +1280,53 @@ Status LogBlockContainer::TruncateDataToNextBlockOffset() {
   return Status::OK();
 }
 
-Status LogBlockContainer::ProcessRecords(
-    FsReport* report,
-    LogBlockManager::UntrackedBlockMap* live_blocks,
-    LogBlockManager::BlockRecordMap* live_block_records,
-    vector<LogBlockRefPtr>* dead_blocks,
-    uint64_t* max_block_id,
-    ProcessRecordType type) {
-  string metadata_path = metadata_file_->filename();
-  unique_ptr<RandomAccessFile> metadata_reader;
-  RandomAccessFileOptions opts;
-  opts.is_sensitive = true;
-  RETURN_NOT_OK_HANDLE_ERROR(block_manager()->env()->NewRandomAccessFile(
-      opts, metadata_path, &metadata_reader));
-  ReadablePBContainerFile pb_reader(std::move(metadata_reader));
-  RETURN_NOT_OK_HANDLE_ERROR(pb_reader.Open());
-
-  uint64_t data_file_size = 0;
-  Status read_status;
-  while (true) {
-    BlockRecordPB record;
-    read_status = pb_reader.ReadNextPB(&record);
-    if (!read_status.ok()) {
-      break;
-    }
-    RETURN_NOT_OK(ProcessRecord(&record, report,
-                                live_blocks, live_block_records, dead_blocks,
-                                &data_file_size, max_block_id, type));
-  }
-
-  // NOTE: 'read_status' will never be OK here.
-  if (PREDICT_TRUE(read_status.IsEndOfFile())) {
-    // We've reached the end of the file without any problems.
-    return Status::OK();
-  }
-  if (read_status.IsIncomplete()) {
-    // We found a partial trailing record in a version of the pb container file
-    // format that can reliably detect this. Consider this a failed partial
-    // write and truncate the metadata file to remove this partial record.
-    report->partial_record_check->entries.emplace_back(ToString(),
-                                                       pb_reader.offset());
-    return Status::OK();
-  }
-  // If we've made it here, we've found (and are returning) an unrecoverable error.
-  // Handle any errors we can, e.g. disk failures.
-  HandleError(read_status);
-  return read_status;
-}
+//Status LogBlockContainer::ProcessRecords(
+//    FsReport* report,
+//    LogBlockManager::UntrackedBlockMap* live_blocks,
+//    LogBlockManager::BlockRecordMap* live_block_records,
+//    vector<LogBlockRefPtr>* dead_blocks,
+//    uint64_t* max_block_id,
+//    ProcessRecordType type) {
+//  string metadata_path = metadata_file_->filename();
+//  unique_ptr<RandomAccessFile> metadata_reader;
+//  RandomAccessFileOptions opts;
+//  opts.is_sensitive = true;
+//  RETURN_NOT_OK_HANDLE_ERROR(block_manager()->env()->NewRandomAccessFile(
+//      opts, metadata_path, &metadata_reader));
+//  ReadablePBContainerFile pb_reader(std::move(metadata_reader));
+//  RETURN_NOT_OK_HANDLE_ERROR(pb_reader.Open());
+//
+//  uint64_t data_file_size = 0;
+//  Status read_status;
+//  while (true) {
+//    BlockRecordPB record;
+//    read_status = pb_reader.ReadNextPB(&record);
+//    if (!read_status.ok()) {
+//      break;
+//    }
+//    RETURN_NOT_OK(ProcessRecord(&record, report,
+//                                live_blocks, live_block_records, dead_blocks,
+//                                &data_file_size, max_block_id, type));
+//  }
+//
+//  // NOTE: 'read_status' will never be OK here.
+//  if (PREDICT_TRUE(read_status.IsEndOfFile())) {
+//    // We've reached the end of the file without any problems.
+//    return Status::OK();
+//  }
+//  if (read_status.IsIncomplete()) {
+//    // We found a partial trailing record in a version of the pb container file
+//    // format that can reliably detect this. Consider this a failed partial
+//    // write and truncate the metadata file to remove this partial record.
+//    report->partial_record_check->entries.emplace_back(ToString(),
+//                                                       pb_reader.offset());
+//    return Status::OK();
+//  }
+//  // If we've made it here, we've found (and are returning) an unrecoverable error.
+//  // Handle any errors we can, e.g. disk failures.
+//  HandleError(read_status);
+//  return read_status;
+//}
 
 Status LogBlockContainer::ProcessRecords(
     FsReport* report,
