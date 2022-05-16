@@ -94,7 +94,7 @@ METRIC_DECLARE_gauge_uint64(data_dirs_full);
 // The LogBlockManager is only supported on Linux, since it requires hole punching.
 #define RETURN_NOT_LOG_BLOCK_MANAGER() \
   do { \
-    if (FLAGS_block_manager != "log") { \
+    if (FLAGS_block_manager != "logr" && FLAGS_block_manager != "log") { \
       LOG(INFO) << "This platform does not use the log block manager by default. Skipping test."; \
       return; \
     } \
@@ -112,7 +112,7 @@ template<>
 string block_manager_type<FileBlockManager>() { return "file"; }
 
 template<>
-string block_manager_type<LogBlockManager>() { return "log"; }
+string block_manager_type<LogBlockManager>() { return "logr"; }
 
 template <typename T>
 class BlockManagerTest : public KuduTest {
@@ -396,8 +396,12 @@ void BlockManagerTest<LogBlockManager>::RunMultipathTest(const vector<string>& p
     ASSERT_OK(CountFiles(path, &files_in_path));
     sum += files_in_path;
   }
-  ASSERT_EQ(paths.size() * 2, sum);
-//  ASSERT_EQ(paths.size() * 4, sum);
+  if (FLAGS_block_manager == "log") {
+    ASSERT_EQ(paths.size() * 4, sum);
+  } else {
+    ASSERT_EQ(FLAGS_block_manager, "logr");
+    ASSERT_EQ(paths.size() * 2, sum);
+  }
 }
 
 template <>

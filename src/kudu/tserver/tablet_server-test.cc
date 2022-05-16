@@ -925,7 +925,8 @@ TEST_F(TabletServerStartupWebPageTest, TestLogBlockContainerMetrics) {
   // Validate populated metrics in case of zero containers during startup.
   ASSERT_OK(c.FetchURL(Substitute("http://$0/metrics", addr), &buf));
   string raw = buf.ToString();
-  if (mini_server_->options()->fs_opts.block_manager_type == "log") {
+  if (mini_server_->options()->fs_opts.block_manager_type == "log" ||
+      mini_server_->options()->fs_opts.block_manager_type == "logr") {
     ASSERT_STR_MATCHES(raw, "log_block_manager_total_containers_startup\",\n[ ]+\"value\": 0");
     ASSERT_STR_MATCHES(raw, "log_block_manager_processed_containers_startup\",\n[ ]+\"value\": 0");
     // Since we open each directory and read all the contents, the time taken might not be

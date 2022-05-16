@@ -1232,7 +1232,6 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
   }
 
   const auto kEncryptionHeaderSize = env->GetEncryptionHeaderSize();
-  const auto kMinimumValidLength = pb_util::kPBContainerMinimumValidLength + kEncryptionHeaderSize;
 
   // Check that both the metadata and data files exist and have valid lengths.
   // This covers a commonly seen case at startup, where the previous incarnation
