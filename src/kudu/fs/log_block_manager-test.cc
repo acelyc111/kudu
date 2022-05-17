@@ -291,15 +291,15 @@ class LogBlockManagerTest : public KuduTest, public ::testing::WithParamInterfac
   void DoGetContainers(GetMode mode, vector<string>* out) {
     // Populate 'data_files' and 'metadata_files'.
     vector<string> data_files;
-//    vector<string> metadata_files;
+    vector<string> metadata_files;
     for (const string& data_dir : dd_manager_->GetDirs()) {
       vector<string> children;
       ASSERT_OK(env_->GetChildren(data_dir, &children));
       for (const string& child : children) {
         if (HasSuffixString(child, LogBlockManager::kContainerDataFileSuffix)) {
           data_files.push_back(JoinPathSegments(data_dir, child));
-//        } else if (HasSuffixString(child, LogBlockManager::kContainerMetadataFileSuffix)) {
-//          metadata_files.push_back(JoinPathSegments(data_dir, child));
+        } else if (HasSuffixString(child, LogBlockManager::kContainerMetadataFileSuffix)) {
+          metadata_files.push_back(JoinPathSegments(data_dir, child));
         }
       }
     }
@@ -309,7 +309,7 @@ class LogBlockManagerTest : public KuduTest, public ::testing::WithParamInterfac
         *out = std::move(data_files);
         break;
       case METADATA_FILES:
-//        *out = std::move(metadata_files);
+        *out = std::move(metadata_files);
         break;
       case CONTAINER_NAMES:
         // Build the union of 'data_files' and 'metadata_files' with suffixes
@@ -321,12 +321,12 @@ class LogBlockManagerTest : public KuduTest, public ::testing::WithParamInterfac
               df, LogBlockManager::kContainerDataFileSuffix, &c));
           container_names.emplace(std::move(c));
         }
-//        for (const auto& mdf : metadata_files) {
-//          string c;
-//          ASSERT_TRUE(TryStripSuffixString(
-//              mdf, LogBlockManager::kContainerMetadataFileSuffix, &c));
-//          container_names.emplace(std::move(c));
-//        }
+        for (const auto& mdf : metadata_files) {
+          string c;
+          ASSERT_TRUE(TryStripSuffixString(
+              mdf, LogBlockManager::kContainerMetadataFileSuffix, &c));
+          container_names.emplace(std::move(c));
+        }
         out->assign(container_names.begin(), container_names.end());
         break;
     }
@@ -1171,7 +1171,7 @@ TEST_P(LogBlockManagerTest, TestFailMultipleTransactionsPerContainer) {
   // Repeatedly add new blocks for the transactions. Finalizing each block
   // makes the block's container available, allowing the same container to be
   // reused by the next block.
-  const int kNumBlocks = 100;
+  const int kNumBlocks = 10;
   for (int i = 0; i < kNumBlocks; i++) {
     unique_ptr<WritableBlock> block;
     ASSERT_OK_FAST(bm_->CreateBlock(test_block_opts_, &block));
@@ -2489,7 +2489,6 @@ TEST_P(LogBlockManagerTest, TestHalfPresentContainer) {
     ASSERT_OK(env_->DeleteFile(data_file_name));
 
     // The container has been repaired.
-    // TODO: rdb not check this case: has metadata, has no data
     NO_FATALS(CheckRepaired());
   }
 
@@ -2508,11 +2507,9 @@ TEST_P(LogBlockManagerTest, TestHalfPresentContainer) {
     NO_FATALS(CreateDataFile());
 
     // Check passed, but verify records failed at last(malformed records).
-    NO_FATALS(CheckRepaired());
     NO_FATALS(CheckFailed(Status::Corruption("")));
 
     // Delete the data file and metadata file to keep path clean.
-    // TODO data file will be deleted auto
     ASSERT_OK(env_->DeleteFile(data_file_name));
     ASSERT_OK(env_->DeleteFile(metadata_file_name));
   }
@@ -2526,8 +2523,6 @@ TEST_P(LogBlockManagerTest, TestHalfPresentContainer) {
     NO_FATALS(DeleteBlock());
 
     // The container is ok.
-    NO_FATALS(CheckFailed(Status::NotFound("")));
-    ASSERT_OK(env_->DeleteFile(data_file_name));
     NO_FATALS(CheckOK());
   }
 
@@ -2541,7 +2536,6 @@ TEST_P(LogBlockManagerTest, TestHalfPresentContainer) {
     ASSERT_OK(env_->DeleteFile(data_file_name));
 
     // The data file has gone missing.
-    // TODO: rdb not check this case: has metadata, has no data
     NO_FATALS(CheckFailed(Status::NotFound("")));
 
     // Delete the metadata file to keep path clean.
