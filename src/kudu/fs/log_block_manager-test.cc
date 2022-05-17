@@ -89,6 +89,7 @@ DECLARE_double(log_container_excess_space_before_cleanup_fraction);
 DECLARE_double(log_container_live_metadata_before_compact_ratio);
 DECLARE_int32(fs_target_data_dirs_per_tablet);
 DECLARE_int64(log_container_max_blocks);
+DECLARE_string(block_manager);
 DECLARE_string(block_manager_preflush_control);
 DECLARE_string(env_inject_eio_globs);
 DECLARE_uint64(log_container_preallocate_bytes);
@@ -697,7 +698,10 @@ TEST_P(LogBlockManagerTest, TestReuseBlockIds) {
 // Note that we rely on filesystem integrity to ensure that we do not lose
 // trailing, fsync()ed metadata.
 TEST_P(LogBlockManagerTest, TestMetadataTruncation) {
-  return;
+  if (FLAGS_block_manager != "log") {
+    return;
+  }
+
   EnableEncryption(GetParam());
   // Create several blocks.
   vector<BlockId> created_blocks;
@@ -1167,7 +1171,7 @@ TEST_P(LogBlockManagerTest, TestFailMultipleTransactionsPerContainer) {
   // Repeatedly add new blocks for the transactions. Finalizing each block
   // makes the block's container available, allowing the same container to be
   // reused by the next block.
-  const int kNumBlocks = 10;
+  const int kNumBlocks = 100;
   for (int i = 0; i < kNumBlocks; i++) {
     unique_ptr<WritableBlock> block;
     ASSERT_OK_FAST(bm_->CreateBlock(test_block_opts_, &block));
@@ -1267,7 +1271,11 @@ TEST_P(LogBlockManagerTest, TestContainerBlockLimitingByBlockNum) {
   NO_FATALS(AssertNumContainers(4));
 }
 
-TEST_P(LogBlockManagerTest, DISABLED_TestContainerBlockLimitingByMetadataSize) {
+TEST_P(LogBlockManagerTest, TestContainerBlockLimitingByMetadataSize) {
+  if (FLAGS_block_manager != "log") {
+    return;
+  }
+
   EnableEncryption(GetParam());
   const int kNumBlocks = 1000;
 
@@ -1304,7 +1312,11 @@ TEST_P(LogBlockManagerTest, DISABLED_TestContainerBlockLimitingByMetadataSize) {
   NO_FATALS(AssertNumContainers(4));
 }
 
-TEST_F(LogBlockManagerTest, DISABLED_TestContainerBlockLimitingByMetadataSizeWithCompaction) {
+TEST_F(LogBlockManagerTest, TestContainerBlockLimitingByMetadataSizeWithCompaction) {
+  if (FLAGS_block_manager != "log") {
+    return;
+  }
+
   const int kNumBlocks = 2000;
   const int kNumThreads = 10;
   const double kLiveBlockRatio = 0.1;
@@ -1394,7 +1406,7 @@ TEST_F(LogBlockManagerTest, DISABLED_TestContainerBlockLimitingByMetadataSizeWit
   ASSERT_TRUE(exist_larger_one);
 }
 
-TEST_F(LogBlockManagerTest, TestRdb) {
+TEST_F(LogBlockManagerTest, TestRdb_will_remove_later) {
   BlockId block_id(2543844590840917740);
   string id = "27d59b58446343e597b0b66e180e6bb8";
   Dir* dir = dd_manager_->dirs()[0].get();
@@ -1496,7 +1508,6 @@ TEST_P(LogBlockManagerTest, TestMisalignedBlocksFuzz) {
       ASSERT_OK(block->Close());
     }
   }
-  LOG(INFO) << "111111111111111";
   FsReport report;
   ASSERT_OK(ReopenBlockManager(nullptr, &report));
   corruptor.ResetDataDirManager(dd_manager_.get());
@@ -1506,7 +1517,6 @@ TEST_P(LogBlockManagerTest, TestMisalignedBlocksFuzz) {
     ASSERT_EQ(container_name, mb.container);
   }
 
-  LOG(INFO) << "22222222222222";
   // Delete about half of them, chosen randomly.
   vector<BlockId> block_ids;
   {
@@ -1522,7 +1532,6 @@ TEST_P(LogBlockManagerTest, TestMisalignedBlocksFuzz) {
     ASSERT_OK(deletion_transaction->CommitDeletedBlocks(&deleted));
   }
 
-  LOG(INFO) << "333333333333333";
   // Wait for the block manager to punch out all of the holes. It's easiest to
   // do this by reopening it; shutdown will wait for outstanding hole punches.
   //
@@ -1536,7 +1545,6 @@ TEST_P(LogBlockManagerTest, TestMisalignedBlocksFuzz) {
     ASSERT_EQ(container_name, mb.container);
   }
 
-  LOG(INFO) << "44444444444444444";
   // Read and verify the contents of each remaining block.
   ASSERT_OK(bm_->GetAllBlockIds(&block_ids));
   for (const auto& id : block_ids) {
@@ -1768,10 +1776,14 @@ TEST_P(LogBlockManagerTest, TestDetectMisalignedBlocks) {
 }
 
 // TODO: rdb not need this case
-TEST_P(LogBlockManagerTest, DISABLED_TestRepairPartialRecords) {
+TEST_P(LogBlockManagerTest, TestRepairPartialRecords) {
+  if (FLAGS_block_manager != "log") {
+    return;
+  }
+
   EnableEncryption(GetParam());
   const int kNumContainers = 50;
-  const int kNumRecords = 50;
+  const int kNumRecords = 10;
 
   // Create some containers.
   {
@@ -1850,7 +1862,10 @@ TEST_P(LogBlockManagerTest, TestDeleteDeadContainersAtStartup) {
 }
 
 TEST_P(LogBlockManagerTest, TestCompactFullContainerMetadataAtStartup) {
-  return;
+  if (FLAGS_block_manager != "log") {
+    return;
+  }
+
   EnableEncryption(GetParam());
   // With this ratio, the metadata of a full container comprised of half dead
   // blocks will be compacted at startup.
@@ -1916,7 +1931,11 @@ TEST_P(LogBlockManagerTest, TestCompactFullContainerMetadataAtStartup) {
 //
 // The bug was related to a stale file descriptor left in the file_cache, so
 // this test explicitly targets that scenario.
-TEST_P(LogBlockManagerTest, DISABLED_TestDeleteFromContainerAfterMetadataCompaction) {
+TEST_P(LogBlockManagerTest, TestDeleteFromContainerAfterMetadataCompaction) {
+  if (FLAGS_block_manager != "log") {
+    return;
+  }
+
   EnableEncryption(GetParam());
   // Compact aggressively.
   FLAGS_log_container_live_metadata_before_compact_ratio = 0.99;
