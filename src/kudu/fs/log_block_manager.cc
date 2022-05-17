@@ -908,6 +908,7 @@ void LogBlockContainer::CompactMetadata() {
   report.malformed_record_check.emplace();
   report.misaligned_block_check.emplace();
   report.partial_record_check.emplace();
+  report.partial_rdb_record_check.emplace();
 
   LogBlockManager::UntrackedBlockMap live_blocks;
   LogBlockManager::BlockRecordMap live_block_records;
@@ -1198,6 +1199,7 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
   int corrupt_block_id_count = 0;
   int normal_block_id_count = 0;
   bool has_metadata = false;
+  BlockRecordPB record;
   Status read_status;
   rocksdb::Slice begin_key = id;
   string next = ObjectIdGenerator::NextOf(id);
@@ -1207,9 +1209,7 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
   std::unique_ptr<rocksdb::Iterator> it(dir->rdb()->NewIterator(options, dir->rdb()->DefaultColumnFamily()));
   it->Seek(begin_key);
   while (it->Valid() && it->key().starts_with(begin_key)) {
-    LOG(INFO) << it->key().ToString();
     has_metadata = true;
-    BlockRecordPB record;
     if (!record.ParseFromArray(it->value().data(), it->value().size())) {
       corrupt_block_id_count++;
       read_status = Status::Corruption(Substitute("Invalid BlockRecordPB, key=$0", it->key().ToString()));
@@ -2015,6 +2015,7 @@ struct LogBlockContainerLoadResult {
     report.malformed_record_check.emplace();
     report.misaligned_block_check.emplace();
     report.partial_record_check.emplace();
+    report.partial_rdb_record_check.emplace();
   }
 };
 
@@ -3285,6 +3286,9 @@ Status LogBlockManager::Repair(
         }
       }
     }
+    if (report->partial_rdb_record_check) {
+      // TODO: how to repair
+    }
     for (const auto& e : low_live_block_containers) {
       LogBlockContainerRefPtr c = FindPtrOrNull(all_containers_by_name_,
                                                 e.first);
@@ -3301,7 +3305,6 @@ Status LogBlockManager::Repair(
   // Truncate partial metadata records.
   //
   // This is a fatal inconsistency; if the repair fails, we cannot proceed.
-  // TODO: not rdb
   if (report->partial_record_check) {
     for (auto& pr : report->partial_record_check->entries) {
       LogBlockContainerRefPtr container = FindPtrOrNull(containers_by_name, pr.container);
@@ -3342,7 +3345,6 @@ Status LogBlockManager::Repair(
   //
   // This is a non-fatal inconsistency; we can just as easily ignore the
   // leftover container files.
-  // TODO: check if repair needed when rdb
   if (report->incomplete_container_check) {
     for (auto& ic : report->incomplete_container_check->entries) {
       {
@@ -3394,6 +3396,10 @@ Status LogBlockManager::Repair(
       }
       WARN_NOT_OK(s, "could not truncate excess preallocated space");
     }
+  }
+
+  if (report->partial_rdb_record_check) {
+    // TODO: how to repair
   }
 
   // Repunch all requested holes. Any excess space reclaimed was already

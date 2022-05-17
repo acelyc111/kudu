@@ -267,6 +267,7 @@ class LogBlockManagerTest : public KuduTest, public ::testing::WithParamInterfac
     ASSERT_TRUE(report.malformed_record_check->entries.empty()) << report.malformed_record_check->entries.size();
     ASSERT_TRUE(report.misaligned_block_check->entries.empty()) << report.misaligned_block_check->entries.size();
     ASSERT_TRUE(report.partial_record_check->entries.empty()) << report.partial_record_check->entries.size();
+    ASSERT_TRUE(report.partial_rdb_record_check->entries.empty()) << report.partial_rdb_record_check->entries.size();
   }
 
   void EnableEncryption(bool enable) {
