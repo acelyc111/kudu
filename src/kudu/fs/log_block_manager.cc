@@ -1198,50 +1198,57 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
     RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_data);
   }
 
-  rocksdb::Slice begin_key = id;
-  string next = ObjectIdGenerator::NextOf(id);
-  //  rocksdb::Slice end_key = next;
-  rocksdb::ReadOptions options;
-  options.readahead_size = 2 << 20;
-  //  options.iterate_upper_bound = &end_key;
-
-  bool has_normal_block_id = false;
-  BlockRecordPB record;
-  unique_ptr<rocksdb::Iterator> it(dir->rdb()->NewIterator(options, dir->rdb()->DefaultColumnFamily()));
-  it->Seek(begin_key);
-  while (it->Valid() && it->key().starts_with(begin_key)) {
-    if (record.ParseFromArray(it->value().data(), it->value().size())) {
-      has_normal_block_id = true;
-      break;
-    }
-
-    LOG(WARNING) << Substitute("Parse metadata in rocksdb failed, path: $0, key: $1",
-                               common_path,
-                               it->key().ToString());
-    it->Next();
-  }
-  Status s = Status::FromRdbStatus(it->status());
-  if (!s.ok()) {
-    LOG(WARNING) << "Read metadata from rocksdb failed, instance: " << s.ToString();
-    return Status::Aborted(Substitute("read metadata from rocksdb failed, instance: $0, error: $1",
-                                      common_path,
-                                      s.ToString()));
-  }
-
   const auto kEncryptionHeaderSize = env->GetEncryptionHeaderSize();
 
-  // TODO: update comments and error message
-  // Check that both the metadata and data files exist and have valid lengths.
-  // This covers a commonly seen case at startup, where the previous incarnation
-  // of the server crashed due to "too many open files" just as it was trying
-  // to create a file. This orphans an empty or invalid length file, which we can
-  // safely delete. And another case is that the metadata and data files exist,
-  // but the lengths are invalid.
-  if (PREDICT_FALSE(!has_normal_block_id ||
-                    data_size <= kEncryptionHeaderSize)) {
+  // Check data files exist and have valid lengths.
+  if (PREDICT_FALSE(data_size <= kEncryptionHeaderSize)) {
     report->incomplete_container_check->entries.emplace_back(common_path);
     return Status::Aborted(Substitute("orphaned empty or invalid length file $0", common_path));
   }
+
+  // TODO: need to find and clear up dead metadata
+//  rocksdb::Slice begin_key = id;
+//  string next = ObjectIdGenerator::NextOf(id);
+//  //  rocksdb::Slice end_key = next;
+//  rocksdb::ReadOptions options;
+//  options.readahead_size = 2 << 20;
+//  //  options.iterate_upper_bound = &end_key;
+//
+//  bool has_normal_block_id = false;
+//  BlockRecordPB record;
+//  unique_ptr<rocksdb::Iterator> it(dir->rdb()->NewIterator(options, dir->rdb()->DefaultColumnFamily()));
+//  it->Seek(begin_key);
+//  while (it->Valid() && it->key().starts_with(begin_key)) {
+//    if (record.ParseFromArray(it->value().data(), it->value().size())) {
+//      LOG(WARNING) << "record: " << record.op_type()
+//                   << " " << record.timestamp_us()
+//                   << " " << record.offset()
+//                   << " " << record.length();
+//      // Some test cases will write zero length blocks.
+//      if (PREDICT_TRUE(record.length() > 0)) {
+//        has_normal_block_id = true;
+//        break;
+//      }
+//    } else {
+//      LOG(WARNING) << Substitute(
+//          "Parse metadata in rocksdb failed, path: $0, key: $1, value size: $2",
+//          common_path,
+//          it->key().ToString(),
+//          it->value().size());
+//    }
+//    it->Next();
+//  }
+//  Status s = Status::FromRdbStatus(it->status());
+//  if (!s.ok()) {
+//    LOG(WARNING) << "Read metadata from rocksdb failed, instance: " << s.ToString();
+//    return Status::Aborted(Substitute("read metadata from rocksdb failed, instance: $0, error: $1",
+//                                      common_path,
+//                                      s.ToString()));
+//  }
+//
+//  if (!has_normal_block_id) {
+//    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(Status::NotFound("metadata in rocksdb has no valid data."));
+//  }
 
   return Status::OK();
 }
@@ -1325,7 +1332,7 @@ Status LogBlockContainer::ProcessRecords(
   it->Seek(begin_key);
   while (it->Valid() && it->key().starts_with(begin_key)) {
     if (!record.ParseFromArray(it->value().data(), it->value().size())) {
-      report->partial_rdb_record_check->entries.emplace_back(ToString(), BlockId::FromPB(record.block_id()));
+      report->partial_rdb_record_check->entries.emplace_back(ToString(), it->key().ToString());
       LOG(WARNING) << Substitute("Parse metadata in rocksdb failed, path: $0, key: $1",
                                  ToString(),
                                  it->key().ToString());
@@ -1341,7 +1348,6 @@ Status LogBlockContainer::ProcessRecords(
   Status s = Status::FromRdbStatus(it->status());
   if (PREDICT_FALSE(!s.ok())) {
     LOG(WARNING) << "Read metadata from rocksdb failed, instance: " << s.ToString();
-//    report->incomplete_rdb_container_check->entries.emplace_back(ToString());
     HandleError(s);
     return s;
   }
@@ -3255,7 +3261,13 @@ Status LogBlockManager::Repair(
       }
     }
     if (report->partial_rdb_record_check) {
-      // TODO: how to repair
+      for (const auto& e : report->partial_rdb_record_check->entries) {
+        LogBlockContainerRefPtr c = FindPtrOrNull(all_containers_by_name_,
+                                                  e.container);
+        if (c) {
+          containers_by_name[e.container] = c;
+        }
+      }
     }
     for (const auto& e : low_live_block_containers) {
       LogBlockContainerRefPtr c = FindPtrOrNull(all_containers_by_name_,
@@ -3316,7 +3328,6 @@ Status LogBlockManager::Repair(
   if (report->incomplete_container_check) {
     for (auto& ic : report->incomplete_container_check->entries) {
       {
-        // TODO: maybe delete only corrupt block ids
         vector<string> kv = Split(ic.container, "/", SkipEmpty());
         CHECK(!kv.empty());
         string id = kv[kv.size() - 1];
@@ -3324,12 +3335,9 @@ Status LogBlockManager::Repair(
         rocksdb::Slice begin_key = id;
         string next = ObjectIdGenerator::NextOf(id);
         rocksdb::Slice end_key = next;
-        //    LOG(INFO) << "DeleteRange: " << begin_key.ToString() << " -> " << end_key.ToString();
         auto s =
             dir->rdb()->DeleteRange(del_opt, dir->rdb()->DefaultColumnFamily(), begin_key, end_key);
-        if (!s.ok()) {
-          LOG(FATAL) << s.ToString();
-        }
+        CHECK_OK(Status::FromRdbStatus(s));
       }
       Status s = env_->DeleteFile(
           StrCat(ic.container, kContainerMetadataFileSuffix));
@@ -3371,7 +3379,14 @@ Status LogBlockManager::Repair(
   }
 
   if (report->partial_rdb_record_check) {
-    // TODO: how to repair
+    for (auto& e : report->partial_rdb_record_check->entries) {
+      // TODO: optimize to delete by batch
+      rocksdb::WriteOptions del_opt;
+      rocksdb::Slice key(e.block_id);
+      auto s = dir->rdb()->Delete(del_opt, key);
+      CHECK_OK(Status::FromRdbStatus(s));
+      e.repaired = true;
+    }
   }
 
   // Repunch all requested holes. Any excess space reclaimed was already

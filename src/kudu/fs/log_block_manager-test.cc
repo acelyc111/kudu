@@ -165,11 +165,33 @@ class LogBlockManagerTest : public KuduTest, public ::testing::WithParamInterfac
     rocksdb::Slice end_key = next;
     auto s = pdir->rdb()->DeleteRange(
         del_opt, pdir->rdb()->DefaultColumnFamily(), begin_key, end_key);
-    if (!s.ok()) {
-      LOG(FATAL) << s.ToString();
-    }
-
+    CHECK_OK(Status::FromRdbStatus(s));
     return Status::OK();
+  }
+
+  int MetadataEntriesCount(const string& dir, const string& container_name) {
+    Dir* pdir = nullptr;
+    for (const auto& d : dd_manager_->dirs()) {
+      if (d->dir() == dir) {
+        pdir = d.get();
+        break;
+      }
+    }
+    CHECK(pdir);
+
+    rocksdb::ReadOptions scan_opt;
+    rocksdb::Slice begin_key = container_name;
+    string next = ObjectIdGenerator::NextOf(container_name);
+
+    int count = 0;
+    unique_ptr<rocksdb::Iterator> it(pdir->rdb()->NewIterator(scan_opt, pdir->rdb()->DefaultColumnFamily()));
+    it->Seek(begin_key);
+    while (it->Valid() && it->key().starts_with(begin_key)) {
+      count++;
+      it->Next();
+    }
+    CHECK_OK(Status::FromRdbStatus(it->status()));
+    return count;
   }
 
  protected:
@@ -262,12 +284,18 @@ class LogBlockManagerTest : public KuduTest, public ::testing::WithParamInterfac
 
   // Asserts that 'report' contains no inconsistencies.
   void AssertEmptyReport(const FsReport& report) {
-    ASSERT_TRUE(report.full_container_space_check->entries.empty()) << report.full_container_space_check->entries.size();
-    ASSERT_TRUE(report.incomplete_container_check->entries.empty()) << report.incomplete_container_check->entries.size();
-    ASSERT_TRUE(report.malformed_record_check->entries.empty()) << report.malformed_record_check->entries.size();
-    ASSERT_TRUE(report.misaligned_block_check->entries.empty()) << report.misaligned_block_check->entries.size();
-    ASSERT_TRUE(report.partial_record_check->entries.empty()) << report.partial_record_check->entries.size();
-    ASSERT_TRUE(report.partial_rdb_record_check->entries.empty()) << report.partial_rdb_record_check->entries.size();
+    ASSERT_TRUE(report.full_container_space_check->entries.empty())
+        << "full_container_space_check " << report.full_container_space_check->entries.size();
+    ASSERT_TRUE(report.incomplete_container_check->entries.empty())
+        << "incomplete_container_check " << report.incomplete_container_check->entries.size();
+    ASSERT_TRUE(report.malformed_record_check->entries.empty())
+        << "malformed_record_check " << report.malformed_record_check->entries.size();
+    ASSERT_TRUE(report.misaligned_block_check->entries.empty())
+        << "misaligned_block_check " << report.misaligned_block_check->entries.size();
+    ASSERT_TRUE(report.partial_record_check->entries.empty())
+        << "partial_record_check " << report.partial_record_check->entries.size();
+    ASSERT_TRUE(report.partial_rdb_record_check->entries.empty())
+        << "partial_rdb_record_check " << report.partial_rdb_record_check->entries.size();
   }
 
   void EnableEncryption(bool enable) {
@@ -1632,6 +1660,7 @@ TEST_P(LogBlockManagerTest, TestRepairUnpunchedBlocks) {
   // Create one container.
   unique_ptr<WritableBlock> block;
   ASSERT_OK(bm_->CreateBlock(test_block_opts_, &block));
+  ASSERT_OK(block->Append("a"));
   ASSERT_OK(block->Close());
   string data_file;
   NO_FATALS(GetOnlyContainerDataFile(&data_file));
@@ -2598,27 +2627,11 @@ TEST_P(LogBlockManagerTest, TestLogBlockManagerHalfPresentContainer) {
     ASSERT_OK(writer->Finalize());
     ASSERT_OK(writer->Close());
     NO_FATALS(GetOnlyContainerDataFile(&data_file_name));
-    //    NO_FATALS(GetOnlyContainerMetadataFile(&metadata_file_name));
     dir = DirName(data_file_name);
     string file_name = BaseName(data_file_name);
     vector<string> tmp = Split(file_name, ".", SkipEmpty());
     CHECK(!tmp.empty());
     container_name = tmp[0];
-
-    LOG(INFO) << "dir: " << dir << ", container_name: " << container_name;
-  };
-
-  const auto CreateMetadataFile = [&] () {
-    // We're often recreating an existing file, so we must invalidate any
-    // entry in the file cache first.
-    file_cache_.Invalidate(metadata_file_name);
-
-    unique_ptr<WritableFile> metadata_file_writer;
-    WritableFileOptions opts;
-    opts.is_sensitive = true;
-    ASSERT_OK(env_->NewWritableFile(opts, metadata_file_name, &metadata_file_writer));
-    ASSERT_OK(metadata_file_writer->Append(Slice("a")));
-    metadata_file_writer->Close();
   };
 
   const auto CreateDataFile = [&] () {
@@ -2651,157 +2664,135 @@ TEST_P(LogBlockManagerTest, TestLogBlockManagerHalfPresentContainer) {
     NO_FATALS(AssertEmptyReport(report));
   };
 
-  const auto CheckFailed = [&] (const Status& expect) {
-    Status s = ReopenBlockManager(entity);
-    ASSERT_EQ(s.CodeAsString(), expect.CodeAsString()) << s.ToString();
-  };
-
-  const auto CheckRepaired = [&] () {
+  const auto CheckRepaired = [&] (const string& type) {
     FsReport report;
     ASSERT_OK(ReopenBlockManager(entity, &report));
     ASSERT_FALSE(report.HasFatalErrors());
-    ASSERT_EQ(1, report.incomplete_container_check->entries.size());
-    report.incomplete_container_check->entries.clear();
+    if (type == "incomplete_container_check") {
+      ASSERT_EQ(1, report.incomplete_container_check->entries.size());
+      report.incomplete_container_check->entries.clear();
+    } else if (type == "partial_rdb_record_check") {
+      ASSERT_EQ(1, report.partial_rdb_record_check->entries.size());
+      report.partial_rdb_record_check->entries.clear();
+    }
     NO_FATALS(AssertEmptyReport(report));
   };
 
-  // Case1: the metadata file has gone missing and
+  const auto WriteBadMetadataToRdb = [&] (const string& dir,
+                                          const string& container_name,
+                                          const BlockId& block_id) {
+    Dir* pdir = nullptr;
+    for (const auto& d : dd_manager_->dirs()) {
+      if (d->dir() == dir) {
+        pdir = d.get();
+        break;
+      }
+    }
+    CHECK(pdir);
+
+    string tmp_key = container_name + "." + block_id.ToString();
+    rocksdb::Slice key(tmp_key);
+    string value = "bad_value";
+    rocksdb::WriteOptions wopt;
+    rocksdb::Status s = pdir->rdb()->Put(wopt, key, rocksdb::Slice(value));
+    CHECK_OK(Status::FromRdbStatus(s));
+  };
+
+  // Case1: the metadata in rdb is empty and
   //        the size of the existing data file is 0.
   {
-    LOG(INFO) << "000";
     // Create a container.
     NO_FATALS(CreateContainer());
 
     // Delete the metadata file.
     ASSERT_OK(DeleteMetadataFromRdb(dir, container_name));
-    //    ASSERT_OK(env_->DeleteFile(metadata_file_name));
 
     // The container has been repaired.
-    NO_FATALS(CheckRepaired());
+    NO_FATALS(CheckRepaired("incomplete_container_check"));
+
+    // Data file has been removed, metadata is empty.
+    ASSERT_FALSE(env_->FileExists(data_file_name));
+    ASSERT_EQ(0, MetadataEntriesCount(dir, container_name));
   }
 
-  // Case2: the metadata file has gone missing and
+  // Case2: the metadata in rdb is empty and
   //        the size of the existing data file is >0.
   {
-    LOG(INFO) << "000";
     // Create a container.
     NO_FATALS(CreateContainer(true));
 
     // Delete the metadata file.
     ASSERT_OK(DeleteMetadataFromRdb(dir, container_name));
-    //    ASSERT_OK(env_->DeleteFile(metadata_file_name));
 
-    // The metadata file has gone missing.
-    NO_FATALS(CheckFailed(Status::NotFound("")));
+    // The container has been repaired.
+    NO_FATALS(CheckOK());
 
-    // Delete the data file to keep path clean.
-    ASSERT_OK(env_->DeleteFile(data_file_name));
+    // Data file exists, but metadata is empty.
+    ASSERT_TRUE(env_->FileExists(data_file_name));
+    ASSERT_EQ(0, MetadataEntriesCount(dir, container_name));
   }
 
-  // Case3: the size of the existing metadata file is <MIN and
+  // Case3: the metadata in rdb is empty and
   //        the data file has gone missing.
   {
-    LOG(INFO) << "000";
     // Create a container.
     NO_FATALS(CreateContainer());
 
     // Delete the data file&metadata file, and keep the path.
     ASSERT_OK(env_->DeleteFile(data_file_name));
     ASSERT_OK(DeleteMetadataFromRdb(dir, container_name));
-    //    ASSERT_OK(env_->DeleteFile(metadata_file_name));
 
-    // Create a metadata file whose size is <MIN.
-    //    NO_FATALS(CreateMetadataFile());
+    // The container is not exist actually.
+    NO_FATALS(CheckOK());
 
-    // The container has been repaired.
-    //    NO_FATALS(CheckRepaired());
+    // Data file has been removed, metadata is empty.
+    ASSERT_FALSE(env_->FileExists(data_file_name));
+    ASSERT_EQ(0, MetadataEntriesCount(dir, container_name));
   }
 
-  // Case4: the size of the existing metadata file is <MIN and
+  // Case4: the metadata in rdb has bad value and
   //        the size of the existing data file is 0.
   {
-    LOG(INFO) << "000";
     // Create a container.
     NO_FATALS(CreateContainer());
 
     // Delete the metadata file.
     ASSERT_OK(DeleteMetadataFromRdb(dir, container_name));
-    //    ASSERT_OK(env_->DeleteFile(metadata_file_name));
 
-    // Create a metadata file whose size is <MIN.
-    {
-      Dir* pdir = nullptr;
-      for (const auto& d : dd_manager_->dirs()) {
-        if (d->dir() == dir) {
-          pdir = d.get();
-          break;
-        }
-      }
-      CHECK(pdir);
-
-      string tmp_key = container_name + "." + block_id.ToString();
-      LOG(INFO) << tmp_key;
-      rocksdb::Slice key(tmp_key);
-      string value = "bad";
-      rocksdb::WriteOptions wopt;
-      rocksdb::Status s = pdir->rdb()->Put(wopt, key, rocksdb::Slice(value));
-      if (!s.ok()) {
-        LOG(FATAL) << s.ToString();
-      }
-    }
-    //    NO_FATALS(CreateMetadataFile());
+    // Create a metadata record with bad value.
+    WriteBadMetadataToRdb(dir, container_name, block_id);
 
     // The container has been repaired.
-    NO_FATALS(CheckRepaired());
+    NO_FATALS(CheckRepaired("incomplete_container_check"));
+
+    // Data file has been removed, metadata is empty.
+    ASSERT_FALSE(env_->FileExists(data_file_name));
+    ASSERT_EQ(0, MetadataEntriesCount(dir, container_name));
   }
 
-  // Case5: the size of the existing metadata file is <MIN and
+  // Case5: the metadata in rdb has bad value and
   //        the size of the existing data file is >0.
   {
-    LOG(INFO) << "000";
     // Create a container.
     NO_FATALS(CreateContainer(true));
 
     // Delete the metadata file.
     ASSERT_OK(DeleteMetadataFromRdb(dir, container_name));
-    //    ASSERT_OK(env_->DeleteFile(metadata_file_name));
 
-    // Create a metadata file whose size is <MIN.
-    {
-      Dir* pdir = nullptr;
-      for (const auto& d : dd_manager_->dirs()) {
-        if (d->dir() == dir) {
-          pdir = d.get();
-          break;
-        }
-      }
-      CHECK(pdir);
+    // Create a metadata record with bad value.
+    WriteBadMetadataToRdb(dir, container_name, block_id);
 
-      string tmp_key = container_name + "." + block_id.ToString();
-      LOG(INFO) << tmp_key;
-      rocksdb::Slice key(tmp_key);
-      string value = "bad";
-      rocksdb::WriteOptions wopt;
-      rocksdb::Status s = pdir->rdb()->Put(wopt, key, rocksdb::Slice(value));
-      if (!s.ok()) {
-        LOG(FATAL) << s.ToString();
-      }
-    }
-    //    NO_FATALS(CreateMetadataFile());
+    // The container has been repaired.
+    NO_FATALS(CheckRepaired("partial_rdb_record_check"));
 
-    // Check passed, but open metadata file failed at last.
-    NO_FATALS(CheckFailed(Status::NotFound("")));
-    //    NO_FATALS(CheckFailed(Status::Incomplete("")));
-
-    // Delete the data file and metadata file to keep path clean.
-    ASSERT_OK(env_->DeleteFile(data_file_name));
-    //    ASSERT_OK(env_->DeleteFile(metadata_file_name));
+    // Data file has been removed, metadata is empty.
+    ASSERT_TRUE(env_->FileExists(data_file_name));
+    ASSERT_EQ(0, MetadataEntriesCount(dir, container_name));
   }
 
   // Case6: the existing metadata file has no live blocks and
   //        the data file has gone missing.
   {
-    LOG(INFO) << "000";
     NO_FATALS(CreateContainer(true));
 
     // Delete the only block.
@@ -2810,15 +2801,17 @@ TEST_P(LogBlockManagerTest, TestLogBlockManagerHalfPresentContainer) {
     // Delete the data file.
     ASSERT_OK(env_->DeleteFile(data_file_name));
 
-    // The container has been repaired.
-    // TODO: rdb not check this case: has metadata, has no data
-    //    NO_FATALS(CheckRepaired());
+    // The container is not exist actually.
+    NO_FATALS(CheckOK());
+
+    // Data file has been removed, metadata is empty.
+    ASSERT_FALSE(env_->FileExists(data_file_name));
+    ASSERT_EQ(0, MetadataEntriesCount(dir, container_name));
   }
 
   // Case7: the existing metadata file has no live blocks and
   //        the size of the existing data file is 0.
   {
-    LOG(INFO) << "000";
     NO_FATALS(CreateContainer(true));
 
     // Delete the only block.
@@ -2830,53 +2823,53 @@ TEST_P(LogBlockManagerTest, TestLogBlockManagerHalfPresentContainer) {
     // Create an empty data file.
     NO_FATALS(CreateDataFile());
 
-    // Check passed, but verify records failed at last(malformed records).
-    NO_FATALS(CheckRepaired());
-    //    NO_FATALS(CheckFailed(Status::Corruption("")));
+    // The container has been repaired.
+    NO_FATALS(CheckRepaired("incomplete_container_check"));
 
-    // Delete the data file and metadata file to keep path clean.
-    // TODO data file will be deleted auto
-    //    ASSERT_OK(env_->DeleteFile(data_file_name));
-    //    ASSERT_OK(env_->DeleteFile(metadata_file_name));
+    // Data file has been removed, metadata is empty.
+    ASSERT_FALSE(env_->FileExists(data_file_name));
+    ASSERT_EQ(0, MetadataEntriesCount(dir, container_name));
   }
 
   // Case8: the existing metadata file has no live blocks and
   //        the size of the existing data file is >0.
   {
-    LOG(INFO) << "000";
     NO_FATALS(CreateContainer(true));
 
     // Delete the only block.
     NO_FATALS(DeleteBlock());
 
     // The container is ok.
-    NO_FATALS(CheckFailed(Status::NotFound("")));
+    NO_FATALS(CheckOK());
+
+    // Data file exists, but metadata is empty.
+    ASSERT_TRUE(env_->FileExists(data_file_name));
+    ASSERT_EQ(0, MetadataEntriesCount(dir, container_name));
+
     ASSERT_OK(env_->DeleteFile(data_file_name));
-    //    NO_FATALS(CheckOK());
   }
 
+  // TODO: need to clear up dead metadata
   // Case9: the existing metadata file has live blocks and
   //        the data file has gone missing.
   {
-    LOG(INFO) << "000";
-    // Create a container.
-    NO_FATALS(CreateContainer(true));
-
-    // Delete the data file.
-    ASSERT_OK(env_->DeleteFile(data_file_name));
-
-    // The data file has gone missing.
-    // TODO: rdb not check this case: has metadata, has no data
-    //    NO_FATALS(CheckFailed(Status::NotFound("")));
-
-    // Delete the metadata file to keep path clean.
-    //    ASSERT_OK(env_->DeleteFile(metadata_file_name));
+//    // Create a container.
+//    NO_FATALS(CreateContainer(true));
+//
+//    // Delete the data file.
+//    ASSERT_OK(env_->DeleteFile(data_file_name));
+//
+//    // The container has been repaired.
+//    NO_FATALS(CheckRepaired("incomplete_container_check"));
+//
+//    // Data file has been removed, metadata is empty.
+//    ASSERT_FALSE(env_->FileExists(data_file_name));
+//    ASSERT_EQ(0, MetadataEntriesCount(dir, container_name));
   }
 
   // Case10: the existing metadata file has live blocks and
   //         the size of the existing data file is 0.
   {
-    LOG(INFO) << "000";
     // Create a container.
     NO_FATALS(CreateContainer(true));
 
@@ -2886,23 +2879,25 @@ TEST_P(LogBlockManagerTest, TestLogBlockManagerHalfPresentContainer) {
     // Create an empty data file.
     NO_FATALS(CreateDataFile());
 
-    // Check passed, but verify records failed at last(malformed records).
-    NO_FATALS(CheckFailed(Status::Corruption("")));
+    // The container has been repaired.
+    NO_FATALS(CheckRepaired("incomplete_container_check"));
 
     // Delete the data file and metadata file to keep path clean.
-    ASSERT_OK(env_->DeleteFile(data_file_name));
-    //    ASSERT_OK(env_->DeleteFile(metadata_file_name));
+    ASSERT_FALSE(env_->FileExists(data_file_name));
+    ASSERT_EQ(0, MetadataEntriesCount(dir, container_name));
   }
 
   // Case11: the existing metadata file has live blocks and
   //         the size of the existing data file is >0.
   {
-    LOG(INFO) << "000";
     // Create a container.
     NO_FATALS(CreateContainer(true));
 
     // The container is ok.
     NO_FATALS(CheckOK());
+
+    ASSERT_TRUE(env_->FileExists(data_file_name));
+    ASSERT_EQ(1, MetadataEntriesCount(dir, container_name));
   }
 }
 

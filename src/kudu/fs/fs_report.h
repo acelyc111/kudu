@@ -205,9 +205,9 @@ struct LBMPartialRdbRecordCheck {
   std::string ToString() const;
 
   struct Entry {
-    Entry(std::string c, BlockId b);
+    Entry(std::string c, std::string b);
     std::string container;
-    BlockId block_id;;
+    std::string block_id;;
     bool repaired;
   };
   std::vector<Entry> entries;
@@ -305,7 +305,7 @@ struct FsReport {
   // LBM-specific inconsistency checks.
   boost::optional<LBMFullContainerSpaceCheck> full_container_space_check;
   boost::optional<LBMIncompleteContainerCheck> incomplete_container_check;
-  boost::optional<LBMIncompleteRdbContainerCheck> incomplete_rdb_container_check;
+  boost::optional<LBMIncompleteRdbContainerCheck> incomplete_rdb_container_check;  // TODO: not used now
   boost::optional<LBMMalformedRecordCheck> malformed_record_check;
   boost::optional<LBMMisalignedBlockCheck> misaligned_block_check;
   boost::optional<LBMPartialRecordCheck> partial_record_check;

@@ -291,9 +291,9 @@ string LBMPartialRdbRecordCheck::ToString() const {
                     entries.size(), partial_records_repaired);
 }
 
-LBMPartialRdbRecordCheck::Entry::Entry(string c, BlockId b)
+LBMPartialRdbRecordCheck::Entry::Entry(string c, string b)
     : container(std::move(c)),
-      block_id(b),
+      block_id(std::move(b)),
       repaired(false) {
 }
 
