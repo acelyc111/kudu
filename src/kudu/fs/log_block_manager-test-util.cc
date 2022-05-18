@@ -44,6 +44,7 @@
 #include "kudu/util/slice.h"
 #include "kudu/util/status.h"
 
+DECLARE_string(block_manager);
 DECLARE_uint64(log_container_max_size);
 
 namespace kudu {
@@ -81,26 +82,27 @@ Status LBMCorruptor::Init() {
         containers_by_name[stripped].dir = dd->dir();
         containers_by_name[stripped].name = stripped;
         containers_by_name[stripped].data_filename = JoinPathSegments(dd->dir(), f);
-//      } else if (TryStripSuffixString(
-//          f, LogBlockManager::kContainerMetadataFileSuffix, &stripped)) {
-//        containers_by_name[stripped].dir = dd->dir();
-//        containers_by_name[stripped].name = stripped;
-//        containers_by_name[stripped].metadata_filename = JoinPathSegments(dd->dir(), f);
+      } else if (TryStripSuffixString(
+          f, LogBlockManager::kContainerMetadataFileSuffix, &stripped)) {
+        containers_by_name[stripped].dir = dd->dir();
+        containers_by_name[stripped].name = stripped;
+        containers_by_name[stripped].metadata_filename = JoinPathSegments(dd->dir(), f);
       }
     }
 
     for (const auto& e : containers_by_name) {
       // Only include the container if both of its files were present.
-      if (!e.second.data_filename.empty()/* &&
-          !e.second.metadata_filename.empty()*/) {
-        all_containers.push_back(e.second);
+      if (!e.second.data_filename.empty()) {
+        if (FLAGS_block_manager == "logr" || !e.second.metadata_filename.empty()) {
+          all_containers.push_back(e.second);
 
-        // File size is an imprecise proxy for whether a container is full, but
-        // it should be good enough.
-        uint64_t data_file_size;
-        RETURN_NOT_OK(env_->GetFileSize(e.second.data_filename, &data_file_size));
-        if (data_file_size >= FLAGS_log_container_max_size) {
-          full_containers.push_back(e.second);
+          // File size is an imprecise proxy for whether a container is full, but
+          // it should be good enough.
+          uint64_t data_file_size;
+          RETURN_NOT_OK(env_->GetFileSize(e.second.data_filename, &data_file_size));
+          if (data_file_size >= FLAGS_log_container_max_size) {
+            full_containers.push_back(e.second);
+          }
         }
       }
     }
@@ -170,26 +172,28 @@ Status LBMCorruptor::AddUnpunchedBlockToFullContainer() {
 
   // Having written out the block, write both CREATE and DELETE metadata
   // records for it.
-//  unique_ptr<WritablePBContainerFile> metadata_writer;
-//  RETURN_NOT_OK(OpenMetadataWriter(*c, &metadata_writer));
   BlockId block_id(rand_.Next64());
-//  RETURN_NOT_OK(AppendCreateRecord(metadata_writer.get(), block_id,
-//                                   initial_data_size, block_length));
-  Dir* pdir = nullptr;
-  for (const auto& dir : dd_manager_->dirs()) {
-    if (dir->dir() == c->dir) {
-      pdir = dir.get();
-      break;
+  if (FLAGS_block_manager == "log") {
+    unique_ptr<WritablePBContainerFile> metadata_writer;
+    RETURN_NOT_OK(OpenMetadataWriter(*c, &metadata_writer));
+    RETURN_NOT_OK(
+        AppendCreateRecord(metadata_writer.get(), block_id, initial_data_size, block_length));
+      RETURN_NOT_OK(AppendDeleteRecord(metadata_writer.get(), block_id));
+      RETURN_NOT_OK(metadata_writer->Close());
+  } else {
+    Dir* pdir = nullptr;
+    for (const auto& dir : dd_manager_->dirs()) {
+      if (dir->dir() == c->dir) {
+        pdir = dir.get();
+        break;
+      }
     }
+    CHECK(pdir);
+    RETURN_NOT_OK(AppendCreateRecord(pdir, c->name, block_id, initial_data_size, block_length));
+    RETURN_NOT_OK(AppendDeleteRecord(pdir, c->name, block_id));
   }
-  CHECK(pdir);
-  RETURN_NOT_OK(AppendCreateRecord(pdir, c->name, block_id,
-                                   initial_data_size, block_length));
-//  RETURN_NOT_OK(AppendDeleteRecord(metadata_writer.get(), block_id));
-  RETURN_NOT_OK(AppendDeleteRecord(pdir, c->name, block_id));
-
   LOG(INFO) << "Added unpunched block to full container " << c->name;
-//  return metadata_writer->Close();
+
   return Status::OK();
 }
 
