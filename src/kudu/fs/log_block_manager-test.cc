@@ -1706,6 +1706,7 @@ TEST_P(LogBlockManagerTest, TestRepairUnpunchedBlocks) {
 }
 
 TEST_P(LogBlockManagerTest, TestRepairIncompleteContainer) {
+  // TODO: have to adapt to logr
   EnableEncryption(GetParam());
   const int kNumContainers = 20;
 

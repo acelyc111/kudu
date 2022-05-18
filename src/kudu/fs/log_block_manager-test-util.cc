@@ -212,17 +212,17 @@ Status LBMCorruptor::CreateIncompleteContainer() {
   // 1. Empty data file but no metadata file.
   // 2. No data file but metadata file exists (and is up to a certain size).
   // 3. Empty data file and metadata file exists (and is up to a certain size).
-  int r = rand_.Uniform(3);
+  int max = (FLAGS_block_manager == "logr") ? 2 : 3;
+  int r = rand_.Uniform(max);
   RWFileOptions opts;
   opts.is_sensitive = true;
   if (r == 0) {
     RETURN_NOT_OK(env_->NewRWFile(opts, data_fname, &data_file));
-    // TODO: in rdb, no metadata
-//  } else if (r == 1) {
-//    RETURN_NOT_OK(env_->NewRWFile(opts, metadata_fname, &metadata_file));
-  } else {
-    CHECK_LE(r, 2);
+  } else if (r == 1) {
     RETURN_NOT_OK(env_->NewRWFile(opts, data_fname, &data_file));
+    RETURN_NOT_OK(env_->NewRWFile(opts, metadata_fname, &metadata_file));
+  } else {
+    CHECK_EQ(r, 2);
     RETURN_NOT_OK(env_->NewRWFile(opts, metadata_fname, &metadata_file));
   }
 
@@ -271,16 +271,18 @@ Status LBMCorruptor::AddMalformedRecordToContainer() {
   record.set_timestamp_us(0);
 
   Dir* pdir = nullptr;
-  for (const auto& dir : dd_manager_->dirs()) {
-    if (dir->dir() == c->dir) {
-      pdir = dir.get();
-      break;
+  unique_ptr<WritablePBContainerFile> metadata_writer;
+  if (FLAGS_block_manager == "logr") {
+    for (const auto& dir : dd_manager_->dirs()) {
+      if (dir->dir() == c->dir) {
+        pdir = dir.get();
+        break;
+      }
     }
+    CHECK(pdir);
+  } else {
+    RETURN_NOT_OK(OpenMetadataWriter(*c, &metadata_writer));
   }
-  CHECK(pdir);
-
-//  unique_ptr<WritablePBContainerFile> metadata_writer;
-//  RETURN_NOT_OK(OpenMetadataWriter(*c, &metadata_writer));
 
   // Corrupt the record in some way. Kinds of malformed records (as per the
   // malformed record checking code in log_block_manager.cc):
@@ -290,10 +292,11 @@ Status LBMCorruptor::AddMalformedRecordToContainer() {
   // 2. Negative block offset.
   // 3. Negative block length.
   // 4. Offset + length > data file size.
-  // 5. Two CREATEs for same block ID.   // TODO no such error for rdb
+  // 5. log: Two CREATEs for same block ID.
   // 6. DELETE without first matching CREATE.
   // 7. Unrecognized op type.
-  int r = rand_.Uniform(8);
+  int max = (FLAGS_block_manager == "logr") ? 7 : 8;
+  int r = rand_.Uniform(max);
   if (r == 0) {
     record.clear_offset();
   } else if (r == 1) {
@@ -304,31 +307,31 @@ Status LBMCorruptor::AddMalformedRecordToContainer() {
     record.set_length(-1);
   } else if (r == 4) {
     record.set_offset(kint64max / 2);
-  } else if (r == 5 ||
-//    RETURN_NOT_OK(metadata_writer->Append(record));
-             r == 6) {
+  } else if (r == 5) {
     record.clear_offset();
     record.clear_length();
     record.set_op_type(DELETE);
+  } else if (r == 6) {
+    record.set_op_type(UNKNOWN);
   } else {
     CHECK_EQ(r, 7);
-    record.set_op_type(UNKNOWN);
+    RETURN_NOT_OK(metadata_writer->Append(record));
   }
 
-  string buf;
-  record.SerializeToString(&buf);
-  rocksdb::WriteOptions options;
-  string tmp(c->name + "." + block_id.ToString());
-  rocksdb::Slice key(tmp);
-  //  LOG(INFO) << "Put: " << c->name << " " << key.ToString() << " " << key.size();
-  rocksdb::Status s = pdir->rdb()->Put(options, key, rocksdb::Slice(buf));
-  if (!s.ok()) {
-    LOG(FATAL) << s.ToString();
+  if (FLAGS_block_manager == "logr") {
+    string buf;
+    record.SerializeToString(&buf);
+    rocksdb::WriteOptions options;
+    string tmp(c->name + "." + block_id.ToString());
+    rocksdb::Slice key(tmp);
+    rocksdb::Status s = pdir->rdb()->Put(options, key, rocksdb::Slice(buf));
+    CHECK_OK(Status::FromRdbStatus(s));
+  } else {
+    RETURN_NOT_OK(metadata_writer->Append(record));
   }
 
   LOG(INFO) << "Added malformed record to container " << c->name;
   return Status::OK();
-//  return metadata_writer->Append(record);
 }
 
 Status LBMCorruptor::AddMisalignedBlockToContainer() {
@@ -385,23 +388,26 @@ Status LBMCorruptor::AddMisalignedBlockToContainer() {
   RETURN_NOT_OK(data_file->Close());
 
   // Having written out the block, write a corresponding metadata record.
-//  unique_ptr<WritablePBContainerFile> metadata_writer;
-//  RETURN_NOT_OK(OpenMetadataWriter(*c, &metadata_writer));
-//  RETURN_NOT_OK(AppendCreateRecord(metadata_writer.get(), block_id,
-//                                   block_offset, block_length));
-  Dir* pdir = nullptr;
-  for (const auto& dir : dd_manager_->dirs()) {
-    if (dir->dir() == c->dir) {
-      pdir = dir.get();
-      break;
+  if (FLAGS_block_manager == "logr") {
+    Dir* pdir = nullptr;
+    for (const auto& dir : dd_manager_->dirs()) {
+      if (dir->dir() == c->dir) {
+        pdir = dir.get();
+        break;
+      }
     }
+    CHECK(pdir);
+
+    RETURN_NOT_OK(AppendCreateRecord(pdir, c->name, block_id,
+                                     block_offset, block_length));
+  } else {
+    unique_ptr<WritablePBContainerFile> metadata_writer;
+    RETURN_NOT_OK(OpenMetadataWriter(*c, &metadata_writer));
+    RETURN_NOT_OK(AppendCreateRecord(metadata_writer.get(), block_id, block_offset, block_length));
+    RETURN_NOT_OK(metadata_writer->Close());
   }
-  CHECK(pdir);
-  RETURN_NOT_OK(AppendCreateRecord(pdir, c->name, block_id,
-                                   block_offset, block_length));
 
   LOG(INFO) << Substitute("Added misaligned block $0 to container $1", block_id.ToString(), c->name);
-//  return metadata_writer->Close();
   return Status::OK();
 }
 
@@ -409,26 +415,20 @@ Status LBMCorruptor::AddPartialRecordToContainer() {
   const Container* c;
   RETURN_NOT_OK(GetRandomContainer(ANY, &c));
 
-//  unique_ptr<WritablePBContainerFile> metadata_writer;
-//  RETURN_NOT_OK(OpenMetadataWriter(*c, &metadata_writer));
-
-  // Add a new good record to the container.
-//  RETURN_NOT_OK(AppendCreateRecord(metadata_writer.get(),
-//                                   BlockId(rand_.Next64()),
-//                                   0, 0));
+  unique_ptr<WritablePBContainerFile> metadata_writer;
   Dir* pdir = nullptr;
-  for (const auto& dir : dd_manager_->dirs()) {
-    if (dir->dir() == c->dir) {
-      pdir = dir.get();
-      break;
+  if (FLAGS_block_manager == "logr") {
+    for (const auto& dir : dd_manager_->dirs()) {
+      if (dir->dir() == c->dir) {
+        pdir = dir.get();
+        break;
+      }
     }
-  }
-  CHECK(pdir);
-  RETURN_NOT_OK(AppendCreateRecord(pdir, c->name, BlockId(rand_.Next64()),
-                                   0, 0));
-
-  // Corrupt the record by truncating one byte off the end of it.
-  {
+    CHECK(pdir);
+    // Add a new good record to the container.
+    RETURN_NOT_OK(AppendCreateRecord(pdir, c->name, BlockId(rand_.Next64()),
+                                     0, 0));
+    // Corrupt the record by truncating one byte off the end of it.
     bool has_metadata = false;
     BlockRecordPB record;
     rocksdb::Slice begin_key = c->name;
@@ -459,17 +459,22 @@ Status LBMCorruptor::AddPartialRecordToContainer() {
 
     rocksdb::WriteOptions wopt;
     s = pdir->rdb()->Put(wopt, key, rocksdb::Slice(value));
-    if (!s.ok()) {
-      LOG(FATAL) << s.ToString();
-    }
-//    RWFileOptions opts;
-//    opts.mode = Env::MUST_EXIST;
-//    opts.is_sensitive = true;
-//    unique_ptr<RWFile> metadata_file;
-//    RETURN_NOT_OK(env_->NewRWFile(opts, c->metadata_filename, &metadata_file));
-//    uint64_t initial_metadata_size;
-//    RETURN_NOT_OK(metadata_file->Size(&initial_metadata_size));
-//    RETURN_NOT_OK(metadata_file->Truncate(initial_metadata_size - 1));
+    CHECK_OK(Status::FromRdbStatus(s));
+  } else {
+    RETURN_NOT_OK(OpenMetadataWriter(*c, &metadata_writer));
+    // Add a new good record to the container.
+    RETURN_NOT_OK(AppendCreateRecord(metadata_writer.get(),
+                                     BlockId(rand_.Next64()),
+                                     0, 0));
+    // Corrupt the record by truncating one byte off the end of it.
+    RWFileOptions opts;
+    opts.mode = Env::MUST_EXIST;
+    opts.is_sensitive = true;
+    unique_ptr<RWFile> metadata_file;
+    RETURN_NOT_OK(env_->NewRWFile(opts, c->metadata_filename, &metadata_file));
+    uint64_t initial_metadata_size;
+    RETURN_NOT_OK(metadata_file->Size(&initial_metadata_size));
+    RETURN_NOT_OK(metadata_file->Truncate(initial_metadata_size - 1));
   }
 
   // Once a container has a partial record, it cannot be further corrupted by
