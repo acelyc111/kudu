@@ -159,6 +159,10 @@
 #define KUDU_DCHECK           DCHECK
 #endif
 
+namespace rocksdb {
+class Status;
+} // namespace rocksdb
+
 namespace kudu {
 
 /// @brief A representation of an operation's outcome.
@@ -431,6 +435,8 @@ class KUDU_EXPORT Status {
   /// @return The memory usage of this object including the object itself.
   ///   Should be used when allocated on the heap.
   size_t memory_footprint_including_this() const;
+
+  static Status FromRdbStatus(const rocksdb::Status& s);
 
  private:
   // OK status has a NULL state_.  Otherwise, state_ is a new[] array

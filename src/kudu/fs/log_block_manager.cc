@@ -905,6 +905,7 @@ void LogBlockContainer::CompactMetadata() {
   FsReport report;
   report.full_container_space_check.emplace();
   report.incomplete_container_check.emplace();
+  report.incomplete_rdb_container_check.emplace();
   report.malformed_record_check.emplace();
   report.misaligned_block_check.emplace();
   report.partial_record_check.emplace();
@@ -1196,78 +1197,51 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
     s_data = s_data.CloneAndPrepend("unable to determine data file size");
     RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_data);
   }
-  int corrupt_block_id_count = 0;
-  int normal_block_id_count = 0;
-  bool has_metadata = false;
-  BlockRecordPB record;
-  Status read_status;
+
   rocksdb::Slice begin_key = id;
   string next = ObjectIdGenerator::NextOf(id);
   //  rocksdb::Slice end_key = next;
   rocksdb::ReadOptions options;
+  options.readahead_size = 2 << 20;
   //  options.iterate_upper_bound = &end_key;
-  std::unique_ptr<rocksdb::Iterator> it(dir->rdb()->NewIterator(options, dir->rdb()->DefaultColumnFamily()));
+
+  bool has_normal_block_id = false;
+  BlockRecordPB record;
+  unique_ptr<rocksdb::Iterator> it(dir->rdb()->NewIterator(options, dir->rdb()->DefaultColumnFamily()));
   it->Seek(begin_key);
   while (it->Valid() && it->key().starts_with(begin_key)) {
-    has_metadata = true;
-    if (!record.ParseFromArray(it->value().data(), it->value().size())) {
-      corrupt_block_id_count++;
-      read_status = Status::Corruption(Substitute("Invalid BlockRecordPB, key=$0", it->key().ToString()));
-      LOG(ERROR) << "record.ParseFromArray failed. key: " << it->key().ToString();
-      it->Next();
-      continue;
+    if (record.ParseFromArray(it->value().data(), it->value().size())) {
+      has_normal_block_id = true;
+      break;
     }
-    normal_block_id_count++;
-    break;
-  }
-  LOG(INFO) << has_metadata;
-  if (!it->status().ok()) {
-    LOG(ERROR) << it->status().ToString();
-    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(Status::Corruption(Substitute("rdb error: $0", it->status().ToString())));
-  }
 
-  if (corrupt_block_id_count != 0) {
-    report->incomplete_container_check->entries.emplace_back(common_path);
-    // TODO: update message
-    return Status::Aborted(Substitute("orphaned empty or invalid length file $0", common_path));
+    LOG(WARNING) << Substitute("Parse metadata in rocksdb failed, path: $0, key: $1",
+                               common_path,
+                               it->key().ToString());
+    it->Next();
+  }
+  Status s = Status::FromRdbStatus(it->status());
+  if (!s.ok()) {
+    LOG(WARNING) << "Read metadata from rocksdb failed, instance: " << s.ToString();
+    return Status::Aborted(Substitute("read metadata from rocksdb failed, instance: $0, error: $1",
+                                      common_path,
+                                      s.ToString()));
   }
 
   const auto kEncryptionHeaderSize = env->GetEncryptionHeaderSize();
 
+  // TODO: update comments and error message
   // Check that both the metadata and data files exist and have valid lengths.
   // This covers a commonly seen case at startup, where the previous incarnation
   // of the server crashed due to "too many open files" just as it was trying
   // to create a file. This orphans an empty or invalid length file, which we can
   // safely delete. And another case is that the metadata and data files exist,
   // but the lengths are invalid.
-  LOG(INFO) << "data_size: " << data_size << ", kEncryptionHeaderSize: " << kEncryptionHeaderSize;
-  if (PREDICT_FALSE(!has_metadata &&
+  if (PREDICT_FALSE(!has_normal_block_id ||
                     data_size <= kEncryptionHeaderSize)) {
     report->incomplete_container_check->entries.emplace_back(common_path);
     return Status::Aborted(Substitute("orphaned empty or invalid length file $0", common_path));
   }
-
-  // Handle a half-present container whose data file has gone missing and
-  // the metadata file has no live blocks. If that's true, the (orphaned)
-  // metadata file will be deleted when repairing.
-  //
-  // Open the metadata file and quickly check whether or not there is any live blocks.
-  if (PREDICT_FALSE(has_metadata &&
-                    s_data.IsNotFound())) {
-    if (normal_block_id_count == 0) {
-      report->incomplete_container_check->entries.emplace_back(common_path);
-      return Status::Aborted(Substitute("orphaned metadata file with no live blocks $0",
-                                        common_path));
-    }
-    // TODO: other error
-    // If the read failed for some unexpected reason, propagate the error.
-    if (!it->status().ok()) {
-      RETURN_NOT_OK_CONTAINER_DISK_FAILURE(read_status);
-    }
-  }
-
-  // Except the special cases above, returns error status if any.
-  if (s_data.IsNotFound()) RETURN_NOT_OK_CONTAINER_DISK_FAILURE(s_data);
 
   return Status::OK();
 }
@@ -1338,48 +1312,41 @@ Status LogBlockContainer::ProcessRecords(
     vector<LogBlockRefPtr>* dead_blocks,
     uint64_t* max_block_id,
     ProcessRecordType type) {
-  Status read_status;
-  uint64_t data_file_size = 0;
   rocksdb::Slice begin_key = id_;
   string next = ObjectIdGenerator::NextOf(id_);
   //  rocksdb::Slice end_key = next;
   rocksdb::ReadOptions options;
   options.readahead_size = 2 << 20;
   //  options.iterate_upper_bound = &end_key;
-  std::unique_ptr<rocksdb::Iterator> it(data_dir_->rdb()->NewIterator(options, data_dir_->rdb()->DefaultColumnFamily()));
+
+  uint64_t data_file_size = 0;
+  BlockRecordPB record;
+  unique_ptr<rocksdb::Iterator> it(data_dir_->rdb()->NewIterator(options, data_dir_->rdb()->DefaultColumnFamily()));
   it->Seek(begin_key);
-  int count = 0;
   while (it->Valid() && it->key().starts_with(begin_key)) {
-    count++;
-    BlockRecordPB record;
     if (!record.ParseFromArray(it->value().data(), it->value().size())) {
-      LOG(INFO) << it->key().ToString();
-      read_status = Status::Corruption(Substitute("Invalid BlockRecordPB, key=$0", it->key().ToString()));
+      report->partial_rdb_record_check->entries.emplace_back(ToString(), BlockId::FromPB(record.block_id()));
+      LOG(WARNING) << Substitute("Parse metadata in rocksdb failed, path: $0, key: $1",
+                                 ToString(),
+                                 it->key().ToString());
+      it->Next();
       continue;
     }
-    //    LOG(INFO) << "Scanned: " << id_ << " " << it->key().ToString() << " " << it->key().size();
 
-    // TODO: check correction
     RETURN_NOT_OK(ProcessRecord(&record, report,
                                 live_blocks, live_block_records, dead_blocks,
                                 &data_file_size, max_block_id, type));
     it->Next();
   }
-  if (!it->status().ok()) {
-    LOG(FATAL) << it->status().ToString();
-  }
-  //  LOG(INFO) << "Scaned " << count << " live blocks in " << id_;
-
-  // NOTE: 'read_status' will never be OK here.
-  if (true) {
-    // We've reached the end of the file without any problems.
-    return Status::OK();
+  Status s = Status::FromRdbStatus(it->status());
+  if (PREDICT_FALSE(!s.ok())) {
+    LOG(WARNING) << "Read metadata from rocksdb failed, instance: " << s.ToString();
+//    report->incomplete_rdb_container_check->entries.emplace_back(ToString());
+    HandleError(s);
+    return s;
   }
 
-  // If we've made it here, we've found (and are returning) an unrecoverable error.
-  // Handle any errors we can, e.g. disk failures.
-  HandleError(read_status);
-  return read_status;
+  return Status::OK();
 }
 
 Status LogBlockContainer::ProcessRecord(
@@ -2012,6 +1979,7 @@ struct LogBlockContainerLoadResult {
     // may be checks that the LBM cannot perform.
     report.full_container_space_check.emplace();
     report.incomplete_container_check.emplace();
+    report.incomplete_rdb_container_check.emplace();
     report.malformed_record_check.emplace();
     report.misaligned_block_check.emplace();
     report.partial_record_check.emplace();
@@ -2412,12 +2380,12 @@ LogBlockManager::LogBlockManager(Env* env,
     next_block_id_(1) {
   managed_block_shards_.resize(kBlockMapChunk);
   for (auto& mb : managed_block_shards_) {
-    mb.lock = std::unique_ptr<simple_spinlock>(new simple_spinlock());
+    mb.lock = unique_ptr<simple_spinlock>(new simple_spinlock());
     mb.blocks_by_block_id
-        = std::unique_ptr<BlockMap>(new BlockMap(10,
-                                                 BlockMap::hasher(),
-                                                 BlockMap::key_equal(),
-                                                 BlockAllocator(mem_tracker_)));
+        = unique_ptr<BlockMap>(new BlockMap(10,
+                                            BlockMap::hasher(),
+                                            BlockMap::key_equal(),
+                                            BlockAllocator(mem_tracker_)));
     mb.blocks_by_block_id->set_deleted_key(BlockId());
   }
 
@@ -3396,6 +3364,10 @@ Status LogBlockManager::Repair(
       }
       WARN_NOT_OK(s, "could not truncate excess preallocated space");
     }
+  }
+
+  if (report->incomplete_rdb_container_check) {
+    // TODO: how to repair
   }
 
   if (report->partial_rdb_record_check) {

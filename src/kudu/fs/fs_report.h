@@ -113,6 +113,24 @@ struct LBMIncompleteContainerCheck {
   std::vector<Entry> entries;
 };
 
+// Checks for LBM containers where RocksDB read failed when retrieve all records in a container.
+//
+// Error type: fatal and irrepairable.
+struct LBMIncompleteRdbContainerCheck {
+
+  // Merges the contents of another check into this one.
+  void MergeFrom(const LBMIncompleteRdbContainerCheck& other);
+
+  // Returns a multi-line string representation of this check.
+  std::string ToString() const;
+
+  struct Entry {
+    explicit Entry(std::string c);
+    std::string container;
+  };
+  std::vector<Entry> entries;
+};
+
 // Checks for LBM metadata records that are malformed in some way.
 //
 // Error type: fatal and irreparable.
@@ -287,6 +305,7 @@ struct FsReport {
   // LBM-specific inconsistency checks.
   boost::optional<LBMFullContainerSpaceCheck> full_container_space_check;
   boost::optional<LBMIncompleteContainerCheck> incomplete_container_check;
+  boost::optional<LBMIncompleteRdbContainerCheck> incomplete_rdb_container_check;
   boost::optional<LBMMalformedRecordCheck> malformed_record_check;
   boost::optional<LBMMisalignedBlockCheck> misaligned_block_check;
   boost::optional<LBMPartialRecordCheck> partial_record_check;

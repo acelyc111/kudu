@@ -175,6 +175,24 @@ LBMIncompleteContainerCheck::Entry::Entry(string c)
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// LBMIncompleteRdbContainerCheck
+///////////////////////////////////////////////////////////////////////////////
+
+void LBMIncompleteRdbContainerCheck::MergeFrom(
+    const LBMIncompleteRdbContainerCheck& other) {
+  MERGE_ENTRIES_FROM(other);
+}
+
+string LBMIncompleteRdbContainerCheck::ToString() const {
+  return Substitute("Total incomplete LBM Rdb containers: $0\n",
+                    entries.size());
+}
+
+LBMIncompleteRdbContainerCheck::Entry::Entry(string c)
+    : container(std::move(c)) {
+}
+
+///////////////////////////////////////////////////////////////////////////////
 // LBMMalformedRecordCheck
 ///////////////////////////////////////////////////////////////////////////////
 
