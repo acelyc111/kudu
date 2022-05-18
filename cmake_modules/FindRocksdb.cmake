@@ -19,22 +19,12 @@ find_path(ROCKSDB_INCLUDE_DIR rocksdb/db.h
   # make sure we don't accidentally pick up a different version
   NO_CMAKE_SYSTEM_PATH
   NO_SYSTEM_ENVIRONMENT_PATH)
-
 find_library(ROCKSDB_STATIC_LIB librocksdb.a
   NO_CMAKE_SYSTEM_PATH
   NO_SYSTEM_ENVIRONMENT_PATH)
-
-set(__CURRENT_FIND_LIBRARY_SUFFIXES ${CMAKE_FIND_LIBRARY_SUFFIXES})
-if (APPLE)
-  set(CMAKE_FIND_LIBRARY_SUFFIXES ".dylib")
-else()
-  set(CMAKE_FIND_LIBRARY_SUFFIXES ".so")
-endif()
 find_library(ROCKSDB_SHARED_LIB rocksdb
   NO_CMAKE_SYSTEM_PATH
   NO_SYSTEM_ENVIRONMENT_PATH)
-set(CMAKE_FIND_LIBRARY_SUFFIXES ${__CURRENT_FIND_LIBRARY_SUFFIXES})
-unset(__CURRENT_FIND_LIBRARY_SUFFIXES)
 
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(Rocksdb REQUIRED_VARS

@@ -1147,7 +1147,10 @@ build_rocksdb() {
   ROCKSDB_BUILD_DIR=$TP_BUILD_DIR/$ROCKSDB_NAME$MODE_SUFFIX
   mkdir -p $ROCKSDB_BUILD_DIR
   pushd $ROCKSDB_BUILD_DIR
-  cmake \
+  rm -Rf CMakeCache.txt CMakeFiles/
+  CFLAGS="$EXTRA_CFLAGS -fPIC" \
+    CXXFLAGS="$EXTRA_CXXFLAGS -fPIC" \
+    cmake \
     -DFAIL_ON_WARNINGS=OFF \
     -DWITH_BENCHMARK_TOOLS=OFF \
     -DWITH_TOOLS=OFF \
