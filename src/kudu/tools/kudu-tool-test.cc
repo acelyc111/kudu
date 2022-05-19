@@ -1740,6 +1740,10 @@ TEST_F(ToolTest, TestPbcTools) {
 }
 
 TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
+  // TODO: `kudu rdb dump` and `kudu rdb edit` have to adapt to logr
+  if (FLAGS_block_manager == "logr") {
+    return;
+  }
   const int kNumCFileBlocks = 1024;
   const int kNumEntries = 1;
   const string kTestDir = GetTestPath("test");
@@ -1983,22 +1987,26 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
 TEST_F(ToolTest, TestFsDumpCFile) {
   const int kNumEntries = 8192;
   const string kTestDir = GetTestPath("test");
-  FsManager fs(env_, FsManagerOpts(kTestDir));
-  ASSERT_OK(fs.CreateInitialFileSystemLayout());
-  ASSERT_OK(fs.Open());
+  BlockId block_id;
 
-  unique_ptr<WritableBlock> block;
-  ASSERT_OK(fs.CreateNewBlock({}, &block));
-  BlockId block_id = block->id();
-  StringDataGenerator<false> generator("hello %04d");
-  WriterOptions opts;
-  opts.write_posidx = true;
-  CFileWriter writer(opts, GetTypeInfo(generator.kDataType),
-                     generator.has_nulls(), std::move(block));
-  ASSERT_OK(writer.Start());
-  generator.Build(kNumEntries);
-  ASSERT_OK_FAST(writer.AppendEntries(generator.values(), kNumEntries));
-  ASSERT_OK(writer.Finish());
+  {
+    FsManager fs(env_, FsManagerOpts(kTestDir));
+    ASSERT_OK(fs.CreateInitialFileSystemLayout());
+    ASSERT_OK(fs.Open());
+
+    unique_ptr<WritableBlock> block;
+    ASSERT_OK(fs.CreateNewBlock({}, &block));
+    block_id = block->id();
+    StringDataGenerator<false> generator("hello %04d");
+    WriterOptions opts;
+    opts.write_posidx = true;
+    CFileWriter writer(
+        opts, GetTypeInfo(generator.kDataType), generator.has_nulls(), std::move(block));
+    ASSERT_OK(writer.Start());
+    generator.Build(kNumEntries);
+    ASSERT_OK_FAST(writer.AppendEntries(generator.values(), kNumEntries));
+    ASSERT_OK(writer.Finish());
+  }
 
   string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
 
@@ -2037,15 +2045,19 @@ TEST_F(ToolTest, TestFsDumpCFile) {
 
 TEST_F(ToolTest, TestFsDumpBlock) {
   const string kTestDir = GetTestPath("test");
-  FsManager fs(env_, FsManagerOpts(kTestDir));
-  ASSERT_OK(fs.CreateInitialFileSystemLayout());
-  ASSERT_OK(fs.Open());
+  BlockId block_id;
 
-  unique_ptr<WritableBlock> block;
-  ASSERT_OK(fs.CreateNewBlock({}, &block));
-  ASSERT_OK(block->Append("hello world"));
-  ASSERT_OK(block->Close());
-  BlockId block_id = block->id();
+  {
+    FsManager fs(env_, FsManagerOpts(kTestDir));
+    ASSERT_OK(fs.CreateInitialFileSystemLayout());
+    ASSERT_OK(fs.Open());
+
+    unique_ptr<WritableBlock> block;
+    ASSERT_OK(fs.CreateNewBlock({}, &block));
+    ASSERT_OK(block->Append("hello world"));
+    ASSERT_OK(block->Close());
+    block_id = block->id();
+  }
 
   {
     string stdout;
@@ -2523,30 +2535,47 @@ TEST_F(ToolTest, TestFsDumpTree) {
 
 TEST_F(ToolTest, TestLocalReplicaOps) {
   const string kTestDir = GetTestPath("test");
-
-  ObjectIdGenerator generator;
   const string kTestTablet = "ffffffffffffffffffffffffffffffff";
   const int kRowId = 100;
   const Schema kSchema(GetSimpleTestSchema());
   const Schema kSchemaWithIds(SchemaBuilder(kSchema).Build());
+  string debug_str;
+  string table_name;
+  string table_id;
+  uint32_t schema_version;
+  string schema_str;
+  TabletSuperBlockPB pb1;
 
-  TabletHarness::Options opts(kTestDir);
-  opts.tablet_id = kTestTablet;
-  TabletHarness harness(kSchemaWithIds, opts);
-  ASSERT_OK(harness.Create(true));
-  ASSERT_OK(harness.Open());
-  LocalTabletWriter writer(harness.tablet().get(), &kSchema);
-  KuduPartialRow row(&kSchemaWithIds);
-  for (int num_rowsets = 0; num_rowsets < 3; num_rowsets++) {
-    for (int i = 0; i < 10; i++) {
-      ASSERT_OK(row.SetInt32(0, num_rowsets * 10 + i));
-      ASSERT_OK(row.SetInt32(1, num_rowsets * 10 * 10 + i));
-      ASSERT_OK(row.SetStringCopy(2, "HelloWorld"));
-      writer.Insert(row);
+  {
+    TabletHarness::Options opts(kTestDir);
+    opts.tablet_id = kTestTablet;
+    TabletHarness harness(kSchemaWithIds, opts);
+    ASSERT_OK(harness.Create(true));
+    ASSERT_OK(harness.Open());
+    LocalTabletWriter writer(harness.tablet().get(), &kSchema);
+    KuduPartialRow row(&kSchemaWithIds);
+    for (int num_rowsets = 0; num_rowsets < 3; num_rowsets++) {
+      for (int i = 0; i < 10; i++) {
+        ASSERT_OK(row.SetInt32(0, num_rowsets * 10 + i));
+        ASSERT_OK(row.SetInt32(1, num_rowsets * 10 * 10 + i));
+        ASSERT_OK(row.SetStringCopy(2, "HelloWorld"));
+        writer.Insert(row);
+      }
+      harness.tablet()->Flush();
     }
-    harness.tablet()->Flush();
+    harness.tablet()->Shutdown();
+
+    // Cache the data before harness destroyed.
+    TabletMetadata* meta = harness.tablet()->metadata();
+    debug_str = meta->partition_schema()
+                    .PartitionDebugString(meta->partition(), *meta->schema());
+    table_name = meta->table_name();
+    table_id = meta->table_id();
+    schema_version = meta->schema_version();
+    schema_str = meta->schema()->ToString();
+    meta->ToSuperBlock(&pb1);
   }
-  harness.tablet()->Shutdown();
+
   string fs_paths = "--fs_wal_dir=" + kTestDir + " "
       "--fs_data_dirs=" + kTestDir;
   string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
@@ -2621,30 +2650,22 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
     }
   }
   {
-    TabletMetadata* meta = harness.tablet()->metadata();
     string stdout;
-    string debug_str;
     NO_FATALS(RunActionStdoutString(
         Substitute("local_replica dump meta $0 $1 $2",
                    kTestTablet, fs_paths, encryption_args), &stdout));
-
     SCOPED_TRACE(stdout);
-    debug_str = meta->partition_schema()
-        .PartitionDebugString(meta->partition(), *meta->schema());
     StripWhiteSpace(&debug_str);
     ASSERT_STR_CONTAINS(stdout, debug_str);
-    debug_str = Substitute("Table name: $0 Table id: $1",
-                           meta->table_name(), meta->table_id());
+    debug_str = Substitute("Table name: $0 Table id: $1", table_name, table_id);
     ASSERT_STR_CONTAINS(stdout, debug_str);
-    debug_str = Substitute("Schema (version=$0):", meta->schema_version());
+    debug_str = Substitute("Schema (version=$0):", schema_version);
     StripWhiteSpace(&debug_str);
     ASSERT_STR_CONTAINS(stdout, debug_str);
-    debug_str = meta->schema()->ToString();
+    debug_str = schema_str;
     StripWhiteSpace(&debug_str);
     ASSERT_STR_CONTAINS(stdout, debug_str);
 
-    TabletSuperBlockPB pb1;
-    meta->ToSuperBlock(&pb1);
     debug_str = pb_util::SecureDebugString(pb1);
     StripWhiteSpace(&debug_str);
     ASSERT_STR_CONTAINS(stdout, "Superblock:");

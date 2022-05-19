@@ -2643,7 +2643,7 @@ Status LogBlockManager::OpenBlock(const BlockId& block_id,
     lb = FindPtrOrNull(*managed_block_shards_[index].blocks_by_block_id, block_id);
   }
   if (!lb) {
-    return Status::NotFound("Can't find block", block_id.ToString());
+    return Status::NotFound("Can't find block when open log block", block_id.ToString());
   }
 
   VLOG(3) << "Opened block " << block_id
@@ -2934,7 +2934,7 @@ Status LogBlockManager::RemoveLogBlock(const BlockId& block_id,
 
   auto it = blocks_by_block_id->find(block_id);
   if (it == blocks_by_block_id->end()) {
-    return Status::NotFound("Can't find block", block_id.ToString());
+    return Status::NotFound("Can't find block when remove log block", block_id.ToString());
   }
 
   LogBlockContainer* container = it->second->container();
