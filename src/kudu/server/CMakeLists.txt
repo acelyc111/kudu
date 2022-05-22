@@ -81,7 +81,10 @@ endif()
 SET_KUDU_TEST_LINK_LIBS(
   kudu_curl_util
   mini_kdc
+  rocksdb
+  lz4
   server_process
-  security_test_util)
+  security_test_util
+  snappy)
 ADD_KUDU_TEST(rpc_server-test)
 ADD_KUDU_TEST(webserver-test)
