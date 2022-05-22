@@ -38,9 +38,12 @@
 namespace rocksdb {
 class Cache;
 class DB;
+class Status;
 } // namespace rocksdb
 
 namespace kudu {
+
+Status FromRdbStatus(const rocksdb::Status& s);
 
 class Env;
 class ThreadPool;

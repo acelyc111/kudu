@@ -1238,7 +1238,7 @@ Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
 //    }
 //    it->Next();
 //  }
-//  Status s = Status::FromRdbStatus(it->status());
+//  Status s = FromRdbStatus(it->status());
 //  if (!s.ok()) {
 //    LOG(WARNING) << "Read metadata from rocksdb failed, instance: " << s.ToString();
 //    return Status::Aborted(Substitute("read metadata from rocksdb failed, instance: $0, error: $1",
@@ -1345,7 +1345,7 @@ Status LogBlockContainer::ProcessRecords(
                                 &data_file_size, max_block_id, type));
     it->Next();
   }
-  Status s = Status::FromRdbStatus(it->status());
+  Status s = FromRdbStatus(it->status());
   if (PREDICT_FALSE(!s.ok())) {
     LOG(WARNING) << "Read metadata from rocksdb failed, instance: " << s.ToString();
     HandleError(s);
@@ -3337,7 +3337,7 @@ Status LogBlockManager::Repair(
         rocksdb::Slice end_key = next;
         auto s =
             dir->rdb()->DeleteRange(del_opt, dir->rdb()->DefaultColumnFamily(), begin_key, end_key);
-        CHECK_OK(Status::FromRdbStatus(s));
+        CHECK_OK(FromRdbStatus(s));
       }
       Status s = env_->DeleteFile(
           StrCat(ic.container, kContainerMetadataFileSuffix));
@@ -3384,7 +3384,7 @@ Status LogBlockManager::Repair(
       rocksdb::WriteOptions del_opt;
       rocksdb::Slice key(e.block_id);
       auto s = dir->rdb()->Delete(del_opt, key);
-      CHECK_OK(Status::FromRdbStatus(s));
+      CHECK_OK(FromRdbStatus(s));
       e.repaired = true;
     }
   }

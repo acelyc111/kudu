@@ -9,7 +9,6 @@
 #include <ostream>
 
 #include <glog/logging.h>
-#include <rocksdb/status.h>
 
 #include "kudu/gutil/strings/fastmem.h"
 #include "kudu/util/malloc.h"
@@ -170,28 +169,5 @@ size_t Status::memory_footprint_excluding_this() const {
 
 size_t Status::memory_footprint_including_this() const {
   return kudu_malloc_usable_size(this) + memory_footprint_excluding_this();
-}
-
-Status Status::FromRdbStatus(const rocksdb::Status& s) {
-  switch (s.code()) {
-    case rocksdb::Status::kOk:
-      return Status::OK();
-    case rocksdb::Status::kNotFound:
-      return Status::NotFound(s.ToString());
-    case rocksdb::Status::kCorruption:
-      return Status::Corruption(s.ToString());
-    case rocksdb::Status::kNotSupported:
-      return Status::NotSupported(s.ToString());
-    case rocksdb::Status::kInvalidArgument:
-      return Status::InvalidArgument(s.ToString());
-    case rocksdb::Status::kIOError:
-      return Status::IOError(s.ToString());
-    case rocksdb::Status::kIncomplete:
-      return Status::Incomplete(s.ToString());
-    case rocksdb::Status::kAborted:
-      return Status::Aborted(s.ToString());
-    default:
-      return Status::RuntimeError(s.ToString());
-  }
 }
 }  // namespace kudu

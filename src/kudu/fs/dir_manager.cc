@@ -34,6 +34,7 @@
 #include <rocksdb/db.h>
 #include <rocksdb/filter_policy.h>
 #include <rocksdb/slice_transform.h>
+#include <rocksdb/status.h>
 #include <rocksdb/table.h>
 
 #include "kudu/fs/dir_util.h"
@@ -62,6 +63,29 @@ using std::vector;
 using strings::Substitute;
 
 namespace kudu {
+
+Status FromRdbStatus(const rocksdb::Status& s) {
+  switch (s.code()) {
+    case rocksdb::Status::kOk:
+      return Status::OK();
+    case rocksdb::Status::kNotFound:
+      return Status::NotFound(s.ToString());
+    case rocksdb::Status::kCorruption:
+      return Status::Corruption(s.ToString());
+    case rocksdb::Status::kNotSupported:
+      return Status::NotSupported(s.ToString());
+    case rocksdb::Status::kInvalidArgument:
+      return Status::InvalidArgument(s.ToString());
+    case rocksdb::Status::kIOError:
+      return Status::IOError(s.ToString());
+    case rocksdb::Status::kIncomplete:
+      return Status::Incomplete(s.ToString());
+    case rocksdb::Status::kAborted:
+      return Status::Aborted(s.ToString());
+    default:
+      return Status::RuntimeError(s.ToString());
+  }
+}
 
 namespace {
 

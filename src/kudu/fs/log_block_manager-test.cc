@@ -165,7 +165,7 @@ class LogBlockManagerTest : public KuduTest, public ::testing::WithParamInterfac
     rocksdb::Slice end_key = next;
     auto s = pdir->rdb()->DeleteRange(
         del_opt, pdir->rdb()->DefaultColumnFamily(), begin_key, end_key);
-    CHECK_OK(Status::FromRdbStatus(s));
+    CHECK_OK(FromRdbStatus(s));
     return Status::OK();
   }
 
@@ -190,7 +190,7 @@ class LogBlockManagerTest : public KuduTest, public ::testing::WithParamInterfac
       count++;
       it->Next();
     }
-    CHECK_OK(Status::FromRdbStatus(it->status()));
+    CHECK_OK(FromRdbStatus(it->status()));
     return count;
   }
 
@@ -2696,7 +2696,7 @@ TEST_P(LogBlockManagerTest, TestLogBlockManagerHalfPresentContainer) {
     string value = "bad_value";
     rocksdb::WriteOptions wopt;
     rocksdb::Status s = pdir->rdb()->Put(wopt, key, rocksdb::Slice(value));
-    CHECK_OK(Status::FromRdbStatus(s));
+    CHECK_OK(FromRdbStatus(s));
   };
 
   // Case1: the metadata in rdb is empty and

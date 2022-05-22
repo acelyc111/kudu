@@ -325,7 +325,7 @@ Status LBMCorruptor::AddMalformedRecordToContainer() {
     string tmp(c->name + "." + block_id.ToString());
     rocksdb::Slice key(tmp);
     rocksdb::Status s = pdir->rdb()->Put(options, key, rocksdb::Slice(buf));
-    CHECK_OK(Status::FromRdbStatus(s));
+    CHECK_OK(FromRdbStatus(s));
   } else {
     RETURN_NOT_OK(metadata_writer->Append(record));
   }
@@ -459,7 +459,7 @@ Status LBMCorruptor::AddPartialRecordToContainer() {
 
     rocksdb::WriteOptions wopt;
     s = pdir->rdb()->Put(wopt, key, rocksdb::Slice(value));
-    CHECK_OK(Status::FromRdbStatus(s));
+    CHECK_OK(FromRdbStatus(s));
   } else {
     RETURN_NOT_OK(OpenMetadataWriter(*c, &metadata_writer));
     // Add a new good record to the container.

@@ -295,7 +295,6 @@ set(UTIL_LIBS
   protobuf
   openssl_crypto
   openssl_ssl
-  rocksdb
   version_info_proto
   yaml
   zlib)
