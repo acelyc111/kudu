@@ -3234,9 +3234,8 @@ void LogBlockManager::OpenDataDir(
   // TODO: if data file is not exist, but metadata in rdb exists, we should check this case.
   // Find all containers and open them.
   unordered_set<string> containers_seen;
-  results->reserve(children.size() / 2);
+  results->reserve(children.size() / 2);  // TODO: rdb and file
   for (const string& child : children) {
-    LOG(WARNING) << "child: " << child;
     string container_name;
     if (!TryStripSuffixString(
             child, LogBlockManager::kContainerDataFileSuffix, &container_name) &&

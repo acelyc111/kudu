@@ -1123,12 +1123,7 @@ TEST_P(LogBlockManagerTest, TestParseKernelRelease) {
 //    threads running a long time since last bootstrap)
 //
 // However it still can be used to micro-optimize the startup process.
-class LogBlockManagerStartupBenchmarkTest: public LogBlockManagerTest {};
-INSTANTIATE_TEST_SUITE_P(StartupBenchmarkSuite, LogBlockManagerStartupBenchmarkTest,
-                         ::testing::Values(false, true));
-
-TEST_P(LogBlockManagerStartupBenchmarkTest, StartupBenchmark) {
-  bool delete_blocks = GetParam();
+TEST_P(LogBlockManagerTest, StartupBenchmark) {
   std::vector<std::string> test_dirs;
   for (int i = 0; i < FLAGS_startup_benchmark_data_dir_count_for_testing; ++i) {
     test_dirs.emplace_back(test_dir_ + "/" + std::to_string(i));
@@ -1162,12 +1157,11 @@ TEST_P(LogBlockManagerStartupBenchmarkTest, StartupBenchmark) {
     ASSERT_OK(transaction->CommitCreatedBlocks());
   }
 
-  if (delete_blocks) {
+  int to_delete_count = block_ids.size() * FLAGS_startup_benchmark_deleted_block_percentage / 100;
+  if (to_delete_count > 0) {
     std::mt19937 gen(SeedRandom());
     std::shuffle(block_ids.begin(), block_ids.end(), gen);
     {
-      int to_delete_count =
-          block_ids.size() * FLAGS_startup_benchmark_deleted_block_percentage / 100;
       shared_ptr<BlockDeletionTransaction> deletion_transaction =
           this->bm_->NewDeletionTransaction();
       for (const BlockId& b : block_ids) {
@@ -1182,7 +1176,7 @@ TEST_P(LogBlockManagerStartupBenchmarkTest, StartupBenchmark) {
   }
 
   for (int i = 0; i < FLAGS_startup_benchmark_reopen_times; i++) {
-    LOG_TIMING(INFO, "reopening block manager") {
+    LOG_TIMING(INFO, Substitute("reopening block manager when --block_manager=$0", FLAGS_block_manager)) {
       ASSERT_OK(ReopenBlockManager(nullptr, nullptr, test_dirs));
     }
   }
