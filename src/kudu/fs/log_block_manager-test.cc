@@ -103,10 +103,10 @@ DEFINE_int32(startup_benchmark_data_dir_count_for_testing, 8,
              "Data directories to do startup benchmark.");
 DEFINE_int32(startup_benchmark_reopen_times, 10,
              "Block manager reopen times.");
-DEFINE_int32(startup_benchmark_deleted_block_percentage, 90,
-             "Percentage of deleted blocks in containers.");
+DEFINE_double(startup_benchmark_deleted_block_percentage, 90.0,
+              "Percentage of deleted blocks in containers.");
 DEFINE_validator(startup_benchmark_deleted_block_percentage,
-                 [](const char* /*n*/, int32_t v) { return 0 <= v && v <= 100; });
+                 [](const char* /*n*/, double v) { return 0 <= v && v <= 100; });
 DECLARE_bool(encrypt_data_at_rest);
 DECLARE_uint64(fs_max_thread_count_per_data_dir);
 
