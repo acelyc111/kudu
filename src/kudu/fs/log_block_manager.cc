@@ -890,7 +890,7 @@ Status LogBlockContainer::Create(LogBlockManager* block_manager,
   return !metadata_status.ok() ? metadata_status : data_status;
 }
 
-Status LogrBlockContainer::Create(LogBlockManager* block_manager,
+Status LogBlockContainer::Create(LogBlockManager* block_manager,
                                   Dir* dir,
                                   LogrBlockContainerRefPtr* container) {
   string id;
