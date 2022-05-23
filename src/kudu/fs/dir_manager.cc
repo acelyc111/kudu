@@ -146,17 +146,15 @@ Status Dir::InitRdb() {
     s_block_cache_ = rocksdb::NewLRUCache(1 << 30);  // TODO(yingchun): use gflag
   });
   tbl_opts.block_cache = s_block_cache_;
+  tbl_opts.whole_key_filtering = false;
   tbl_opts.filter_policy.reset(rocksdb::NewBloomFilterPolicy(9.9));
   opts.table_factory.reset(NewBlockBasedTableFactory(tbl_opts));
-//  opts.prefix_extractor.reset(rocksdb::NewFixedPrefixTransform(ObjectIdGenerator::IdLength()));
-//  opts.memtable_prefix_bloom_size_ratio = 0.1;
-//  ReadOptions prefix_same_as_start = true;
-
+  opts.prefix_extractor.reset(rocksdb::NewFixedPrefixTransform(ObjectIdGenerator::IdLength()));
+  opts.memtable_prefix_bloom_size_ratio = 0.1;
   rocksdb::Status s = rocksdb::DB::Open(opts, JoinPathSegments(dir_, "rdb"), &db_);
   if (!s.ok()) {
     return Status::IOError(Substitute("$0, open RocksDB failed, path: $0", s.ToString(), dir_));
   }
-//  LOG(INFO) << Substitute("rocksdb::DB::Open $0", dir_);
   is_init_ = true;
   return Status::OK();
 }

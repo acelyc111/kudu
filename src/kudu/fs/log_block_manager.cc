@@ -1984,17 +1984,20 @@ Status LogrBlockContainer::ProcessRecords(
     ProcessRecordType type) {
   rocksdb::Slice begin_key = id_;
   string next = ObjectIdGenerator::NextOf(id_);
-  //  rocksdb::Slice end_key = next;
+  rocksdb::Slice end_key = next;
   rocksdb::ReadOptions options;
+  options.total_order_seek = false;
+  options.auto_prefix_mode = false;
   options.readahead_size = 2 << 20;
-  //  options.iterate_upper_bound = &end_key;
+  options.iterate_upper_bound = &end_key;
+  options.prefix_same_as_start = true;
 
   uint64_t data_file_size = 0;
   BlockRecordPB record;
   unique_ptr<rocksdb::Iterator> it(data_dir_->rdb()->NewIterator(options, data_dir_->rdb()->DefaultColumnFamily()));
   it->Seek(begin_key);
   while (it->Valid() && it->key().starts_with(begin_key)) {
-    if (!record.ParseFromArray(it->value().data(), it->value().size())) {
+    if (PREDICT_FALSE(!record.ParseFromArray(it->value().data(), it->value().size()))) {
       report->partial_rdb_record_check->entries.emplace_back(ToString(), it->key().ToString());
       LOG(WARNING) << Substitute("Parse metadata in rocksdb failed, path: $0, key: $1",
                                  ToString(),
