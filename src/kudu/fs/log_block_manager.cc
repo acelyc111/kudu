@@ -2746,10 +2746,12 @@ Status LogBlockManager::Open(FsReport* report, std::atomic<int>* containers_proc
   for (const auto& dd : dd_manager_->dirs()) {
     i++;
 
-    Status rdb_s = dd->InitRdb();
-    if (rdb_s.IsIOError()) {
-      statuses[i] = Status::IOError("Data directory failed", rdb_s.ToString(), EIO);
-      continue;
+    if (type_ == LogBlockManagerType::kRdb) {
+      Status rdb_s = dd->InitRdb();
+      if (rdb_s.IsIOError()) {
+        statuses[i] = Status::IOError("Data directory failed", rdb_s.ToString(), EIO);
+        continue;
+      }
     }
 
     int uuid_idx;
@@ -3156,20 +3158,19 @@ Status LogBlockManager::RemoveLogBlocks(const vector<BlockId>& block_ids,
             "Unable to append deletion record to block metadata");
       }
     } else {
-      rocksdb::WriteOptions options;
-      rocksdb::Slice key(lb->container()->id() + "." + lb->block_id().ToString());
-      rocksdb::Status s = lb->container()->data_dir()->rdb()->Delete(options, key);
-      if (!s.ok()) {
-        LOG(FATAL) << s.ToString();
-      }
-      // Metadata files of containers with very few live blocks will be compacted.
-      if (!lb->container()->read_only() &&
-          FLAGS_log_container_metadata_runtime_compact &&
-          lb->container()->ShouldCompact()) {
-        scoped_refptr<LogBlockContainer> self(lb->container());
-        lb->container()->ExecClosure([self]() {
-          self->CompactMetadata();
-        });
+      if (type_ == LogBlockManagerType::kRdb) {
+        rocksdb::WriteOptions options;
+        rocksdb::Slice key(lb->container()->id() + "." + lb->block_id().ToString());
+        rocksdb::Status s = lb->container()->data_dir()->rdb()->Delete(options, key);
+        CHECK_OK(FromRdbStatus(s));
+      } else {
+        CHECK_EQ(type_, LogBlockManagerType::kFile);
+        // Metadata files of containers with very few live blocks will be compacted.
+        if (!lb->container()->read_only() && FLAGS_log_container_metadata_runtime_compact &&
+            lb->container()->ShouldCompact()) {
+          scoped_refptr<LogBlockContainer> self(lb->container());
+          lb->container()->ExecClosure([self]() { self->CompactMetadata(); });
+        }
       }
 
       deleted->emplace_back(lb->block_id());
@@ -3586,7 +3587,7 @@ Status LogBlockManager::Repair(
   // leftover container files.
   if (report->incomplete_container_check) {
     for (auto& ic : report->incomplete_container_check->entries) {
-      {
+      if (type_ == LogBlockManagerType::kRdb) {
         vector<string> kv = Split(ic.container, "/", SkipEmpty());
         CHECK(!kv.empty());
         string id = kv[kv.size() - 1];
@@ -3597,16 +3598,17 @@ Status LogBlockManager::Repair(
         auto s =
             dir->rdb()->DeleteRange(del_opt, dir->rdb()->DefaultColumnFamily(), begin_key, end_key);
         CHECK_OK(FromRdbStatus(s));
-      }
-      Status s = env_->DeleteFile(
-          StrCat(ic.container, kContainerMetadataFileSuffix));
-      if (!s.ok() && !s.IsNotFound()) {
-        WARN_NOT_OK_LBM_DISK_FAILURE(s, "could not delete incomplete container metadata file");
-      }
+      } else {
+        CHECK_EQ(type_, LogBlockManagerType::kFile);
+        Status s = env_->DeleteFile(StrCat(ic.container, kContainerMetadataFileSuffix));
+        if (!s.ok() && !s.IsNotFound()) {
+          WARN_NOT_OK_LBM_DISK_FAILURE(s, "could not delete incomplete container metadata file");
+        }
 
-      s = env_->DeleteFile(StrCat(ic.container, kContainerDataFileSuffix));
-      if (!s.ok() && !s.IsNotFound()) {
-        WARN_NOT_OK_LBM_DISK_FAILURE(s, "could not delete incomplete container data file");
+        s = env_->DeleteFile(StrCat(ic.container, kContainerDataFileSuffix));
+        if (!s.ok() && !s.IsNotFound()) {
+          WARN_NOT_OK_LBM_DISK_FAILURE(s, "could not delete incomplete container data file");
+        }
       }
       ic.repaired = true;
     }
@@ -3638,6 +3640,7 @@ Status LogBlockManager::Repair(
   }
 
   if (report->partial_rdb_record_check) {
+    CHECK(type_ == LogBlockManagerType::kRdb || report->partial_rdb_record_check->entries.empty());
     for (auto& e : report->partial_rdb_record_check->entries) {
       // TODO: optimize to delete by batch
       rocksdb::WriteOptions del_opt;

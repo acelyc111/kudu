@@ -74,7 +74,7 @@ DEFINE_bool(enable_data_block_fsync, true,
 TAG_FLAG(enable_data_block_fsync, unsafe);
 
 #if defined(__linux__)
-DEFINE_string(block_manager, "logr", "Which block manager to use for storage. "
+DEFINE_string(block_manager, "log", "Which block manager to use for storage. "
               "Valid options are 'file', 'log' and 'logr'. "
               "The file block manager is not suitable for "
               "production use due to scaling limitations.");
@@ -334,7 +334,7 @@ void FsManager::InitBlockManager() {
   } else if (opts_.block_manager_type == "log") {
     block_manager_.reset(new LogfBlockManager(
         env_, dd_manager_.get(), error_manager_.get(), opts_.file_cache, std::move(bm_opts)));
-  } else if (opts_.block_manager_type == "log") {
+  } else if (opts_.block_manager_type == "logr") {
     block_manager_.reset(new LogrBlockManager(
         env_, dd_manager_.get(), error_manager_.get(), opts_.file_cache, std::move(bm_opts)));
   } else {
