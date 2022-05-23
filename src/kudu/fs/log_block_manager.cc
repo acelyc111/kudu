@@ -508,7 +508,7 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
   // Appends 'pb' to this container's metadata file.
   //
   // The on-disk effects of this call are made durable only after SyncMetadata().
-  Status AppendMetadata(const BlockId& block_id, const BlockRecordPB& pb);
+  virtual Status AppendMetadata(const BlockId& block_id, const BlockRecordPB& pb) = 0;
 
   // Asynchronously flush this container's data file from 'offset' through
   // to 'length'.
@@ -673,9 +673,8 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
 
   static std::vector<BlockRecordPB> SortRecords(LogBlockManager::BlockRecordMap live_block_records);
 
- private:
+ protected:
   LogBlockContainer(LogBlockManager* block_manager, Dir* data_dir, const string& id,
-                    unique_ptr<WritablePBContainerFile> metadata_file,
                     shared_ptr<RWFile> data_file);
 
   // Processes a single block record, performing sanity checks on it and adding
@@ -723,12 +722,6 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
   // Offset up to which we have preallocated bytes.
   int64_t preallocated_offset_ = 0;
 
-  // Protect 'metadata_file_', only rewriting should add write lock,
-  // appending and syncing only need read lock, cause there is an
-  // internal lock for these operations in WritablePBContainerFile.
-  mutable RWMutex metadata_compact_lock_;
-  // Opened file handles to the container's files.
-  unique_ptr<WritablePBContainerFile> metadata_file_;
   shared_ptr<RWFile> data_file_;
 
   // The offset of the next block to be written to the container.
@@ -783,15 +776,12 @@ LogBlockContainer::LogBlockContainer(
     LogBlockManager* block_manager,
     Dir* data_dir,
     const string& id,
-    unique_ptr<WritablePBContainerFile> metadata_file,
     shared_ptr<RWFile> data_file)
     : block_manager_(block_manager),
       data_dir_(data_dir),
       id_(id),
       max_num_blocks_(FindOrDie(block_manager->block_limits_by_data_dir_,
                                 data_dir)),
-      metadata_compact_lock_(RWMutex::Priority::PREFER_READING),
-      metadata_file_(std::move(metadata_file)),
       data_file_(std::move(data_file)),
       next_block_offset_(0),
       total_bytes_(0),
@@ -826,7 +816,7 @@ void LogBlockContainer::HandleError(const Status& s) const {
 
 Status LogBlockContainer::Create(LogBlockManager* block_manager,
                                  Dir* dir,
-                                 LogBlockContainerRefPtr* container) {
+                                 LogfBlockContainerRefPtr* container) {
   string id;
   string common_path;
   string metadata_path;
@@ -884,11 +874,11 @@ Status LogBlockContainer::Create(LogBlockManager* block_manager,
     unique_ptr<WritablePBContainerFile> metadata_file(new WritablePBContainerFile(
         std::move(metadata_writer)));
     RETURN_NOT_OK_CONTAINER_DISK_FAILURE(metadata_file->CreateNew(BlockRecordPB()));
-    container->reset(new LogBlockContainer(block_manager,
-                                           dir,
-                                           id,
-                                           std::move(metadata_file),
-                                           std::move(data_file)));
+    container->reset(new LogfBlockContainer(block_manager,
+                                            dir,
+                                            id,
+                                            std::move(metadata_file),
+                                            std::move(data_file)));
     VLOG(1) << "Created log block container " << (*container)->ToString();
   }
 
@@ -1175,9 +1165,7 @@ Status LogBlockContainer::DoCloseBlocks(const vector<LogWritableBlock*>& blocks,
                             "unable to append block's metadata during close");
     }
 
-    // TODO: Flush rocksdb ?
     if (mode == SYNC) {
-      VLOG(3) << "Syncing metadata file " << metadata_file_->filename();
       RETURN_NOT_OK(SyncMetadata());
     }
 
@@ -1246,15 +1234,6 @@ Status LogBlockContainer::ReadData(int64_t offset, Slice result) const {
 Status LogBlockContainer::ReadVData(int64_t offset, ArrayView<Slice> results) const {
   DCHECK_GE(offset, 0);
   RETURN_NOT_OK_HANDLE_ERROR(data_file_->ReadV(offset, results));
-  return Status::OK();
-}
-
-Status LogBlockContainer::AppendMetadata(const BlockId& block_id, const BlockRecordPB& pb) {
-  RETURN_NOT_OK_HANDLE_ERROR(read_only_status());
-  // Note: We don't check for sufficient disk space for metadata writes in
-  // order to allow for block deletion on full disks.
-  shared_lock<RWMutex> l(metadata_compact_lock_);
-  RETURN_NOT_OK_HANDLE_ERROR(metadata_file_->Append(pb));
   return Status::OK();
 }
 
@@ -1460,9 +1439,6 @@ class LogfBlockContainer: public LogBlockContainer {
   // The destructor will delete files of this container if it is dead.
   ~LogfBlockContainer();
 
-  // Appends 'pb' to this container's metadata file.
-  //
-  // The on-disk effects of this call are made durable only after SyncMetadata().
   Status AppendMetadata(const BlockId& block_id, const BlockRecordPB& pb) override;
 
   // Synchronize this container's metadata file with the disk. On success,
@@ -1519,8 +1495,8 @@ class LogfBlockContainer: public LogBlockContainer {
 
  private:
   LogfBlockContainer(LogBlockManager* block_manager, Dir* data_dir, const string& id,
-                     unique_ptr<WritablePBContainerFile> metadata_file,
-                     shared_ptr<RWFile> data_file);
+                     shared_ptr<RWFile> data_file,
+                     unique_ptr<WritablePBContainerFile> metadata_file);
 
   // Check the container whether it is fine.
   //
@@ -1575,34 +1551,11 @@ LogfBlockContainer::LogfBlockContainer(
     LogBlockManager* block_manager,
     Dir* data_dir,
     const string& id,
-    unique_ptr<WritablePBContainerFile> metadata_file,
-    shared_ptr<RWFile> data_file)
-    : block_manager_(block_manager),
-      data_dir_(data_dir),
-      id_(id),
-      max_num_blocks_(FindOrDie(block_manager->block_limits_by_data_dir_,
-                                data_dir)),
+    shared_ptr<RWFile> data_file,
+    unique_ptr<WritablePBContainerFile> metadata_file)
+    : LogBlockContainer(block_manager, data_dir, id, data_file),
       metadata_compact_lock_(RWMutex::Priority::PREFER_READING),
-      metadata_file_(std::move(metadata_file)),
-      data_file_(std::move(data_file)),
-      next_block_offset_(0),
-      total_bytes_(0),
-      total_blocks_(0),
-      live_bytes_(0),
-      live_bytes_aligned_(0),
-      live_blocks_(0),
-      blocks_being_written_(0),
-      dead_(false),
-      metrics_(block_manager->metrics()) {
-  // If we have an encryption header, we need to align the next offset to the
-  // next file system block.
-  if (auto encryption_header_size = data_file_->GetEncryptionHeaderSize();
-      encryption_header_size > 0) {
-    UpdateNextBlockOffset(0, encryption_header_size);
-    live_bytes_.Store(encryption_header_size);
-    total_bytes_.Store(next_block_offset_.Load());
-    live_bytes_aligned_.Store(next_block_offset_.Load());
-  }
+      metadata_file_(std::move(metadata_file)) {
 }
 
 LogfBlockContainer::~LogfBlockContainer() {
@@ -1837,6 +1790,7 @@ Status LogfBlockContainer::AppendMetadata(const BlockId& block_id, const BlockRe
 }
 
 Status LogfBlockContainer::SyncMetadata() {
+  VLOG(3) << "Syncing metadata file " << metadata_file_->filename();
   RETURN_NOT_OK_HANDLE_ERROR(read_only_status());
   if (FLAGS_enable_data_block_fsync) {
     if (metrics_) metrics_->generic_metrics.total_disk_sync->Increment();
@@ -1890,6 +1844,8 @@ class LogrBlockContainer: public LogBlockContainer {
   // The destructor will delete files of this container if it is dead.
   ~LogrBlockContainer();
 
+  Status AppendMetadata(const BlockId& block_id, const BlockRecordPB& pb) override;
+
   // Synchronize this container's metadata file with the disk. On success,
   // guarantees that the metadata is made durable.
   //
@@ -1923,7 +1879,6 @@ class LogrBlockContainer: public LogBlockContainer {
 
  private:
   LogrBlockContainer(LogBlockManager* block_manager, Dir* data_dir, const string& id,
-                     unique_ptr<WritablePBContainerFile> metadata_file,
                      shared_ptr<RWFile> data_file);
 
   // TODO: update comments
@@ -1958,34 +1913,8 @@ LogrBlockContainer::LogrBlockContainer(
     LogBlockManager* block_manager,
     Dir* data_dir,
     const string& id,
-    unique_ptr<WritablePBContainerFile> metadata_file,
     shared_ptr<RWFile> data_file)
-    : block_manager_(block_manager),
-      data_dir_(data_dir),
-      id_(id),
-      max_num_blocks_(FindOrDie(block_manager->block_limits_by_data_dir_,
-                                data_dir)),
-      metadata_compact_lock_(RWMutex::Priority::PREFER_READING),
-      metadata_file_(std::move(metadata_file)),
-      data_file_(std::move(data_file)),
-      next_block_offset_(0),
-      total_bytes_(0),
-      total_blocks_(0),
-      live_bytes_(0),
-      live_bytes_aligned_(0),
-      live_blocks_(0),
-      blocks_being_written_(0),
-      dead_(false),
-      metrics_(block_manager->metrics()) {
-  // If we have an encryption header, we need to align the next offset to the
-  // next file system block.
-  if (auto encryption_header_size = data_file_->GetEncryptionHeaderSize();
-      encryption_header_size > 0) {
-    UpdateNextBlockOffset(0, encryption_header_size);
-    live_bytes_.Store(encryption_header_size);
-    total_bytes_.Store(next_block_offset_.Load());
-    live_bytes_aligned_.Store(next_block_offset_.Load());
-  }
+    : LogBlockContainer(block_manager, data_dir, id, data_file) {
 }
 
 LogrBlockContainer::~LogrBlockContainer() {

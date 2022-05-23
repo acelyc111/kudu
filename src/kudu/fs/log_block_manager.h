@@ -57,6 +57,7 @@ struct FsReport;
 namespace internal {
 class LogBlock;
 class LogBlockContainer;
+class LogfBlockContainer;
 class LogrBlockContainer;
 class LogBlockDeletionTransaction;
 class LogWritableBlock;
@@ -66,6 +67,7 @@ struct LogBlockManagerMetrics;
 
 typedef scoped_refptr<internal::LogBlock> LogBlockRefPtr;
 typedef scoped_refptr<internal::LogBlockContainer> LogBlockContainerRefPtr;
+typedef scoped_refptr<internal::LogfBlockContainer> LogfBlockContainerRefPtr;
 typedef scoped_refptr<internal::LogrBlockContainer> LogrBlockContainerRefPtr;
 
 // A log-backed (i.e. sequentially allocated file) block storage
@@ -231,6 +233,7 @@ class LogBlockManager : public BlockManager {
   FRIEND_TEST(LogBlockManagerTest, TestRdb);
 
   friend class internal::LogBlockContainer;
+  friend class internal::LogfBlockContainer;
   friend class internal::LogrBlockContainer;
   friend class internal::LogBlockDeletionTransaction;
   friend class internal::LogWritableBlock;
