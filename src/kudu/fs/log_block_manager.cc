@@ -879,7 +879,7 @@ Status LogBlockContainer::ProcessRecord(
         report->malformed_record_check->entries.emplace_back(ToString(), record);
         break;
       }
-      LOG(INFO) << Substitute("Found DELETE block $0", block_id.ToString());
+      VLOG(2) << Substitute("Found DELETE block $0", block_id.ToString());
       if (type == ProcessRecordType::kReadAndUpdate) {
         BlockDeleted(lb);
       }
@@ -3234,14 +3234,14 @@ void LogBlockManager::OpenDataDir(
   // TODO: if data file is not exist, but metadata in rdb exists, we should check this case.
   // Find all containers and open them.
   unordered_set<string> containers_seen;
-  results->reserve(children.size());
-//  results->reserve(children.size() / 2);
+  results->reserve(children.size() / 2);
   for (const string& child : children) {
+    LOG(WARNING) << "child: " << child;
     string container_name;
     if (!TryStripSuffixString(
-            child, LogBlockManager::kContainerDataFileSuffix, &container_name)/* &&
+            child, LogBlockManager::kContainerDataFileSuffix, &container_name) &&
         !TryStripSuffixString(
-            child, LogBlockManager::kContainerMetadataFileSuffix, &container_name)*/) {
+            child, LogBlockManager::kContainerMetadataFileSuffix, &container_name)) {
       continue;
     }
     InsertIfNotPresent(&containers_seen, container_name);
@@ -3604,11 +3604,11 @@ Status LogBlockManager::Repair(
         if (!s.ok() && !s.IsNotFound()) {
           WARN_NOT_OK_LBM_DISK_FAILURE(s, "could not delete incomplete container metadata file");
         }
+      }
 
-        s = env_->DeleteFile(StrCat(ic.container, kContainerDataFileSuffix));
-        if (!s.ok() && !s.IsNotFound()) {
-          WARN_NOT_OK_LBM_DISK_FAILURE(s, "could not delete incomplete container data file");
-        }
+      Status s = env_->DeleteFile(StrCat(ic.container, kContainerDataFileSuffix));
+      if (!s.ok() && !s.IsNotFound()) {
+        WARN_NOT_OK_LBM_DISK_FAILURE(s, "could not delete incomplete container data file");
       }
       ic.repaired = true;
     }

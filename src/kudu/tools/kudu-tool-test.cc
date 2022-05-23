@@ -3841,9 +3841,11 @@ TEST_F(ToolTest, TestLocalReplicaDelete) {
   const string& data_dir = JoinPathSegments(tserver_dir, "data");
   uint64_t size_before_delete;
   ASSERT_OK(env_->GetFileSizeOnDiskRecursively(data_dir, &size_before_delete));
-  uint64_t size_of_rdb;
-  ASSERT_OK(env_->GetFileSizeOnDiskRecursively(JoinPathSegments(data_dir, "rdb"), &size_of_rdb));
-  size_before_delete -= size_of_rdb;
+  if (FLAGS_block_manager == "logr") {
+    uint64_t size_of_rdb;
+    ASSERT_OK(env_->GetFileSizeOnDiskRecursively(JoinPathSegments(data_dir, "rdb"), &size_of_rdb));
+    size_before_delete -= size_of_rdb;
+  }
   NO_FATALS(RunActionStdoutNone(Substitute("local_replica delete $0 --fs_wal_dir=$1 $2 "
                                            "--fs_data_dirs=$1 --clean_unsafe",
                                            tablet_id, tserver_dir, encryption_args)));
@@ -3884,8 +3886,11 @@ TEST_F(ToolTest, TestLocalReplicaDelete) {
   // indicates that some data has been deleted from disk.
   uint64_t size_after_delete;
   ASSERT_OK(env_->GetFileSizeOnDiskRecursively(data_dir, &size_after_delete));
-  ASSERT_OK(env_->GetFileSizeOnDiskRecursively(JoinPathSegments(data_dir, "rdb"), &size_of_rdb));
-  size_after_delete -= size_of_rdb;
+  if (FLAGS_block_manager == "logr") {
+    uint64_t size_of_rdb;
+    ASSERT_OK(env_->GetFileSizeOnDiskRecursively(JoinPathSegments(data_dir, "rdb"), &size_of_rdb));
+    size_after_delete -= size_of_rdb;
+  }
   ASSERT_LT(size_after_delete, size_before_delete);
 
   // Since there was only one tablet on the node which was deleted by tool,
