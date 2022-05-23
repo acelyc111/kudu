@@ -485,8 +485,8 @@ class LogBlockManager : public BlockManager {
   // For generating block IDs.
   AtomicInt<uint64_t> next_block_id_;
 
-  enum class LogBlockManagerType {
-    kFile,
+  enum LogBlockManagerType {
+    kFile = 0,
     kRdb
   };
   LogBlockManagerType type_;

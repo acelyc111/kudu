@@ -139,6 +139,7 @@ class LogBlockManagerTest : public KuduTest,
       //
       // Not strictly necessary except for TestDeleteFromContainerAfterMetadataCompaction.
       file_cache_("test_cache", env_, 50, scoped_refptr<MetricEntity>()),
+      type_(LogBlockManager::LogBlockManagerType::kFile),
       bm_(CreateBlockManager(scoped_refptr<MetricEntity>())) {
     CHECK_OK(file_cache_.Init());
   }
@@ -209,12 +210,11 @@ class LogBlockManagerTest : public KuduTest,
 
     BlockManagerOptions opts;
     opts.metric_entity = metric_entity;
-    LogBlockManager::LogBlockManagerType type = std::get<1>(GetParam());
-    if (type == LogBlockManager::LogBlockManagerType::kFile) {
+    if (type_ == LogBlockManager::LogBlockManagerType::kFile) {
       return new LogfBlockManager(
           env_, dd_manager_.get(), &error_manager_, &file_cache_, std::move(opts));
     } else {
-      CHECK_EQ(type, LogBlockManager::LogBlockManagerType::kRdb);
+      CHECK_EQ(type_, LogBlockManager::LogBlockManagerType::kRdb);
       return new LogrBlockManager(
           env_, dd_manager_.get(), &error_manager_, &file_cache_, std::move(opts));
     }
@@ -318,6 +318,7 @@ class LogBlockManagerTest : public KuduTest,
   unique_ptr<DataDirManager> dd_manager_;
   FsErrorManager error_manager_;
   FileCache file_cache_;
+  LogBlockManager::LogBlockManagerType type_;
   unique_ptr<LogBlockManager> bm_;
 
  private:
@@ -407,7 +408,10 @@ static void CheckLogMetrics(const scoped_refptr<MetricEntity>& entity,
   }
 }
 
-INSTANTIATE_TEST_SUITE_P(EncryptionEnabled, LogBlockManagerTest, ::testing::Values(false, true));
+INSTANTIATE_TEST_SUITE_P(EncryptionEnabled, LogBlockManagerTest,
+                         ::testing::Combine(
+                             ::testing::Values(false, true),
+                             ::testing::Values(0, 1)));
 
 TEST_P(LogBlockManagerTest, MetricsTest) {
   EnableEncryption(std::get<0>(GetParam()));
