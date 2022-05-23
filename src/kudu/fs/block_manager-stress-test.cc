@@ -228,6 +228,14 @@ class BlockManagerStressTest : public KuduTest {
 
   int GetMaxFdCount() const;
 
+  int GetMaxFdCountForLogBlockManager() const {
+    return FLAGS_max_open_files +
+           // If all containers are full, each open block could theoretically
+           // result in a new container, which is two files briefly outside the
+           // cache (before they are inserted and evict other cached files).
+           (FLAGS_num_writer_threads * FLAGS_block_group_size * FLAGS_block_group_number * 2);
+  }
+
   // Adds FLAGS_num_inconsistencies randomly chosen inconsistencies to the
   // block manager's on-disk representation, assuming the block manager in
   // question supports inconsistency detection and repair.
@@ -235,6 +243,15 @@ class BlockManagerStressTest : public KuduTest {
   // The block manager should be idle while this is called, and it should be
   // restarted afterwards so that detection and repair have a chance to run.
   void InjectNonFatalInconsistencies();
+
+  void InjectNonFatalInconsistenciesForLogBlockManager() {
+    LBMCorruptor corruptor(env_, dd_manager_.get(), rand_seed_);
+    ASSERT_OK(corruptor.Init());
+
+    for (int i = 0; i < FLAGS_num_inconsistencies; i++) {
+      ASSERT_OK(corruptor.InjectRandomNonFatalInconsistency());
+    }
+  }
 
  protected:
   // Used to generate random data. All PRNG instances are seeded with this
@@ -479,24 +496,14 @@ int BlockManagerStressTest<FileBlockManager>::GetMaxFdCount() const {
       FLAGS_num_reader_threads;
 }
 
-namespace {
-int GetMaxFdCount() {
-  return FLAGS_max_open_files +
-         // If all containers are full, each open block could theoretically
-         // result in a new container, which is two files briefly outside the
-         // cache (before they are inserted and evict other cached files).
-         (FLAGS_num_writer_threads * FLAGS_block_group_size * FLAGS_block_group_number * 2);
-}
-}
-
 template <>
 int BlockManagerStressTest<LogfBlockManager>::GetMaxFdCount() const {
-  return GetMaxFdCount();
+  return GetMaxFdCountForLogBlockManager();
 }
 
 template <>
 int BlockManagerStressTest<LogrBlockManager>::GetMaxFdCount() const {
-  return GetMaxFdCount();
+  return GetMaxFdCountForLogBlockManager();
 }
 
 template <>
@@ -505,13 +512,13 @@ void BlockManagerStressTest<FileBlockManager>::InjectNonFatalInconsistencies() {
 }
 
 template <>
-void BlockManagerStressTest<LogBlockManager>::InjectNonFatalInconsistencies() {
-  LBMCorruptor corruptor(env_, dd_manager_.get(), rand_seed_);
-  ASSERT_OK(corruptor.Init());
+void BlockManagerStressTest<LogfBlockManager>::InjectNonFatalInconsistencies() {
+  InjectNonFatalInconsistenciesForLogBlockManager();
+}
 
-  for (int i = 0; i < FLAGS_num_inconsistencies; i++) {
-    ASSERT_OK(corruptor.InjectRandomNonFatalInconsistency());
-  }
+template <>
+void BlockManagerStressTest<LogrBlockManager>::InjectNonFatalInconsistencies() {
+  InjectNonFatalInconsistenciesForLogBlockManager();
 }
 
 // What kinds of BlockManagers are supported?
