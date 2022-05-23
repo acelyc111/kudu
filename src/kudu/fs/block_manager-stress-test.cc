@@ -479,13 +479,24 @@ int BlockManagerStressTest<FileBlockManager>::GetMaxFdCount() const {
       FLAGS_num_reader_threads;
 }
 
-template <>
-int BlockManagerStressTest<LogBlockManager>::GetMaxFdCount() const {
+namespace {
+int GetMaxFdCount() {
   return FLAGS_max_open_files +
-      // If all containers are full, each open block could theoretically
-      // result in a new container, which is two files briefly outside the
-      // cache (before they are inserted and evict other cached files).
-      (FLAGS_num_writer_threads * FLAGS_block_group_size * FLAGS_block_group_number * 2);
+         // If all containers are full, each open block could theoretically
+         // result in a new container, which is two files briefly outside the
+         // cache (before they are inserted and evict other cached files).
+         (FLAGS_num_writer_threads * FLAGS_block_group_size * FLAGS_block_group_number * 2);
+}
+}
+
+template <>
+int BlockManagerStressTest<LogfBlockManager>::GetMaxFdCount() const {
+  return GetMaxFdCount();
+}
+
+template <>
+int BlockManagerStressTest<LogrBlockManager>::GetMaxFdCount() const {
+  return GetMaxFdCount();
 }
 
 template <>
@@ -505,7 +516,7 @@ void BlockManagerStressTest<LogBlockManager>::InjectNonFatalInconsistencies() {
 
 // What kinds of BlockManagers are supported?
 #if defined(__linux__)
-typedef ::testing::Types<FileBlockManager, LogBlockManager> BlockManagers;
+typedef ::testing::Types<FileBlockManager, LogfBlockManager, LogrBlockManager> BlockManagers;
 #else
 typedef ::testing::Types<FileBlockManager> BlockManagers;
 #endif

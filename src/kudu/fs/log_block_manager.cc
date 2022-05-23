@@ -211,6 +211,8 @@ namespace fs {
 
 using internal::LogBlock;
 using internal::LogBlockContainer;
+using internal::LogfBlockContainer;
+using internal::LogrBlockContainer;
 using internal::LogBlockDeletionTransaction;
 using internal::LogWritableBlock;
 using pb_util::ReadablePBContainerFile;
@@ -434,39 +436,8 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
     NO_SYNC
   };
 
-  // Creates a new block container in 'dir'.
-  static Status Create(LogBlockManager* block_manager,
-                       Dir* dir,
-                       LogfBlockContainerRefPtr* container);
-
-  // Creates a new block container in 'dir'.
-  static Status Create(LogBlockManager* block_manager,
-                       Dir* dir,
-                       LogrBlockContainerRefPtr* container);
-
-  // Opens an existing block container in 'dir'.
-  //
-  // Every container is comprised of two files: "<dir>/<id>.data" and
-  // "<dir>/<id>.metadata". Together, 'dir' and 'id' fully describe both
-  // files.
-  //
-  // Returns Status::Aborted() in the case that the metadata and data files
-  // both appear to have no data (e.g. due to a crash just after creating
-  // one of them but before writing any records). This is recorded in 'report'.
-  static Status Open(LogBlockManager* block_manager,
-                     Dir* dir,
-                     FsReport* report,
-                     const string& id,
-                     LogfBlockContainerRefPtr* container);
-
-  static Status Open(LogBlockManager* block_manager,
-                     Dir* dir,
-                     FsReport* report,
-                     const string& id,
-                     LogrBlockContainerRefPtr* container);
-
   // The destructor will delete files of this container if it is dead.
-  virtual ~LogBlockContainer();
+  virtual ~LogBlockContainer() = default;
 
   // Closes a set of blocks belonging to this container, possibly synchronizing
   // the dirty data and metadata to disk.
@@ -675,7 +646,7 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
 
  protected:
   LogBlockContainer(LogBlockManager* block_manager, Dir* data_dir, const string& id,
-                    shared_ptr<RWFile> data_file);
+                    shared_ptr<RWFile> data_file, uint64_t data_file_size);
 
   // Processes a single block record, performing sanity checks on it and adding
   // it either to 'live_blocks' or 'dead_blocks'. If the record is live, it is
@@ -776,12 +747,14 @@ LogBlockContainer::LogBlockContainer(
     LogBlockManager* block_manager,
     Dir* data_dir,
     const string& id,
-    shared_ptr<RWFile> data_file)
+    shared_ptr<RWFile> data_file,
+    uint64_t data_file_size)
     : block_manager_(block_manager),
       data_dir_(data_dir),
       id_(id),
       max_num_blocks_(FindOrDie(block_manager->block_limits_by_data_dir_,
                                 data_dir)),
+      preallocated_offset_(data_file_size),
       data_file_(std::move(data_file)),
       next_block_offset_(0),
       total_bytes_(0),
@@ -813,232 +786,6 @@ void LogBlockContainer::HandleError(const Status& s) const {
   RETURN_NOT_OK_HANDLE_DISK_FAILURE((status_expr), \
     block_manager->error_manager()->RunErrorNotificationCb(ErrorHandlerType::DISK_ERROR, dir)); \
 } while (0)
-
-Status LogBlockContainer::Create(LogBlockManager* block_manager,
-                                 Dir* dir,
-                                 LogfBlockContainerRefPtr* container) {
-  string id;
-  string common_path;
-  string metadata_path;
-  string data_path;
-  Status metadata_status;
-  Status data_status;
-  shared_ptr<RWFile> metadata_writer;
-  shared_ptr<RWFile> data_file;
-
-  // Repeat in the event of a container id collision (unlikely).
-  //
-  // When looping, we delete any created-and-orphaned files.
-  do {
-    id = block_manager->oid_generator()->Next();
-    common_path = JoinPathSegments(dir->dir(), id);
-    metadata_path = StrCat(common_path, LogBlockManager::kContainerMetadataFileSuffix);
-    data_path = StrCat(common_path, LogBlockManager::kContainerDataFileSuffix);
-    if (PREDICT_TRUE(block_manager->file_cache_)) {
-      if (metadata_writer) {
-        WARN_NOT_OK(block_manager->file_cache_->DeleteFile(metadata_path),
-                    "could not delete orphaned metadata file thru file cache");
-      }
-      if (data_file) {
-        WARN_NOT_OK(block_manager->file_cache_->DeleteFile(data_path),
-                    "could not delete orphaned data file thru file cache");
-      }
-      metadata_status = block_manager->file_cache_->OpenFile<Env::MUST_CREATE>(
-          metadata_path, &metadata_writer);
-      data_status = block_manager->file_cache_->OpenFile<Env::MUST_CREATE>(
-          data_path, &data_file);
-    } else {
-      if (metadata_writer) {
-        WARN_NOT_OK(block_manager->env()->DeleteFile(metadata_path),
-                    "could not delete orphaned metadata file");
-      }
-      if (data_file) {
-        WARN_NOT_OK(block_manager->env()->DeleteFile(data_path),
-                    "could not delete orphaned data file");
-      }
-      unique_ptr<RWFile> rwf;
-      RWFileOptions rw_opts;
-
-      rw_opts.mode = Env::MUST_CREATE;
-      rw_opts.is_sensitive = true;
-      metadata_status = block_manager->env()->NewRWFile(
-          rw_opts, metadata_path, &rwf);
-      metadata_writer.reset(rwf.release());
-      data_status = block_manager->env()->NewRWFile(
-          rw_opts, data_path, &rwf);
-      data_file.reset(rwf.release());
-    }
-  } while (PREDICT_FALSE(metadata_status.IsAlreadyPresent() ||
-                         data_status.IsAlreadyPresent()));
-  if (metadata_status.ok() && data_status.ok()) {
-    unique_ptr<WritablePBContainerFile> metadata_file(new WritablePBContainerFile(
-        std::move(metadata_writer)));
-    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(metadata_file->CreateNew(BlockRecordPB()));
-    container->reset(new LogfBlockContainer(block_manager,
-                                            dir,
-                                            id,
-                                            std::move(metadata_file),
-                                            std::move(data_file)));
-    VLOG(1) << "Created log block container " << (*container)->ToString();
-  }
-
-  // Prefer metadata status (arbitrarily).
-  FsErrorManager* em = block_manager->error_manager();
-  HANDLE_DISK_FAILURE(metadata_status, em->RunErrorNotificationCb(
-      ErrorHandlerType::DISK_ERROR, dir));
-  HANDLE_DISK_FAILURE(data_status, em->RunErrorNotificationCb(ErrorHandlerType::DISK_ERROR, dir));
-  return !metadata_status.ok() ? metadata_status : data_status;
-}
-
-Status LogBlockContainer::Create(LogBlockManager* block_manager,
-                                  Dir* dir,
-                                  LogrBlockContainerRefPtr* container) {
-  string id;
-  string common_path;
-  string data_path;
-  Status data_status;
-  shared_ptr<RWFile> data_file;
-
-  // Repeat in the event of a container id collision (unlikely).
-  //
-  // When looping, we delete any created-and-orphaned files.
-  do {
-    id = block_manager->oid_generator()->Next();
-    common_path = JoinPathSegments(dir->dir(), id);
-    data_path = StrCat(common_path, LogBlockManager::kContainerDataFileSuffix);
-    rocksdb::WriteOptions del_opt;
-    rocksdb::Slice begin_key = id;
-    string next = ObjectIdGenerator::NextOf(id);
-    rocksdb::Slice end_key = next;
-    auto s = dir->rdb()->DeleteRange(del_opt, dir->rdb()->DefaultColumnFamily(), begin_key, end_key);
-    CHECK_OK(FromRdbStatus(s));
-    if (PREDICT_TRUE(block_manager->file_cache_)) {
-      if (data_file) {
-        WARN_NOT_OK(block_manager->file_cache_->DeleteFile(data_path),
-                    "could not delete orphaned data file thru file cache");
-      }
-      data_status = block_manager->file_cache_->OpenFile<Env::MUST_CREATE>(
-          data_path, &data_file);
-    } else {
-      if (data_file) {
-        WARN_NOT_OK(block_manager->env()->DeleteFile(data_path),
-                    "could not delete orphaned data file");
-      }
-      unique_ptr<RWFile> rwf;
-      RWFileOptions rw_opts;
-
-      rw_opts.mode = Env::MUST_CREATE;
-      rw_opts.is_sensitive = true;
-      data_status = block_manager->env()->NewRWFile(
-          rw_opts, data_path, &rwf);
-      data_file.reset(rwf.release());
-    }
-  } while (PREDICT_FALSE(data_status.IsAlreadyPresent()));
-  if (data_status.ok()) {
-    container->reset(new LogrBlockContainer(block_manager,
-                                            dir,
-                                            id,
-                                            nullptr,
-                                            std::move(data_file)));
-    VLOG(1) << "Created log block container " << (*container)->ToString();
-  }
-
-  // Prefer metadata status (arbitrarily).
-  FsErrorManager* em = block_manager->error_manager();
-  HANDLE_DISK_FAILURE(data_status, em->RunErrorNotificationCb(ErrorHandlerType::DISK_ERROR, dir));
-  return data_status;
-}
-
-Status LogBlockContainer::Open(LogBlockManager* block_manager,
-                               Dir* dir,
-                               FsReport* report,
-                               const string& id,
-                               LogfBlockContainerRefPtr* container) {
-  string common_path = JoinPathSegments(dir->dir(), id);
-  string data_path = StrCat(common_path, LogBlockManager::kContainerDataFileSuffix);
-  string metadata_path = StrCat(common_path, LogBlockManager::kContainerMetadataFileSuffix);
-  RETURN_NOT_OK(LogfBlockContainer::CheckContainerFiles(block_manager, report, dir, id,
-                                    common_path, data_path, metadata_path));
-
-  // Open the existing metadata and data files for writing.
-  shared_ptr<RWFile> metadata_file;
-  shared_ptr<RWFile> data_file;
-  if (PREDICT_TRUE(block_manager->file_cache_)) {
-    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(
-        block_manager->file_cache_->OpenFile<Env::MUST_EXIST>(metadata_path, &metadata_file));
-    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(
-        block_manager->file_cache_->OpenFile<Env::MUST_EXIST>(data_path, &data_file));
-  } else {
-    RWFileOptions opts;
-    opts.mode = Env::MUST_EXIST;
-    opts.is_sensitive = true;
-    unique_ptr<RWFile> rwf;
-    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(block_manager->env()->NewRWFile(opts,
-        metadata_path, &rwf));
-    metadata_file.reset(rwf.release());
-    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(block_manager->env()->NewRWFile(opts,
-        data_path, &rwf));
-    data_file.reset(rwf.release());
-  }
-
-  unique_ptr<WritablePBContainerFile> metadata_pb_writer;
-  metadata_pb_writer.reset(new WritablePBContainerFile(std::move(metadata_file)));
-  RETURN_NOT_OK_CONTAINER_DISK_FAILURE(metadata_pb_writer->OpenExisting());
-
-  uint64_t data_file_size;
-  RETURN_NOT_OK_CONTAINER_DISK_FAILURE(data_file->Size(&data_file_size));
-
-  // Create the in-memory container and populate it.
-  LogfBlockContainerRefPtr open_container(new LogfBlockContainer(block_manager,
-                                                               dir,
-                                                               id,
-                                                               std::move(metadata_pb_writer),
-                                                               std::move(data_file)));
-  open_container->preallocated_offset_ = data_file_size;
-  VLOG(1) << "Opened log block container " << open_container->ToString();
-  container->swap(open_container);
-  return Status::OK();
-}
-
-Status LogBlockContainer::Open(LogBlockManager* block_manager,
-                                Dir* dir,
-                                FsReport* report,
-                                const string& id,
-                                LogrBlockContainerRefPtr* container) {
-  string common_path = JoinPathSegments(dir->dir(), id);
-  string data_path = StrCat(common_path, LogBlockManager::kContainerDataFileSuffix);
-  RETURN_NOT_OK(LogrBlockContainer::CheckContainerFiles(block_manager, report, dir, id,
-                                    common_path, data_path, ""));
-
-  // Open the existing metadata and data files for writing.
-  shared_ptr<RWFile> data_file;
-  if (PREDICT_TRUE(block_manager->file_cache_)) {
-    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(
-        block_manager->file_cache_->OpenFile<Env::MUST_EXIST>(data_path, &data_file));
-  } else {
-    RWFileOptions opts;
-    opts.mode = Env::MUST_EXIST;
-    opts.is_sensitive = true;
-    unique_ptr<RWFile> rwf;
-    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(block_manager->env()->NewRWFile(opts,
-                                                                         data_path, &rwf));
-    data_file.reset(rwf.release());
-  }
-
-  uint64_t data_file_size;
-  RETURN_NOT_OK_CONTAINER_DISK_FAILURE(data_file->Size(&data_file_size));
-
-  // Create the in-memory container and populate it.
-  LogrBlockContainerRefPtr open_container(new LogrBlockContainer(block_manager,
-                                                                 dir,
-                                                                 id,
-                                                                 nullptr,
-                                                                 std::move(data_file)));
-  open_container->preallocated_offset_ = data_file_size;
-  VLOG(1) << "Opened log block container " << open_container->ToString();
-  container->swap(open_container);
-  return Status::OK();
-}
 
 Status LogBlockContainer::TruncateDataToNextBlockOffset() {
   RETURN_NOT_OK_HANDLE_ERROR(read_only_status());
@@ -1436,6 +1183,26 @@ void LogBlockContainer::ContainerDeletionAsync(int64_t offset, int64_t length) {
 class LogfBlockContainer: public LogBlockContainer {
  public:
 
+  // Creates a new block container in 'dir'.
+  static Status Create(LogBlockManager* block_manager,
+                       Dir* dir,
+                       LogBlockContainerRefPtr* container);
+
+  // Opens an existing block container in 'dir'.
+  //
+  // Every container is comprised of two files: "<dir>/<id>.data" and
+  // "<dir>/<id>.metadata". Together, 'dir' and 'id' fully describe both
+  // files.
+  //
+  // Returns Status::Aborted() in the case that the metadata and data files
+  // both appear to have no data (e.g. due to a crash just after creating
+  // one of them but before writing any records). This is recorded in 'report'.
+  static Status Open(LogBlockManager* block_manager,
+                     Dir* dir,
+                     FsReport* report,
+                     const string& id,
+                     LogBlockContainerRefPtr* container);
+
   // The destructor will delete files of this container if it is dead.
   ~LogfBlockContainer();
 
@@ -1495,7 +1262,7 @@ class LogfBlockContainer: public LogBlockContainer {
 
  private:
   LogfBlockContainer(LogBlockManager* block_manager, Dir* data_dir, const string& id,
-                     shared_ptr<RWFile> data_file,
+                     shared_ptr<RWFile> data_file, uint64_t data_file_size,
                      unique_ptr<WritablePBContainerFile> metadata_file);
 
   // Check the container whether it is fine.
@@ -1547,13 +1314,144 @@ class LogfBlockContainer: public LogBlockContainer {
   DISALLOW_COPY_AND_ASSIGN(LogfBlockContainer);
 };
 
+Status LogfBlockContainer::Create(LogBlockManager* block_manager,
+                                 Dir* dir,
+                                 LogBlockContainerRefPtr* container) {
+  string id;
+  string common_path;
+  string metadata_path;
+  string data_path;
+  Status metadata_status;
+  Status data_status;
+  shared_ptr<RWFile> metadata_writer;
+  shared_ptr<RWFile> data_file;
+
+  // Repeat in the event of a container id collision (unlikely).
+  //
+  // When looping, we delete any created-and-orphaned files.
+  do {
+    id = block_manager->oid_generator()->Next();
+    common_path = JoinPathSegments(dir->dir(), id);
+    metadata_path = StrCat(common_path, LogBlockManager::kContainerMetadataFileSuffix);
+    data_path = StrCat(common_path, LogBlockManager::kContainerDataFileSuffix);
+    if (PREDICT_TRUE(block_manager->file_cache_)) {
+      if (metadata_writer) {
+        WARN_NOT_OK(block_manager->file_cache_->DeleteFile(metadata_path),
+                    "could not delete orphaned metadata file thru file cache");
+      }
+      if (data_file) {
+        WARN_NOT_OK(block_manager->file_cache_->DeleteFile(data_path),
+                    "could not delete orphaned data file thru file cache");
+      }
+      metadata_status = block_manager->file_cache_->OpenFile<Env::MUST_CREATE>(
+          metadata_path, &metadata_writer);
+      data_status = block_manager->file_cache_->OpenFile<Env::MUST_CREATE>(
+          data_path, &data_file);
+    } else {
+      if (metadata_writer) {
+        WARN_NOT_OK(block_manager->env()->DeleteFile(metadata_path),
+                    "could not delete orphaned metadata file");
+      }
+      if (data_file) {
+        WARN_NOT_OK(block_manager->env()->DeleteFile(data_path),
+                    "could not delete orphaned data file");
+      }
+      unique_ptr<RWFile> rwf;
+      RWFileOptions rw_opts;
+
+      rw_opts.mode = Env::MUST_CREATE;
+      rw_opts.is_sensitive = true;
+      metadata_status = block_manager->env()->NewRWFile(
+          rw_opts, metadata_path, &rwf);
+      metadata_writer.reset(rwf.release());
+      data_status = block_manager->env()->NewRWFile(
+          rw_opts, data_path, &rwf);
+      data_file.reset(rwf.release());
+    }
+  } while (PREDICT_FALSE(metadata_status.IsAlreadyPresent() ||
+                         data_status.IsAlreadyPresent()));
+  if (metadata_status.ok() && data_status.ok()) {
+    unique_ptr<WritablePBContainerFile> metadata_file(new WritablePBContainerFile(
+        std::move(metadata_writer)));
+    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(metadata_file->CreateNew(BlockRecordPB()));
+    uint64_t data_file_size;
+    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(data_file->Size(&data_file_size));
+    container->reset(new LogfBlockContainer(block_manager,
+                                            dir,
+                                            id,
+                                            std::move(data_file),
+                                            data_file_size,
+                                            std::move(metadata_file)));
+    VLOG(1) << "Created log block container " << (*container)->ToString();
+  }
+
+  // Prefer metadata status (arbitrarily).
+  FsErrorManager* em = block_manager->error_manager();
+  HANDLE_DISK_FAILURE(metadata_status, em->RunErrorNotificationCb(
+                                           ErrorHandlerType::DISK_ERROR, dir));
+  HANDLE_DISK_FAILURE(data_status, em->RunErrorNotificationCb(ErrorHandlerType::DISK_ERROR, dir));
+  return !metadata_status.ok() ? metadata_status : data_status;
+}
+
+Status LogfBlockContainer::Open(LogBlockManager* block_manager,
+                                Dir* dir,
+                                FsReport* report,
+                                const string& id,
+                                LogBlockContainerRefPtr* container) {
+  string common_path = JoinPathSegments(dir->dir(), id);
+  string data_path = StrCat(common_path, LogBlockManager::kContainerDataFileSuffix);
+  string metadata_path = StrCat(common_path, LogBlockManager::kContainerMetadataFileSuffix);
+  RETURN_NOT_OK(LogfBlockContainer::CheckContainerFiles(block_manager, report, dir, id,
+                                                        common_path, data_path, metadata_path));
+
+  // Open the existing metadata and data files for writing.
+  shared_ptr<RWFile> metadata_file;
+  shared_ptr<RWFile> data_file;
+  if (PREDICT_TRUE(block_manager->file_cache_)) {
+    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(
+        block_manager->file_cache_->OpenFile<Env::MUST_EXIST>(metadata_path, &metadata_file));
+    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(
+        block_manager->file_cache_->OpenFile<Env::MUST_EXIST>(data_path, &data_file));
+  } else {
+    RWFileOptions opts;
+    opts.mode = Env::MUST_EXIST;
+    opts.is_sensitive = true;
+    unique_ptr<RWFile> rwf;
+    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(block_manager->env()->NewRWFile(opts,
+                                                                         metadata_path, &rwf));
+    metadata_file.reset(rwf.release());
+    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(block_manager->env()->NewRWFile(opts,
+                                                                         data_path, &rwf));
+    data_file.reset(rwf.release());
+  }
+
+  unique_ptr<WritablePBContainerFile> metadata_pb_writer;
+  metadata_pb_writer.reset(new WritablePBContainerFile(std::move(metadata_file)));
+  RETURN_NOT_OK_CONTAINER_DISK_FAILURE(metadata_pb_writer->OpenExisting());
+
+  uint64_t data_file_size;
+  RETURN_NOT_OK_CONTAINER_DISK_FAILURE(data_file->Size(&data_file_size));
+
+  // Create the in-memory container and populate it.
+  LogBlockContainerRefPtr open_container(new LogfBlockContainer(block_manager,
+                                                                dir,
+                                                                id,
+                                                                std::move(data_file),
+                                                                data_file_size,
+                                                                std::move(metadata_pb_writer)));
+  VLOG(1) << "Opened log block container " << open_container->ToString();
+  container->swap(open_container);
+  return Status::OK();
+}
+
 LogfBlockContainer::LogfBlockContainer(
     LogBlockManager* block_manager,
     Dir* data_dir,
     const string& id,
     shared_ptr<RWFile> data_file,
+    uint64_t data_file_size,
     unique_ptr<WritablePBContainerFile> metadata_file)
-    : LogBlockContainer(block_manager, data_dir, id, data_file),
+    : LogBlockContainer(block_manager, data_dir, id, std::move(data_file), data_file_size),
       metadata_compact_lock_(RWMutex::Priority::PREFER_READING),
       metadata_file_(std::move(metadata_file)) {
 }
@@ -1841,6 +1739,17 @@ Status LogfBlockContainer::ReopenMetadataWriter() {
 class LogrBlockContainer: public LogBlockContainer {
  public:
 
+  // Creates a new block container in 'dir'.
+  static Status Create(LogBlockManager* block_manager,
+                       Dir* dir,
+                       LogBlockContainerRefPtr* container);
+
+  static Status Open(LogBlockManager* block_manager,
+                     Dir* dir,
+                     FsReport* report,
+                     const string& id,
+                     LogBlockContainerRefPtr* container);
+
   // The destructor will delete files of this container if it is dead.
   ~LogrBlockContainer();
 
@@ -1879,7 +1788,7 @@ class LogrBlockContainer: public LogBlockContainer {
 
  private:
   LogrBlockContainer(LogBlockManager* block_manager, Dir* data_dir, const string& id,
-                     shared_ptr<RWFile> data_file);
+                     shared_ptr<RWFile> data_file, uint64_t data_file_size);
 
   // TODO: update comments
   // Check the container whether it is fine.
@@ -1909,12 +1818,112 @@ class LogrBlockContainer: public LogBlockContainer {
   DISALLOW_COPY_AND_ASSIGN(LogrBlockContainer);
 };
 
+Status LogrBlockContainer::Create(LogBlockManager* block_manager,
+                                  Dir* dir,
+                                  LogBlockContainerRefPtr* container) {
+  string id;
+  string common_path;
+  string data_path;
+  Status data_status;
+  shared_ptr<RWFile> data_file;
+
+  // Repeat in the event of a container id collision (unlikely).
+  //
+  // When looping, we delete any created-and-orphaned files.
+  do {
+    id = block_manager->oid_generator()->Next();
+    common_path = JoinPathSegments(dir->dir(), id);
+    data_path = StrCat(common_path, LogBlockManager::kContainerDataFileSuffix);
+    rocksdb::WriteOptions del_opt;
+    rocksdb::Slice begin_key = id;
+    string next = ObjectIdGenerator::NextOf(id);
+    rocksdb::Slice end_key = next;
+    auto s = dir->rdb()->DeleteRange(del_opt, dir->rdb()->DefaultColumnFamily(), begin_key, end_key);
+    CHECK_OK(FromRdbStatus(s));
+    if (PREDICT_TRUE(block_manager->file_cache_)) {
+      if (data_file) {
+        WARN_NOT_OK(block_manager->file_cache_->DeleteFile(data_path),
+                    "could not delete orphaned data file thru file cache");
+      }
+      data_status = block_manager->file_cache_->OpenFile<Env::MUST_CREATE>(
+          data_path, &data_file);
+    } else {
+      if (data_file) {
+        WARN_NOT_OK(block_manager->env()->DeleteFile(data_path),
+                    "could not delete orphaned data file");
+      }
+      unique_ptr<RWFile> rwf;
+      RWFileOptions rw_opts;
+
+      rw_opts.mode = Env::MUST_CREATE;
+      rw_opts.is_sensitive = true;
+      data_status = block_manager->env()->NewRWFile(
+          rw_opts, data_path, &rwf);
+      data_file.reset(rwf.release());
+    }
+  } while (PREDICT_FALSE(data_status.IsAlreadyPresent()));
+  if (data_status.ok()) {
+    uint64_t data_file_size;
+    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(data_file->Size(&data_file_size));
+    container->reset(new LogrBlockContainer(block_manager,
+                                            dir,
+                                            id,
+                                            std::move(data_file),
+                                            data_file_size));
+    VLOG(1) << "Created log block container " << (*container)->ToString();
+  }
+
+  // Prefer metadata status (arbitrarily).
+  FsErrorManager* em = block_manager->error_manager();
+  HANDLE_DISK_FAILURE(data_status, em->RunErrorNotificationCb(ErrorHandlerType::DISK_ERROR, dir));
+  return data_status;
+}
+
+Status LogrBlockContainer::Open(LogBlockManager* block_manager,
+                               Dir* dir,
+                               FsReport* report,
+                               const string& id,
+                               LogBlockContainerRefPtr* container) {
+  string common_path = JoinPathSegments(dir->dir(), id);
+  string data_path = StrCat(common_path, LogBlockManager::kContainerDataFileSuffix);
+  RETURN_NOT_OK(LogrBlockContainer::CheckContainerFiles(block_manager, report, dir, id,
+                                                        common_path, data_path, ""));
+
+  // Open the existing metadata and data files for writing.
+  shared_ptr<RWFile> data_file;
+  if (PREDICT_TRUE(block_manager->file_cache_)) {
+    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(
+        block_manager->file_cache_->OpenFile<Env::MUST_EXIST>(data_path, &data_file));
+  } else {
+    RWFileOptions opts;
+    opts.mode = Env::MUST_EXIST;
+    opts.is_sensitive = true;
+    unique_ptr<RWFile> rwf;
+    RETURN_NOT_OK_CONTAINER_DISK_FAILURE(block_manager->env()->NewRWFile(opts,
+                                                                         data_path, &rwf));
+    data_file.reset(rwf.release());
+  }
+  uint64_t data_file_size;
+  RETURN_NOT_OK_CONTAINER_DISK_FAILURE(data_file->Size(&data_file_size));
+
+  // Create the in-memory container and populate it.
+  LogBlockContainerRefPtr open_container(new LogrBlockContainer(block_manager,
+                                                                dir,
+                                                                id,
+                                                                std::move(data_file),
+                                                                data_file_size));
+  VLOG(1) << "Opened log block container " << open_container->ToString();
+  container->swap(open_container);
+  return Status::OK();
+}
+
 LogrBlockContainer::LogrBlockContainer(
     LogBlockManager* block_manager,
     Dir* data_dir,
     const string& id,
-    shared_ptr<RWFile> data_file)
-    : LogBlockContainer(block_manager, data_dir, id, data_file) {
+    shared_ptr<RWFile> data_file,
+    uint64_t data_file_size)
+    : LogBlockContainer(block_manager, data_dir, id, std::move(data_file), data_file_size) {
 }
 
 LogrBlockContainer::~LogrBlockContainer() {
@@ -2973,7 +2982,12 @@ Status LogBlockManager::GetOrCreateContainer(const CreateBlockOptions& opts,
 
   // All containers are in use; create a new one.
   LogBlockContainerRefPtr new_container;
-  Status s = LogBlockContainer::Create(this, dir, &new_container);
+  Status s;
+  if (type_ == LogBlockManagerType::kFile) {
+    s = LogfBlockContainer::Create(this, dir, &new_container);
+  } else {
+    s = LogrBlockContainer::Create(this, dir, &new_container);
+  }
 
   // We could create a container in a different directory, but there's
   // currently no point in doing so. On disk failure, the tablet specified by
@@ -3243,8 +3257,13 @@ void LogBlockManager::OpenDataDir(
     // Add a new result for the container.
     results->emplace_back(new internal::LogBlockContainerLoadResult());
     LogBlockContainerRefPtr container;
-    s = LogBlockContainer::Open(
-        this, dir, &results->back()->report, container_name, &container);
+    if (type_ == LogBlockManagerType::kFile) {
+      s = LogfBlockContainer::Open(
+          this, dir, &results->back()->report, container_name, &container);
+    } else {
+      s = LogrBlockContainer::Open(
+          this, dir, &results->back()->report, container_name, &container);
+    }
     if (containers_processed) {
       ++*containers_processed;
       if (metrics_) {

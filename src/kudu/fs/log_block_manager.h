@@ -189,15 +189,7 @@ class LogBlockManager : public BlockManager {
   static const char* kContainerMetadataFileSuffix;
   static const char* kContainerDataFileSuffix;
 
-  // Note: all objects passed as pointers should remain alive for the lifetime
-  // of the block manager.
-  LogBlockManager(Env* env,
-                  DataDirManager* dd_manager,
-                  FsErrorManager* error_manager,
-                  FileCache* file_cache,
-                  BlockManagerOptions opts);
-
-  ~LogBlockManager();
+  virtual ~LogBlockManager();
 
   Status Open(FsReport* report, std::atomic<int>* containers_processed = nullptr,
               std::atomic<int>* containers_total = nullptr) override;
@@ -218,7 +210,7 @@ class LogBlockManager : public BlockManager {
 
   FsErrorManager* error_manager() override { return error_manager_; }
 
- private:
+ protected:
   FRIEND_TEST(LogBlockManagerTest, TestAbortBlock);
   FRIEND_TEST(LogBlockManagerTest, TestCloseFinalizedBlock);
   FRIEND_TEST(LogBlockManagerTest, TestCompactFullContainerMetadataAtStartup);
@@ -237,6 +229,7 @@ class LogBlockManager : public BlockManager {
   friend class internal::LogrBlockContainer;
   friend class internal::LogBlockDeletionTransaction;
   friend class internal::LogWritableBlock;
+  friend class LogBlockManagerTest;
 
   // Type for the actual block map used to store all live blocks.
   // We use sparse_hash_map<> here to reduce memory overhead.
@@ -266,6 +259,14 @@ class LogBlockManager : public BlockManager {
       BlockRecordPB,
       BlockIdHash,
       BlockIdEqual> BlockRecordMap;
+
+  // Note: all objects passed as pointers should remain alive for the lifetime
+  // of the block manager.
+  LogBlockManager(Env* env,
+                  DataDirManager* dd_manager,
+                  FsErrorManager* error_manager,
+                  FileCache* file_cache,
+                  BlockManagerOptions opts);
 
   // Adds an as of yet unseen container to this block manager.
   //
@@ -366,7 +367,6 @@ class LogBlockManager : public BlockManager {
   // failure, an effort is made to delete the temporary file.
   //
   // Note: the new file is synced but its parent directory is not.
-  // TODO: no rdb
   Status RewriteMetadataFile(const internal::LogBlockContainer& container,
                              const std::vector<BlockRecordPB>& records,
                              int64_t* file_bytes_delta);
@@ -485,12 +485,43 @@ class LogBlockManager : public BlockManager {
   // For generating block IDs.
   AtomicInt<uint64_t> next_block_id_;
 
+  enum class LogBlockManagerType {
+    kFile,
+    kRdb
+  };
+  LogBlockManagerType type_;
+
   // Metrics for the block manager.
   //
   // May be null if instantiated without metrics.
   std::unique_ptr<internal::LogBlockManagerMetrics> metrics_;
 
   DISALLOW_COPY_AND_ASSIGN(LogBlockManager);
+};
+
+
+class LogfBlockManager : public LogBlockManager {
+ public:
+  LogfBlockManager(Env* env,
+                   DataDirManager* dd_manager,
+                   FsErrorManager* error_manager,
+                   FileCache* file_cache,
+                   BlockManagerOptions opts)
+      : LogBlockManager(env, dd_manager, error_manager, file_cache, std::move(opts)) {
+    type_ = LogBlockManagerType::kFile;
+  }
+};
+
+class LogrBlockManager : public LogBlockManager {
+ public:
+  LogrBlockManager(Env* env,
+                   DataDirManager* dd_manager,
+                   FsErrorManager* error_manager,
+                   FileCache* file_cache,
+                   BlockManagerOptions opts)
+      : LogBlockManager(env, dd_manager, error_manager, file_cache, std::move(opts)) {
+    type_ = LogBlockManagerType::kRdb;
+  }
 };
 
 } // namespace fs
