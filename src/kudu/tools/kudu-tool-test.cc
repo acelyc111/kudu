@@ -1442,7 +1442,6 @@ TEST_F(ToolTest, TestFsCheck) {
   }
 
   string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  extra_args += " --block_manager=" + FLAGS_block_manager;
 
   // Check the filesystem; all the blocks should be accounted for, and there
   // should be no blocks missing or orphaned.
@@ -1497,7 +1496,6 @@ TEST_F(ToolTest, TestFsCheck) {
 TEST_F(ToolTest, TestFsCheckLiveServer) {
   NO_FATALS(StartExternalMiniCluster());
   string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  extra_args += " --block_manager=" + FLAGS_block_manager;
   string args = Substitute("fs check --fs_wal_dir $0 --fs_data_dirs $1 $2",
                            cluster_->GetWalPath("master-0"),
                            JoinStrings(cluster_->GetDataPaths("master-0"), ","),
@@ -1517,7 +1515,6 @@ TEST_F(ToolTest, TestFsCheckLiveServer) {
 TEST_F(ToolTest, TestFsFormat) {
   const string kTestDir = GetTestPath("test");
   string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  extra_args += " --block_manager=" + FLAGS_block_manager;
   NO_FATALS(RunActionStdoutNone(Substitute("fs format --fs_wal_dir=$0 $1", kTestDir, extra_args)));
   FsManager fs(env_, FsManagerOpts(kTestDir));
   ASSERT_OK(fs.Open());
@@ -1533,7 +1530,6 @@ TEST_F(ToolTest, TestFsFormatWithUuid) {
   ObjectIdGenerator generator;
   string original_uuid = generator.Next();
   string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  extra_args += " --block_manager=" + FLAGS_block_manager;
   NO_FATALS(RunActionStdoutNone(Substitute(
       "fs format --fs_wal_dir=$0 --uuid=$1 $2", kTestDir, original_uuid, extra_args)));
   FsManager fs(env_, FsManagerOpts(kTestDir));
@@ -1794,7 +1790,6 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
   }
 
   string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  extra_args += " --block_manager=" + FLAGS_block_manager;
 
   // Test default dump
   {
@@ -2018,7 +2013,6 @@ TEST_F(ToolTest, TestFsDumpCFile) {
   }
 
   string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  extra_args += " --block_manager=" + FLAGS_block_manager;
 
   {
     NO_FATALS(RunActionStdoutNone(Substitute(
@@ -2071,7 +2065,6 @@ TEST_F(ToolTest, TestFsDumpBlock) {
 
   {
     string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-    extra_args += " --block_manager=" + FLAGS_block_manager;
     string stdout;
     NO_FATALS(RunActionStdoutString(Substitute(
         "fs dump block --fs_wal_dir=$0 $1 $2",
@@ -2122,7 +2115,6 @@ TEST_F(ToolTest, TestWalDump) {
 
   string wal_path = fs.GetWalSegmentFileName(kTestTablet, 1);
   string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  extra_args += " --block_manager=" + FLAGS_block_manager;
   string stdout;
   for (const auto& args : { Substitute("wal dump $0 $1", wal_path, extra_args),
                             Substitute("local_replica dump wals --fs_wal_dir=$0 $1 $2",
@@ -2304,7 +2296,6 @@ TEST_F(ToolTest, TestWalDumpWithAlterSchema) {
   string wal_path = fs.GetWalSegmentFileName(kTestTablet, 1);
   string stdout;
   string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  extra_args += " --block_manager=" + FLAGS_block_manager;
   for (const auto& args : { Substitute("wal dump $0", wal_path),
                             Substitute("local_replica dump wals --fs_wal_dir=$0 $1 $2",
                                        kTestDir, kTestTablet, extra_args)
@@ -2452,7 +2443,6 @@ TEST_F(ToolTest, TestLocalReplicaDumpDataDirs) {
       &meta));
   string stdout;
   string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  extra_args += " --block_manager=" + FLAGS_block_manager;
   NO_FATALS(RunActionStdoutString(Substitute("local_replica dump data_dirs $0 "
                                              "--fs_wal_dir=$1 "
                                              "--fs_data_dirs=$2 $3",
@@ -2493,7 +2483,6 @@ TEST_F(ToolTest, TestLocalReplicaDumpMeta) {
                   &meta);
   string stdout;
   string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  extra_args += " --block_manager=" + FLAGS_block_manager;
   NO_FATALS(RunActionStdoutString(Substitute("local_replica dump meta $0 "
                                              "--fs_wal_dir=$1 "
                                              "--fs_data_dirs=$2 "
@@ -2536,7 +2525,6 @@ TEST_F(ToolTest, TestFsDumpTree) {
 
   string stdout;
   string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  extra_args += " --block_manager=" + FLAGS_block_manager;
   NO_FATALS(RunActionStdoutString(Substitute("fs dump tree --fs_wal_dir=$0 "
                                              "--fs_data_dirs=$1 $2",
                                              kTestDir, kTestDir, extra_args), &stdout));
@@ -2596,7 +2584,6 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
   string fs_paths = "--fs_wal_dir=" + kTestDir + " "
       "--fs_data_dirs=" + kTestDir;
   string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  extra_args += " --block_manager=" + FLAGS_block_manager;
   {
     string stdout;
     NO_FATALS(RunActionStdoutString(
@@ -3568,7 +3555,6 @@ TEST_F(ToolTest, TestPerfTabletScan) {
   cluster_->Shutdown();
   for (const string& tid : tablet_ids) {
     string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-    extra_args += " --block_manager=" + FLAGS_block_manager;
     const string args =
         Substitute("perf tablet_scan $0 --fs_wal_dir=$1 --fs_data_dirs=$2 --num_iters=2 $3",
                    tid, cluster_->tablet_server(0)->wal_dir(),
@@ -3630,7 +3616,6 @@ TEST_F(ToolTest, TestRemoteReplicaCopy) {
   const string& src_ts_addr = cluster_->tablet_server(kSrcTsIndex)->bound_rpc_addr().ToString();
   const string& dst_ts_addr = cluster_->tablet_server(kDstTsIndex)->bound_rpc_addr().ToString();
   string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  extra_args += " --block_manager=" + FLAGS_block_manager;
   Status s = RunTool(
       Substitute("remote_replica copy $0 $1 $2 $3",
                  healthy_tablet_id, src_ts_addr, dst_ts_addr, extra_args),
@@ -3845,7 +3830,6 @@ TEST_F(ToolTest, TestLocalReplicaDelete) {
     tablet_id = tablet_replicas[0]->tablet_id();
   }
   string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  extra_args += " --block_manager=" + FLAGS_block_manager;
   const string& tserver_dir = ts->options()->fs_opts.wal_root;
   // Using the delete tool with tablet server running fails.
   string stderr;
@@ -3955,7 +3939,6 @@ TEST_F(ToolTest, TestLocalReplicaDeleteMultiple) {
   const string& tserver_dir = ts->options()->fs_opts.wal_root;
   const string tablet_ids_csv_str = JoinStrings(tablet_ids, ",");
   string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  extra_args += " --block_manager=" + FLAGS_block_manager;
   NO_FATALS(RunActionStdoutNone(Substitute(
       "local_replica delete --fs_wal_dir=$0 --fs_data_dirs=$0 "
       "--clean_unsafe $1 $2", tserver_dir, tablet_ids_csv_str,
@@ -4013,7 +3996,6 @@ TEST_F(ToolTest, TestLocalReplicaTombstoneDelete) {
   uint64_t size_before_delete;
   ASSERT_OK(env_->GetFileSizeOnDiskRecursively(data_dir, &size_before_delete));
   string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  extra_args += " --block_manager=" + FLAGS_block_manager;
   NO_FATALS(RunActionStdoutNone(Substitute("local_replica delete $0 --fs_wal_dir=$1 "
                                            "--fs_data_dirs=$1 $2",
                                            tablet_id, tserver_dir, extra_args)));
@@ -4066,7 +4048,6 @@ TEST_F(ToolTest, TestLocalReplicaCMetaOps) {
     ts_uuids.emplace_back(mini_cluster_->mini_tablet_server(i)->uuid());
   }
   string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  extra_args += " --block_manager=" + FLAGS_block_manager;
   const string& flags =
       Substitute("-fs-wal-dir $0 $1",
                  mini_cluster_->mini_tablet_server(0)->options()->fs_opts.wal_root,
@@ -6988,7 +6969,6 @@ TEST_F(ToolTest, TestFsSwappingDirectoriesFailsGracefully) {
   const string& new_data_root_no_wal = GetTestPath("foo");
   string stderr;
   string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  extra_args += " --block_manager=" + FLAGS_block_manager;
   Status s = RunTool(Substitute(
       "fs update_dirs --fs_wal_dir=$0 --fs_data_dirs=$1 $2",
       wal_root, new_data_root_no_wal, extra_args), nullptr, &stderr);
@@ -7089,7 +7069,6 @@ TEST_F(ToolTest, TestFsRemoveDataDirWithTombstone) {
   mts->Shutdown();
   // KUDU-2680: tombstones shouldn't prevent us from removing a directory.
   string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  extra_args += " --block_manager=" + FLAGS_block_manager;
   NO_FATALS(RunActionStdoutNone(Substitute(
       "fs update_dirs --fs_wal_dir=$0 --fs_data_dirs=$1 $2",
       mts->options()->fs_opts.wal_root, data_root, extra_args)));
@@ -7129,7 +7108,6 @@ TEST_F(ToolTest, TestFsAddRemoveDataDirEndToEnd) {
   data_roots.emplace_back(to_add);
   mts->Shutdown();
   string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  extra_args += " --block_manager=" + FLAGS_block_manager;
   NO_FATALS(RunActionStdoutNone(Substitute(
       "fs update_dirs --fs_wal_dir=$0 --fs_data_dirs=$1 $2",
       wal_root, JoinStrings(data_roots, ","), extra_args)));
@@ -7283,7 +7261,6 @@ TEST_F(ToolTest, TestCheckFSWithNonDefaultMetadataDir) {
   // Providing the necessary arguments, the tool should work.
   string stdout;
   string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  extra_args += " --block_manager=" + FLAGS_block_manager;
   NO_FATALS(RunActionStdoutString(Substitute(
       "fs check --fs_wal_dir=$0 --fs_metadata_dir=$1 $2",
       opts.wal_root, opts.metadata_root, extra_args), &stdout));
@@ -7989,7 +7966,6 @@ TEST_F(ToolTest, TestLocalReplicaCopyLocal) {
   }
 
   string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  extra_args += " --block_manager=" + FLAGS_block_manager;
 
   // Copy replica from local filesystem failed, because the tserver on source filesystem
   // is still running.
@@ -8089,7 +8065,6 @@ TEST_F(ToolTest, TestRebuildTserverByLocalReplicaCopy) {
 
   // Copy source tserver's all replicas from local filesystem.
   string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  extra_args += " --block_manager=" + FLAGS_block_manager;
   for (const auto& tablet_id : tablet_ids) {
     string stdout;
     NO_FATALS(RunActionStdoutString(Substitute("local_replica copy_from_local $0 $1 $2 $3",
