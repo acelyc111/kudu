@@ -139,6 +139,8 @@ Status Dir::InitRdb() {
   opts.max_manifest_file_size = 100 << 20;
   opts.max_background_jobs = 4;
   opts.write_buffer_size = 64 << 20;  // TODO(yingchun): this is default value, try to use gflag
+  opts.level0_file_num_compaction_trigger = 8;
+  opts.max_write_buffer_number = 8;
 
   rocksdb::BlockBasedTableOptions tbl_opts;
   static std::once_flag flag;
