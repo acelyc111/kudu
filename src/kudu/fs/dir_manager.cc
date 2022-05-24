@@ -170,9 +170,16 @@ void Dir::Shutdown() {
   pool_->Shutdown();
 
   if (is_init_) {
+    {
+      rocksdb::FlushOptions options;
+      options.wait = true;
+      rocksdb::Status s = db_->Flush(options);
+      CHECK_OK(FromRdbStatus(s));
+    }
+
     delete db_;
     db_ = nullptr;
-//    LOG(INFO) << Substitute("rocksdb::DB::Close $0", dir_);
+    LOG(INFO) << Substitute("rocksdb::DB::Close $0", dir_);
   }
 
   is_shutdown_ = true;

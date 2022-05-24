@@ -113,6 +113,9 @@ DEFINE_uint64(log_container_preallocate_bytes, 32LU * 1024 * 1024,
               "creating new blocks. Set to 0 to disable preallocation");
 TAG_FLAG(log_container_preallocate_bytes, advanced);
 
+DEFINE_uint64(log_container_delete_batch_count, 256,
+              "");
+
 DEFINE_double(log_container_excess_space_before_cleanup_fraction, 0.10,
               "Additional fraction of a log container's calculated size that "
               "must be consumed on disk before the container is considered to "
@@ -2103,19 +2106,27 @@ Status LogrBlockContainer::AppendMetadata(const BlockId& block_id, const BlockRe
 }
 
 Status LogrBlockContainer::AppendMetadataForBatchDelete(const vector<BlockId>& block_ids) {
-//  SCOPED_LOG_TIMING(INFO, Substitute("AppendMetadataForBatchDelete $0", block_ids.size()));
+  SCOPED_LOG_TIMING(INFO, Substitute("AppendMetadataForBatchDelete $0", block_ids.size()));
+  rocksdb::WriteOptions options;
   rocksdb::WriteBatch batch;
   string tmp_key;
   for (const auto& block_id : block_ids) {
     tmp_key = id_ + "." + block_id.ToString();
     rocksdb::Slice key(tmp_key);
     CHECK_OK(FromRdbStatus(batch.Delete(key)));
+
+    if (batch.Count() == FLAGS_log_container_delete_batch_count) {
+//      SCOPED_LOG_TIMING(INFO, Substitute("$0 rdb()->Write $1 ops, $2 bytes",
+//                                         ToString(), batch.Count(), batch.GetDataSize()));
+      //  options.sync = true;
+      rocksdb::Status s = data_dir_->rdb()->Write(options, &batch);
+      CHECK_OK(FromRdbStatus(s));
+      batch.Clear();
+    }
   }
 
-  rocksdb::WriteOptions options;
-//  options.sync = true;
-  {
-//    SCOPED_LOG_TIMING(INFO, Substitute("rdb()->Write $0", batch.GetDataSize()));
+  if (batch.Count() > 0) {
+    //  options.sync = true;
     rocksdb::Status s = data_dir_->rdb()->Write(options, &batch);
     CHECK_OK(FromRdbStatus(s));
   }
@@ -2155,7 +2166,8 @@ Status LogrBlockContainer::AppendMetadataForBatchCreate(const vector<LogWritable
   rocksdb::WriteOptions options;
 //  options.sync = true;
   {
-//    SCOPED_LOG_TIMING(INFO, Substitute("rdb()->Write $0", batch.GetDataSize()));
+    SCOPED_LOG_TIMING(INFO, Substitute("$0 rdb()->Write $1 ops, $2 bytes",
+                                       ToString(), batch.Count(), batch.GetDataSize()));
     rocksdb::Status s = data_dir_->rdb()->Write(options, &batch);
     CHECK_OK(FromRdbStatus(s));
   }
