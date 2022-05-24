@@ -63,6 +63,7 @@
 DECLARE_bool(cache_force_single_shard);
 DECLARE_double(log_container_excess_space_before_cleanup_fraction);
 DECLARE_double(log_container_live_metadata_before_compact_ratio);
+DECLARE_string(block_manager);
 DECLARE_uint64(log_container_max_size);
 DECLARE_uint64(log_container_preallocate_bytes);
 
@@ -130,6 +131,7 @@ class BlockManagerStressTest : public KuduTest {
       total_blocks_read_(0),
       total_bytes_read_(0),
       total_blocks_deleted_(0) {
+    FLAGS_block_manager = T::name();
 
     // Increase the number of containers created.
     FLAGS_log_container_max_size = 1 * 1024 * 1024;

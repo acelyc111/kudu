@@ -503,6 +503,10 @@ class LogBlockManager : public BlockManager {
 
 class LogfBlockManager : public LogBlockManager {
  public:
+  static std::string name() {
+    return "log";
+  }
+
   LogfBlockManager(Env* env,
                    DataDirManager* dd_manager,
                    FsErrorManager* error_manager,
@@ -515,6 +519,10 @@ class LogfBlockManager : public LogBlockManager {
 
 class LogrBlockManager : public LogBlockManager {
  public:
+  static std::string name() {
+    return "logr";
+  }
+
   LogrBlockManager(Env* env,
                    DataDirManager* dd_manager,
                    FsErrorManager* error_manager,

@@ -1707,7 +1707,7 @@ Status LogfBlockContainer::AppendMetadata(const BlockId& block_id, const BlockRe
 }
 
 Status LogfBlockContainer::AppendMetadataForBatchDelete(const vector<BlockId>& block_ids) {
-  SCOPED_LOG_TIMING(INFO, Substitute("AppendMetadataForBatchDelete $0", block_ids.size()));
+//  SCOPED_LOG_TIMING(INFO, Substitute("AppendMetadataForBatchDelete $0", block_ids.size()));
   RETURN_NOT_OK_HANDLE_ERROR(read_only_status());
   // Note: We don't check for sufficient disk space for metadata writes in
   // order to allow for block deletion on full disks.
@@ -1723,7 +1723,7 @@ Status LogfBlockContainer::AppendMetadataForBatchDelete(const vector<BlockId>& b
 }
 
 Status LogfBlockContainer::AppendMetadataForBatchCreate(const vector<LogWritableBlock*>& blocks) {
-  SCOPED_LOG_TIMING(INFO, Substitute("AppendMetadataForBatchCreate $0", blocks.size()));
+//  SCOPED_LOG_TIMING(INFO, Substitute("AppendMetadataForBatchCreate $0", blocks.size()));
   RETURN_NOT_OK_HANDLE_ERROR(read_only_status());
   // Note: We don't check for sufficient disk space for metadata writes in
   // order to allow for block deletion on full disks.
@@ -2103,7 +2103,7 @@ Status LogrBlockContainer::AppendMetadata(const BlockId& block_id, const BlockRe
 }
 
 Status LogrBlockContainer::AppendMetadataForBatchDelete(const vector<BlockId>& block_ids) {
-  SCOPED_LOG_TIMING(INFO, Substitute("AppendMetadataForBatchDelete $0", block_ids.size()));
+//  SCOPED_LOG_TIMING(INFO, Substitute("AppendMetadataForBatchDelete $0", block_ids.size()));
   rocksdb::WriteBatch batch;
   string tmp_key;
   for (const auto& block_id : block_ids) {
@@ -2113,26 +2113,26 @@ Status LogrBlockContainer::AppendMetadataForBatchDelete(const vector<BlockId>& b
   }
 
   rocksdb::WriteOptions options;
-  options.sync = true;
+//  options.sync = true;
   {
-    SCOPED_LOG_TIMING(INFO, Substitute("rdb()->Write $0", batch.GetDataSize()));
+//    SCOPED_LOG_TIMING(INFO, Substitute("rdb()->Write $0", batch.GetDataSize()));
     rocksdb::Status s = data_dir_->rdb()->Write(options, &batch);
     CHECK_OK(FromRdbStatus(s));
   }
 
   {
-    SCOPED_LOG_TIMING(INFO, "rdb()->Flush");
-    rocksdb::FlushOptions options;
-    options.wait = true;
-    rocksdb::Status s = data_dir_->rdb()->Flush(options);
-    CHECK_OK(FromRdbStatus(s));
+//    SCOPED_LOG_TIMING(INFO, "rdb()->Flush");
+//    rocksdb::FlushOptions options;
+//    options.wait = true;
+//    rocksdb::Status s = data_dir_->rdb()->Flush(options);
+//    CHECK_OK(FromRdbStatus(s));
   }
 
   return Status::OK();
 }
 
 Status LogrBlockContainer::AppendMetadataForBatchCreate(const vector<LogWritableBlock*>& blocks) {
-  SCOPED_LOG_TIMING(INFO, Substitute("AppendMetadataForBatchCreate $0", blocks.size()));
+//  SCOPED_LOG_TIMING(INFO, Substitute("AppendMetadataForBatchCreate $0", blocks.size()));
   BlockRecordPB record;
   record.set_op_type(CREATE);
   record.set_timestamp_us(GetCurrentTimeMicros());
@@ -2153,19 +2153,19 @@ Status LogrBlockContainer::AppendMetadataForBatchCreate(const vector<LogWritable
   }
 
   rocksdb::WriteOptions options;
-  options.sync = true;
+//  options.sync = true;
   {
-    SCOPED_LOG_TIMING(INFO, Substitute("rdb()->Write $0", batch.GetDataSize()));
+//    SCOPED_LOG_TIMING(INFO, Substitute("rdb()->Write $0", batch.GetDataSize()));
     rocksdb::Status s = data_dir_->rdb()->Write(options, &batch);
     CHECK_OK(FromRdbStatus(s));
   }
 
   {
-    SCOPED_LOG_TIMING(INFO, "rdb()->Flush");
-    rocksdb::FlushOptions options;
-    options.wait = true;
-    rocksdb::Status s = data_dir_->rdb()->Flush(options);
-    CHECK_OK(FromRdbStatus(s));
+//    SCOPED_LOG_TIMING(INFO, "rdb()->Flush");
+//    rocksdb::FlushOptions options;
+//    options.wait = true;
+//    rocksdb::Status s = data_dir_->rdb()->Flush(options);
+//    CHECK_OK(FromRdbStatus(s));
   }
 
   return Status::OK();
@@ -3265,7 +3265,7 @@ Status LogBlockManager::RemoveLogBlocks(const vector<BlockId>& block_ids,
 
   unordered_map<LogBlockContainer*, vector<LogBlockRefPtr>> lbs_by_containers;
   {
-    SCOPED_LOG_TIMING(INFO, "AppendMetadataForBatchDelete");
+//    SCOPED_LOG_TIMING(INFO, "AppendMetadataForBatchDelete");
     for (auto& lb : lbs) {
       auto& sub_lbs = LookupOrInsert(&lbs_by_containers, lb->container(), {});
       sub_lbs.emplace_back(std::move(lb));
