@@ -1124,13 +1124,6 @@ TEST_P(LogBlockManagerTest, TestParseKernelRelease) {
 //
 // However it still can be used to micro-optimize the startup process.
 TEST_P(LogBlockManagerTest, StartupBenchmark) {
-  std::vector<std::string> test_dirs;
-  for (int i = 0; i < FLAGS_startup_benchmark_data_dir_count_for_testing; ++i) {
-    test_dirs.emplace_back(test_dir_ + "/" + std::to_string(i));
-  }
-  // Re-open block manager to place data on multiple data directories.
-  ASSERT_OK(ReopenBlockManager(nullptr, nullptr, test_dirs, /* force= */ true));
-
   // Disable preflushing since this can slow down our writes. In particular,
   // since we write such small blocks in this test, each block will likely
   // begin on the same 4KB page as the prior one we wrote, and due to the
@@ -1141,10 +1134,20 @@ TEST_P(LogBlockManagerTest, StartupBenchmark) {
   // for details.
   FLAGS_block_manager_preflush_control = "never";
   const int kNumBlocks = AllowSlowTests() ? FLAGS_startup_benchmark_block_count_for_testing : 1000;
+  std::vector<std::string> test_dirs;
+  {
+    SCOPED_LOG_TIMING(INFO, "init environment");
+    for (int i = 0; i < FLAGS_startup_benchmark_data_dir_count_for_testing; ++i) {
+      test_dirs.emplace_back(test_dir_ + "/" + std::to_string(i));
+    }
+    // Re-open block manager to place data on multiple data directories.
+    ASSERT_OK(ReopenBlockManager(nullptr, nullptr, test_dirs, /* force= */ true));
+  }
 
   // Creates 'kNumBlocks' blocks with minimal data.
   vector<BlockId> block_ids;
   {
+    SCOPED_LOG_TIMING(INFO, "create blocks");
     unique_ptr<BlockCreationTransaction> transaction = bm_->NewCreationTransaction();
     for (int i = 0; i < kNumBlocks; i++) {
       unique_ptr<WritableBlock> block;
@@ -1159,6 +1162,7 @@ TEST_P(LogBlockManagerTest, StartupBenchmark) {
 
   int to_delete_count = block_ids.size() * FLAGS_startup_benchmark_deleted_block_percentage / 100;
   if (to_delete_count > 0) {
+    SCOPED_LOG_TIMING(INFO, "delete blocks");
     std::mt19937 gen(SeedRandom());
     std::shuffle(block_ids.begin(), block_ids.end(), gen);
     {
@@ -1176,10 +1180,10 @@ TEST_P(LogBlockManagerTest, StartupBenchmark) {
   }
 
   for (int i = 0; i < FLAGS_startup_benchmark_reopen_times; i++) {
-    LOG_TIMING(INFO, Substitute("reopening block manager when --block_manager=$0", FLAGS_block_manager)) {
-      ASSERT_OK(ReopenBlockManager(nullptr, nullptr, test_dirs));
-    }
+    SCOPED_LOG_TIMING(INFO, "reopening block manager");
+    ASSERT_OK(ReopenBlockManager(nullptr, nullptr, test_dirs));
   }
+  LOG(INFO) << "Test on --block_manager=" << FLAGS_block_manager;
 }
 #endif
 

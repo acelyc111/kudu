@@ -2022,16 +2022,17 @@ Status LogrBlockContainer::ProcessRecords(
 }
 
 Status LogrBlockContainer::AppendMetadata(const BlockId& block_id, const BlockRecordPB& pb) {
-  string buf;
-  pb.SerializeToString(&buf);
   rocksdb::WriteOptions options;
   string tmp_key = id_ + "." + block_id.ToString();
   rocksdb::Slice key(tmp_key);
   rocksdb::Status s;
   switch (pb.op_type()) {
-    case CREATE:
+    case CREATE: {
+      string buf;
+      pb.SerializeToString(&buf);
       s = data_dir_->rdb()->Put(options, key, rocksdb::Slice(buf));
       break;
+    }
     case DELETE:
       s = data_dir_->rdb()->Delete(options, key);
       break;
@@ -3154,20 +3155,13 @@ Status LogBlockManager::RemoveLogBlocks(const vector<BlockId>& block_ids,
     // fsync).
     //
     // TODO(KUDU-829): Implement GC of orphaned blocks.
-
     if (!s.ok()) {
       if (first_failure.ok()) {
         first_failure = s.CloneAndPrepend(
             "Unable to append deletion record to block metadata");
       }
     } else {
-      if (type_ == LogBlockManagerType::kRdb) {
-        rocksdb::WriteOptions options;
-        rocksdb::Slice key(lb->container()->id() + "." + lb->block_id().ToString());
-        rocksdb::Status s = lb->container()->data_dir()->rdb()->Delete(options, key);
-        CHECK_OK(FromRdbStatus(s));
-      } else {
-        CHECK_EQ(type_, LogBlockManagerType::kFile);
+      if (type_ == LogBlockManagerType::kFile) {
         // Metadata files of containers with very few live blocks will be compacted.
         if (!lb->container()->read_only() && FLAGS_log_container_metadata_runtime_compact &&
             lb->container()->ShouldCompact()) {
@@ -3675,7 +3669,6 @@ Status LogBlockManager::Repair(
   std::atomic<bool> seen_fatal_error = false;
   Status first_fatal_error;
   SCOPED_LOG_TIMING(INFO, "loading block containers with low live blocks");
-  // TODO: not for rdb
   for (const auto& e : low_live_block_containers) {
     if (seen_fatal_error) {
       break;
@@ -3688,6 +3681,7 @@ Status LogBlockManager::Repair(
 
     dir->ExecClosure([this, &metadata_files_compacted, &metadata_bytes_delta,
         &seen_fatal_error, &first_fatal_error, e, container]() {
+      LOG(INFO) << "Start to rewrite " << e.first;
       // Rewrite this metadata file.
       int64_t file_bytes_delta;
       const auto& meta_path = StrCat(e.first, kContainerMetadataFileSuffix);
