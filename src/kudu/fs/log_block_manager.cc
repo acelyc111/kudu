@@ -481,6 +481,8 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
   // The on-disk effects of this call are made durable only after SyncMetadata().
   virtual Status AppendMetadata(const BlockId& block_id, const BlockRecordPB& pb) = 0;
 
+  virtual Status AppendMetadataForBatchDelete(const vector<BlockId>& block_ids) = 0;
+
   // Asynchronously flush this container's data file from 'offset' through
   // to 'length'.
   //
@@ -908,6 +910,7 @@ Status LogBlockContainer::DoCloseBlocks(const vector<LogWritableBlock*>& blocks,
     // Append metadata only after data is synced so that there's
     // no chance of metadata landing on the disk before the data.
     for (auto* block : blocks) {
+      // TODO: write rdb by batch
       RETURN_NOT_OK_PREPEND(block->AppendMetadata(),
                             "unable to append block's metadata during close");
     }
@@ -1207,6 +1210,8 @@ class LogfBlockContainer: public LogBlockContainer {
   ~LogfBlockContainer();
 
   Status AppendMetadata(const BlockId& block_id, const BlockRecordPB& pb) override;
+
+  Status AppendMetadataForBatchDelete(const vector<BlockId>& block_ids) override;
 
   // Synchronize this container's metadata file with the disk. On success,
   // guarantees that the metadata is made durable.
@@ -1687,6 +1692,22 @@ Status LogfBlockContainer::AppendMetadata(const BlockId& block_id, const BlockRe
   return Status::OK();
 }
 
+Status LogfBlockContainer::AppendMetadataForBatchDelete(const vector<BlockId>& block_ids) {
+  RETURN_NOT_OK_HANDLE_ERROR(read_only_status());
+  // Note: We don't check for sufficient disk space for metadata writes in
+  // order to allow for block deletion on full disks.
+  int64_t microtime = GetCurrentTimeMicros();
+  BlockRecordPB record;
+  record.set_op_type(DELETE);
+  record.set_timestamp_us(microtime);
+  shared_lock<RWMutex> l(metadata_compact_lock_);
+  for (const auto& block_id : block_ids) {
+    block_id.CopyToPB(record.mutable_block_id());
+    RETURN_NOT_OK_HANDLE_ERROR(metadata_file_->Append(record));
+  }
+  return Status::OK();
+}
+
 Status LogfBlockContainer::SyncMetadata() {
   VLOG(3) << "Syncing metadata file " << metadata_file_->filename();
   RETURN_NOT_OK_HANDLE_ERROR(read_only_status());
@@ -1754,6 +1775,8 @@ class LogrBlockContainer: public LogBlockContainer {
   ~LogrBlockContainer();
 
   Status AppendMetadata(const BlockId& block_id, const BlockRecordPB& pb) override;
+
+  Status AppendMetadataForBatchDelete(const vector<BlockId>& block_ids) override;
 
   // Synchronize this container's metadata file with the disk. On success,
   // guarantees that the metadata is made durable.
@@ -2040,6 +2063,22 @@ Status LogrBlockContainer::AppendMetadata(const BlockId& block_id, const BlockRe
       LOG(FATAL) << Substitute("Write a record with unknown type $0", pb.op_type());
       break;
   }
+  CHECK_OK(FromRdbStatus(s));
+
+  return Status::OK();
+}
+
+Status LogrBlockContainer::AppendMetadataForBatchDelete(const vector<BlockId>& block_ids) {
+  rocksdb::WriteBatch batch;
+  string tmp_key;
+  for (const auto& block_id : block_ids) {
+    tmp_key = id_ + "." + block_id.ToString();
+    rocksdb::Slice key(tmp_key);
+    batch.Delete(key);
+  }
+
+  rocksdb::WriteOptions options;
+  rocksdb::Status s = data_dir_->rdb()->Write(options, &batch);
   CHECK_OK(FromRdbStatus(s));
 
   return Status::OK();
@@ -3112,6 +3151,7 @@ Status LogBlockManager::RemoveLogBlocks(const vector<BlockId>& block_ids,
                                         vector<BlockId>* deleted) {
   Status first_failure;
   vector<LogBlockRefPtr> lbs;
+  lbs.reserve(block_ids.size());
   int64_t malloc_space = 0, blocks_length = 0;
   for (const auto& block_id : block_ids) {
     LogBlockRefPtr lb;
@@ -3136,18 +3176,27 @@ Status LogBlockManager::RemoveLogBlocks(const vector<BlockId>& block_ids,
     metrics()->bytes_under_management->DecrementBy(blocks_length);
   }
 
+  unordered_map<LogBlockContainer*, vector<LogBlockRefPtr>> lbs_by_containers;
   for (auto& lb : lbs) {
-    VLOG(3) << "Deleting block " << lb->block_id();
-    lb->container()->BlockDeleted(lb);
+    auto& sub_lbs = LookupOrInsert(&lbs_by_containers, lb->container(), {});
+    sub_lbs.emplace_back(std::move(lb));
+  }
+
+  for (auto& lbs_by_container : lbs_by_containers) {
+    const auto& container = lbs_by_container.first;
+    vector<BlockId> to_delete_block_ids;
+    to_delete_block_ids.reserve(lbs_by_container.second.size());
+    for (const auto& lb : lbs_by_container.second) {
+      VLOG(3) << "Deleting block " << lb->block_id();
+      container->BlockDeleted(lb);
+
+      to_delete_block_ids.emplace_back(lb->block_id());
+    }
 
     // Record the on-disk deletion.
     //
     // TODO(unknown): what if this fails? Should we restore the in-memory block?
-    BlockRecordPB record;
-    lb->block_id().CopyToPB(record.mutable_block_id());
-    record.set_op_type(DELETE);
-    record.set_timestamp_us(GetCurrentTimeMicros());
-    Status s = lb->container()->AppendMetadata(lb->block_id(), record);
+    Status s = container->AppendMetadataForBatchDelete(to_delete_block_ids);
 
     // We don't bother fsyncing the metadata append for deletes in order to avoid
     // the disk overhead. Even if we did fsync it, we'd still need to account for
@@ -3157,22 +3206,22 @@ Status LogBlockManager::RemoveLogBlocks(const vector<BlockId>& block_ids,
     // TODO(KUDU-829): Implement GC of orphaned blocks.
     if (!s.ok()) {
       if (first_failure.ok()) {
-        first_failure = s.CloneAndPrepend(
-            "Unable to append deletion record to block metadata");
+        first_failure = s.CloneAndPrepend("Unable to append deletion record to block metadata");
       }
-    } else {
-      if (type_ == LogBlockManagerType::kFile) {
-        // Metadata files of containers with very few live blocks will be compacted.
-        if (!lb->container()->read_only() && FLAGS_log_container_metadata_runtime_compact &&
-            lb->container()->ShouldCompact()) {
-          scoped_refptr<LogBlockContainer> self(lb->container());
-          lb->container()->ExecClosure([self]() { self->CompactMetadata(); });
-        }
-      }
-
-      deleted->emplace_back(lb->block_id());
-      log_blocks->emplace_back(std::move(lb));
+      continue;
     }
+
+    if (type_ == LogBlockManagerType::kFile) {
+      // Metadata files of containers with very few live blocks will be compacted.
+      if (!container->read_only() && FLAGS_log_container_metadata_runtime_compact &&
+          container->ShouldCompact()) {
+        scoped_refptr<LogBlockContainer> self(container);
+        container->ExecClosure([self]() { self->CompactMetadata(); });
+      }
+    }
+
+    deleted->insert(deleted->end(), to_delete_block_ids.begin(), to_delete_block_ids.end());
+    log_blocks->insert(log_blocks->end(), lbs_by_container.second.begin(), lbs_by_container.second.end());
   }
 
   return first_failure;
