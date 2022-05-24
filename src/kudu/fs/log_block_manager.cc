@@ -393,6 +393,10 @@ class LogWritableBlock : public WritableBlock {
 
   LogBlockContainer* container() const { return container_.get(); }
 
+  int64_t block_offset() const { return block_offset_; }
+
+  int64_t block_length() const { return block_length_; }
+
  private:
   // The owning container.
   LogBlockContainerRefPtr container_;
@@ -482,6 +486,8 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
   virtual Status AppendMetadata(const BlockId& block_id, const BlockRecordPB& pb) = 0;
 
   virtual Status AppendMetadataForBatchDelete(const vector<BlockId>& block_ids) = 0;
+
+  virtual Status AppendMetadataForBatchCreate(const vector<LogWritableBlock*>& blocks) = 0;
 
   // Asynchronously flush this container's data file from 'offset' through
   // to 'length'.
@@ -909,9 +915,15 @@ Status LogBlockContainer::DoCloseBlocks(const vector<LogWritableBlock*>& blocks,
 
     // Append metadata only after data is synced so that there's
     // no chance of metadata landing on the disk before the data.
+    unordered_map<LogBlockContainer*, vector<LogWritableBlock*>> lbs_by_containers;
     for (auto* block : blocks) {
-      // TODO: write rdb by batch
-      RETURN_NOT_OK_PREPEND(block->AppendMetadata(),
+      auto& sub_lbs = LookupOrInsert(&lbs_by_containers, block->container(), {});
+      sub_lbs.emplace_back(block);
+    }
+
+    for (auto& lbs_by_container : lbs_by_containers) {
+      LogBlockContainer* container = lbs_by_container.first;
+      RETURN_NOT_OK_PREPEND(container->AppendMetadataForBatchCreate(lbs_by_container.second),
                             "unable to append block's metadata during close");
     }
 
@@ -1212,6 +1224,8 @@ class LogfBlockContainer: public LogBlockContainer {
   Status AppendMetadata(const BlockId& block_id, const BlockRecordPB& pb) override;
 
   Status AppendMetadataForBatchDelete(const vector<BlockId>& block_ids) override;
+
+  Status AppendMetadataForBatchCreate(const vector<LogWritableBlock*>& blocks) override;
 
   // Synchronize this container's metadata file with the disk. On success,
   // guarantees that the metadata is made durable.
@@ -1708,6 +1722,24 @@ Status LogfBlockContainer::AppendMetadataForBatchDelete(const vector<BlockId>& b
   return Status::OK();
 }
 
+Status LogfBlockContainer::AppendMetadataForBatchCreate(const vector<LogWritableBlock*>& blocks) {
+  RETURN_NOT_OK_HANDLE_ERROR(read_only_status());
+  // Note: We don't check for sufficient disk space for metadata writes in
+  // order to allow for block deletion on full disks.
+  int64_t microtime = GetCurrentTimeMicros();
+  BlockRecordPB record;
+  record.set_op_type(CREATE);
+  record.set_timestamp_us(microtime);
+  shared_lock<RWMutex> l(metadata_compact_lock_);
+  for (const auto& block : blocks) {
+    block->id().CopyToPB(record.mutable_block_id());
+    record.set_offset(block->block_offset());
+    record.set_length(block->block_length());
+    RETURN_NOT_OK_HANDLE_ERROR(metadata_file_->Append(record));
+  }
+  return Status::OK();
+}
+
 Status LogfBlockContainer::SyncMetadata() {
   VLOG(3) << "Syncing metadata file " << metadata_file_->filename();
   RETURN_NOT_OK_HANDLE_ERROR(read_only_status());
@@ -1777,6 +1809,8 @@ class LogrBlockContainer: public LogBlockContainer {
   Status AppendMetadata(const BlockId& block_id, const BlockRecordPB& pb) override;
 
   Status AppendMetadataForBatchDelete(const vector<BlockId>& block_ids) override;
+
+  Status AppendMetadataForBatchCreate(const vector<LogWritableBlock*>& blocks) override;
 
   // Synchronize this container's metadata file with the disk. On success,
   // guarantees that the metadata is made durable.
@@ -2075,6 +2109,34 @@ Status LogrBlockContainer::AppendMetadataForBatchDelete(const vector<BlockId>& b
     tmp_key = id_ + "." + block_id.ToString();
     rocksdb::Slice key(tmp_key);
     batch.Delete(key);
+  }
+
+  rocksdb::WriteOptions options;
+  rocksdb::Status s = data_dir_->rdb()->Write(options, &batch);
+  CHECK_OK(FromRdbStatus(s));
+
+  return Status::OK();
+}
+
+Status LogrBlockContainer::AppendMetadataForBatchCreate(const vector<LogWritableBlock*>& blocks) {
+  int64_t microtime = GetCurrentTimeMicros();
+  BlockRecordPB record;
+  record.set_op_type(CREATE);
+  record.set_timestamp_us(microtime);
+
+  rocksdb::WriteBatch batch;
+  string tmp_key;
+  for (const auto& block : blocks) {
+    block->id().CopyToPB(record.mutable_block_id());
+    record.set_offset(block->block_offset());
+    record.set_length(block->block_length());
+
+    tmp_key = id_ + "." + block->id().ToString();
+    rocksdb::Slice key(tmp_key);
+    string buf;
+    record.SerializeToString(&buf);
+    rocksdb::Slice value(buf);
+    batch.Put(key, value);
   }
 
   rocksdb::WriteOptions options;
@@ -3183,7 +3245,7 @@ Status LogBlockManager::RemoveLogBlocks(const vector<BlockId>& block_ids,
   }
 
   for (auto& lbs_by_container : lbs_by_containers) {
-    const auto& container = lbs_by_container.first;
+    LogBlockContainer* container = lbs_by_container.first;
     vector<BlockId> to_delete_block_ids;
     to_delete_block_ids.reserve(lbs_by_container.second.size());
     for (const auto& lb : lbs_by_container.second) {
