@@ -1348,6 +1348,17 @@ Status LogfBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
   return Status::OK();
 }
 
+Status LogBlockContainer::TruncateDataToNextBlockOffset() {
+  RETURN_NOT_OK_HANDLE_ERROR(read_only_status());
+
+  if (full()) {
+    VLOG(2) << Substitute("Truncating container $0 to offset $1",
+                          ToString(), next_block_offset());
+    RETURN_NOT_OK_HANDLE_ERROR(data_file_->Truncate(next_block_offset()));
+  }
+  return Status::OK();
+}
+
 Status LogfBlockContainer::ProcessRecords(
     FsReport* report,
     LogBlockManager::UntrackedBlockMap* live_blocks,
@@ -1394,17 +1405,6 @@ Status LogfBlockContainer::ProcessRecords(
   // Handle any errors we can, e.g. disk failures.
   HandleError(read_status);
   return read_status;
-}
-
-Status LogBlockContainer::TruncateDataToNextBlockOffset() {
-  RETURN_NOT_OK_HANDLE_ERROR(read_only_status());
-
-  if (full()) {
-    VLOG(2) << Substitute("Truncating container $0 to offset $1",
-                          ToString(), next_block_offset());
-    RETURN_NOT_OK_HANDLE_ERROR(data_file_->Truncate(next_block_offset()));
-  }
-  return Status::OK();
 }
 
 Status LogBlockContainer::ProcessRecord(
