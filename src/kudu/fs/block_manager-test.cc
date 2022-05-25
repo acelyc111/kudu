@@ -123,9 +123,9 @@ class BlockManagerTest : public KuduTest {
   BlockManagerTest() :
       test_tablet_name_("test_tablet"),
       test_block_opts_(CreateBlockOptions({ test_tablet_name_ })),
-      file_cache_("test_cache", env_, 1, scoped_refptr<MetricEntity>()),
-      bm_(CreateBlockManager(scoped_refptr<MetricEntity>(),
-                             shared_ptr<MemTracker>())) {
+      file_cache_("test_cache", env_, 1, scoped_refptr<MetricEntity>()) {
+    FLAGS_block_manager = T::name();
+    bm_.reset(CreateBlockManager(scoped_refptr<MetricEntity>(), shared_ptr<MemTracker>()));
     CHECK_OK(file_cache_.Init());
   }
 
