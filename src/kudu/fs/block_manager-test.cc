@@ -209,84 +209,6 @@ class BlockManagerTest : public KuduTest {
 
   void RunBlockDistributionTest(const vector<string>& paths);
 
-  void RunBlockDistributionTestForLogBlockManager(const vector<string>& paths) {
-    vector<int> files_in_each_path(paths.size());
-    int num_blocks_per_dir = 30;
-    // Spread across 1, then 3, then 5 data directories.
-    for (int d: { 1, 3, 5 }) {
-      DistributeBlocksAcrossDirs(d, num_blocks_per_dir);
-
-      // Check that upon each addition of new paths to data dir groups, new files are being created.
-      // Since log blocks are placed and used randomly within a data dir group, the only expected
-      // behavior is that the total number of files and the number of paths with files will increase.
-      bool some_new_files = false;
-      bool some_new_paths = false;
-      for (int path_idx = 0; path_idx < paths.size(); path_idx++) {
-        int num_files = 0;
-        ASSERT_OK(CountFiles(paths[path_idx], &num_files));
-        int new_files = num_files - files_in_each_path[path_idx];
-        if (new_files > 0) {
-          some_new_files = true;
-          if (files_in_each_path[path_idx] == 0) {
-            some_new_paths = true;
-          }
-          files_in_each_path[path_idx] = num_files;
-        }
-      }
-      ASSERT_TRUE(some_new_paths);
-      ASSERT_TRUE(some_new_files);
-    }
-  }
-
-  void RunMultipathTestForLogBlockManager(const vector<string>& paths, int* sum) {
-    // Write (3 * numPaths * 2) blocks, in groups of (numPaths * 2). That should
-    // yield two containers per path.
-    CreateBlockOptions opts({ "multipath_test" });
-    FLAGS_fs_target_data_dirs_per_tablet = 3;
-    ASSERT_OK(dd_manager_->CreateDataDirGroup("multipath_test"));
-
-    const char* kTestData = "test data";
-    unique_ptr<BlockCreationTransaction> transaction = bm_->NewCreationTransaction();
-    // Creates (numPaths * 2) containers.
-    for (int j = 0; j < paths.size() * 2; j++) {
-      unique_ptr<WritableBlock> block;
-      ASSERT_OK(bm_->CreateBlock(opts, &block));
-      ASSERT_OK(block->Append(kTestData));
-      transaction->AddCreatedBlock(std::move(block));
-    }
-    ASSERT_OK(transaction->CommitCreatedBlocks());
-
-    // Verify the results. (numPaths * 2) containers were created, each
-    // consisting of 2 files. Thus, there should be a total of
-    // (numPaths * 4) files, ignoring '.', '..', and instance files.
-    *sum = 0;
-    for (const string& path : paths) {
-      vector<string> children;
-      ASSERT_OK(env_->GetChildren(path, &children));
-      int files_in_path = 0;
-      ASSERT_OK(CountFiles(path, &files_in_path));
-      *sum += files_in_path;
-    }
-  }
-
-  void RunMemTrackerTestForLogBlockManager() {
-    shared_ptr<MemTracker> tracker = MemTracker::CreateTracker(-1, "test tracker");
-    ASSERT_OK(ReopenBlockManager(scoped_refptr<MetricEntity>(),
-                                 tracker,
-                                 { test_dir_ },
-                                 false /* create */));
-
-    // The initial consumption should be non-zero due to the block map.
-    int64_t initial_mem = tracker->consumption();
-    ASSERT_GT(initial_mem, 0);
-
-    // Allocating a persistent block should increase the consumption.
-    unique_ptr<WritableBlock> writer;
-    ASSERT_OK(bm_->CreateBlock(test_block_opts_, &writer));
-    ASSERT_OK(writer->Close());
-    ASSERT_GT(tracker->consumption(), initial_mem);
-  }
-
   static Status CountFilesCb(int* num_files, Env::FileType type,
                              const string& dirname,
                              const string& basename) {
@@ -324,17 +246,17 @@ class BlockManagerTest : public KuduTest {
   unique_ptr<T> bm_;
 };
 
-//template <>
-//void BlockManagerTest<LogBlockManager>::SetUp() {
-//  RETURN_NOT_LOG_BLOCK_MANAGER();
-//  // Pass in a report to prevent the block manager from logging unnecessarily.
-//  FsReport report;
-//  ASSERT_OK(bm_->Open(&report));
-//  ASSERT_OK(dd_manager_->CreateDataDirGroup(test_tablet_name_));
-//
-//  // Store the DataDirGroupPB for tests that reopen the block manager.
-//  ASSERT_OK(dd_manager_->GetDataDirGroupPB(test_tablet_name_, &test_group_pb_));
-//}
+template <>
+void BlockManagerTest<LogBlockManager>::SetUp() {
+  RETURN_NOT_LOG_BLOCK_MANAGER();
+  // Pass in a report to prevent the block manager from logging unnecessarily.
+  FsReport report;
+  ASSERT_OK(bm_->Open(&report));
+  ASSERT_OK(dd_manager_->CreateDataDirGroup(test_tablet_name_));
+
+  // Store the DataDirGroupPB for tests that reopen the block manager.
+  ASSERT_OK(dd_manager_->GetDataDirGroupPB(test_tablet_name_, &test_group_pb_));
+}
 
 template <>
 void BlockManagerTest<FileBlockManager>::RunBlockDistributionTest(const vector<string>& paths) {
@@ -368,14 +290,34 @@ void BlockManagerTest<FileBlockManager>::RunBlockDistributionTest(const vector<s
   }
 }
 
-template <>
-void BlockManagerTest<LogfBlockManager>::RunBlockDistributionTest(const vector<string>& paths) {
-  RunBlockDistributionTestForLogBlockManager(paths);
-}
+template<typename T>
+void BlockManagerTest<T>::RunBlockDistributionTest(const vector<string>& paths) {
+  vector<int> files_in_each_path(paths.size());
+  int num_blocks_per_dir = 30;
+  // Spread across 1, then 3, then 5 data directories.
+  for (int d: { 1, 3, 5 }) {
+    DistributeBlocksAcrossDirs(d, num_blocks_per_dir);
 
-template <>
-void BlockManagerTest<LogrBlockManager>::RunBlockDistributionTest(const vector<string>& paths) {
-  RunBlockDistributionTestForLogBlockManager(paths);
+    // Check that upon each addition of new paths to data dir groups, new files are being created.
+    // Since log blocks are placed and used randomly within a data dir group, the only expected
+    // behavior is that the total number of files and the number of paths with files will increase.
+    bool some_new_files = false;
+    bool some_new_paths = false;
+    for (int path_idx = 0; path_idx < paths.size(); path_idx++) {
+      int num_files = 0;
+      ASSERT_OK(CountFiles(paths[path_idx], &num_files));
+      int new_files = num_files - files_in_each_path[path_idx];
+      if (new_files > 0) {
+        some_new_files = true;
+        if (files_in_each_path[path_idx] == 0) {
+          some_new_paths = true;
+        }
+        files_in_each_path[path_idx] = num_files;
+      }
+    }
+    ASSERT_TRUE(some_new_paths);
+    ASSERT_TRUE(some_new_files);
+  }
 }
 
 template <>
@@ -427,18 +369,42 @@ void BlockManagerTest<FileBlockManager>::RunMultipathTest(const vector<string>& 
   ASSERT_EQ(20, num_blocks);
 }
 
-template <>
-void BlockManagerTest<LogfBlockManager>::RunMultipathTest(const vector<string>& paths) {
-  int sum = 0;
-  RunMultipathTestForLogBlockManager(paths, &sum);
-  ASSERT_EQ(paths.size() * 4, sum);
-}
+template<typename T>
+void BlockManagerTest<T>::RunMultipathTest(const vector<string>& paths) {
+  // Write (3 * numPaths * 2) blocks, in groups of (numPaths * 2). That should
+  // yield two containers per path.
+  CreateBlockOptions opts({ "multipath_test" });
+  FLAGS_fs_target_data_dirs_per_tablet = 3;
+  ASSERT_OK(dd_manager_->CreateDataDirGroup("multipath_test"));
 
-template <>
-void BlockManagerTest<LogrBlockManager>::RunMultipathTest(const vector<string>& paths) {
+  const char* kTestData = "test data";
+  unique_ptr<BlockCreationTransaction> transaction = bm_->NewCreationTransaction();
+  // Creates (numPaths * 2) containers.
+  for (int j = 0; j < paths.size() * 2; j++) {
+    unique_ptr<WritableBlock> block;
+    ASSERT_OK(bm_->CreateBlock(opts, &block));
+    ASSERT_OK(block->Append(kTestData));
+    transaction->AddCreatedBlock(std::move(block));
+  }
+  ASSERT_OK(transaction->CommitCreatedBlocks());
+
+  // Verify the results. (numPaths * 2) containers were created, each
+  // consisting of 2 files. Thus, there should be a total of
+  // (numPaths * 4) files, ignoring '.', '..', and instance files.
   int sum = 0;
-  RunMultipathTestForLogBlockManager(paths, &sum);
-  ASSERT_EQ(paths.size() * 2, sum);
+  for (const string& path : paths) {
+    vector<string> children;
+    ASSERT_OK(env_->GetChildren(path, &children));
+    int files_in_path = 0;
+    ASSERT_OK(CountFiles(path, &files_in_path));
+    sum += files_in_path;
+  }
+
+  if (std::is_same<T, LogfBlockManager>::value) {
+    ASSERT_EQ(paths.size() * 4, sum);
+  } else {
+    ASSERT_EQ(paths.size() * 2, sum);
+  }
 }
 
 template <>
@@ -458,14 +424,23 @@ void BlockManagerTest<FileBlockManager>::RunMemTrackerTest() {
   ASSERT_EQ(tracker->consumption(), initial_mem);
 }
 
-template <>
-void BlockManagerTest<LogfBlockManager>::RunMemTrackerTest() {
-  RunMemTrackerTestForLogBlockManager();
-}
+template<typename T>
+void BlockManagerTest<T>::RunMemTrackerTest() {
+  shared_ptr<MemTracker> tracker = MemTracker::CreateTracker(-1, "test tracker");
+  ASSERT_OK(ReopenBlockManager(scoped_refptr<MetricEntity>(),
+                               tracker,
+                               { test_dir_ },
+                               false /* create */));
 
-template <>
-void BlockManagerTest<LogrBlockManager>::RunMemTrackerTest() {
-  RunMemTrackerTestForLogBlockManager();
+  // The initial consumption should be non-zero due to the block map.
+  int64_t initial_mem = tracker->consumption();
+  ASSERT_GT(initial_mem, 0);
+
+  // Allocating a persistent block should increase the consumption.
+  unique_ptr<WritableBlock> writer;
+  ASSERT_OK(bm_->CreateBlock(test_block_opts_, &writer));
+  ASSERT_OK(writer->Close());
+  ASSERT_GT(tracker->consumption(), initial_mem);
 }
 
 // What kinds of BlockManagers are supported?
