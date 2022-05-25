@@ -2106,7 +2106,7 @@ Status LogrBlockContainer::AppendMetadata(const BlockId& block_id, const BlockRe
 }
 
 Status LogrBlockContainer::AppendMetadataForBatchDelete(const vector<BlockId>& block_ids) {
-  SCOPED_LOG_TIMING(INFO, Substitute("AppendMetadataForBatchDelete $0", block_ids.size()));
+//  SCOPED_LOG_TIMING(INFO, Substitute("AppendMetadataForBatchDelete $0", block_ids.size()));
   rocksdb::WriteOptions options;
   rocksdb::WriteBatch batch;
   string tmp_key;
@@ -2166,8 +2166,8 @@ Status LogrBlockContainer::AppendMetadataForBatchCreate(const vector<LogWritable
   rocksdb::WriteOptions options;
 //  options.sync = true;
   {
-    SCOPED_LOG_TIMING(INFO, Substitute("$0 rdb()->Write $1 ops, $2 bytes",
-                                       ToString(), batch.Count(), batch.GetDataSize()));
+//    SCOPED_LOG_TIMING(INFO, Substitute("$0 rdb()->Write $1 ops, $2 bytes",
+//                                       ToString(), batch.Count(), batch.GetDataSize()));
     rocksdb::Status s = data_dir_->rdb()->Write(options, &batch);
     CHECK_OK(FromRdbStatus(s));
   }

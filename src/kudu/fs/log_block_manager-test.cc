@@ -97,6 +97,8 @@ DECLARE_uint64(log_container_max_size);
 DECLARE_uint64(log_container_metadata_max_size);
 DECLARE_bool(log_container_metadata_runtime_compact);
 DECLARE_double(log_container_metadata_size_before_compact_ratio);
+DEFINE_int32(startup_benchmark_batch_count_for_testing, 64,
+             "Container count to do startup benchmark.");
 DEFINE_int32(startup_benchmark_block_count_for_testing, 1000000,
              "Block count to do startup benchmark.");
 DEFINE_int32(startup_benchmark_data_dir_count_for_testing, 8,
@@ -1146,18 +1148,21 @@ TEST_P(LogBlockManagerTest, StartupBenchmark) {
 
   // Creates 'kNumBlocks' blocks with minimal data.
   vector<BlockId> block_ids;
+  block_ids.reserve(kNumBlocks);
   {
     SCOPED_LOG_TIMING(INFO, "create blocks");
-    unique_ptr<BlockCreationTransaction> transaction = bm_->NewCreationTransaction();
-    for (int i = 0; i < kNumBlocks; i++) {
-      unique_ptr<WritableBlock> block;
-      ASSERT_OK_FAST(bm_->CreateBlock(test_block_opts_, &block));
-      ASSERT_OK_FAST(block->Append("x"));
-      ASSERT_OK_FAST(block->Finalize());
-      block_ids.emplace_back(block->id());
-      transaction->AddCreatedBlock(std::move(block));
+    for (int i = 0; i < FLAGS_startup_benchmark_batch_count_for_testing; i++) {
+      unique_ptr<BlockCreationTransaction> transaction = bm_->NewCreationTransaction();
+      for (int j = 0; j < kNumBlocks / FLAGS_startup_benchmark_batch_count_for_testing; j++) {
+        unique_ptr<WritableBlock> block;
+        ASSERT_OK_FAST(bm_->CreateBlock(test_block_opts_, &block));
+        ASSERT_OK_FAST(block->Append("x"));
+        ASSERT_OK_FAST(block->Finalize());
+        block_ids.emplace_back(block->id());
+        transaction->AddCreatedBlock(std::move(block));
+      }
+      ASSERT_OK(transaction->CommitCreatedBlocks());
     }
-    ASSERT_OK(transaction->CommitCreatedBlocks());
   }
 
   int to_delete_count = block_ids.size() * FLAGS_startup_benchmark_deleted_block_percentage / 100;
@@ -1165,12 +1170,15 @@ TEST_P(LogBlockManagerTest, StartupBenchmark) {
     SCOPED_LOG_TIMING(INFO, "delete blocks");
     std::mt19937 gen(SeedRandom());
     std::shuffle(block_ids.begin(), block_ids.end(), gen);
-    {
+
+    int j = 0;
+    for (int i = 0; i < FLAGS_startup_benchmark_batch_count_for_testing; i++) {
+      int to_delete_count_per_batch = to_delete_count / FLAGS_startup_benchmark_batch_count_for_testing;
       shared_ptr<BlockDeletionTransaction> deletion_transaction =
           this->bm_->NewDeletionTransaction();
-      for (const BlockId& b : block_ids) {
-        deletion_transaction->AddDeletedBlock(b);
-        if (--to_delete_count <= 0) {
+      for (; j < block_ids.size(); j++) {
+        deletion_transaction->AddDeletedBlock(block_ids[j]);
+        if (--to_delete_count_per_batch <= 0) {
           break;
         }
       }
