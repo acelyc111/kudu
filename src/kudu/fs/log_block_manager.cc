@@ -1518,7 +1518,6 @@ void LogfBlockContainer::CompactMetadata() {
   FsReport report;
   report.full_container_space_check.emplace();
   report.incomplete_container_check.emplace();
-  report.incomplete_rdb_container_check.emplace();
   report.malformed_record_check.emplace();
   report.misaligned_block_check.emplace();
   report.partial_record_check.emplace();
@@ -2376,7 +2375,6 @@ struct LogBlockContainerLoadResult {
     // may be checks that the LBM cannot perform.
     report.full_container_space_check.emplace();
     report.incomplete_container_check.emplace();
-    report.incomplete_rdb_container_check.emplace();
     report.malformed_record_check.emplace();
     report.misaligned_block_check.emplace();
     report.partial_record_check.emplace();
@@ -3780,10 +3778,6 @@ Status LogBlockManager::Repair(
       }
       WARN_NOT_OK(s, "could not truncate excess preallocated space");
     }
-  }
-
-  if (report->incomplete_rdb_container_check) {
-    // TODO: how to repair
   }
 
   if (report->partial_rdb_record_check) {

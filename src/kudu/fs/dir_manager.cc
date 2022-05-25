@@ -179,7 +179,6 @@ void Dir::Shutdown() {
 
     delete db_;
     db_ = nullptr;
-    LOG(INFO) << Substitute("rocksdb::DB::Close $0", dir_);
   }
 
   is_shutdown_ = true;
@@ -594,7 +593,7 @@ Status DirManager::Open() {
   // Load the instance files from disk.
   bool has_healthy_instances = true;
   vector<unique_ptr<DirInstanceMetadataFile>> loaded_instances;
-  RETURN_NOT_OK_PREPEND(LoadInstances(&loaded_instances, &has_healthy_instances),  // TODO(yingchun): old, create_if_missing
+  RETURN_NOT_OK_PREPEND(LoadInstances(&loaded_instances, &has_healthy_instances),
       "failed to load instance files");
   if (!has_healthy_instances) {
     return Status::NotFound(
@@ -605,7 +604,7 @@ Status DirManager::Open() {
   if (!opts_.read_only && opts_.dir_type != "file" &&
       opts_.update_instances != UpdateInstanceBehavior::DONT_UPDATE) {
     RETURN_NOT_OK_PREPEND(
-        CreateNewDirectoriesAndUpdateInstances(std::move(loaded_instances)),  // TODO(yingchun): new, error_if_exists
+        CreateNewDirectoriesAndUpdateInstances(std::move(loaded_instances)),
         "could not add new directories");
     vector<unique_ptr<DirInstanceMetadataFile>> new_loaded_instances;
     RETURN_NOT_OK_PREPEND(LoadInstances(&new_loaded_instances, &has_healthy_instances),

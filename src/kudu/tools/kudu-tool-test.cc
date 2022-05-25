@@ -1441,11 +1441,11 @@ TEST_F(ToolTest, TestFsCheck) {
     harness.tablet()->Shutdown();
   }
 
-  string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+  string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
 
   // Check the filesystem; all the blocks should be accounted for, and there
   // should be no blocks missing or orphaned.
-  NO_FATALS(RunFsCheck(Substitute("fs check --fs_wal_dir=$0 $1", kTestDir, extra_args),
+  NO_FATALS(RunFsCheck(Substitute("fs check --fs_wal_dir=$0 $1", kTestDir, encryption_args),
                        block_ids.size(), kTabletId, {}, 0));
 
   // Delete half of the blocks. Upon the next check we can only find half, and
@@ -1465,7 +1465,7 @@ TEST_F(ToolTest, TestFsCheck) {
     }
     deletion_transaction->CommitDeletedBlocks(&missing_ids);
   }
-  NO_FATALS(RunFsCheck(Substitute("fs check --fs_wal_dir=$0 $1", kTestDir, extra_args),
+  NO_FATALS(RunFsCheck(Substitute("fs check --fs_wal_dir=$0 $1", kTestDir, encryption_args),
                        block_ids.size() / 2, kTabletId, missing_ids, 0));
 
   // Delete the tablet superblock. The next check finds half of the blocks,
@@ -1480,26 +1480,26 @@ TEST_F(ToolTest, TestFsCheck) {
     ASSERT_OK(env_->DeleteFile(fs.GetTabletMetadataPath(kTabletId)));
   }
   for (int i = 0; i < 2; i++) {
-    NO_FATALS(RunFsCheck(Substitute("fs check --fs_wal_dir=$0 $1", kTestDir, extra_args),
+    NO_FATALS(RunFsCheck(Substitute("fs check --fs_wal_dir=$0 $1", kTestDir, encryption_args),
                          block_ids.size() / 2, kTabletId, {}, block_ids.size() / 2));
   }
 
   // Repair the filesystem. The remaining half of all blocks were found, deemed
   // to be orphaned, and deleted. The next check shows no remaining blocks.
   NO_FATALS(RunFsCheck(Substitute("fs check --fs_wal_dir=$0 $1 --repair", kTestDir,
-                                  extra_args),
+                                  encryption_args),
                        block_ids.size() / 2, kTabletId, {}, block_ids.size() / 2));
-  NO_FATALS(RunFsCheck(Substitute("fs check --fs_wal_dir=$0 $1", kTestDir, extra_args),
+  NO_FATALS(RunFsCheck(Substitute("fs check --fs_wal_dir=$0 $1", kTestDir, encryption_args),
                        0, kTabletId, {}, 0));
 }
 
 TEST_F(ToolTest, TestFsCheckLiveServer) {
   NO_FATALS(StartExternalMiniCluster());
-  string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+  string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
   string args = Substitute("fs check --fs_wal_dir $0 --fs_data_dirs $1 $2",
                            cluster_->GetWalPath("master-0"),
                            JoinStrings(cluster_->GetDataPaths("master-0"), ","),
-                           extra_args);
+                           encryption_args);
   NO_FATALS(RunFsCheck(args, 0, "", {}, 0));
   args += " --repair";
   string stdout;
@@ -1514,8 +1514,8 @@ TEST_F(ToolTest, TestFsCheckLiveServer) {
 
 TEST_F(ToolTest, TestFsFormat) {
   const string kTestDir = GetTestPath("test");
-  string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
-  NO_FATALS(RunActionStdoutNone(Substitute("fs format --fs_wal_dir=$0 $1", kTestDir, extra_args)));
+  string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+  NO_FATALS(RunActionStdoutNone(Substitute("fs format --fs_wal_dir=$0 $1", kTestDir, encryption_args)));
   FsManager fs(env_, FsManagerOpts(kTestDir));
   ASSERT_OK(fs.Open());
 
@@ -1529,9 +1529,9 @@ TEST_F(ToolTest, TestFsFormatWithUuid) {
   const string kTestDir = GetTestPath("test");
   ObjectIdGenerator generator;
   string original_uuid = generator.Next();
-  string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+  string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
   NO_FATALS(RunActionStdoutNone(Substitute(
-      "fs format --fs_wal_dir=$0 --uuid=$1 $2", kTestDir, original_uuid, extra_args)));
+      "fs format --fs_wal_dir=$0 --uuid=$1 $2", kTestDir, original_uuid, encryption_args)));
   FsManager fs(env_, FsManagerOpts(kTestDir));
   ASSERT_OK(fs.Open());
 
@@ -1789,13 +1789,13 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
     metadata_path = metadata_files[0];
   }
 
-  string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+  string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
 
   // Test default dump
   {
     vector<string> stdout;
     NO_FATALS(RunActionStdoutLines(Substitute(
-        "pbc dump $0 $1", metadata_path, extra_args), &stdout));
+        "pbc dump $0 $1", metadata_path, encryption_args), &stdout));
     ASSERT_EQ(kNumCFileBlocks * 10 - 1, stdout.size());
     ASSERT_EQ("Message 0", stdout[0]);
     ASSERT_EQ("-------", stdout[1]);
@@ -1813,7 +1813,7 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
   {
     vector<string> stdout;
     NO_FATALS(RunActionStdoutLines(Substitute(
-        "pbc dump $0 $1 --debug", metadata_path, extra_args), &stdout));
+        "pbc dump $0 $1 --debug", metadata_path, encryption_args), &stdout));
     ASSERT_EQ(kNumCFileBlocks * 12 + 5, stdout.size());
     // Header
     ASSERT_EQ("File header", stdout[0]);
@@ -1841,7 +1841,7 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
   {
     vector<string> stdout;
     NO_FATALS(RunActionStdoutLines(Substitute(
-        "pbc dump $0 $1 --oneline", metadata_path, extra_args), &stdout));
+        "pbc dump $0 $1 --oneline", metadata_path, encryption_args), &stdout));
     ASSERT_EQ(kNumCFileBlocks, stdout.size());
     ASSERT_STR_MATCHES(stdout[0],
         "^0\tblock_id \\{ id: [0-9]+ \\} op_type: CREATE "
@@ -1852,7 +1852,7 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
   {
     vector<string> stdout;
     NO_FATALS(RunActionStdoutLines(Substitute(
-        "pbc dump $0 $1 --json", metadata_path, extra_args), &stdout));
+        "pbc dump $0 $1 --json", metadata_path, encryption_args), &stdout));
     ASSERT_EQ(kNumCFileBlocks, stdout.size());
     ASSERT_STR_MATCHES(stdout[0],
         R"(^\{"blockId":\{"id":"[0-9]+"\},"opType":"CREATE",)"
@@ -1863,7 +1863,7 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
   {
     vector<string> stdout;
     NO_FATALS(RunActionStdoutLines(Substitute(
-        "pbc dump $0 $1 --json_pretty", metadata_path, extra_args), &stdout));
+        "pbc dump $0 $1 --json_pretty", metadata_path, encryption_args), &stdout));
     ASSERT_EQ(kNumCFileBlocks * 10 - 1, stdout.size());
     ASSERT_EQ("{", stdout[0]);
     ASSERT_EQ(R"( "blockId": {)", stdout[1]);
@@ -1886,7 +1886,7 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
                                editor_path));
     chmod(editor_path.c_str(), 0755);
     setenv("EDITOR", editor_path.c_str(), /* overwrite */1);
-    return RunTool(Substitute("pbc edit $0 $1 $2", extra_flags, metadata_path, extra_args),
+    return RunTool(Substitute("pbc edit $0 $1 $2", extra_flags, metadata_path, encryption_args),
                    stdout, stderr, nullptr, nullptr);
   };
 
@@ -1900,7 +1900,7 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
     // Dump to make sure the edit took place.
     vector<string> stdout_lines;
     NO_FATALS(RunActionStdoutLines(Substitute(
-        "pbc dump $0 $1 --oneline", metadata_path, extra_args), &stdout_lines));
+        "pbc dump $0 $1 --oneline", metadata_path, encryption_args), &stdout_lines));
     ASSERT_EQ(kNumCFileBlocks, stdout_lines.size());
     ASSERT_STR_MATCHES(stdout_lines[0],
                        "^0\tblock_id \\{ id: [0-9]+ \\} op_type: DELETE "
@@ -1922,7 +1922,7 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
     // Dump to make sure the edit took place.
     vector<string> stdout_lines;
     NO_FATALS(RunActionStdoutLines(Substitute(
-        "pbc dump $0 $1 --oneline", metadata_path, extra_args), &stdout_lines));
+        "pbc dump $0 $1 --oneline", metadata_path, encryption_args), &stdout_lines));
     ASSERT_EQ(kNumCFileBlocks, stdout_lines.size());
     ASSERT_STR_MATCHES(stdout_lines[0],
                        "^0\tblock_id \\{ id: [0-9]+ \\} op_type: CREATE "
@@ -1980,7 +1980,7 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
   {
     vector<string> stdout;
     NO_FATALS(RunActionStdoutLines(Substitute(
-        "pbc dump $0 $1 --oneline", metadata_path, extra_args), &stdout));
+        "pbc dump $0 $1 --oneline", metadata_path, encryption_args), &stdout));
     ASSERT_EQ(kNumCFileBlocks, stdout.size());
     ASSERT_STR_MATCHES(stdout[0],
                        "^0\tblock_id \\{ id: [0-9]+ \\} op_type: DELETE "
@@ -2012,18 +2012,18 @@ TEST_F(ToolTest, TestFsDumpCFile) {
     ASSERT_OK(writer.Finish());
   }
 
-  string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+  string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
 
   {
     NO_FATALS(RunActionStdoutNone(Substitute(
         "fs dump cfile --fs_wal_dir=$0 $1 $2 --noprint_meta --noprint_rows",
-        kTestDir, block_id.ToString(), extra_args)));
+        kTestDir, block_id.ToString(), encryption_args)));
   }
   vector<string> stdout;
   {
     NO_FATALS(RunActionStdoutLines(Substitute(
         "fs dump cfile --fs_wal_dir=$0 $1 $2 --noprint_rows",
-        kTestDir, block_id.ToString(), extra_args), &stdout));
+        kTestDir, block_id.ToString(), encryption_args), &stdout));
     SCOPED_TRACE(stdout);
     ASSERT_GE(stdout.size(), 4);
     ASSERT_EQ(stdout[0], "Header:");
@@ -2032,14 +2032,14 @@ TEST_F(ToolTest, TestFsDumpCFile) {
   {
     NO_FATALS(RunActionStdoutLines(Substitute(
         "fs dump cfile --fs_wal_dir=$0 $1 $2 --noprint_meta",
-        kTestDir, block_id.ToString(), extra_args), &stdout));
+        kTestDir, block_id.ToString(), encryption_args), &stdout));
     SCOPED_TRACE(stdout);
     ASSERT_EQ(kNumEntries, stdout.size());
   }
   {
     NO_FATALS(RunActionStdoutLines(Substitute(
         "fs dump cfile --fs_wal_dir=$0 $1 $2",
-        kTestDir, block_id.ToString(), extra_args), &stdout));
+        kTestDir, block_id.ToString(), encryption_args), &stdout));
     SCOPED_TRACE(stdout);
     ASSERT_GT(stdout.size(), kNumEntries);
     ASSERT_EQ(stdout[0], "Header:");
@@ -2064,11 +2064,11 @@ TEST_F(ToolTest, TestFsDumpBlock) {
   }
 
   {
-    string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+    string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
     string stdout;
     NO_FATALS(RunActionStdoutString(Substitute(
         "fs dump block --fs_wal_dir=$0 $1 $2",
-        kTestDir, block_id.ToString(), extra_args), &stdout));
+        kTestDir, block_id.ToString(), encryption_args), &stdout));
     ASSERT_EQ("hello world", stdout);
   }
 }
@@ -2114,11 +2114,11 @@ TEST_F(ToolTest, TestWalDump) {
   }
 
   string wal_path = fs.GetWalSegmentFileName(kTestTablet, 1);
-  string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+  string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
   string stdout;
-  for (const auto& args : { Substitute("wal dump $0 $1", wal_path, extra_args),
+  for (const auto& args : { Substitute("wal dump $0 $1", wal_path, encryption_args),
                             Substitute("local_replica dump wals --fs_wal_dir=$0 $1 $2",
-                                       kTestDir, kTestTablet, extra_args)
+                                       kTestDir, kTestTablet, encryption_args)
                            }) {
     SCOPED_TRACE(args);
     for (const auto& print_entries : { "true", "1", "yes", "decoded" }) {
@@ -2295,10 +2295,10 @@ TEST_F(ToolTest, TestWalDumpWithAlterSchema) {
 
   string wal_path = fs.GetWalSegmentFileName(kTestTablet, 1);
   string stdout;
-  string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+  string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
   for (const auto& args : { Substitute("wal dump $0", wal_path),
                             Substitute("local_replica dump wals --fs_wal_dir=$0 $1 $2",
-                                       kTestDir, kTestTablet, extra_args)
+                                       kTestDir, kTestTablet, encryption_args)
                            }) {
     SCOPED_TRACE(args);
     for (const auto& print_entries : { "true", "1", "yes", "decoded" }) {
@@ -2442,13 +2442,13 @@ TEST_F(ToolTest, TestLocalReplicaDumpDataDirs) {
       /*table_type=*/ boost::none,
       &meta));
   string stdout;
-  string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+  string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
   NO_FATALS(RunActionStdoutString(Substitute("local_replica dump data_dirs $0 "
                                              "--fs_wal_dir=$1 "
                                              "--fs_data_dirs=$2 $3",
                                              kTestTablet, opts.wal_root,
                                              JoinStrings(opts.data_roots, ","),
-                                             extra_args),
+                                             encryption_args),
                                   &stdout));
   vector<string> expected;
   for (const auto& data_root : opts.data_roots) {
@@ -2482,14 +2482,14 @@ TEST_F(ToolTest, TestLocalReplicaDumpMeta) {
                   /*table_type=*/ boost::none,
                   &meta);
   string stdout;
-  string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+  string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
   NO_FATALS(RunActionStdoutString(Substitute("local_replica dump meta $0 "
                                              "--fs_wal_dir=$1 "
                                              "--fs_data_dirs=$2 "
                                              "$3",
                                              kTestTablet, kTestDir,
                                              kTestDir,
-                                             extra_args), &stdout));
+                                             encryption_args), &stdout));
 
   // Verify the contents of the metadata output
   SCOPED_TRACE(stdout);
@@ -2524,10 +2524,10 @@ TEST_F(ToolTest, TestFsDumpTree) {
   ASSERT_OK(fs.Open());
 
   string stdout;
-  string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+  string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
   NO_FATALS(RunActionStdoutString(Substitute("fs dump tree --fs_wal_dir=$0 "
                                              "--fs_data_dirs=$1 $2",
-                                             kTestDir, kTestDir, extra_args), &stdout));
+                                             kTestDir, kTestDir, encryption_args), &stdout));
 
   // It suffices to verify the contents of the top-level tree structure.
   SCOPED_TRACE(stdout);
@@ -2583,12 +2583,12 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
 
   string fs_paths = "--fs_wal_dir=" + kTestDir + " "
       "--fs_data_dirs=" + kTestDir;
-  string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+  string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
   {
     string stdout;
     NO_FATALS(RunActionStdoutString(
         Substitute("local_replica dump block_ids $0 $1 $2",
-                   kTestTablet, fs_paths, extra_args), &stdout));
+                   kTestTablet, fs_paths, encryption_args), &stdout));
 
     SCOPED_TRACE(stdout);
     string tablet_out = "Listing all data blocks in tablet " + kTestTablet;
@@ -2603,7 +2603,7 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
     string stdout;
     NO_FATALS(RunActionStdoutString(
         Substitute("local_replica dump rowset $0 $1 $2",
-                   kTestTablet, fs_paths, extra_args), &stdout));
+                   kTestTablet, fs_paths, encryption_args), &stdout));
 
     SCOPED_TRACE(stdout);
     ASSERT_STR_CONTAINS(stdout, "Dumping rowset 0");
@@ -2627,7 +2627,7 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
     string stderr;
     Status s = RunTool(
         Substitute("local_replica dump rowset $0 $1 --rowset_index=$2 $3",
-                   kTestTablet, fs_paths, kRowId, extra_args),
+                   kTestTablet, fs_paths, kRowId, encryption_args),
                    &stdout, &stderr, nullptr, nullptr);
     ASSERT_TRUE(s.IsRuntimeError());
     SCOPED_TRACE(stderr);
@@ -2638,7 +2638,7 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
     NO_FATALS(RunActionStdoutString(
         Substitute("local_replica dump rowset --nodump_all_columns "
                    "--nodump_metadata --nrows=15 $0 $1 $2",
-                   kTestTablet, fs_paths, extra_args), &stdout));
+                   kTestTablet, fs_paths, encryption_args), &stdout));
 
     SCOPED_TRACE(stdout);
     ASSERT_STR_CONTAINS(stdout, "Dumping rowset 0");
@@ -2658,7 +2658,7 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
     string stdout;
     NO_FATALS(RunActionStdoutString(
         Substitute("local_replica dump meta $0 $1 $2",
-                   kTestTablet, fs_paths, extra_args), &stdout));
+                   kTestTablet, fs_paths, encryption_args), &stdout));
     SCOPED_TRACE(stdout);
     StripWhiteSpace(&debug_str);
     ASSERT_STR_CONTAINS(stdout, debug_str);
@@ -2680,7 +2680,7 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
     string stdout;
     NO_FATALS(RunActionStdoutString(
         Substitute("local_replica data_size $0 $1 $2",
-                   kTestTablet, fs_paths, extra_args), &stdout));
+                   kTestTablet, fs_paths, encryption_args), &stdout));
     SCOPED_TRACE(stdout);
 
     string expected = R"(
@@ -2747,7 +2747,7 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
   {
     string stdout;
     NO_FATALS(RunActionStdoutString(Substitute("local_replica list $0 $1",
-                                               fs_paths, extra_args), &stdout));
+                                               fs_paths, encryption_args), &stdout));
 
     SCOPED_TRACE(stdout);
     ASSERT_STR_MATCHES(stdout, kTestTablet);
@@ -2758,7 +2758,7 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
     string stdout;
     NO_FATALS(RunActionStdoutString(
           Substitute("fs list $0 $1 --columns=table,tablet-id --format=csv",
-                     fs_paths, extra_args),
+                     fs_paths, encryption_args),
           &stdout));
 
     SCOPED_TRACE(stdout);
@@ -2770,7 +2770,7 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
     vector<string> stdout;
     NO_FATALS(RunActionStdoutLines(
           Substitute("fs list $0 $1 --columns=table,tablet-id,rowset-id --format=csv",
-                     fs_paths, extra_args),
+                     fs_paths, encryption_args),
           &stdout));
 
     SCOPED_TRACE(stdout);
@@ -2788,7 +2788,7 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
           Substitute("fs list $0 $1 "
                      "--columns=table,tablet-id,rowset-id,block-kind,column "
                      "--format=csv",
-                     fs_paths, extra_args),
+                     fs_paths, encryption_args),
           &stdout));
 
     SCOPED_TRACE(stdout);
@@ -2815,7 +2815,7 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
                      "--columns=table,tablet-id,rowset-id,block-kind,"
                                "column,cfile-encoding,cfile-num-values "
                      "--format=csv",
-                     fs_paths, extra_args),
+                     fs_paths, encryption_args),
           &stdout));
 
     SCOPED_TRACE(stdout);
@@ -3554,12 +3554,12 @@ TEST_F(ToolTest, TestPerfTabletScan) {
   // Scan the tablets using the local tool.
   cluster_->Shutdown();
   for (const string& tid : tablet_ids) {
-    string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+    string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
     const string args =
         Substitute("perf tablet_scan $0 --fs_wal_dir=$1 --fs_data_dirs=$2 --num_iters=2 $3",
                    tid, cluster_->tablet_server(0)->wal_dir(),
                    JoinStrings(cluster_->tablet_server(0)->data_dirs(), ","),
-                   extra_args);
+                   encryption_args);
     NO_FATALS(RunActionStdoutNone(args));
     NO_FATALS(RunActionStdoutNone(args + " --ordered_scan"));
   }
@@ -3615,10 +3615,10 @@ TEST_F(ToolTest, TestRemoteReplicaCopy) {
   string stderr;
   const string& src_ts_addr = cluster_->tablet_server(kSrcTsIndex)->bound_rpc_addr().ToString();
   const string& dst_ts_addr = cluster_->tablet_server(kDstTsIndex)->bound_rpc_addr().ToString();
-  string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+  string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
   Status s = RunTool(
       Substitute("remote_replica copy $0 $1 $2 $3",
-                 healthy_tablet_id, src_ts_addr, dst_ts_addr, extra_args),
+                 healthy_tablet_id, src_ts_addr, dst_ts_addr, encryption_args),
                  nullptr, &stderr, nullptr, nullptr);
   ASSERT_TRUE(s.IsRuntimeError());
   SCOPED_TRACE(stderr);
@@ -3626,7 +3626,7 @@ TEST_F(ToolTest, TestRemoteReplicaCopy) {
 
   NO_FATALS(RunActionStdoutNone(Substitute("remote_replica copy $0 $1 $2 $3 --force_copy",
                                            healthy_tablet_id, src_ts_addr, dst_ts_addr,
-                                           extra_args)));
+                                           encryption_args)));
   ASSERT_OK(WaitUntilTabletInState(dst_ts, healthy_tablet_id,
                                    tablet::RUNNING, kTimeout));
 
@@ -3650,7 +3650,7 @@ TEST_F(ToolTest, TestRemoteReplicaCopy) {
       "local_replica delete $0 --fs_wal_dir=$1 --fs_data_dirs=$2 --clean_unsafe $3",
       deleted_tablet_id, cluster_->tablet_server(kDstTsIndex)->wal_dir(),
       JoinStrings(cluster_->tablet_server(kDstTsIndex)->data_dirs(), ","),
-      extra_args)));
+      encryption_args)));
 
   // At this point, we expect only 2 tablets to show up on destination when
   // we restart the destination tserver. deleted_tablet_id should not be found on
@@ -3673,13 +3673,13 @@ TEST_F(ToolTest, TestRemoteReplicaCopy) {
   // Copy tombstoned_tablet_id from source to destination.
   NO_FATALS(RunActionStdoutNone(Substitute("remote_replica copy $0 $1 $2 $3 --force_copy",
                                            tombstoned_tablet_id, src_ts_addr, dst_ts_addr,
-                                           extra_args)));
+                                           encryption_args)));
   ASSERT_OK(WaitUntilTabletInState(dst_ts, tombstoned_tablet_id,
                                    tablet::RUNNING, kTimeout));
   // Copy deleted_tablet_id from source to destination.
   NO_FATALS(RunActionStdoutNone(Substitute("remote_replica copy $0 $1 $2 $3",
                                            deleted_tablet_id, src_ts_addr, dst_ts_addr,
-                                           extra_args)));
+                                           encryption_args)));
   ASSERT_OK(WaitUntilTabletInState(dst_ts, deleted_tablet_id,
                                    tablet::RUNNING, kTimeout));
 }
@@ -3829,13 +3829,13 @@ TEST_F(ToolTest, TestLocalReplicaDelete) {
     ASSERT_OK(tablet->Flush());
     tablet_id = tablet_replicas[0]->tablet_id();
   }
-  string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+  string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
   const string& tserver_dir = ts->options()->fs_opts.wal_root;
   // Using the delete tool with tablet server running fails.
   string stderr;
   Status s = RunTool(
       Substitute("local_replica delete $0 --fs_wal_dir=$1 --fs_data_dirs=$1 $2 "
-                 "--clean_unsafe", tablet_id, tserver_dir, extra_args),
+                 "--clean_unsafe", tablet_id, tserver_dir, encryption_args),
                  nullptr, &stderr, nullptr, nullptr);
   ASSERT_TRUE(s.IsRuntimeError());
   SCOPED_TRACE(stderr);
@@ -3854,7 +3854,7 @@ TEST_F(ToolTest, TestLocalReplicaDelete) {
   }
   NO_FATALS(RunActionStdoutNone(Substitute("local_replica delete $0 --fs_wal_dir=$1 $2 "
                                            "--fs_data_dirs=$1 --clean_unsafe",
-                                           tablet_id, tserver_dir, extra_args)));
+                                           tablet_id, tserver_dir, encryption_args)));
   // Verify metadata and WAL segments for the tablet_id are gone.
   const string& wal_dir = JoinPathSegments(tserver_dir,
                                            Substitute("wals/$0", tablet_id));
@@ -3866,7 +3866,7 @@ TEST_F(ToolTest, TestLocalReplicaDelete) {
   // Try to remove the same tablet replica again.
   s = RunTool(Substitute(
       "local_replica delete $0 --clean_unsafe --fs_wal_dir=$1 --fs_data_dirs=$1 $2",
-      tablet_id, tserver_dir, extra_args),
+      tablet_id, tserver_dir, encryption_args),
       nullptr, &stderr, nullptr, nullptr);
   ASSERT_TRUE(s.IsRuntimeError());
   ASSERT_STR_CONTAINS(stderr, "Not found: Could not load tablet metadata");
@@ -3878,7 +3878,7 @@ TEST_F(ToolTest, TestLocalReplicaDelete) {
   ASSERT_OK(RunActionStderrString(
       Substitute("local_replica delete $0 --clean_unsafe --fs_wal_dir=$1 "
                  "--fs_data_dirs=$1 --ignore_nonexistent $2",
-                 tablet_id, tserver_dir, extra_args),
+                 tablet_id, tserver_dir, encryption_args),
       &stderr));
   ASSERT_STR_CONTAINS(stderr, Substitute("ignoring error for tablet replica $0 "
                                          "because of the --ignore_nonexistent flag",
@@ -3938,11 +3938,11 @@ TEST_F(ToolTest, TestLocalReplicaDeleteMultiple) {
   ts->Shutdown();
   const string& tserver_dir = ts->options()->fs_opts.wal_root;
   const string tablet_ids_csv_str = JoinStrings(tablet_ids, ",");
-  string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+  string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
   NO_FATALS(RunActionStdoutNone(Substitute(
       "local_replica delete --fs_wal_dir=$0 --fs_data_dirs=$0 "
       "--clean_unsafe $1 $2", tserver_dir, tablet_ids_csv_str,
-      extra_args)));
+      encryption_args)));
 
   ASSERT_OK(ts->Start());
   ASSERT_OK(ts->WaitStarted());
@@ -3995,10 +3995,10 @@ TEST_F(ToolTest, TestLocalReplicaTombstoneDelete) {
   const string& data_dir = JoinPathSegments(tserver_dir, "data");
   uint64_t size_before_delete;
   ASSERT_OK(env_->GetFileSizeOnDiskRecursively(data_dir, &size_before_delete));
-  string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+  string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
   NO_FATALS(RunActionStdoutNone(Substitute("local_replica delete $0 --fs_wal_dir=$1 "
                                            "--fs_data_dirs=$1 $2",
-                                           tablet_id, tserver_dir, extra_args)));
+                                           tablet_id, tserver_dir, encryption_args)));
   // Verify WAL segments for the tablet_id are gone and
   // the data_dir size on tserver is reduced.
   const string& wal_dir = JoinPathSegments(tserver_dir,
@@ -4047,14 +4047,14 @@ TEST_F(ToolTest, TestLocalReplicaCMetaOps) {
   for (int i = 0; i < kNumTabletServers; ++i) {
     ts_uuids.emplace_back(mini_cluster_->mini_tablet_server(i)->uuid());
   }
-  string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+  string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
   const string& flags =
       Substitute("-fs-wal-dir $0 $1",
                  mini_cluster_->mini_tablet_server(0)->options()->fs_opts.wal_root,
-                 extra_args);
+                 encryption_args);
   vector<string> tablet_ids;
   {
-    NO_FATALS(RunActionStdoutLines(Substitute("local_replica list $0 $1", flags, extra_args),
+    NO_FATALS(RunActionStdoutLines(Substitute("local_replica list $0 $1", flags, encryption_args),
                                    &tablet_ids));
     ASSERT_EQ(kNumTablets, tablet_ids.size());
   }
@@ -4073,7 +4073,7 @@ TEST_F(ToolTest, TestLocalReplicaCMetaOps) {
   {
     vector<string> lines;
     NO_FATALS(RunActionStdoutLines(Substitute("local_replica cmeta print_replica_uuids $0 $1 $2",
-                                              flags, JoinStrings(tablet_ids, ","), extra_args),
+                                              flags, JoinStrings(tablet_ids, ","), encryption_args),
                                    &lines));
     ASSERT_EQ(kNumTablets, lines.size());
     for (int i = 0; i < lines.size(); ++i) {
@@ -4089,10 +4089,10 @@ TEST_F(ToolTest, TestLocalReplicaCMetaOps) {
   // Test using set-term to bump the term to 123.
   for (int i = 0; i < tablet_ids.size(); ++i) {
     NO_FATALS(RunActionStdoutNone(Substitute("local_replica cmeta set-term $0 $1 $2 123",
-                                             flags, tablet_ids[i], extra_args)));
+                                             flags, tablet_ids[i], encryption_args)));
 
     string stdout;
-    NO_FATALS(RunActionStdoutString(Substitute("pbc dump $0 $1", cmeta_paths[i], extra_args),
+    NO_FATALS(RunActionStdoutString(Substitute("pbc dump $0 $1", cmeta_paths[i], encryption_args),
                                     &stdout));
     ASSERT_STR_CONTAINS(stdout, "current_term: 123");
   }
@@ -4101,7 +4101,7 @@ TEST_F(ToolTest, TestLocalReplicaCMetaOps) {
   for (const auto& tablet_id : tablet_ids) {
     string stdout, stderr;
     Status s = RunTool(Substitute("local_replica cmeta set-term $0 $1 $2 10",
-                                  flags, tablet_id, extra_args),
+                                  flags, tablet_id, encryption_args),
                        &stdout, &stderr,
                        /* stdout_lines = */ nullptr,
                        /* stderr_lines = */ nullptr);
@@ -4119,7 +4119,7 @@ TEST_F(ToolTest, TestLocalReplicaCMetaOps) {
                    JoinStrings(tablet_ids, ","),
                    ts_uuids[0],
                    ts_host_port,
-                   extra_args)));
+                   encryption_args)));
   }
 
   // We have kNumTablets replicas, so we expect kNumTablets lines, with our the
@@ -4127,7 +4127,7 @@ TEST_F(ToolTest, TestLocalReplicaCMetaOps) {
   {
     vector<string> lines;
     NO_FATALS(RunActionStdoutLines(Substitute("local_replica cmeta print_replica_uuids $0 $1 $2",
-                                              flags, JoinStrings(tablet_ids, ","), extra_args),
+                                              flags, JoinStrings(tablet_ids, ","), encryption_args),
                                    &lines));
     ASSERT_EQ(kNumTablets, lines.size());
     for (int i = 0; i < lines.size(); ++i) {
@@ -6968,10 +6968,10 @@ TEST_F(ToolTest, TestFsSwappingDirectoriesFailsGracefully) {
   const string& wal_root = mts->options()->fs_opts.wal_root;
   const string& new_data_root_no_wal = GetTestPath("foo");
   string stderr;
-  string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+  string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
   Status s = RunTool(Substitute(
       "fs update_dirs --fs_wal_dir=$0 --fs_data_dirs=$1 $2",
-      wal_root, new_data_root_no_wal, extra_args), nullptr, &stderr);
+      wal_root, new_data_root_no_wal, encryption_args), nullptr, &stderr);
   ASSERT_STR_CONTAINS(stderr, "no healthy directories found");
 
   // If we instead try to add the directory to the existing list of
@@ -6979,7 +6979,7 @@ TEST_F(ToolTest, TestFsSwappingDirectoriesFailsGracefully) {
   vector<string> new_data_roots = { new_data_root_no_wal, wal_root };
   NO_FATALS(RunActionStdoutNone(Substitute(
       "fs update_dirs --fs_wal_dir=$0 --fs_data_dirs=$1 $2",
-      wal_root, JoinStrings(new_data_roots, ","), extra_args)));
+      wal_root, JoinStrings(new_data_roots, ","), encryption_args)));
 }
 
 TEST_F(ToolTest, TestStartEndMaintenanceMode) {
@@ -7068,10 +7068,10 @@ TEST_F(ToolTest, TestFsRemoveDataDirWithTombstone) {
   mts->options()->fs_opts.data_roots = { data_root };
   mts->Shutdown();
   // KUDU-2680: tombstones shouldn't prevent us from removing a directory.
-  string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+  string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
   NO_FATALS(RunActionStdoutNone(Substitute(
       "fs update_dirs --fs_wal_dir=$0 --fs_data_dirs=$1 $2",
-      mts->options()->fs_opts.wal_root, data_root, extra_args)));
+      mts->options()->fs_opts.wal_root, data_root, encryption_args)));
 
   ASSERT_OK(mts->Start());
   ASSERT_OK(mts->WaitStarted());
@@ -7107,10 +7107,10 @@ TEST_F(ToolTest, TestFsAddRemoveDataDirEndToEnd) {
   string to_add = JoinPathSegments(DirName(data_roots.back()), "data-new");
   data_roots.emplace_back(to_add);
   mts->Shutdown();
-  string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+  string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
   NO_FATALS(RunActionStdoutNone(Substitute(
       "fs update_dirs --fs_wal_dir=$0 --fs_data_dirs=$1 $2",
-      wal_root, JoinStrings(data_roots, ","), extra_args)));
+      wal_root, JoinStrings(data_roots, ","), encryption_args)));
 
   // Reconfigure the tserver to use the newly added data directory and restart it.
   //
@@ -7135,7 +7135,7 @@ TEST_F(ToolTest, TestFsAddRemoveDataDirEndToEnd) {
   string stderr;
   ASSERT_TRUE(RunActionStderrString(Substitute(
       "fs update_dirs --fs_wal_dir=$0 --fs_data_dirs=$1 $2",
-      wal_root, JoinStrings(data_roots, ","), extra_args), &stderr).IsRuntimeError());
+      wal_root, JoinStrings(data_roots, ","), encryption_args), &stderr).IsRuntimeError());
   ASSERT_STR_CONTAINS(
       stderr, "Not found: cannot update data directories: at least one "
       "tablet is configured to use removed data directory. Retry with --force "
@@ -7150,7 +7150,7 @@ TEST_F(ToolTest, TestFsAddRemoveDataDirEndToEnd) {
   // bootstrap some tablets when restarted.
   NO_FATALS(RunActionStdoutNone(Substitute(
       "fs update_dirs --fs_wal_dir=$0 --fs_data_dirs=$1 $2 --force",
-      wal_root, JoinStrings(data_roots, ","), extra_args)));
+      wal_root, JoinStrings(data_roots, ","), encryption_args)));
   mts->options()->fs_opts.data_roots = data_roots;
   ASSERT_OK(mts->Start());
   Status s = mts->WaitStarted();
@@ -7180,7 +7180,7 @@ TEST_F(ToolTest, TestFsAddRemoveDataDirEndToEnd) {
   data_roots.emplace_back(to_add);
   NO_FATALS(RunActionStdoutNone(Substitute(
       "fs update_dirs --fs_wal_dir=$0 --fs_data_dirs=$1 $2",
-      wal_root, JoinStrings(data_roots, ","), extra_args)));
+      wal_root, JoinStrings(data_roots, ","), encryption_args)));
   mts->options()->fs_opts.data_roots = data_roots;
   ASSERT_OK(mts->Start());
   ASSERT_OK(mts->WaitStarted());
@@ -7190,7 +7190,7 @@ TEST_F(ToolTest, TestFsAddRemoveDataDirEndToEnd) {
   data_roots.pop_back();
   NO_FATALS(RunActionStdoutNone(Substitute(
       "fs update_dirs --fs_wal_dir=$0 --fs_data_dirs=$1 $2 --force",
-      wal_root, JoinStrings(data_roots, ","), extra_args)));
+      wal_root, JoinStrings(data_roots, ","), encryption_args)));
   mts->options()->fs_opts.data_roots = data_roots;
   ASSERT_OK(mts->Start());
   s = mts->WaitStarted();
@@ -7216,7 +7216,7 @@ TEST_F(ToolTest, TestFsAddRemoveDataDirEndToEnd) {
   data_roots.emplace_back(JoinPathSegments(DirName(data_roots.back()), "data-new2"));
   NO_FATALS(RunActionStdoutNone(Substitute(
       "fs update_dirs --fs_wal_dir=$0 --fs_data_dirs=$1 $2",
-      wal_root, JoinStrings(data_roots, ","), extra_args)));
+      wal_root, JoinStrings(data_roots, ","), encryption_args)));
   mts->options()->fs_opts.data_roots = data_roots;
   ASSERT_OK(mts->Start());
   ASSERT_OK(mts->WaitStarted());
@@ -7228,7 +7228,7 @@ TEST_F(ToolTest, TestFsAddRemoveDataDirEndToEnd) {
   data_roots.pop_back();
   NO_FATALS(RunActionStdoutNone(Substitute(
       "fs update_dirs --fs_wal_dir=$0 --fs_data_dirs=$1 $2",
-      wal_root, JoinStrings(data_roots, ","), extra_args)));
+      wal_root, JoinStrings(data_roots, ","), encryption_args)));
   mts->options()->fs_opts.data_roots = data_roots;
   ASSERT_OK(mts->Start());
   ASSERT_OK(mts->WaitStarted());
@@ -7260,10 +7260,10 @@ TEST_F(ToolTest, TestCheckFSWithNonDefaultMetadataDir) {
 
   // Providing the necessary arguments, the tool should work.
   string stdout;
-  string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+  string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
   NO_FATALS(RunActionStdoutString(Substitute(
       "fs check --fs_wal_dir=$0 --fs_metadata_dir=$1 $2",
-      opts.wal_root, opts.metadata_root, extra_args), &stdout));
+      opts.wal_root, opts.metadata_root, encryption_args), &stdout));
   SCOPED_TRACE(stdout);
 }
 
@@ -7965,7 +7965,7 @@ TEST_F(ToolTest, TestLocalReplicaCopyLocal) {
                    "--fs_data_dirs=" + kTestDstDir;
   }
 
-  string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+  string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
 
   // Copy replica from local filesystem failed, because the tserver on source filesystem
   // is still running.
@@ -7973,7 +7973,7 @@ TEST_F(ToolTest, TestLocalReplicaCopyLocal) {
   string stderr;
   Status s = RunActionStdoutStderrString(
       Substitute("local_replica copy_from_local $0 $1 $2 $3",
-                 tablet_id, src_fs_paths_with_prefix, dst_fs_paths_with_prefix, extra_args),
+                 tablet_id, src_fs_paths_with_prefix, dst_fs_paths_with_prefix, encryption_args),
       &stdout, &stderr);
   SCOPED_TRACE(stdout);
   SCOPED_TRACE(stderr);
@@ -7986,7 +7986,7 @@ TEST_F(ToolTest, TestLocalReplicaCopyLocal) {
   mini_cluster_->Shutdown();
   NO_FATALS(RunActionStdoutString(
       Substitute("local_replica copy_from_local $0 $1 $2 $3",
-                 tablet_id, src_fs_paths_with_prefix, dst_fs_paths_with_prefix, extra_args),
+                 tablet_id, src_fs_paths_with_prefix, dst_fs_paths_with_prefix, encryption_args),
       &stdout));
   SCOPED_TRACE(stdout);
 
@@ -7994,13 +7994,13 @@ TEST_F(ToolTest, TestLocalReplicaCopyLocal) {
   string src_stdout;
   NO_FATALS(RunActionStdoutString(
       Substitute("local_replica data_size $0 $1 $2",
-                 tablet_id, src_fs_paths, extra_args), &src_stdout));
+                 tablet_id, src_fs_paths, encryption_args), &src_stdout));
   SCOPED_TRACE(src_stdout);
 
   string dst_stdout;
   NO_FATALS(RunActionStdoutString(
       Substitute("local_replica data_size $0 $1 $2",
-                 tablet_id, dst_fs_paths, extra_args), &dst_stdout));
+                 tablet_id, dst_fs_paths, encryption_args), &dst_stdout));
   SCOPED_TRACE(dst_stdout);
 
   ASSERT_EQ(src_stdout, dst_stdout);
@@ -8064,14 +8064,14 @@ TEST_F(ToolTest, TestRebuildTserverByLocalReplicaCopy) {
   NO_FATALS(StopMiniCluster());
 
   // Copy source tserver's all replicas from local filesystem.
-  string extra_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
+  string encryption_args = env_->IsEncryptionEnabled() ? GetEncryptionArgs() : "";
   for (const auto& tablet_id : tablet_ids) {
     string stdout;
     NO_FATALS(RunActionStdoutString(Substitute("local_replica copy_from_local $0 $1 $2 $3",
                                                tablet_id,
                                                src_fs_paths_with_prefix,
                                                dst_fs_paths_with_prefix,
-                                               extra_args),
+                                               encryption_args),
                                     &stdout));
     SCOPED_TRACE(stdout);
   }
