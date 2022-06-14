@@ -208,6 +208,7 @@ namespace fs {
 
 using internal::LogBlock;
 using internal::LogBlockContainer;
+using internal::LogfBlockContainer;
 using internal::LogBlockDeletionTransaction;
 using internal::LogWritableBlock;
 using pb_util::ReadablePBContainerFile;
@@ -383,6 +384,10 @@ class LogWritableBlock : public WritableBlock {
 
   LogBlockContainer* container() const { return container_.get(); }
 
+  int64_t block_offset() const { return block_offset_; }
+
+  int64_t block_length() const { return block_length_; }
+
  private:
   // The owning container.
   LogBlockContainerRefPtr container_;
@@ -426,28 +431,8 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
     NO_SYNC
   };
 
-  // Creates a new block container in 'dir'.
-  static Status Create(LogBlockManager* block_manager,
-                       Dir* dir,
-                       LogBlockContainerRefPtr* container);
-
-  // Opens an existing block container in 'dir'.
-  //
-  // Every container is comprised of two files: "<dir>/<id>.data" and
-  // "<dir>/<id>.metadata". Together, 'dir' and 'id' fully describe both
-  // files.
-  //
-  // Returns Status::Aborted() in the case that the metadata and data files
-  // both appear to have no data (e.g. due to a crash just after creating
-  // one of them but before writing any records). This is recorded in 'report'.
-  static Status Open(LogBlockManager* block_manager,
-                     Dir* dir,
-                     FsReport* report,
-                     const string& id,
-                     LogBlockContainerRefPtr* container);
-
   // The destructor will delete files of this container if it is dead.
-  ~LogBlockContainer();
+  virtual ~LogBlockContainer() = default;
 
   // Closes a set of blocks belonging to this container, possibly synchronizing
   // the dirty data and metadata to disk.
@@ -489,7 +474,7 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
   // Appends 'pb' to this container's metadata file.
   //
   // The on-disk effects of this call are made durable only after SyncMetadata().
-  Status AppendMetadata(const BlockRecordPB& pb);
+  virtual Status AppendMetadata(const BlockRecordPB& pb) = 0;
 
   // Asynchronously flush this container's data file from 'offset' through
   // to 'length'.
@@ -507,11 +492,11 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
   // guarantees that the metadata is made durable.
   //
   // TODO(unknown): Add support to synchronize just a range.
-  Status SyncMetadata();
+  virtual Status SyncMetadata() = 0;
 
   // Reopen the metadata file record writer. Should be called if the underlying
   // file was changed.
-  Status ReopenMetadataWriter();
+  virtual Status ReopenMetadataWriter() = 0;
 
   // Truncates this container's data file to 'next_block_offset_' if it is
   // full. This effectively removes any preallocated but unused space.
@@ -540,13 +525,13 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
   //
   // Returns an error only if there was a problem accessing the container from
   // disk; such errors are fatal and effectively halt processing immediately.
-  Status ProcessRecords(
+  virtual Status ProcessRecords(
       FsReport* report,
       LogBlockManager::UntrackedBlockMap* live_blocks,
       LogBlockManager::BlockRecordMap* live_block_records,
       vector<LogBlockRefPtr>* dead_blocks,
       uint64_t* max_block_id,
-      ProcessRecordType type);
+      ProcessRecordType type) = 0;
 
   // Updates internal bookkeeping state to reflect the creation of a block.
   void BlockCreated(const LogBlockRefPtr& block);
@@ -592,6 +577,7 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
 
   // Simple accessors.
   LogBlockManager* block_manager() const { return block_manager_; }
+  const string& id() const { return id_; }
   int64_t next_block_offset() const { return next_block_offset_.Load(); }
   int64_t total_bytes() const { return total_bytes_.Load(); }
   int64_t total_blocks() const { return total_blocks_.Load(); }
@@ -599,22 +585,9 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
   int64_t live_bytes_aligned() const { return live_bytes_aligned_.Load(); }
   int64_t live_blocks() const { return live_blocks_.Load(); }
   int32_t blocks_being_written() const { return blocks_being_written_.Load(); }
-  bool full() const {
-    if (next_block_offset() >= FLAGS_log_container_max_size ||
-        (max_num_blocks_ && total_blocks() >= max_num_blocks_)) {
-      return true;
-    }
-
-    if (FLAGS_log_container_metadata_max_size <= 0) {
-      return false;
-    }
-
-    // Try lock before reading metadata offset, consider it not full if lock failed.
-    shared_lock<RWMutex> l(metadata_compact_lock_, std::try_to_lock);
-    if (!l.owns_lock()) {
-      return false;
-    }
-    return metadata_file_->Offset() >= FLAGS_log_container_metadata_max_size;
+  virtual bool full() const {
+    return next_block_offset() >= FLAGS_log_container_max_size ||
+           (max_num_blocks_ && total_blocks() >= max_num_blocks_);
   }
 
   bool dead() const { return dead_.Load(); }
@@ -653,53 +626,15 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
     return dead_.CompareAndSet(false, true);
   }
 
-  bool ShouldCompact() const {
-    shared_lock<RWMutex> l(metadata_compact_lock_);
-    return ShouldCompactUnlocked();
-  }
+  virtual bool ShouldCompact() const = 0;
 
-  bool ShouldCompactUnlocked() const {
-    DCHECK_GT(FLAGS_log_container_metadata_max_size, 0);
-    if (live_blocks() >=
-        total_blocks() * FLAGS_log_container_live_metadata_before_compact_ratio) {
-      return false;
-    }
-
-    return metadata_file_->Offset() >= FLAGS_log_container_metadata_max_size *
-                                       FLAGS_log_container_metadata_size_before_compact_ratio;
-  }
-
-  void CompactMetadata();
+  virtual void CompactMetadata() = 0;
 
   static std::vector<BlockRecordPB> SortRecords(LogBlockManager::BlockRecordMap live_block_records);
 
- private:
-  LogBlockContainer(LogBlockManager* block_manager, Dir* data_dir,
-                    unique_ptr<WritablePBContainerFile> metadata_file,
-                    shared_ptr<RWFile> data_file);
-
-  // Check the container whether it is fine.
-  //
-  // OK: both files of the container exist;
-  // Aborted: the container will be repaired later;
-  // NotFound: one file of the container has gone missing;
-  // *-------------*------------*----------------*-------------------------*---------------------*
-  // |DATA\METADATA| NONE EXIST | EXIST && < MIN | EXIST && NO LIVE BLOCKS | EXIST && LIVE BLOCKS|
-  // *-------------*------------*----------------*-------------------------*---------------------*
-  // | NONE EXIST  |            |    Aborted     |      Aborted            |      NotFound       |
-  // *-------------*------------*----------------*-------------------------*---------------------*
-  // | EXIST && 0  |  Aborted   |    Aborted     |      OK                 |      OK             |
-  // *-------------*------------*----------------*-------------------------*---------------------*
-  // | EXIST && >0 |  NotFound  |    OK          |      OK                 |      OK             |
-  // *-------------*------------*----------------*-------------------------*---------------------*
-  //
-  // Note: the status here only represents the result of check.
-  static Status CheckContainerFiles(LogBlockManager* block_manager,
-                                    FsReport* report,
-                                    const Dir* dir,
-                                    const string& common_path,
-                                    const string& data_path,
-                                    const string& metadata_path);
+ protected:
+  LogBlockContainer(LogBlockManager* block_manager, Dir* data_dir, const string& id,
+                    shared_ptr<RWFile> data_file, uint64_t data_file_size);
 
   // Processes a single block record, performing sanity checks on it and adding
   // it either to 'live_blocks' or 'dead_blocks'. If the record is live, it is
@@ -739,17 +674,13 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
   // The data directory where the container lives.
   Dir* data_dir_;
 
+  string id_;
+
   const boost::optional<int64_t> max_num_blocks_;
 
   // Offset up to which we have preallocated bytes.
   int64_t preallocated_offset_ = 0;
 
-  // Protect 'metadata_file_', only rewriting should add write lock,
-  // appending and syncing only need read lock, cause there is an
-  // internal lock for these operations in WritablePBContainerFile.
-  mutable RWMutex metadata_compact_lock_;
-  // Opened file handles to the container's files.
-  unique_ptr<WritablePBContainerFile> metadata_file_;
   shared_ptr<RWFile> data_file_;
 
   // The offset of the next block to be written to the container.
@@ -757,9 +688,6 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
 
   // The amount of data (post block alignment) written thus far to the container.
   AtomicInt<int64_t> total_bytes_;
-
-  // TODO(yingchun): add metadata bytes for metadata.
-  //AtomicInt<int64_t> metadata_bytes_;
 
   // The number of blocks written thus far in the container.
   AtomicInt<int64_t> total_blocks_;
@@ -793,6 +721,155 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
   DISALLOW_COPY_AND_ASSIGN(LogBlockContainer);
 };
 
+////////////////////////////////////////////////////////////
+// LogfBlockContainer
+////////////////////////////////////////////////////////////
+
+// A single block container belonging to the log-backed block manager.
+//
+// A container may only be used to write one WritableBlock at a given time.
+// However, existing blocks may be deleted concurrently. As such, almost
+// all container functions must be reentrant, even if the container itself
+// is logically thread unsafe (i.e. multiple clients calling WriteData()
+// concurrently will produce nonsensical container data). Thread unsafe
+// functions are marked explicitly.
+//
+// Block containers are reference counted so that they can be safely removed
+// despite concurrent access.
+class LogfBlockContainer: public LogBlockContainer {
+ public:
+
+  // Creates a new block container in 'dir'.
+  static Status Create(LogBlockManager* block_manager,
+                       Dir* dir,
+                       LogBlockContainerRefPtr* container);
+
+  // Opens an existing block container in 'dir'.
+  //
+  // Every container is comprised of two files: "<dir>/<id>.data" and
+  // "<dir>/<id>.metadata". Together, 'dir' and 'id' fully describe both
+  // files.
+  //
+  // Returns Status::Aborted() in the case that the metadata and data files
+  // both appear to have no data (e.g. due to a crash just after creating
+  // one of them but before writing any records). This is recorded in 'report'.
+  static Status Open(LogBlockManager* block_manager,
+                     Dir* dir,
+                     FsReport* report,
+                     const string& id,
+                     LogBlockContainerRefPtr* container);
+
+  // The destructor will delete files of this container if it is dead.
+  virtual ~LogfBlockContainer();
+
+  Status AppendMetadata(const BlockRecordPB& pb) override;
+
+  // Synchronize this container's metadata file with the disk. On success,
+  // guarantees that the metadata is made durable.
+  //
+  // TODO(unknown): Add support to synchronize just a range.
+  Status SyncMetadata() override;
+
+  // Reopen the metadata file record writer. Should be called if the underlying
+  // file was changed.
+  Status ReopenMetadataWriter() override;
+
+  // Reads the container's metadata from disk, sanity checking and processing
+  // records along the way.
+  //
+  // Malformed records and other container inconsistencies are written to
+  // 'report'. Healthy blocks are written either to 'live_blocks' or
+  // 'dead_blocks'. Live records are written to 'live_block_records'. The
+  // greatest block ID seen thus far in the container is written to 'max_block_id'.
+  //
+  // Returns an error only if there was a problem accessing the container from
+  // disk; such errors are fatal and effectively halt processing immediately.
+  Status ProcessRecords(
+      FsReport* report,
+      LogBlockManager::UntrackedBlockMap* live_blocks,
+      LogBlockManager::BlockRecordMap* live_block_records,
+      vector<LogBlockRefPtr>* dead_blocks,
+      uint64_t* max_block_id,
+      ProcessRecordType type) override;
+
+  bool full() const override {
+    if (LogBlockContainer::full()) {
+      return true;
+    }
+
+    if (FLAGS_log_container_metadata_max_size <= 0) {
+      return false;
+    }
+
+    // Try lock before reading metadata offset, consider it not full if lock failed.
+    shared_lock<RWMutex> l(metadata_compact_lock_, std::try_to_lock);
+    if (!l.owns_lock()) {
+      return false;
+    }
+    return metadata_file_->Offset() >= FLAGS_log_container_metadata_max_size;
+  }
+
+  bool ShouldCompact() const override {
+    shared_lock<RWMutex> l(metadata_compact_lock_);
+    return ShouldCompactUnlocked();
+  }
+
+  void CompactMetadata() override;
+
+ private:
+  LogfBlockContainer(LogBlockManager* block_manager, Dir* data_dir, const string& id,
+                     shared_ptr<RWFile> data_file, uint64_t data_file_size,
+                     unique_ptr<WritablePBContainerFile> metadata_file);
+
+  // Check the container whether it is fine.
+  //
+  // OK: both files of the container exist;
+  // Aborted: the container will be repaired later;
+  // NotFound: one file of the container has gone missing;
+  // *-------------*------------*----------------*-------------------------*---------------------*
+  // |DATA\METADATA| NONE EXIST | EXIST && < MIN | EXIST && NO LIVE BLOCKS | EXIST && LIVE BLOCKS|
+  // *-------------*------------*----------------*-------------------------*---------------------*
+  // | NONE EXIST  |            |    Aborted     |      Aborted            |      NotFound       |
+  // *-------------*------------*----------------*-------------------------*---------------------*
+  // | EXIST && 0  |  Aborted   |    Aborted     |      OK                 |      OK             |
+  // *-------------*------------*----------------*-------------------------*---------------------*
+  // | EXIST && >0 |  NotFound  |    OK          |      OK                 |      OK             |
+  // *-------------*------------*----------------*-------------------------*---------------------*
+  //
+  // Note: the status here only represents the result of check.
+  static Status CheckContainerFiles(LogBlockManager* block_manager,
+                                    FsReport* report,
+                                    const Dir* dir,
+                                    const string& id,
+                                    const string& common_path,
+                                    const string& data_path,
+                                    const string& metadata_path);
+
+  bool ShouldCompactUnlocked() const {
+    DCHECK_GT(FLAGS_log_container_metadata_max_size, 0);
+    if (live_blocks() >=
+        total_blocks() * FLAGS_log_container_live_metadata_before_compact_ratio) {
+      return false;
+    }
+
+    return metadata_file_->Offset() >= FLAGS_log_container_metadata_max_size *
+                                           FLAGS_log_container_metadata_size_before_compact_ratio;
+  }
+
+  // Protect 'metadata_file_', only rewriting should add write lock,
+  // appending and syncing only need read lock, cause there is an
+  // internal lock for these operations in WritablePBContainerFile.
+  mutable RWMutex metadata_compact_lock_;
+
+  // Opened file handles to the container's files.
+  unique_ptr<WritablePBContainerFile> metadata_file_;
+
+  // TODO(yingchun): add metadata bytes for metadata.
+  //  AtomicInt<int64_t> metadata_bytes_;
+
+  DISALLOW_COPY_AND_ASSIGN(LogfBlockContainer);
+};
+
 #define CONTAINER_DISK_FAILURE(status_expr, msg) do { \
   Status s_ = (status_expr); \
   HANDLE_DISK_FAILURE(s_, block_manager_->error_manager_->RunErrorNotificationCb( \
@@ -803,14 +880,15 @@ class LogBlockContainer: public RefCountedThreadSafe<LogBlockContainer> {
 LogBlockContainer::LogBlockContainer(
     LogBlockManager* block_manager,
     Dir* data_dir,
-    unique_ptr<WritablePBContainerFile> metadata_file,
-    shared_ptr<RWFile> data_file)
+    const string& id,
+    shared_ptr<RWFile> data_file,
+    uint64_t data_file_size)
     : block_manager_(block_manager),
       data_dir_(data_dir),
+      id_(id),
       max_num_blocks_(FindOrDie(block_manager->block_limits_by_data_dir_,
                                 data_dir)),
-      metadata_compact_lock_(RWMutex::Priority::PREFER_READING),
-      metadata_file_(std::move(metadata_file)),
+      preallocated_offset_(data_file_size),
       data_file_(std::move(data_file)),
       next_block_offset_(0),
       total_bytes_(0),
@@ -832,7 +910,7 @@ LogBlockContainer::LogBlockContainer(
   }
 }
 
-LogBlockContainer::~LogBlockContainer() {
+LogfBlockContainer::~LogfBlockContainer() {
   if (dead()) {
     CHECK(!block_manager_->opts_.read_only);
     string data_file_name = data_file_->filename();
@@ -841,27 +919,33 @@ LogBlockContainer::~LogBlockContainer() {
         "Could not delete dead container data file " + data_file_name;
     string metadata_failure_msg =
         "Could not delete dead container metadata file " + metadata_file_name;
+
     if (PREDICT_TRUE(block_manager_->file_cache_)) {
+      VLOG(1) << "LogfBlockContainer delete log block container " << data_file_name;
       CONTAINER_DISK_FAILURE(block_manager_->file_cache_->DeleteFile(data_file_name),
                              data_failure_msg);
+      VLOG(1) << "LogfBlockContainer delete log block container " << metadata_file_name;
       CONTAINER_DISK_FAILURE(block_manager_->file_cache_->DeleteFile(metadata_file_name),
                              metadata_failure_msg);
     } else {
+      VLOG(1) << "LogfBlockContainer delete log block container " << metadata_file_name;
       CONTAINER_DISK_FAILURE(block_manager_->env_->DeleteFile(data_file_name),
                              data_failure_msg);
       CONTAINER_DISK_FAILURE(block_manager_->env_->DeleteFile(metadata_file_name),
                              metadata_failure_msg);
     }
   }
+  data_file_.reset();
+  metadata_file_.reset();
 }
 
 void LogBlockContainer::HandleError(const Status& s) const {
   HANDLE_DISK_FAILURE(s,
-      block_manager()->error_manager()->RunErrorNotificationCb(ErrorHandlerType::DISK_ERROR,
-                                                               data_dir_));
+                      block_manager()->error_manager()->RunErrorNotificationCb(ErrorHandlerType::DISK_ERROR,
+                                                                               data_dir_));
 }
 
-void LogBlockContainer::CompactMetadata() {
+void LogfBlockContainer::CompactMetadata() {
   SCOPED_LOG_SLOW_EXECUTION(WARNING, 5, Substitute("CompactMetadata $0", ToString()));
   // Skip compacting if lock failed to reduce overhead, metadata is on compacting or will be
   // compacted next time.
@@ -929,9 +1013,10 @@ void LogBlockContainer::CompactMetadata() {
     block_manager->error_manager()->RunErrorNotificationCb(ErrorHandlerType::DISK_ERROR, dir)); \
 } while (0)
 
-Status LogBlockContainer::Create(LogBlockManager* block_manager,
-                                 Dir* dir,
-                                 LogBlockContainerRefPtr* container) {
+Status LogfBlockContainer::Create(LogBlockManager* block_manager,
+                                  Dir* dir,
+                                  LogBlockContainerRefPtr* container) {
+  string id;
   string common_path;
   string metadata_path;
   string data_path;
@@ -944,12 +1029,12 @@ Status LogBlockContainer::Create(LogBlockManager* block_manager,
   //
   // When looping, we delete any created-and-orphaned files.
   do {
-    common_path = JoinPathSegments(dir->dir(),
-                                   block_manager->oid_generator()->Next());
+    id = block_manager->oid_generator()->Next();
+    common_path = JoinPathSegments(dir->dir(), id);
     metadata_path = StrCat(common_path, LogBlockManager::kContainerMetadataFileSuffix);
     data_path = StrCat(common_path, LogBlockManager::kContainerDataFileSuffix);
-
     if (PREDICT_TRUE(block_manager->file_cache_)) {
+      VLOG(1) << "Create delete log block container " << metadata_path;
       if (metadata_writer) {
         WARN_NOT_OK(block_manager->file_cache_->DeleteFile(metadata_path),
                     "could not delete orphaned metadata file thru file cache");
@@ -963,6 +1048,7 @@ Status LogBlockContainer::Create(LogBlockManager* block_manager,
       data_status = block_manager->file_cache_->OpenFile<Env::MUST_CREATE>(
           data_path, &data_file);
     } else {
+      VLOG(1) << "Create delete log block container " << metadata_path;
       if (metadata_writer) {
         WARN_NOT_OK(block_manager->env()->DeleteFile(metadata_path),
                     "could not delete orphaned metadata file");
@@ -989,31 +1075,33 @@ Status LogBlockContainer::Create(LogBlockManager* block_manager,
     unique_ptr<WritablePBContainerFile> metadata_file(new WritablePBContainerFile(
         std::move(metadata_writer)));
     RETURN_NOT_OK_CONTAINER_DISK_FAILURE(metadata_file->CreateNew(BlockRecordPB()));
-    container->reset(new LogBlockContainer(block_manager,
-                                           dir,
-                                           std::move(metadata_file),
-                                           std::move(data_file)));
+    container->reset(new LogfBlockContainer(block_manager,
+                                            dir,
+                                            id,
+                                            std::move(data_file),
+                                            0 /*data_file_size*/,
+                                            std::move(metadata_file)));
     VLOG(1) << "Created log block container " << (*container)->ToString();
   }
 
   // Prefer metadata status (arbitrarily).
   FsErrorManager* em = block_manager->error_manager();
   HANDLE_DISK_FAILURE(metadata_status, em->RunErrorNotificationCb(
-      ErrorHandlerType::DISK_ERROR, dir));
+                                           ErrorHandlerType::DISK_ERROR, dir));
   HANDLE_DISK_FAILURE(data_status, em->RunErrorNotificationCb(ErrorHandlerType::DISK_ERROR, dir));
   return !metadata_status.ok() ? metadata_status : data_status;
 }
 
-Status LogBlockContainer::Open(LogBlockManager* block_manager,
-                               Dir* dir,
-                               FsReport* report,
-                               const string& id,
-                               LogBlockContainerRefPtr* container) {
+Status LogfBlockContainer::Open(LogBlockManager* block_manager,
+                                Dir* dir,
+                                FsReport* report,
+                                const string& id,
+                                LogBlockContainerRefPtr* container) {
   string common_path = JoinPathSegments(dir->dir(), id);
   string data_path = StrCat(common_path, LogBlockManager::kContainerDataFileSuffix);
   string metadata_path = StrCat(common_path, LogBlockManager::kContainerMetadataFileSuffix);
-  RETURN_NOT_OK(CheckContainerFiles(block_manager, report, dir,
-                                    common_path, data_path, metadata_path));
+  RETURN_NOT_OK(LogfBlockContainer::CheckContainerFiles(block_manager, report, dir, id,
+                                                        common_path, data_path, metadata_path));
 
   // Open the existing metadata and data files for writing.
   shared_ptr<RWFile> metadata_file;
@@ -1029,10 +1117,10 @@ Status LogBlockContainer::Open(LogBlockManager* block_manager,
     opts.is_sensitive = true;
     unique_ptr<RWFile> rwf;
     RETURN_NOT_OK_CONTAINER_DISK_FAILURE(block_manager->env()->NewRWFile(opts,
-        metadata_path, &rwf));
+                                                                         metadata_path, &rwf));
     metadata_file.reset(rwf.release());
     RETURN_NOT_OK_CONTAINER_DISK_FAILURE(block_manager->env()->NewRWFile(opts,
-        data_path, &rwf));
+                                                                         data_path, &rwf));
     data_file.reset(rwf.release());
   }
 
@@ -1044,22 +1132,24 @@ Status LogBlockContainer::Open(LogBlockManager* block_manager,
   RETURN_NOT_OK_CONTAINER_DISK_FAILURE(data_file->Size(&data_file_size));
 
   // Create the in-memory container and populate it.
-  LogBlockContainerRefPtr open_container(new LogBlockContainer(block_manager,
-                                                               dir,
-                                                               std::move(metadata_pb_writer),
-                                                               std::move(data_file)));
-  open_container->preallocated_offset_ = data_file_size;
+  LogBlockContainerRefPtr open_container(new LogfBlockContainer(block_manager,
+                                                                dir,
+                                                                id,
+                                                                std::move(data_file),
+                                                                data_file_size,
+                                                                std::move(metadata_pb_writer)));
   VLOG(1) << "Opened log block container " << open_container->ToString();
   container->swap(open_container);
   return Status::OK();
 }
 
-Status LogBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
-                                              FsReport* report,
-                                              const Dir* dir,
-                                              const string& common_path,
-                                              const string& data_path,
-                                              const string& metadata_path) {
+Status LogfBlockContainer::CheckContainerFiles(LogBlockManager* block_manager,
+                                               FsReport* report,
+                                               const Dir* dir,
+                                               const string& id,
+                                               const string& common_path,
+                                               const string& data_path,
+                                               const string& metadata_path) {
   Env* env = block_manager->env();
   uint64_t data_size = 0;
   Status s_data = env->GetFileSize(data_path, &data_size);
@@ -1149,7 +1239,7 @@ Status LogBlockContainer::TruncateDataToNextBlockOffset() {
   return Status::OK();
 }
 
-Status LogBlockContainer::ProcessRecords(
+Status LogfBlockContainer::ProcessRecords(
     FsReport* report,
     LogBlockManager::UntrackedBlockMap* live_blocks,
     LogBlockManager::BlockRecordMap* live_block_records,
@@ -1312,7 +1402,6 @@ Status LogBlockContainer::DoCloseBlocks(const vector<LogWritableBlock*>& blocks,
     }
 
     if (mode == SYNC) {
-      VLOG(3) << "Syncing metadata file " << metadata_file_->filename();
       RETURN_NOT_OK(SyncMetadata());
     }
 
@@ -1377,13 +1466,14 @@ Status LogBlockContainer::ReadData(int64_t offset, Slice result) const {
   RETURN_NOT_OK_HANDLE_ERROR(data_file_->Read(offset, result));
   return Status::OK();
 }
+
 Status LogBlockContainer::ReadVData(int64_t offset, ArrayView<Slice> results) const {
   DCHECK_GE(offset, 0);
   RETURN_NOT_OK_HANDLE_ERROR(data_file_->ReadV(offset, results));
   return Status::OK();
 }
 
-Status LogBlockContainer::AppendMetadata(const BlockRecordPB& pb) {
+Status LogfBlockContainer::AppendMetadata(const BlockRecordPB& pb) {
   RETURN_NOT_OK_HANDLE_ERROR(read_only_status());
   // Note: We don't check for sufficient disk space for metadata writes in
   // order to allow for block deletion on full disks.
@@ -1409,7 +1499,20 @@ Status LogBlockContainer::SyncData() {
   return Status::OK();
 }
 
-Status LogBlockContainer::SyncMetadata() {
+LogfBlockContainer::LogfBlockContainer(
+    LogBlockManager* block_manager,
+    Dir* data_dir,
+    const string& id,
+    shared_ptr<RWFile> data_file,
+    uint64_t data_file_size,
+    unique_ptr<WritablePBContainerFile> metadata_file)
+    : LogBlockContainer(block_manager, data_dir, id, std::move(data_file), data_file_size),
+      metadata_compact_lock_(RWMutex::Priority::PREFER_READING),
+      metadata_file_(std::move(metadata_file)) {
+}
+
+Status LogfBlockContainer::SyncMetadata() {
+  VLOG(3) << "Syncing metadata file " << metadata_file_->filename();
   RETURN_NOT_OK_HANDLE_ERROR(read_only_status());
   if (FLAGS_enable_data_block_fsync) {
     if (metrics_) metrics_->generic_metrics.total_disk_sync->Increment();
@@ -1419,7 +1522,7 @@ Status LogBlockContainer::SyncMetadata() {
   return Status::OK();
 }
 
-Status LogBlockContainer::ReopenMetadataWriter() {
+Status LogfBlockContainer::ReopenMetadataWriter() {
   shared_ptr<RWFile> f;
   if (PREDICT_TRUE(block_manager_->file_cache_)) {
     RETURN_NOT_OK_HANDLE_ERROR(block_manager_->file_cache_->OpenFile<Env::MUST_EXIST>(
@@ -1429,8 +1532,8 @@ Status LogBlockContainer::ReopenMetadataWriter() {
     RWFileOptions opts;
     opts.mode = Env::MUST_EXIST;
     opts.is_sensitive = true;
-    RETURN_NOT_OK_HANDLE_ERROR(block_manager_->env_->NewRWFile(opts,
-        metadata_file_->filename(), &f_uniq));
+    RETURN_NOT_OK_HANDLE_ERROR(
+        block_manager_->env_->NewRWFile(opts, metadata_file_->filename(), &f_uniq));
     f.reset(f_uniq.release());
   }
   unique_ptr<WritablePBContainerFile> w;
@@ -1723,6 +1826,7 @@ LogBlockDeletionTransaction::~LogBlockDeletionTransaction() {
       // The function 'TrySetDead()' can only be called successfully once,
       // because there is a compare-and-swap operation inside.
       if (container->TrySetDead()) {
+        VLOG(1) << "RemoveDeadContainer " << container->ToString();
         lbm_->RemoveDeadContainer(container->ToString());
       }
       continue;
@@ -2198,12 +2302,12 @@ LogBlockManager::LogBlockManager(Env* env,
     next_block_id_(1) {
   managed_block_shards_.resize(kBlockMapChunk);
   for (auto& mb : managed_block_shards_) {
-    mb.lock = std::unique_ptr<simple_spinlock>(new simple_spinlock());
+    mb.lock = unique_ptr<simple_spinlock>(new simple_spinlock());
     mb.blocks_by_block_id
-        = std::unique_ptr<BlockMap>(new BlockMap(10,
-                                                 BlockMap::hasher(),
-                                                 BlockMap::key_equal(),
-                                                 BlockAllocator(mem_tracker_)));
+        = unique_ptr<BlockMap>(new BlockMap(10,
+                                            BlockMap::hasher(),
+                                            BlockMap::key_equal(),
+                                            BlockAllocator(mem_tracker_)));
     mb.blocks_by_block_id->set_deleted_key(BlockId());
   }
 
@@ -2448,7 +2552,7 @@ Status LogBlockManager::OpenBlock(const BlockId& block_id,
     lb = FindPtrOrNull(*managed_block_shards_[index].blocks_by_block_id, block_id);
   }
   if (!lb) {
-    return Status::NotFound("Can't find block", block_id.ToString());
+    return Status::NotFound("Can't find block when open log block", block_id.ToString());
   }
 
   VLOG(3) << "Opened block " << block_id
@@ -2538,7 +2642,12 @@ Status LogBlockManager::GetOrCreateContainer(const CreateBlockOptions& opts,
 
   // All containers are in use; create a new one.
   LogBlockContainerRefPtr new_container;
-  Status s = LogBlockContainer::Create(this, dir, &new_container);
+  Status s;
+  if (type_ == LogBlockManagerType::kFile) {
+    s = LogfBlockContainer::Create(this, dir, &new_container);
+  } else {
+    LOG(FATAL) << "unknown type";
+  }
 
   // We could create a container in a different directory, but there's
   // currently no point in doing so. On disk failure, the tablet specified by
@@ -2652,7 +2761,7 @@ bool LogBlockManager::AddLogBlock(LogBlockRefPtr lb) {
   return true;
 }
 
-Status LogBlockManager::RemoveLogBlocks(vector<BlockId> block_ids,
+Status LogBlockManager::RemoveLogBlocks(const vector<BlockId>& block_ids,
                                         vector<LogBlockRefPtr>* log_blocks,
                                         vector<BlockId>* deleted) {
   Status first_failure;
@@ -2733,7 +2842,7 @@ Status LogBlockManager::RemoveLogBlock(const BlockId& block_id,
 
   auto it = blocks_by_block_id->find(block_id);
   if (it == blocks_by_block_id->end()) {
-    return Status::NotFound("Can't find block", block_id.ToString());
+    return Status::NotFound("Can't find block when remove log block", block_id.ToString());
   }
 
   LogBlockContainer* container = it->second->container();
@@ -2800,8 +2909,12 @@ void LogBlockManager::OpenDataDir(
     // Add a new result for the container.
     results->emplace_back(new internal::LogBlockContainerLoadResult());
     LogBlockContainerRefPtr container;
-    s = LogBlockContainer::Open(
-        this, dir, &results->back()->report, container_name, &container);
+    if (type_ == LogBlockManagerType::kFile) {
+      s = LogfBlockContainer::Open(
+          this, dir, &results->back()->report, container_name, &container);
+    } else {
+      LOG(FATAL) << "unknown type";
+    }
     if (containers_processed) {
       ++*containers_processed;
       if (metrics_) {
@@ -3106,6 +3219,8 @@ Status LogBlockManager::Repair(
       // underlying file and resume appending to the new end of the file.
       RETURN_NOT_OK_LBM_DISK_FAILURE_PREPEND(container->ReopenMetadataWriter(),
           "could not reopen container metadata file");
+
+      VLOG(1) << "Truncate log block container " << pr.container;
     }
   }
 
@@ -3115,13 +3230,18 @@ Status LogBlockManager::Repair(
   // leftover container files.
   if (report->incomplete_container_check) {
     for (auto& ic : report->incomplete_container_check->entries) {
-      Status s = env_->DeleteFile(
-          StrCat(ic.container, kContainerMetadataFileSuffix));
-      if (!s.ok() && !s.IsNotFound()) {
-        WARN_NOT_OK_LBM_DISK_FAILURE(s, "could not delete incomplete container metadata file");
+      if (type_ == LogBlockManagerType::kFile) {
+        VLOG(1) << "Delete metadata of log block container " << ic.container;
+        Status s = env_->DeleteFile(StrCat(ic.container, kContainerMetadataFileSuffix));
+        if (!s.ok() && !s.IsNotFound()) {
+          WARN_NOT_OK_LBM_DISK_FAILURE(s, "could not delete incomplete container metadata file");
+        }
+      } else {
+        LOG(FATAL) << "unknown type";
       }
 
-      s = env_->DeleteFile(StrCat(ic.container, kContainerDataFileSuffix));
+      VLOG(1) << "Delete data of log block container " << ic.container;
+      Status s = env_->DeleteFile(StrCat(ic.container, kContainerDataFileSuffix));
       if (!s.ok() && !s.IsNotFound()) {
         WARN_NOT_OK_LBM_DISK_FAILURE(s, "could not delete incomplete container data file");
       }
@@ -3184,6 +3304,7 @@ Status LogBlockManager::Repair(
 
     dir->ExecClosure([this, &metadata_files_compacted, &metadata_bytes_delta,
         &seen_fatal_error, &first_fatal_error, e, container]() {
+      LOG(INFO) << "Start to rewrite " << e.first;
       // Rewrite this metadata file.
       int64_t file_bytes_delta;
       const auto& meta_path = StrCat(e.first, kContainerMetadataFileSuffix);
@@ -3265,6 +3386,7 @@ Status LogBlockManager::RewriteMetadataFile(const LogBlockContainer& container,
                                                              &tmp_file_name, &tmp_file),
                                          "could not create temporary metadata file");
   auto tmp_deleter = MakeScopedCleanup([&]() {
+    VLOG(1) << "Created log block container " << tmp_file_name;
     WARN_NOT_OK(env_->DeleteFile(tmp_file_name),
                 "Could not delete file " + tmp_file_name);
 

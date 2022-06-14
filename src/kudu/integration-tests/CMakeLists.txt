@@ -52,7 +52,8 @@ target_link_libraries(itest_util
   security_test_util)
 add_dependencies(itest_util
   kudu-master
-  kudu-tserver)
+  kudu-tserver
+  kudu)
 
 # Tests
 SET_KUDU_TEST_LINK_LIBS(itest_util gumbo-parser gumbo-query)

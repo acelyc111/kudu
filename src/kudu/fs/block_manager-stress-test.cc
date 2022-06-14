@@ -480,7 +480,7 @@ int BlockManagerStressTest<FileBlockManager>::GetMaxFdCount() const {
 }
 
 template <>
-int BlockManagerStressTest<LogBlockManager>::GetMaxFdCount() const {
+int BlockManagerStressTest<LogfBlockManager>::GetMaxFdCount() const {
   return FLAGS_max_open_files +
       // If all containers are full, each open block could theoretically
       // result in a new container, which is two files briefly outside the
@@ -494,7 +494,7 @@ void BlockManagerStressTest<FileBlockManager>::InjectNonFatalInconsistencies() {
 }
 
 template <>
-void BlockManagerStressTest<LogBlockManager>::InjectNonFatalInconsistencies() {
+void BlockManagerStressTest<LogfBlockManager>::InjectNonFatalInconsistencies() {
   LBMCorruptor corruptor(env_, dd_manager_->GetDirs(), rand_seed_);
   ASSERT_OK(corruptor.Init());
 
@@ -505,7 +505,7 @@ void BlockManagerStressTest<LogBlockManager>::InjectNonFatalInconsistencies() {
 
 // What kinds of BlockManagers are supported?
 #if defined(__linux__)
-typedef ::testing::Types<FileBlockManager, LogBlockManager> BlockManagers;
+typedef ::testing::Types<FileBlockManager, LogfBlockManager> BlockManagers;
 #else
 typedef ::testing::Types<FileBlockManager> BlockManagers;
 #endif
