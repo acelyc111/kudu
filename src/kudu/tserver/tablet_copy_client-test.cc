@@ -500,7 +500,7 @@ TEST_P(TabletCopyClientBasicTest, TestDownloadAllBlocks) {
   // If kNumDataDirs changes, these values may also change. The point of this
   // test is to exemplify the difference in syncs between the log and file
   // block managers, but it would be nice to formulate a bound here.
-  if (FLAGS_block_manager == "log") {
+  if (FLAGS_block_manager != "log" && FLAGS_block_manager != "logr") {
     ASSERT_GE(15, down_cast<Counter*>(
         metric_entity_->FindOrNull(METRIC_block_manager_total_disk_sync).get())->value());
   } else {

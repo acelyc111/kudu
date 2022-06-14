@@ -18,6 +18,7 @@
 #ifndef KUDU_UTIL_OID_GENERATOR_H
 #define KUDU_UTIL_OID_GENERATOR_H
 
+#include <cstddef>
 #include <string>
 
 #include <boost/uuid/random_generator.hpp>
@@ -42,6 +43,11 @@ class ObjectIdGenerator {
   // Validates an existing UUID and converts it into the format used by Kudu
   // (that is, 16 hexadecimal bytes without any dashes).
   Status Canonicalize(const std::string& input, std::string* output) const;
+
+  static size_t IdLength() { return 32; }
+
+  // The 'id' plus 1, maybe not a UUID, just for comparation.
+  static std::string NextOf(const std::string& id);
 
  private:
   DISALLOW_COPY_AND_ASSIGN(ObjectIdGenerator);

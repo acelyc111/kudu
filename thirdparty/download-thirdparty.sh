@@ -485,5 +485,12 @@ fetch_and_patch \
   $JWT_CPP_SOURCE \
   $JWT_CPP_PATCHLEVEL
 
+ROCKSDB_PATCHLEVEL=0
+fetch_with_url_and_patch \
+  $ROCKSDB_NAME.tar.gz \
+  $ROCKSDB_SOURCE \
+  $ROCKSDB_PATCHLEVEL \
+  https://github.com/facebook/rocksdb/archive/refs/tags
+
 echo "---------------"
 echo "Thirdparty dependencies downloaded successfully"

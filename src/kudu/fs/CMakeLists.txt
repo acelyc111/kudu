@@ -41,7 +41,8 @@ add_library(kudu_fs
 target_link_libraries(kudu_fs
   fs_proto
   kudu_util
-  gutil)
+  gutil
+  rocksdb)
 
 add_library(kudu_fs_test_util
   log_block_manager-test-util.cc)
@@ -53,7 +54,7 @@ target_link_libraries(kudu_fs_test_util
   gutil)
 
 # Tests
-SET_KUDU_TEST_LINK_LIBS(kudu_fs kudu_fs_test_util)
+SET_KUDU_TEST_LINK_LIBS(kudu_fs kudu_fs_test_util rocksdb lz4 snappy)
 ADD_KUDU_TEST(block_manager-test)
 ADD_KUDU_TEST(block_manager-stress-test RUN_SERIAL true)
 ADD_KUDU_TEST(data_dirs-test)

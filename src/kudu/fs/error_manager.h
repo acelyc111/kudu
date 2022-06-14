@@ -62,6 +62,17 @@ typedef std::function<void(const std::string&)> ErrorNotificationCb;
   return _s; \
 } while (0)
 
+#define RETURN_NOT_OK_HANDLE_DISK_FAILURE_PREPEND(status_expr, msg, err_handler) do { \
+  const Status& _s = (status_expr); \
+  if (PREDICT_TRUE(_s.ok())) { \
+    break; \
+  } \
+  if (_s.IsDiskFailure()) { \
+    (err_handler); \
+  } \
+  return _s.CloneAndPrepend(msg); \
+} while (0)
+
 // Evaluates the expression and runs 'err_handler' if it results in a
 // corruption. Returns if the expression results in an error.
 #define RETURN_NOT_OK_HANDLE_CORRUPTION(status_expr, err_handler) do { \
