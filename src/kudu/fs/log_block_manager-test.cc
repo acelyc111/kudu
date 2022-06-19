@@ -1173,6 +1173,14 @@ TEST_P(LogBlockManagerTest, StartupBenchmark) {
     }
   }
 
+  // The deleted blocks need to to be hole punched when shutdown block manager, this procedure may
+  // cost a very long time. We shutdown the block manager manually before restart it, then we can
+  // get a more accurate startup time.
+  {
+    SCOPED_LOG_TIMING(INFO, "shutdown block manager");
+    bm_.reset();
+  }
+
   for (int i = 0; i < FLAGS_startup_benchmark_reopen_times; i++) {
     SCOPED_LOG_TIMING(INFO, "reopening block manager");
     ASSERT_OK(ReopenBlockManager(nullptr, nullptr, test_dirs));
