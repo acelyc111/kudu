@@ -2006,6 +2006,8 @@ Status LogrBlockContainer::ProcessRecords(
     vector<LogBlockRefPtr>* dead_blocks,
     uint64_t* max_block_id,
     ProcessRecordType type) {
+  int count = 0;
+  SCOPED_LOG_TIMING(INFO, Substitute("LogrBlockContainer::ProcessRecords $0", count));
   rocksdb::Slice begin_key = id_;
   string next_id = ObjectIdGenerator::NextOf(id_);
   rocksdb::Slice end_key = next_id;
@@ -2035,6 +2037,7 @@ Status LogrBlockContainer::ProcessRecords(
                                 live_blocks, live_block_records, dead_blocks,
                                 &data_file_size, max_block_id, type));
     it->Next();
+    count++;
   }
   Status s = FromRdbStatus(it->status());
   if (PREDICT_FALSE(!s.ok())) {
@@ -2047,18 +2050,21 @@ Status LogrBlockContainer::ProcessRecords(
 }
 
 Status LogrBlockContainer::AppendMetadataForBatchDelete(const vector<BlockId>& block_ids) {
-//  SCOPED_LOG_TIMING(INFO, Substitute("AppendMetadataForBatchDelete $0", block_ids.size()));
+  SCOPED_LOG_TIMING(INFO, Substitute("AppendMetadataForBatchDelete $0", block_ids.size()));
   rocksdb::WriteOptions options;
+//  options.memtable_insert_hint_per_batch = true;
   rocksdb::WriteBatch batch;
   string tmp_key;
+//  vector<BlockId> sorted_block_ids(block_ids);
+//  std::sort(sorted_block_ids.begin(), sorted_block_ids.end());
   for (const auto& block_id : block_ids) {
     tmp_key = id_ + "." + block_id.ToString();
     rocksdb::Slice key(tmp_key);
     CHECK_OK(FromRdbStatus(batch.Delete(key)));
 
     if (batch.Count() == FLAGS_log_container_delete_batch_count) {
-//      SCOPED_LOG_TIMING(INFO, Substitute("$0 rdb()->Write $1 ops, $2 bytes",
-//                                         ToString(), batch.Count(), batch.GetDataSize()));
+      SCOPED_LOG_TIMING(INFO, Substitute("$0 rdb()->Write $1 ops, $2 bytes",
+                                         ToString(), batch.Count(), batch.GetDataSize()));
       //  options.sync = true;
       rocksdb::Status s = data_dir_->rdb()->Write(options, &batch);
       CHECK_OK(FromRdbStatus(s));
