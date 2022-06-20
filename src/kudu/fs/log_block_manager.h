@@ -326,7 +326,8 @@ class LogBlockManager : public BlockManager {
   // appends the block deletion metadata to record the on-disk deletion.
   // The 'log_blocks' out parameter will be set with the LogBlocks that were
   // successfully removed. The 'deleted' out parameter will be set with the
-  // blocks were already deleted, e.g encountered 'NotFound' error during removal.
+  // blocks were already deleted if it's not nullptr, e.g encountered 'NotFound'
+  // error during removal.
   //
   // Returns the first deletion failure that was seen, if any.
   Status RemoveLogBlocks(const std::vector<BlockId>& block_ids,
@@ -492,7 +493,7 @@ class LogBlockManager : public BlockManager {
   };
   LogBlockManagerType type_;
 
-  uint64_t append_metadata_for_batch_delete_ms_;
+  uint64_t append_metadata_for_batch_delete_ns_;
 
   // Metrics for the block manager.
   //

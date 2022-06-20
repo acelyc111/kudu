@@ -2266,7 +2266,9 @@ LogBlockDeletionTransaction::~LogBlockDeletionTransaction() {
 }
 
 Status LogBlockDeletionTransaction::CommitDeletedBlocks(vector<BlockId>* deleted) {
-  deleted->clear();
+  if (deleted) {
+    deleted->clear();
+  }
   shared_ptr<LogBlockDeletionTransaction> transaction = shared_from_this();
 
   vector<LogBlockRefPtr> log_blocks;
@@ -2283,8 +2285,9 @@ Status LogBlockDeletionTransaction::CommitDeletedBlocks(vector<BlockId>* deleted
   }
 
   if (!first_failure.ok()) {
-    first_failure = first_failure.CloneAndPrepend(Substitute("only deleted $0 blocks, "
-                                                             "first failure", deleted->size()));
+    first_failure = first_failure.CloneAndPrepend(
+        Substitute("only deleted $0 blocks, first failure",
+                   deleted ? std::to_string(deleted->size()) : "partial"));
   }
   deleted_blocks_.clear();
   return first_failure;
@@ -2452,8 +2455,7 @@ Status LogWritableBlock::Abort() {
   shared_ptr<BlockDeletionTransaction> deletion_transaction =
       container_->block_manager()->NewDeletionTransaction();
   deletion_transaction->AddDeletedBlock(id());
-  vector<BlockId> deleted;
-  return deletion_transaction->CommitDeletedBlocks(&deleted);
+  return deletion_transaction->CommitDeletedBlocks(nullptr);
 }
 
 const BlockId& LogWritableBlock::id() const {
@@ -2711,7 +2713,7 @@ LogBlockManager::LogBlockManager(Env* env,
     file_cache_(file_cache),
     buggy_el6_kernel_(IsBuggyEl6Kernel(env->GetKernelRelease())),
     next_block_id_(1),
-    append_metadata_for_batch_delete_ms_(0) {
+    append_metadata_for_batch_delete_ns_(0) {
   managed_block_shards_.resize(kBlockMapChunk);
   for (auto& mb : managed_block_shards_) {
     mb.lock = unique_ptr<simple_spinlock>(new simple_spinlock());
@@ -2741,7 +2743,7 @@ LogBlockManager::LogBlockManager(Env* env,
 }
 
 LogBlockManager::~LogBlockManager() {
-  LOG(INFO) << "append_metadata_for_batch_delete_ms_: " << append_metadata_for_batch_delete_ms_;
+  LOG(INFO) << "append_metadata_for_batch_delete_ms_: " << append_metadata_for_batch_delete_ns_ / 1e6;
   // Release all of the memory accounted by the blocks.
   int64_t mem = 0;
   for (const auto& mb : managed_block_shards_) {
@@ -3203,7 +3205,9 @@ Status LogBlockManager::RemoveLogBlocks(const vector<BlockId>& block_ids,
     } else {
       // If we get NotFound, then the block was already deleted.
       DCHECK(s.IsNotFound());
-      deleted->emplace_back(block_id);
+      if (deleted) {
+        deleted->emplace_back(block_id);
+      }
     }
   }
 
@@ -3236,7 +3240,7 @@ Status LogBlockManager::RemoveLogBlocks(const vector<BlockId>& block_ids,
     //
     // TODO(unknown): what if this fails? Should we restore the in-memory block?
     Status s = container->AppendMetadataForBatchDelete(to_delete_block_ids);
-    append_metadata_for_batch_delete_ms_ += (MonoTime::Now() - start_time).ToMilliseconds();
+    append_metadata_for_batch_delete_ns_ += (MonoTime::Now() - start_time).ToNanoseconds();
 
     // We don't bother fsyncing the metadata append for deletes in order to avoid
     // the disk overhead. Even if we did fsync it, we'd still need to account for
@@ -3260,7 +3264,9 @@ Status LogBlockManager::RemoveLogBlocks(const vector<BlockId>& block_ids,
       }
     }
 
-    deleted->insert(deleted->end(), to_delete_block_ids.begin(), to_delete_block_ids.end());
+    if (deleted) {
+      deleted->insert(deleted->end(), to_delete_block_ids.begin(), to_delete_block_ids.end());
+    }
     log_blocks->insert(log_blocks->end(),
                        lbs_by_container.second.begin(),
                        lbs_by_container.second.end());
