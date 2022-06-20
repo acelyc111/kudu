@@ -2050,7 +2050,7 @@ Status LogrBlockContainer::ProcessRecords(
 }
 
 Status LogrBlockContainer::AppendMetadataForBatchDelete(const vector<BlockId>& block_ids) {
-  SCOPED_LOG_TIMING(INFO, Substitute("AppendMetadataForBatchDelete $0", block_ids.size()));
+//  SCOPED_LOG_TIMING(INFO, Substitute("AppendMetadataForBatchDelete $0", block_ids.size()));
   rocksdb::WriteOptions options;
 //  options.memtable_insert_hint_per_batch = true;
   rocksdb::WriteBatch batch;
@@ -2063,8 +2063,8 @@ Status LogrBlockContainer::AppendMetadataForBatchDelete(const vector<BlockId>& b
     CHECK_OK(FromRdbStatus(batch.Delete(key)));
 
     if (batch.Count() == FLAGS_log_container_delete_batch_count) {
-      SCOPED_LOG_TIMING(INFO, Substitute("$0 rdb()->Write $1 ops, $2 bytes",
-                                         ToString(), batch.Count(), batch.GetDataSize()));
+//      SCOPED_LOG_TIMING(INFO, Substitute("$0 rdb()->Write $1 ops, $2 bytes",
+//                                         ToString(), batch.Count(), batch.GetDataSize()));
       //  options.sync = true;
       rocksdb::Status s = data_dir_->rdb()->Write(options, &batch);
       CHECK_OK(FromRdbStatus(s));
@@ -2710,7 +2710,8 @@ LogBlockManager::LogBlockManager(Env* env,
                                            opts_.parent_mem_tracker)),
     file_cache_(file_cache),
     buggy_el6_kernel_(IsBuggyEl6Kernel(env->GetKernelRelease())),
-    next_block_id_(1) {
+    next_block_id_(1),
+    append_metadata_for_batch_delete_ms_(0) {
   managed_block_shards_.resize(kBlockMapChunk);
   for (auto& mb : managed_block_shards_) {
     mb.lock = unique_ptr<simple_spinlock>(new simple_spinlock());
@@ -2740,6 +2741,7 @@ LogBlockManager::LogBlockManager(Env* env,
 }
 
 LogBlockManager::~LogBlockManager() {
+  LOG(INFO) << "append_metadata_for_batch_delete_ms_: " << append_metadata_for_batch_delete_ms_;
   // Release all of the memory accounted by the blocks.
   int64_t mem = 0;
   for (const auto& mb : managed_block_shards_) {
@@ -3229,10 +3231,12 @@ Status LogBlockManager::RemoveLogBlocks(const vector<BlockId>& block_ids,
       to_delete_block_ids.emplace_back(lb->block_id());
     }
 
+    const MonoTime start_time = MonoTime::Now();
     // Record the on-disk deletion.
     //
     // TODO(unknown): what if this fails? Should we restore the in-memory block?
     Status s = container->AppendMetadataForBatchDelete(to_delete_block_ids);
+    append_metadata_for_batch_delete_ms_ += (MonoTime::Now() - start_time).ToMilliseconds();
 
     // We don't bother fsyncing the metadata append for deletes in order to avoid
     // the disk overhead. Even if we did fsync it, we'd still need to account for

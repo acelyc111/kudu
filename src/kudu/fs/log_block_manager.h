@@ -492,6 +492,8 @@ class LogBlockManager : public BlockManager {
   };
   LogBlockManagerType type_;
 
+  uint64_t append_metadata_for_batch_delete_ms_;
+
   // Metrics for the block manager.
   //
   // May be null if instantiated without metrics.
