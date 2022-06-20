@@ -2052,16 +2052,19 @@ Status LogrBlockContainer::ProcessRecords(
 Status LogrBlockContainer::AppendMetadataForBatchDelete(const vector<BlockId>& block_ids) {
 //  SCOPED_LOG_TIMING(INFO, Substitute("AppendMetadataForBatchDelete $0", block_ids.size()));
   rocksdb::WriteOptions options;
-//  options.memtable_insert_hint_per_batch = true;
+  options.memtable_insert_hint_per_batch = true;
   rocksdb::WriteBatch batch;
   string tmp_key;
+  // TODO(yingchun): seems not faster
 //  vector<BlockId> sorted_block_ids(block_ids);
 //  std::sort(sorted_block_ids.begin(), sorted_block_ids.end());
+//  for (const auto& block_id : sorted_block_ids) {
   for (const auto& block_id : block_ids) {
     tmp_key = id_ + "." + block_id.ToString();
     rocksdb::Slice key(tmp_key);
     CHECK_OK(FromRdbStatus(batch.Delete(key)));
 
+    // TODO(yingchun): increase FLAGS_log_container_delete_batch_count seems can get better perform.
     if (batch.Count() == FLAGS_log_container_delete_batch_count) {
 //      SCOPED_LOG_TIMING(INFO, Substitute("$0 rdb()->Write $1 ops, $2 bytes",
 //                                         ToString(), batch.Count(), batch.GetDataSize()));
@@ -2076,14 +2079,6 @@ Status LogrBlockContainer::AppendMetadataForBatchDelete(const vector<BlockId>& b
     //  options.sync = true;
     rocksdb::Status s = data_dir_->rdb()->Write(options, &batch);
     CHECK_OK(FromRdbStatus(s));
-  }
-
-  {
-//    SCOPED_LOG_TIMING(INFO, "rdb()->Flush");
-//    rocksdb::FlushOptions options;
-//    options.wait = true;
-//    rocksdb::Status s = data_dir_->rdb()->Flush(options);
-//    CHECK_OK(FromRdbStatus(s));
   }
 
   return Status::OK();
@@ -3192,6 +3187,10 @@ Status LogBlockManager::RemoveLogBlocks(const vector<BlockId>& block_ids,
   Status first_failure;
   vector<LogBlockRefPtr> lbs;
   lbs.reserve(block_ids.size());
+  log_blocks->reserve(block_ids.size());
+  if (deleted) {
+    deleted->reserve(block_ids.size());
+  }
   int64_t malloc_space = 0, blocks_length = 0;
   for (const auto& block_id : block_ids) {
     LogBlockRefPtr lb;
