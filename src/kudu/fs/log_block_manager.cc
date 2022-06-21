@@ -2050,15 +2050,9 @@ Status LogrBlockContainer::ProcessRecords(
 }
 
 Status LogrBlockContainer::AppendMetadataForBatchDelete(const vector<BlockId>& block_ids) {
-//  SCOPED_LOG_TIMING(INFO, Substitute("AppendMetadataForBatchDelete $0", block_ids.size()));
   rocksdb::WriteOptions options;
-  options.memtable_insert_hint_per_batch = true;
   rocksdb::WriteBatch batch;
   string tmp_key;
-  // TODO(yingchun): seems not faster
-//  vector<BlockId> sorted_block_ids(block_ids);
-//  std::sort(sorted_block_ids.begin(), sorted_block_ids.end());
-//  for (const auto& block_id : sorted_block_ids) {
   for (const auto& block_id : block_ids) {
     tmp_key = id_ + "." + block_id.ToString();
     rocksdb::Slice key(tmp_key);
@@ -2066,9 +2060,6 @@ Status LogrBlockContainer::AppendMetadataForBatchDelete(const vector<BlockId>& b
 
     // TODO(yingchun): increase FLAGS_log_container_delete_batch_count seems can get better perform.
     if (batch.Count() == FLAGS_log_container_delete_batch_count) {
-//      SCOPED_LOG_TIMING(INFO, Substitute("$0 rdb()->Write $1 ops, $2 bytes",
-//                                         ToString(), batch.Count(), batch.GetDataSize()));
-      //  options.sync = true;
       rocksdb::Status s = data_dir_->rdb()->Write(options, &batch);
       CHECK_OK(FromRdbStatus(s));
       batch.Clear();
@@ -2076,7 +2067,6 @@ Status LogrBlockContainer::AppendMetadataForBatchDelete(const vector<BlockId>& b
   }
 
   if (batch.Count() > 0) {
-    //  options.sync = true;
     rocksdb::Status s = data_dir_->rdb()->Write(options, &batch);
     CHECK_OK(FromRdbStatus(s));
   }
@@ -2085,7 +2075,6 @@ Status LogrBlockContainer::AppendMetadataForBatchDelete(const vector<BlockId>& b
 }
 
 Status LogrBlockContainer::AppendMetadataForBatchCreate(const vector<LogWritableBlock*>& blocks) {
-//  SCOPED_LOG_TIMING(INFO, Substitute("AppendMetadataForBatchCreate $0", blocks.size()));
   BlockRecordPB record;
   record.set_op_type(CREATE);
   record.set_timestamp_us(GetCurrentTimeMicros());
@@ -2106,21 +2095,8 @@ Status LogrBlockContainer::AppendMetadataForBatchCreate(const vector<LogWritable
   }
 
   rocksdb::WriteOptions options;
-//  options.sync = true;
-  {
-//    SCOPED_LOG_TIMING(INFO, Substitute("$0 rdb()->Write $1 ops, $2 bytes",
-//                                       ToString(), batch.Count(), batch.GetDataSize()));
-    rocksdb::Status s = data_dir_->rdb()->Write(options, &batch);
-    CHECK_OK(FromRdbStatus(s));
-  }
-
-  {
-//    SCOPED_LOG_TIMING(INFO, "rdb()->Flush");
-//    rocksdb::FlushOptions options;
-//    options.wait = true;
-//    rocksdb::Status s = data_dir_->rdb()->Flush(options);
-//    CHECK_OK(FromRdbStatus(s));
-  }
+  rocksdb::Status s = data_dir_->rdb()->Write(options, &batch);
+  CHECK_OK(FromRdbStatus(s));
 
   return Status::OK();
 }
