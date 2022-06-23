@@ -3194,58 +3194,28 @@ Status LogBlockManager::RemoveLogBlocks(const vector<BlockId>& block_ids,
   }
 
   unordered_map<LogBlockContainer*, vector<LogBlockRefPtr>> lbs_by_containers;
+  unordered_map<LogBlockContainer*, vector<BlockId>> block_ids_by_containers;
   for (auto& lb : lbs) {
+    auto& block_ids_by_container = LookupOrInsert(&block_ids_by_containers, lb->container(), {});
+    block_ids_by_container.emplace_back(lb->block_id());
+
     auto& lbs_by_container = LookupOrInsert(&lbs_by_containers, lb->container(), {});
     lbs_by_container.emplace_back(std::move(lb));
   }
 
   for (auto& lbs_by_container : lbs_by_containers) {
     LogBlockContainer* container = lbs_by_container.first;
-    vector<BlockId> to_delete_block_ids;
-    to_delete_block_ids.reserve(lbs_by_container.second.size());
     for (const auto& lb : lbs_by_container.second) {
       VLOG(3) << "Deleting block " << lb->block_id();
       container->BlockDeleted(lb);
-
-      to_delete_block_ids.emplace_back(lb->block_id());
     }
 
-    const MonoTime start_time = MonoTime::Now();
-    // Record the on-disk deletion.
-    //
-    // TODO(unknown): what if this fails? Should we restore the in-memory block?
-    Status s = container->AppendMetadataForBatchDelete(to_delete_block_ids);
-    append_metadata_for_batch_delete_ns_ += (MonoTime::Now() - start_time).ToNanoseconds();
-
-    // We don't bother fsyncing the metadata append for deletes in order to avoid
-    // the disk overhead. Even if we did fsync it, we'd still need to account for
-    // garbage at startup time (in the event that we crashed just before the
-    // fsync).
-    //
-    // TODO(KUDU-829): Implement GC of orphaned blocks.
-    if (!s.ok()) {
-      if (first_failure.ok()) {
-        first_failure = s.CloneAndPrepend("Unable to append deletion record to block metadata");
-      }
-      continue;
-    }
-
-    if (type_ == LogBlockManagerType::kFile) {
-      // Metadata files of containers with very few live blocks will be compacted.
-      if (!container->read_only() && FLAGS_log_container_metadata_runtime_compact &&
-          container->ShouldCompact()) {
-        scoped_refptr<LogBlockContainer> self(container);
-        container->ExecClosure([self]() { self->CompactMetadata(); });
-      }
-    }
-
-    if (deleted) {
-      deleted->insert(deleted->end(), to_delete_block_ids.begin(), to_delete_block_ids.end());
-    }
     log_blocks->insert(log_blocks->end(),
                        lbs_by_container.second.begin(),
                        lbs_by_container.second.end());
   }
+
+  RETURN_NOT_OK(RemoveLogBlocksMetadata(block_ids_by_containers, deleted));
 
   return first_failure;
 }
@@ -3895,6 +3865,114 @@ int64_t LogBlockManager::LookupBlockLimit(int64_t fs_block_size) {
   // Block size must have been less than the very first key. Return the
   // first recorded entry and hope for the best.
   return kPerFsBlockSizeBlockLimits.begin()->second;
+}
+
+Status LogfBlockManager::RemoveLogBlocksMetadata(
+    const unordered_map<LogBlockContainer*, vector<BlockId>>& block_ids_by_containers,
+    vector<BlockId>* deleted) {
+  Status first_failure;
+  for (const auto& block_ids_by_container : block_ids_by_containers) {
+    LogBlockContainer* container = block_ids_by_container.first;
+    const vector<BlockId>& to_delete_block_ids = block_ids_by_container.second;
+    // Record the on-disk deletion.
+    //
+    // TODO(unknown): what if this fails? Should we restore the in-memory block?
+    Status s = container->AppendMetadataForBatchDelete(to_delete_block_ids);
+
+    // We don't bother fsyncing the metadata append for deletes in order to avoid
+    // the disk overhead. Even if we did fsync it, we'd still need to account for
+    // garbage at startup time (in the event that we crashed just before the
+    // fsync).
+    //
+    // TODO(KUDU-829): Implement GC of orphaned blocks.
+    if (!s.ok()) {
+      if (first_failure.ok()) {
+        first_failure = s.CloneAndPrepend("Unable to append deletion record to block metadata");
+      }
+      continue;
+    }
+
+    // Metadata files of containers with very few live blocks will be compacted.
+    if (!container->read_only() && FLAGS_log_container_metadata_runtime_compact &&
+        container->ShouldCompact()) {
+      scoped_refptr<LogBlockContainer> self(container);
+      container->ExecClosure([self]() { self->CompactMetadata(); });
+    }
+
+    if (deleted) {
+      deleted->insert(deleted->end(), to_delete_block_ids.begin(), to_delete_block_ids.end());
+    }
+  }
+
+  return first_failure;
+}
+
+Status LogrBlockManager::AppendMetadataForBatchDelete(
+    Dir* dir, const unordered_map<string, vector<BlockId>>& block_ids_by_containers) {
+  rocksdb::WriteOptions options;
+  rocksdb::WriteBatch batch;
+  for (const auto& block_ids_by_container : block_ids_by_containers) {
+    const string& container_id = block_ids_by_container.first;
+    for (const auto& block_id : block_ids_by_container.second) {
+      string tmp_key = container_id + "." + block_id.ToString();
+      rocksdb::Slice key(tmp_key);
+      CHECK_OK(FromRdbStatus(batch.Delete(key)));
+
+      // TODO(yingchun): increase FLAGS_log_container_delete_batch_count seems can get better perform.
+      if (batch.Count() == FLAGS_log_container_delete_batch_count) {
+        rocksdb::Status s = dir->rdb()->Write(options, &batch);
+        CHECK_OK(FromRdbStatus(s));
+        batch.Clear();
+      }
+    }
+  }
+
+  if (batch.Count() > 0) {
+    rocksdb::Status s = dir->rdb()->Write(options, &batch);
+    CHECK_OK(FromRdbStatus(s));
+  }
+
+  return Status::OK();
+}
+
+Status LogrBlockManager::RemoveLogBlocksMetadata(
+    const unordered_map<LogBlockContainer*, vector<BlockId>>& block_ids_by_containers,
+    vector<BlockId>* deleted) {
+  map<Dir*, unordered_map<string, vector<BlockId>>> container_block_ids_by_dirs;
+  for (const auto& block_ids_by_container : block_ids_by_containers) {
+    Dir* dir = block_ids_by_container.first->data_dir();
+    auto& container_block_ids_by_dir = LookupOrInsert(&container_block_ids_by_dirs, dir, {});
+
+    string container_id = block_ids_by_container.first->id();
+    auto& block_ids_by_container_id = LookupOrInsert(&container_block_ids_by_dir, container_id, {});
+    block_ids_by_container_id.insert(block_ids_by_container_id.end(),
+                                     block_ids_by_container.second.begin(),
+                                     block_ids_by_container.second.end());
+  }
+
+  Status first_failure;
+  for (const auto& container_block_ids_by_dir : container_block_ids_by_dirs) {
+    const MonoTime start_time = MonoTime::Now();
+    Status s = AppendMetadataForBatchDelete(container_block_ids_by_dir.first,
+                                            container_block_ids_by_dir.second);
+    append_metadata_for_batch_delete_ns_ += (MonoTime::Now() - start_time).ToNanoseconds();
+    if (!s.ok()) {
+      if (first_failure.ok()) {
+        first_failure = s.CloneAndPrepend("Unable to append deletion record to block metadata");
+      }
+      continue;
+    }
+
+    if (deleted) {
+      for (const auto& block_ids_by_container : container_block_ids_by_dir.second) {
+        deleted->insert(deleted->end(),
+                        block_ids_by_container.second.begin(),
+                        block_ids_by_container.second.end());
+      }
+    }
+  }
+
+  return first_failure;
 }
 
 } // namespace fs

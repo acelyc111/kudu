@@ -334,6 +334,10 @@ class LogBlockManager : public BlockManager {
                          std::vector<LogBlockRefPtr>* log_blocks,
                          std::vector<BlockId>* deleted);
 
+  virtual Status RemoveLogBlocksMetadata(
+      const std::unordered_map<internal::LogBlockContainer*, std::vector<BlockId>>& block_ids_by_containers,
+      std::vector<BlockId>* deleted) = 0;
+
   // Removes a LogBlock from in-memory data structures.
   // The 'lb' out parameter will be set with the successfully deleted LogBlock.
   //
@@ -518,6 +522,10 @@ class LogfBlockManager : public LogBlockManager {
       : LogBlockManager(env, dd_manager, error_manager, file_cache, std::move(opts)) {
     type_ = LogBlockManagerType::kFile;
   }
+
+  Status RemoveLogBlocksMetadata(
+      const std::unordered_map<internal::LogBlockContainer*, std::vector<BlockId>>& block_ids_by_containers,
+      std::vector<BlockId>* deleted) override;
 };
 
 class LogrBlockManager : public LogBlockManager {
@@ -534,6 +542,14 @@ class LogrBlockManager : public LogBlockManager {
       : LogBlockManager(env, dd_manager, error_manager, file_cache, std::move(opts)) {
     type_ = LogBlockManagerType::kRdb;
   }
+
+  Status AppendMetadataForBatchDelete(
+      Dir* dir,
+      const std::unordered_map<std::string, std::vector<BlockId>>& block_ids_by_container);
+
+  Status RemoveLogBlocksMetadata(
+      const std::unordered_map<internal::LogBlockContainer*, std::vector<BlockId>>& block_ids_by_containers,
+      std::vector<BlockId>* deleted) override;
 };
 
 } // namespace fs
