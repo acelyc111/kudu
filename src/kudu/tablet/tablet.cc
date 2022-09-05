@@ -381,7 +381,8 @@ Status Tablet::Open(const unordered_set<int64_t>& in_flight_txn_ids,
     // Now that the current state is loaded, create the new MemRowSet with the next id.
     shared_ptr<MemRowSet> new_mrs;
     const SchemaPtr schema_ptr = schema();
-    RETURN_NOT_OK(MemRowSet::Create(next_mrs_id_++, *schema_ptr,
+    RETURN_NOT_OK(MemRowSet::Create(next_mrs_id_++,
+                                    schema_ptr,
                                     log_anchor_registry_.get(),
                                     mem_trackers_.tablet_tracker,
                                     &new_mrs));
@@ -396,7 +397,10 @@ Status Tablet::Open(const unordered_set<int64_t>& in_flight_txn_ids,
       // NOTE: we are able to FindOrDie() on these IDs because
       // 'txn_ids_with_mrs' is a subset of the transaction IDs known by the
       // metadata.
-      RETURN_NOT_OK(MemRowSet::Create(0, *schema_ptr, txn_id, FindOrDie(txn_meta_by_id, txn_id),
+      RETURN_NOT_OK(MemRowSet::Create(0,
+                                      schema_ptr,
+                                      txn_id,
+                                      FindOrDie(txn_meta_by_id, txn_id),
                                       log_anchor_registry_.get(),
                                       mem_trackers_.tablet_tracker,
                                       &txn_mrs));
@@ -1039,7 +1043,10 @@ void Tablet::StartApplying(ParticipantOpState* op_state) {
 void Tablet::CreateTxnRowSets(int64_t txn_id, scoped_refptr<TxnMetadata> txn_meta) {
   shared_ptr<MemRowSet> new_mrs;
   const SchemaPtr schema_ptr = schema();
-  CHECK_OK(MemRowSet::Create(0, *schema_ptr, txn_id, std::move(txn_meta),
+  CHECK_OK(MemRowSet::Create(0,
+                             schema_ptr,
+                             txn_id,
+                             std::move(txn_meta),
                              log_anchor_registry_.get(),
                              mem_trackers_.tablet_tracker,
                              &new_mrs));
@@ -1574,7 +1581,8 @@ Status Tablet::ReplaceMemRowSetsUnlocked(RowSetsInCompaction* compaction,
 
   shared_ptr<MemRowSet> new_mrs;
   const SchemaPtr schema_ptr = schema();
-  RETURN_NOT_OK(MemRowSet::Create(next_mrs_id_++, *schema_ptr,
+  RETURN_NOT_OK(MemRowSet::Create(next_mrs_id_++,
+                                  schema_ptr,
                                   log_anchor_registry_.get(),
                                   mem_trackers_.tablet_tracker,
                                   &new_mrs));
@@ -1668,7 +1676,8 @@ Status Tablet::RewindSchemaForBootstrap(const Schema& new_schema,
     shared_ptr<RowSetTree> old_rowsets = components_->rowsets;
     CHECK(old_mrs->empty());
     shared_ptr<MemRowSet> new_mrs;
-    RETURN_NOT_OK(MemRowSet::Create(old_mrs->mrs_id(), *schema,
+    RETURN_NOT_OK(MemRowSet::Create(old_mrs->mrs_id(),
+                                    schema,
                                     log_anchor_registry_.get(),
                                     mem_trackers_.tablet_tracker,
                                     &new_mrs));

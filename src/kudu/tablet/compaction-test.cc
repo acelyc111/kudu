@@ -184,11 +184,11 @@ class TestCompaction : public KuduRowSetTest {
                      int row_key,
                      int32_t val) {
     BuildRow(row_key, val);
-    if (*row_builder_.schema() != mrs->schema()) {
+    if (*row_builder_.schema() != *mrs->schema()) {
       // The MemRowSet is not projecting the row, so must be done by the caller
-      RowProjector projector(row_builder_.schema(), &mrs->schema());
-      uint8_t rowbuf[ContiguousRowHelper::row_size(mrs->schema())];
-      ContiguousRow dst_row(&mrs->schema(), rowbuf);
+      RowProjector projector(row_builder_.schema(), mrs->schema().get());
+      uint8_t rowbuf[ContiguousRowHelper::row_size(*mrs->schema())];
+      ContiguousRow dst_row(mrs->schema().get(), rowbuf);
       ASSERT_OK_FAST(projector.Init());
       ASSERT_OK_FAST(projector.ProjectRowForWrite(row_builder_.row(),
                                                   &dst_row, static_cast<Arena*>(nullptr)));
@@ -400,8 +400,11 @@ class TestCompaction : public KuduRowSetTest {
   // the same timestamp.
   shared_ptr<MemRowSet> CreateInvisibleMRS() {
     shared_ptr<MemRowSet> mrs;
-    CHECK_OK(MemRowSet::Create(0, schema_, log_anchor_registry_.get(),
-                               mem_trackers_.tablet_tracker, &mrs));
+    CHECK_OK(MemRowSet::Create(0,
+                               std::make_shared<Schema>(schema_),
+                               log_anchor_registry_.get(),
+                               mem_trackers_.tablet_tracker,
+                               &mrs));
     InsertAndDeleteRow(mrs.get(), 0, 0);
     return mrs;
   }
@@ -428,8 +431,11 @@ class TestCompaction : public KuduRowSetTest {
     for (const Schema& schema : schemas) {
       // Create a memrowset with a bunch of rows and updates.
       shared_ptr<MemRowSet> mrs;
-      CHECK_OK(MemRowSet::Create(delta, schema, log_anchor_registry_.get(),
-                                 mem_trackers_.tablet_tracker, &mrs));
+      CHECK_OK(MemRowSet::Create(delta,
+                                 std::make_shared<Schema>(schema),
+                                 log_anchor_registry_.get(),
+                                 mem_trackers_.tablet_tracker,
+                                 &mrs));
       InsertRows(mrs.get(), 1000, delta);
       UpdateRows(mrs.get(), 1000, delta, 1);
 
@@ -464,8 +470,11 @@ class TestCompaction : public KuduRowSetTest {
       for (int i = 0; i < FLAGS_merge_benchmark_num_rowsets; i++) {
         // Create a memrowset with a bunch of rows and updates.
         shared_ptr<MemRowSet> mrs;
-        CHECK_OK(MemRowSet::Create(i, schema_, log_anchor_registry_.get(),
-                                   mem_trackers_.tablet_tracker, &mrs));
+        CHECK_OK(MemRowSet::Create(i,
+                                   std::make_shared<Schema>(schema_),
+                                   log_anchor_registry_.get(),
+                                   mem_trackers_.tablet_tracker,
+                                   &mrs));
 
         for (int n = 0; n < FLAGS_merge_benchmark_num_rows_per_rowset; n++) {
 
@@ -545,8 +554,11 @@ class TestCompaction : public KuduRowSetTest {
 TEST_F(TestCompaction, TestMemRowSetInput) {
   // Create a memrowset with 10 rows and several updates.
   shared_ptr<MemRowSet> mrs;
-  ASSERT_OK(MemRowSet::Create(0, schema_, log_anchor_registry_.get(),
-                              mem_trackers_.tablet_tracker, &mrs));
+  ASSERT_OK(MemRowSet::Create(0,
+                              std::make_shared<Schema>(schema_),
+                              log_anchor_registry_.get(),
+                              mem_trackers_.tablet_tracker,
+                              &mrs));
   InsertRows(mrs.get(), 10, 0);
   UpdateRows(mrs.get(), 10, 0, 1);
   UpdateRows(mrs.get(), 10, 0, 2);
@@ -572,8 +584,11 @@ TEST_F(TestCompaction, TestFlushMRSWithRolling) {
   // Create a memrowset with enough rows so that, when we flush with a small
   // roll threshold, we'll end up creating multiple DiskRowSets.
   shared_ptr<MemRowSet> mrs;
-  ASSERT_OK(MemRowSet::Create(0, schema_, log_anchor_registry_.get(),
-                              mem_trackers_.tablet_tracker, &mrs));
+  ASSERT_OK(MemRowSet::Create(0,
+                              std::make_shared<Schema>(schema_),
+                              log_anchor_registry_.get(),
+                              mem_trackers_.tablet_tracker,
+                              &mrs));
   InsertRows(mrs.get(), 30000, 0);
 
   vector<shared_ptr<DiskRowSet> > rowsets;
@@ -602,8 +617,11 @@ TEST_F(TestCompaction, TestRowSetInput) {
   shared_ptr<DiskRowSet> rs;
   {
     shared_ptr<MemRowSet> mrs;
-    ASSERT_OK(MemRowSet::Create(0, schema_, log_anchor_registry_.get(),
-                                mem_trackers_.tablet_tracker, &mrs));
+    ASSERT_OK(MemRowSet::Create(0,
+                                std::make_shared<Schema>(schema_),
+                                log_anchor_registry_.get(),
+                                mem_trackers_.tablet_tracker,
+                                &mrs));
     InsertRows(mrs.get(), 10, 0);
     FlushMRSAndReopenNoRoll(*mrs, schema_, &rs);
     NO_FATALS();
@@ -642,8 +660,11 @@ TEST_F(TestCompaction, TestDuplicatedGhostRowsMerging) {
   shared_ptr<DiskRowSet> rs1;
   {
     shared_ptr<MemRowSet> mrs;
-    ASSERT_OK(MemRowSet::Create(0, schema_, log_anchor_registry_.get(),
-                                mem_trackers_.tablet_tracker, &mrs));
+    ASSERT_OK(MemRowSet::Create(0,
+                                std::make_shared<Schema>(schema_),
+                                log_anchor_registry_.get(),
+                                mem_trackers_.tablet_tracker,
+                                &mrs));
     InsertRows(mrs.get(), 10, 0);
     FlushMRSAndReopenNoRoll(*mrs, schema_, &rs1);
     NO_FATALS();
@@ -655,8 +676,11 @@ TEST_F(TestCompaction, TestDuplicatedGhostRowsMerging) {
   shared_ptr<DiskRowSet> rs2;
   {
     shared_ptr<MemRowSet> mrs;
-    ASSERT_OK(MemRowSet::Create(1, schema_, log_anchor_registry_.get(),
-                                mem_trackers_.tablet_tracker, &mrs));
+    ASSERT_OK(MemRowSet::Create(1,
+                                std::make_shared<Schema>(schema_),
+                                log_anchor_registry_.get(),
+                                mem_trackers_.tablet_tracker,
+                                &mrs));
     InsertRows(mrs.get(), 10, 0);
     UpdateRows(mrs.get(), 10, 0, 1);
     FlushMRSAndReopenNoRoll(*mrs, schema_, &rs2);
@@ -667,8 +691,11 @@ TEST_F(TestCompaction, TestDuplicatedGhostRowsMerging) {
   shared_ptr<DiskRowSet> rs3;
   {
     shared_ptr<MemRowSet> mrs;
-    ASSERT_OK(MemRowSet::Create(2, schema_, log_anchor_registry_.get(),
-                                mem_trackers_.tablet_tracker, &mrs));
+    ASSERT_OK(MemRowSet::Create(2,
+                                std::make_shared<Schema>(schema_),
+                                log_anchor_registry_.get(),
+                                mem_trackers_.tablet_tracker,
+                                &mrs));
     InsertRows(mrs.get(), 10, 0);
     UpdateRows(mrs.get(), 10, 0, 2);
     FlushMRSAndReopenNoRoll(*mrs, schema_, &rs3);
@@ -803,8 +830,11 @@ TEST_F(TestCompaction, TestDuplicatedRowsRandomCompaction) {
     size_t row_idx = 0;
     for (int j = 0; j < num_rowsets_in_layer; ++j) {
       shared_ptr<MemRowSet> mrs;
-      ASSERT_OK(MemRowSet::Create(rs_id, schema_, log_anchor_registry_.get(),
-                                  mem_trackers_.tablet_tracker, &mrs));
+      ASSERT_OK(MemRowSet::Create(rs_id,
+                                  std::make_shared<Schema>(schema_),
+                                  log_anchor_registry_.get(),
+                                  mem_trackers_.tablet_tracker,
+                                  &mrs));
 
       // For even rows, insert, update and delete them in the mrs.
       for (int k = 0; k < kNumRowsPerRowSet; ++k) {
@@ -899,8 +929,11 @@ TEST_F(TestCompaction, TestMRSCompactionDoesntOutputUnobservableRows) {
   shared_ptr<DiskRowSet> rs1;
   {
     shared_ptr<MemRowSet> mrs;
-    ASSERT_OK(MemRowSet::Create(0, schema_, log_anchor_registry_.get(),
-                                mem_trackers_.tablet_tracker, &mrs));
+    ASSERT_OK(MemRowSet::Create(0,
+                                std::make_shared<Schema>(schema_),
+                                log_anchor_registry_.get(),
+                                mem_trackers_.tablet_tracker,
+                                &mrs));
     InsertRow(mrs.get(), 1, 1);
     FlushMRSAndReopenNoRoll(*mrs, schema_, &rs1);
     NO_FATALS();
@@ -912,8 +945,11 @@ TEST_F(TestCompaction, TestMRSCompactionDoesntOutputUnobservableRows) {
   shared_ptr<DiskRowSet> rs2;
   {
     shared_ptr<MemRowSet> mrs;
-    ASSERT_OK(MemRowSet::Create(1, schema_, log_anchor_registry_.get(),
-                                mem_trackers_.tablet_tracker, &mrs));
+    ASSERT_OK(MemRowSet::Create(1,
+                                std::make_shared<Schema>(schema_),
+                                log_anchor_registry_.get(),
+                                mem_trackers_.tablet_tracker,
+                                &mrs));
     ScopedOp op(&mvcc_, clock_.Now());
     op.StartApplying();
     DeleteRowInOp(rs1.get(), op, 1);
@@ -959,8 +995,11 @@ TEST_F(TestCompaction, TestMRSCompactionDoesntOutputUnobservableRows) {
 TEST_F(TestCompaction, TestOneToOne) {
   // Create a memrowset with a bunch of rows and updates.
   shared_ptr<MemRowSet> mrs;
-  ASSERT_OK(MemRowSet::Create(0, schema_, log_anchor_registry_.get(),
-                              mem_trackers_.tablet_tracker, &mrs));
+  ASSERT_OK(MemRowSet::Create(0,
+                              std::make_shared<Schema>(schema_),
+                              log_anchor_registry_.get(),
+                              mem_trackers_.tablet_tracker,
+                              &mrs));
   InsertRows(mrs.get(), 1000, 0);
   UpdateRows(mrs.get(), 1000, 0, 1);
   MvccSnapshot snap(mvcc_);
@@ -1008,16 +1047,22 @@ TEST_F(TestCompaction, TestOneToOne) {
 TEST_F(TestCompaction, TestKUDU102) {
   // Create 2 row sets, flush them
   shared_ptr<MemRowSet> mrs;
-  ASSERT_OK(MemRowSet::Create(0, schema_, log_anchor_registry_.get(),
-                              mem_trackers_.tablet_tracker, &mrs));
+  ASSERT_OK(MemRowSet::Create(0,
+                              std::make_shared<Schema>(schema_),
+                              log_anchor_registry_.get(),
+                              mem_trackers_.tablet_tracker,
+                              &mrs));
   InsertRows(mrs.get(), 10, 0);
   shared_ptr<DiskRowSet> rs;
   FlushMRSAndReopenNoRoll(*mrs, schema_, &rs);
   NO_FATALS();
 
   shared_ptr<MemRowSet> mrs_b;
-  ASSERT_OK(MemRowSet::Create(1, schema_, log_anchor_registry_.get(),
-                              mem_trackers_.tablet_tracker, &mrs_b));
+  ASSERT_OK(MemRowSet::Create(1,
+                              std::make_shared<Schema>(schema_),
+                              log_anchor_registry_.get(),
+                              mem_trackers_.tablet_tracker,
+                              &mrs_b));
   InsertRows(mrs_b.get(), 10, 100);
   MvccSnapshot snap(mvcc_);
   shared_ptr<DiskRowSet> rs_b;
@@ -1075,13 +1120,19 @@ TEST_F(TestCompaction, TestMergeMultipleSchemas) {
 // Test MergeCompactionInput against MemRowSets.
 TEST_F(TestCompaction, TestMergeMRS) {
   shared_ptr<MemRowSet> mrs_a;
-  ASSERT_OK(MemRowSet::Create(0, schema_, log_anchor_registry_.get(),
-                              mem_trackers_.tablet_tracker, &mrs_a));
+  ASSERT_OK(MemRowSet::Create(0,
+                              std::make_shared<Schema>(schema_),
+                              log_anchor_registry_.get(),
+                              mem_trackers_.tablet_tracker,
+                              &mrs_a));
   InsertRows(mrs_a.get(), 10, 0);
 
   shared_ptr<MemRowSet> mrs_b;
-  ASSERT_OK(MemRowSet::Create(1, schema_, log_anchor_registry_.get(),
-                              mem_trackers_.tablet_tracker, &mrs_b));
+  ASSERT_OK(MemRowSet::Create(1,
+                              std::make_shared<Schema>(schema_),
+                              log_anchor_registry_.get(),
+                              mem_trackers_.tablet_tracker,
+                              &mrs_b));
   InsertRows(mrs_b.get(), 10, 1);
 
   // While we're at it, let's strew some rows' histories across both rowsets.
@@ -1109,8 +1160,11 @@ TEST_F(TestCompaction, TestMergeMRS) {
 TEST_F(TestCompaction, TestMergeMRSWithInvisibleRows) {
   shared_ptr<MemRowSet> mrs_a = CreateInvisibleMRS();
   shared_ptr<MemRowSet> mrs_b;
-  ASSERT_OK(MemRowSet::Create(1, schema_, log_anchor_registry_.get(),
-                              mem_trackers_.tablet_tracker, &mrs_b));
+  ASSERT_OK(MemRowSet::Create(1,
+                              std::make_shared<Schema>(schema_),
+                              log_anchor_registry_.get(),
+                              mem_trackers_.tablet_tracker,
+                              &mrs_b));
   InsertRows(mrs_b.get(), 10, 0);
   MvccSnapshot snap(mvcc_);
   vector<shared_ptr<CompactionInput> > merge_inputs {
@@ -1130,8 +1184,11 @@ TEST_F(TestCompaction, TestRandomizeDuplicatedRowsAcrossTransactions) {
   constexpr int kMinIters = 2;
   shared_ptr<MemRowSet> main_mrs;
   int mrs_id = 0;
-  ASSERT_OK(MemRowSet::Create(mrs_id++, schema_, log_anchor_registry_.get(),
-            mem_trackers_.tablet_tracker, &main_mrs));
+  ASSERT_OK(MemRowSet::Create(mrs_id++,
+                              std::make_shared<Schema>(schema_),
+                              log_anchor_registry_.get(),
+                              mem_trackers_.tablet_tracker,
+                              &main_mrs));
 
   // Keep track of our transactional MRSs. Since we can only mutate a row in
   // a transactional MRS after committing, we'll treat these MRSs as having
@@ -1177,8 +1234,11 @@ TEST_F(TestCompaction, TestRandomizeDuplicatedRowsAcrossTransactions) {
         break;
       case 1: {
         shared_ptr<MemRowSet> txn_mrs;
-        ASSERT_OK(MemRowSet::Create(mrs_id++, schema_, log_anchor_registry_.get(),
-                                    mem_trackers_.tablet_tracker, &txn_mrs));
+        ASSERT_OK(MemRowSet::Create(mrs_id++,
+                                    std::make_shared<Schema>(schema_),
+                                    log_anchor_registry_.get(),
+                                    mem_trackers_.tablet_tracker,
+                                    &txn_mrs));
         LOG(INFO) << Substitute("Inserting into mrs $0 and committing", txn_mrs->mrs_id());
         NO_FATALS(InsertRow(txn_mrs.get(), 1, 0));
         mrs_with_live_row = txn_mrs.get();
@@ -1208,14 +1268,23 @@ TEST_F(TestCompaction, TestRandomizeDuplicatedRowsAcrossTransactions) {
 // back and forth between rowsets over time.
 TEST_F(TestCompaction, TestRowHistoryJumpsBetweenRowsets) {
   shared_ptr<MemRowSet> mrs_a;
-  ASSERT_OK(MemRowSet::Create(0, schema_, log_anchor_registry_.get(),
-                              mem_trackers_.tablet_tracker, &mrs_a));
+  ASSERT_OK(MemRowSet::Create(0,
+                              std::make_shared<Schema>(schema_),
+                              log_anchor_registry_.get(),
+                              mem_trackers_.tablet_tracker,
+                              &mrs_a));
   shared_ptr<MemRowSet> mrs_b;
-  ASSERT_OK(MemRowSet::Create(1, schema_, log_anchor_registry_.get(),
-                              mem_trackers_.tablet_tracker, &mrs_b));
+  ASSERT_OK(MemRowSet::Create(1,
+                              std::make_shared<Schema>(schema_),
+                              log_anchor_registry_.get(),
+                              mem_trackers_.tablet_tracker,
+                              &mrs_b));
   shared_ptr<MemRowSet> mrs_c;
-  ASSERT_OK(MemRowSet::Create(2, schema_, log_anchor_registry_.get(),
-                              mem_trackers_.tablet_tracker, &mrs_c));
+  ASSERT_OK(MemRowSet::Create(2,
+                              std::make_shared<Schema>(schema_),
+                              log_anchor_registry_.get(),
+                              mem_trackers_.tablet_tracker,
+                              &mrs_c));
   // Interleave the history of a row across three MRSs.
   InsertRows(mrs_a.get(), 1, 0);
   DeleteRows(mrs_a.get(), 1, 0);
@@ -1399,8 +1468,11 @@ TEST_F(TestCompaction, TestEmptyFlushDoesntLeakBlocks) {
 
 TEST_F(TestCompaction, TestCountLiveRowsOfMemRowSetFlush) {
   shared_ptr<MemRowSet> mrs;
-  ASSERT_OK(MemRowSet::Create(0, schema_, log_anchor_registry_.get(),
-                              mem_trackers_.tablet_tracker, &mrs));
+  ASSERT_OK(MemRowSet::Create(0,
+                              std::make_shared<Schema>(schema_),
+                              log_anchor_registry_.get(),
+                              mem_trackers_.tablet_tracker,
+                              &mrs));
   NO_FATALS(InsertRows(mrs.get(), 100, 0));
   NO_FATALS(UpdateRows(mrs.get(), 80, 0, 1));
   NO_FATALS(DeleteRows(mrs.get(), 50));
@@ -1419,8 +1491,11 @@ TEST_F(TestCompaction, TestCountLiveRowsOfDiskRowSetsCompact) {
   shared_ptr<DiskRowSet> rs1;
   {
     shared_ptr<MemRowSet> mrs;
-    ASSERT_OK(MemRowSet::Create(0, schema_, log_anchor_registry_.get(),
-                                mem_trackers_.tablet_tracker, &mrs));
+    ASSERT_OK(MemRowSet::Create(0,
+                                std::make_shared<Schema>(schema_),
+                                log_anchor_registry_.get(),
+                                mem_trackers_.tablet_tracker,
+                                &mrs));
     NO_FATALS(InsertRows(mrs.get(), 100, 0));
     NO_FATALS(UpdateRows(mrs.get(), 80, 0, 1));
     NO_FATALS(DeleteRows(mrs.get(), 50, 0));
@@ -1430,8 +1505,11 @@ TEST_F(TestCompaction, TestCountLiveRowsOfDiskRowSetsCompact) {
   shared_ptr<DiskRowSet> rs2;
   {
     shared_ptr<MemRowSet> mrs;
-    ASSERT_OK(MemRowSet::Create(1, schema_, log_anchor_registry_.get(),
-                                mem_trackers_.tablet_tracker, &mrs));
+    ASSERT_OK(MemRowSet::Create(1,
+                                std::make_shared<Schema>(schema_),
+                                log_anchor_registry_.get(),
+                                mem_trackers_.tablet_tracker,
+                                &mrs));
     NO_FATALS(InsertRows(mrs.get(), 100, 1));
     NO_FATALS(UpdateRows(mrs.get(), 80, 1, 1));
     NO_FATALS(DeleteRows(mrs.get(), 50, 1));
@@ -1441,8 +1519,11 @@ TEST_F(TestCompaction, TestCountLiveRowsOfDiskRowSetsCompact) {
   shared_ptr<DiskRowSet> rs3;
   {
     shared_ptr<MemRowSet> mrs;
-    ASSERT_OK(MemRowSet::Create(2, schema_, log_anchor_registry_.get(),
-                                mem_trackers_.tablet_tracker, &mrs));
+    ASSERT_OK(MemRowSet::Create(2,
+                                std::make_shared<Schema>(schema_),
+                                log_anchor_registry_.get(),
+                                mem_trackers_.tablet_tracker,
+                                &mrs));
     NO_FATALS(InsertRows(mrs.get(), 100, 2));
     NO_FATALS(UpdateRows(mrs.get(), 80, 2, 2));
     NO_FATALS(DeleteRows(mrs.get(), 50, 2));

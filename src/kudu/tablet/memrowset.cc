@@ -93,7 +93,7 @@ shared_ptr<MemTracker> CreateMemTrackerForMemRowSet(
 } // anonymous namespace
 
 Status MemRowSet::Create(int64_t id,
-                         const Schema &schema,
+                         const SchemaPtr schema,
                          LogAnchorRegistry* log_anchor_registry,
                          shared_ptr<MemTracker> parent_tracker,
                          shared_ptr<MemRowSet>* mrs) {
@@ -105,7 +105,7 @@ Status MemRowSet::Create(int64_t id,
 }
 
 Status MemRowSet::Create(int64_t id,
-                         const Schema &schema,
+                         const SchemaPtr schema,
                          int64_t txn_id,
                          scoped_refptr<TxnMetadata> txn_metadata,
                          LogAnchorRegistry* log_anchor_registry,
@@ -118,29 +118,28 @@ Status MemRowSet::Create(int64_t id,
   return Status::OK();
 }
 
-
 MemRowSet::MemRowSet(int64_t id,
-                     const Schema& schema,
+                     const SchemaPtr schema,
                      std::optional<int64_t> txn_id,
                      scoped_refptr<TxnMetadata> txn_metadata,
                      LogAnchorRegistry* log_anchor_registry,
                      shared_ptr<MemTracker> parent_tracker)
-  : id_(id),
-    schema_(schema),
-    txn_id_(txn_id),
-    txn_metadata_(std::move(txn_metadata)),
-    allocator_(new MemoryTrackingBufferAllocator(
-        HeapBufferAllocator::Get(),
-        CreateMemTrackerForMemRowSet(id, std::move(parent_tracker)))),
-    arena_(new ThreadSafeMemoryTrackingArena(kInitialArenaSize, allocator_)),
-    tree_(arena_),
-    debug_insert_count_(0),
-    debug_update_count_(0),
-    anchorer_(log_anchor_registry, Substitute("MemRowSet-$0$1", id_, txn_id_ ?
-                                              Substitute("(txn_id=$0)", *txn_id) : "")),
-    has_been_compacted_(false),
-    live_row_count_(0) {
-  CHECK(schema.has_column_ids());
+    : id_(id),
+      schema_(schema),
+      txn_id_(txn_id),
+      txn_metadata_(std::move(txn_metadata)),
+      allocator_(new MemoryTrackingBufferAllocator(
+          HeapBufferAllocator::Get(), CreateMemTrackerForMemRowSet(id, std::move(parent_tracker)))),
+      arena_(new ThreadSafeMemoryTrackingArena(kInitialArenaSize, allocator_)),
+      tree_(arena_),
+      debug_insert_count_(0),
+      debug_update_count_(0),
+      anchorer_(
+          log_anchor_registry,
+          Substitute("MemRowSet-$0$1", id_, txn_id_ ? Substitute("(txn_id=$0)", *txn_id) : "")),
+      has_been_compacted_(false),
+      live_row_count_(0) {
+  CHECK(schema->has_column_ids());
   ANNOTATE_BENIGN_RACE(&debug_insert_count_, "insert count isnt accurate");
   ANNOTATE_BENIGN_RACE(&debug_update_count_, "update count isnt accurate");
 }
@@ -154,15 +153,17 @@ Status MemRowSet::DebugDump(vector<string> *lines) {
   while (iter->HasNext()) {
     MRSRow row = iter->GetCurrentRow();
     LOG_STRING(INFO, lines)
-      << "@" << row.insertion_timestamp()
-      << string(txn_id_ ?
-                Substitute("(txn_id=$0$1)", *txn_id_,
-                           DCHECK_NOTNULL(txn_metadata_)->commit_timestamp() ?
-                               Substitute("@$0", txn_metadata_->commit_timestamp()->value()) : "") :
-                "")
-      << ": row " << schema_.DebugRow(row)
-      << " mutations=" << Mutation::StringifyMutationList(schema_, row.header_->redo_head)
-      << std::endl;
+        << "@" << row.insertion_timestamp()
+        << string(txn_id_ ? Substitute(
+                                "(txn_id=$0$1)",
+                                *txn_id_,
+                                DCHECK_NOTNULL(txn_metadata_)->commit_timestamp()
+                                    ? Substitute("@$0", txn_metadata_->commit_timestamp()->value())
+                                    : "")
+                          : "")
+        << ": row " << schema_->DebugRow(row)
+        << " mutations=" << Mutation::StringifyMutationList(*schema_, row.header_->redo_head)
+        << std::endl;
     iter->Next();
   }
 
@@ -174,11 +175,11 @@ Status MemRowSet::Insert(Timestamp timestamp,
                          const ConstContiguousRow& row,
                          const OpId& op_id) {
   CHECK(row.schema()->has_column_ids());
-  DCHECK_SCHEMA_EQ(schema_, *row.schema());
+  DCHECK_SCHEMA_EQ(*schema_, *row.schema());
 
   {
     faststring enc_key_buf;
-    schema_.EncodeComparableKey(row, &enc_key_buf);
+    schema_->EncodeComparableKey(row, &enc_key_buf);
     Slice enc_key(enc_key_buf);
 
     btree::PreparedMutation<MSBTreeTraits> mutation(enc_key);
@@ -222,7 +223,7 @@ Status MemRowSet::Insert(Timestamp timestamp,
 }
 
 Status MemRowSet::Reinsert(Timestamp timestamp, const ConstContiguousRow& row, MRSRow *ms_row) {
-  DCHECK_SCHEMA_EQ(schema_, *row.schema());
+  DCHECK_SCHEMA_EQ(*schema_, *row.schema());
 
   // Encode the REINSERT mutation
   faststring buf;
@@ -327,7 +328,7 @@ MemRowSet::Iterator* MemRowSet::NewIterator(const RowIteratorOptions& opts) cons
 MemRowSet::Iterator* MemRowSet::NewIterator() const {
   // TODO(todd): can we kill this function? should be only used by tests?
   RowIteratorOptions opts;
-  opts.projection = &schema();
+  opts.projection = schema().get();
   return NewIterator(opts);
 }
 
@@ -423,9 +424,8 @@ MemRowSet::Iterator::Iterator(const std::shared_ptr<const MemRowSet>& mrs,
     : memrowset_(mrs),
       iter_(iter),
       opts_(std::move(opts)),
-      projector_(
-          GenerateAppropriateProjector(&mrs->schema_nonvirtual(), opts_.projection)),
-      delta_projector_(&mrs->schema_nonvirtual(), opts_.projection),
+      projector_(GenerateAppropriateProjector(mrs->schema().get(), opts_.projection)),
+      delta_projector_(mrs->schema().get(), opts_.projection),
       projection_vc_is_deleted_idx_(opts_.projection->first_is_deleted_virtual_column_idx()),
       state_(kUninitialized) {
   // TODO(todd): various code assumes that a newly constructed iterator
@@ -467,8 +467,8 @@ Status MemRowSet::Iterator::SeekAtOrAfter(const Slice &key, bool *exact) {
   DCHECK_NE(state_, kUninitialized) << "not initted";
 
   if (!key.empty()) {
-    ConstContiguousRow row_slice(&memrowset_->schema(), key);
-    memrowset_->schema().EncodeComparableKey(row_slice, &tmp_buf);
+    ConstContiguousRow row_slice(memrowset_->schema().get(), key);
+    memrowset_->schema()->EncodeComparableKey(row_slice, &tmp_buf);
   } else {
     // Seeking to empty key shouldn't try to run any encoding.
     tmp_buf.resize(0);
@@ -671,9 +671,8 @@ Status MemRowSet::Iterator::ApplyMutationsToProjectedRow(
         RowChangeListDecoder decoder(mut->changelist());
         RETURN_NOT_OK(decoder.Init());
         ColumnBlock dst_col = dst_row->column_block(mapping.first);
-        RETURN_NOT_OK(decoder.ApplyToOneColumn(dst_row->row_index(), &dst_col,
-                                               memrowset_->schema_nonvirtual(),
-                                               mapping.second, dst_arena));
+        RETURN_NOT_OK(decoder.ApplyToOneColumn(
+            dst_row->row_index(), &dst_col, *(memrowset_->schema()), mapping.second, dst_arena));
       }
     }
   }

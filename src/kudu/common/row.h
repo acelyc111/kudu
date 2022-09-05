@@ -343,7 +343,7 @@ class DeltaProjector {
 // storage.
 template <class RowType, class ArenaType>
 inline Status RelocateIndirectDataToArena(RowType *row, ArenaType *dst_arena) {
-  const Schema* schema = row->schema();
+  const Schema* schema = row->schema_raw_ptr();
   // First calculate the total size we'll need to allocate in the arena.
   int size = 0;
   for (int i = 0; i < schema->num_columns(); i++) {
@@ -468,6 +468,8 @@ class ContiguousRow {
   const Schema* schema() const {
     return schema_;
   }
+
+  const Schema* schema_raw_ptr() const { return schema_; }
 
   void Reset(uint8_t *row_data) {
     row_data_ = row_data;

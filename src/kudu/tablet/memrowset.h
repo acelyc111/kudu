@@ -106,7 +106,9 @@ class MRSRow {
     memrowset_ = memrowset;
   }
 
-  const Schema* schema() const;
+  const SchemaPtr schema() const;
+
+  const Schema* schema_raw_ptr() const;
 
   Timestamp insertion_timestamp() const { return header_->insertion_timestamp; }
 
@@ -192,14 +194,13 @@ struct MSBTreeTraits : public btree::BTreeTraits {
 // This defines an array on the stack which is sized correctly for an MRSRow::Header
 // plus a single row of the given schema, then constructs an MRSRow object which
 // points into that stack storage.
-#define DEFINE_MRSROW_ON_STACK(memrowset, varname, slice_name) \
-  size_t varname##_size = sizeof(MRSRow::Header) + \
-                           ContiguousRowHelper::row_size((memrowset)->schema_nonvirtual()); \
-  uint8_t varname##_storage[varname##_size]; \
-  Slice slice_name(varname##_storage, varname##_size); \
-  ContiguousRowHelper::InitNullsBitmap((memrowset)->schema_nonvirtual(), slice_name); \
+#define DEFINE_MRSROW_ON_STACK(memrowset, varname, slice_name)                          \
+  size_t varname##_size =                                                               \
+      sizeof(MRSRow::Header) + ContiguousRowHelper::row_size(*((memrowset)->schema())); \
+  uint8_t varname##_storage[varname##_size];                                            \
+  Slice slice_name(varname##_storage, varname##_size);                                  \
+  ContiguousRowHelper::InitNullsBitmap((*(memrowset)->schema()), slice_name);           \
   MRSRow varname(memrowset, slice_name);
-
 
 // In-memory storage for data currently being written to the tablet.
 // This is a holding area for inserts, currently held in row form
@@ -213,7 +214,7 @@ class MemRowSet : public RowSet,
   class Iterator;
 
   static Status Create(int64_t id,
-                       const Schema& schema,
+                       const SchemaPtr schema,
                        log::LogAnchorRegistry* log_anchor_registry,
                        std::shared_ptr<MemTracker> parent_tracker,
                        std::shared_ptr<MemRowSet>* mrs);
@@ -221,7 +222,7 @@ class MemRowSet : public RowSet,
   // Create() variant for a MRS that get inserted to by a single transaction of
   // the given transaction ID and metadata.
   static Status Create(int64_t id,
-                       const Schema& schema,
+                       const SchemaPtr schema,
                        int64_t txn_id,
                        scoped_refptr<TxnMetadata> txn_metadata,
                        log::LogAnchorRegistry* log_anchor_registry,
@@ -346,14 +347,11 @@ class MemRowSet : public RowSet,
                                     std::unique_ptr<CompactionInput>* out) const override;
 
   // Return the Schema for the rows in this memrowset.
-   const Schema &schema() const {
-    return schema_;
-  }
+  const SchemaPtr schema() const { return schema_; }
 
-  // Same as schema(), but non-virtual method
-  const Schema& schema_nonvirtual() const {
-    return schema_;
-  }
+  //  const Schema* schema_raw_ptr() const {
+  //    return schema_.get();
+  //  }
 
   int64_t mrs_id() const {
     return id_;
@@ -456,7 +454,7 @@ class MemRowSet : public RowSet,
 
  protected:
   MemRowSet(int64_t id,
-            const Schema& schema,
+            const SchemaPtr schema,
             std::optional<int64_t> txn_id,
             scoped_refptr<TxnMetadata> txn_metadata,
             log::LogAnchorRegistry* log_anchor_registry,
@@ -474,7 +472,7 @@ class MemRowSet : public RowSet,
   typedef btree::CBTree<MSBTreeTraits> MSBTree;
 
   int64_t id_;
-  const Schema schema_;
+  const SchemaPtr schema_;
 
   // The transaction ID that inserted into this MemRowSet, and its corresponding metadata.
   std::optional<int64_t> txn_id_;
@@ -667,9 +665,9 @@ class MemRowSet::Iterator : public RowwiseIterator {
   std::optional<const Slice> exclusive_upper_bound_;
 };
 
-inline const Schema* MRSRow::schema() const {
-  return &memrowset_->schema_nonvirtual();
-}
+inline const SchemaPtr MRSRow::schema() const { return memrowset_->schema(); }
+
+inline const Schema* MRSRow::schema_raw_ptr() const { return memrowset_->schema().get(); }
 
 } // namespace tablet
 } // namespace kudu
