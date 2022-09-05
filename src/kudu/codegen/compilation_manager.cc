@@ -67,6 +67,15 @@ DEFINE_int32(compilation_task_inject_latency_ms, 0,
 TAG_FLAG(compilation_task_inject_latency_ms, unsafe);
 TAG_FLAG(compilation_task_inject_latency_ms, runtime);
 
+DEFINE_uint32(compilation_mgr_pool_overload_threshold_ms, 0,
+              "The threshold for the queue time of the 'compiler_manager_pool' thread pool "
+              "to enter and exit overloaded state. Once the queue stalls and its queue times "
+              "become longer than the specified threshold, it enters the overloaded state. "
+              "CompilationManager rejects incoming requests when the queue is overloaded. "
+              "Set this flag to 0 to disable the behavior described above.");
+TAG_FLAG(compilation_mgr_pool_overload_threshold_ms, advanced);
+TAG_FLAG(compilation_mgr_pool_overload_threshold_ms, runtime);
+
 METRIC_DEFINE_gauge_int64(server, code_cache_hits, "Codegen Cache Hits",
                           kudu::MetricUnit::kCacheHits,
                           "Number of codegen cache hits since start",
@@ -147,6 +156,7 @@ CompilationManager::CompilationManager()
            .set_max_threads(1)
            .set_max_queue_size(FLAGS_codegen_queue_capacity)
            .set_idle_timeout(MonoDelta::FromMilliseconds(kThreadTimeoutMs))
+           .set_queue_overload_threshold(MonoDelta::FromMilliseconds(FLAGS_compilation_mgr_pool_overload_threshold_ms))
            .Build(&pool_));
   // We call std::atexit after the implicit default construction of
   // generator_ to ensure static LLVM constants would not have been destructed
@@ -197,10 +207,15 @@ bool CompilationManager::RequestRowProjector(const Schema* base_schema,
 
   // If not cached, add a request to compilation pool
   if (!cached) {
-    shared_ptr<CompilationTask> task(make_shared<CompilationTask>(
-        *base_schema, *projection, &cache_, &generator_));
-    WARN_NOT_OK_EVERY_N_SECS(pool_->Submit([task]() { task->Run(); }),
-                    "RowProjector compilation request submit failed", 10);
+    if (!pool_->QueueOverloaded(nullptr, nullptr)) {
+      shared_ptr<CompilationTask> task(
+          make_shared<CompilationTask>(*base_schema, *projection, &cache_, &generator_));
+      WARN_NOT_OK_EVERY_N_SECS(pool_->Submit([task]() { task->Run(); }),
+                               "RowProjector compilation request submit failed",
+                               10);
+    } else {
+      KLOG_EVERY_N_SECS(WARNING, 10) << "RowProjector compilation request rejected";
+    }
     return false;
   }
 
