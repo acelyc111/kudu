@@ -78,8 +78,8 @@ class CodegenTest : public KuduTest {
                                   ColumnSchema("str32         ", STRING, false),
                                   ColumnSchema("str32-null-val", STRING,  true),
                                   ColumnSchema("str32-null    ", STRING,  true) };
-    base_.Reset(cols, 1);
-    base_ = SchemaBuilder(base_).Build(); // add IDs
+    base_->Reset(cols, 1);
+    base_ = std::make_shared<Schema>(SchemaBuilder(*base_).Build()); // add IDs
 
     // Create an extended default schema
     cols.emplace_back("int32-R ",  INT32, false, false, kI32R, nullptr);
@@ -90,7 +90,7 @@ class CodegenTest : public KuduTest {
     defaults_ = SchemaBuilder(defaults_).Build(); // add IDs
 
     test_rows_arena_.reset(new Arena(2 * 1024));
-    RowBuilder rb(&base_);
+    RowBuilder rb(base_.get());
     for (int i = 0; i < kNumTestRows; ++i) {
       rb.AddUint64(i);
       rb.AddInt32(random_.Next32());
@@ -101,8 +101,8 @@ class CodegenTest : public KuduTest {
       rb.AddNull();
 
       void* arena_data = test_rows_arena_->AllocateBytes(
-        ContiguousRowHelper::row_size(base_));
-      ContiguousRow dst(&base_, static_cast<uint8_t*>(arena_data));
+        ContiguousRowHelper::row_size(*base_));
+      ContiguousRow dst(base_.get(), static_cast<uint8_t*>(arena_data));
       CHECK_OK(CopyRow(rb.row(), &dst, test_rows_arena_.get()));
       test_rows_[i].reset(new ConstContiguousRow(dst));
       rb.Reset();
@@ -110,7 +110,7 @@ class CodegenTest : public KuduTest {
   }
 
  protected:
-  Schema base_;
+  SchemaPtr base_;
   Schema defaults_;
 
   // Compares the projection-for-read and projection-for-write results
@@ -217,10 +217,10 @@ template<bool READ>
 void CodegenTest::TestProjection(const Schema* proj) {
   unique_ptr<CodegenRP> with;
   ASSERT_OK(Generate(proj, &with));
-  NoCodegenRP without(&base_, proj);
+  NoCodegenRP without(base_.get(), proj);
   ASSERT_OK(without.Init());
 
-  CHECK_EQ(with->base_schema(), &base_);
+  CHECK_EQ(with->base_schema(), base_.get());
   CHECK_EQ(with->projection(), proj);
 
   RowBlock rb_with(proj, kNumTestRows, &projections_mem_);
@@ -234,8 +234,8 @@ void CodegenTest::TestProjection(const Schema* proj) {
 
 Status CodegenTest::Generate(const Schema* proj, unique_ptr<CodegenRP>* out) {
   scoped_refptr<codegen::RowProjectorFunctions> functions;
-  RETURN_NOT_OK(generator_.CompileRowProjector(base_, *proj, &functions));
-  out->reset(new CodegenRP(&base_, proj, functions));
+  RETURN_NOT_OK(generator_.CompileRowProjector(*base_, *proj, &functions));
+  out->reset(new CodegenRP(base_.get(), proj, functions));
   return Status::OK();
 }
 
@@ -250,10 +250,10 @@ Status CodegenTest::CreatePartialSchema(const vector<size_t>& col_indexes,
 
 TEST_F(CodegenTest, ObservablesTest) {
   // Test when not identity
-  Schema proj = base_.CreateKeyProjection();
+  Schema proj = base_->CreateKeyProjection();
   unique_ptr<CodegenRP> with;
   CHECK_OK(Generate(&proj, &with));
-  NoCodegenRP without(&base_, &proj);
+  NoCodegenRP without(base_.get(), &proj);
   ASSERT_OK(without.Init());
   ASSERT_EQ(with->base_schema(), without.base_schema());
   ASSERT_EQ(with->projection(), without.projection());
@@ -261,10 +261,10 @@ TEST_F(CodegenTest, ObservablesTest) {
   ASSERT_FALSE(with->is_identity());
 
   // Test when identity
-  Schema iproj = *&base_;
+  Schema iproj = *base_.get();
   unique_ptr<CodegenRP> iwith;
   CHECK_OK(Generate(&iproj, &iwith));
-  NoCodegenRP iwithout(&base_, &iproj);
+  NoCodegenRP iwithout(base_.get(), &iproj);
   ASSERT_OK(iwithout.Init());
   ASSERT_EQ(iwith->base_schema(), iwithout.base_schema());
   ASSERT_EQ(iwith->projection(), iwithout.projection());
@@ -281,7 +281,7 @@ TEST_F(CodegenTest, TestEmpty) {
 
 // Test key projection
 TEST_F(CodegenTest, TestKey) {
-  Schema key = base_.CreateKeyProjection();
+  Schema key = base_->CreateKeyProjection();
   TestProjection<true>(&key);
   TestProjection<false>(&key);
 }
@@ -328,8 +328,8 @@ TEST_F(CodegenTest, TestNullables) {
 
 // Test full schema projection
 TEST_F(CodegenTest, TestFullSchema) {
-  TestProjection<true>(&base_);
-  TestProjection<false>(&base_);
+  TestProjection<true>(base_.get());
+  TestProjection<false>(base_.get());
 }
 
 // Tests just the default projection
@@ -406,11 +406,11 @@ TEST_F(CodegenTest, TestCodeCache) {
     vector<size_t> perm = { 0, 1, 2, 3 };
     do {
       SCOPED_TRACE(perm);
-      Schema projection;
-      ASSERT_OK(CreatePartialSchema(perm, &projection));
+      SchemaPtr projection = std::make_shared<Schema>();
+      ASSERT_OK(CreatePartialSchema(perm, projection.get()));
 
       unique_ptr<CodegenRP> projector;
-      if (cm->RequestRowProjector(&base_, &projection, &projector)) {
+      if (cm->RequestRowProjector(base_, projection, &projector)) {
         num_hits++;
       }
       cm->Wait();

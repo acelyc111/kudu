@@ -33,6 +33,8 @@ class MetricEntity;
 class Schema;
 class ThreadPool;
 
+typedef std::shared_ptr<Schema> SchemaPtr;
+
 namespace codegen {
 
 class RowProjector;
@@ -72,8 +74,8 @@ class CompilationManager {
   // schemas in the CompilationManager's thread pool and returns
   // false. Upon any failure, false is returned.
   // Does not write to 'out' if false is returned.
-  bool RequestRowProjector(const Schema* base_schema,
-                           const Schema* projection,
+  bool RequestRowProjector(const SchemaPtr base_schema,
+                           const SchemaPtr projection,
                            std::unique_ptr<RowProjector>* out);
 
   // Waits for all asynchronous compilation tasks to finish.

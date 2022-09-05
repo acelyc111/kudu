@@ -83,7 +83,7 @@ class CompilationTask {
  public:
   // Requires that the cache and generator are valid for the lifetime
   // of this object.
-  CompilationTask(const Schema& base, const Schema& proj, CodeCache* cache,
+  CompilationTask(const SchemaPtr base, const SchemaPtr proj, CodeCache* cache,
                   CodeGenerator* generator)
     : base_(base),
       proj_(proj),
@@ -97,14 +97,14 @@ class CompilationTask {
     // now so there's nowhere to return the status to.
     WARN_NOT_OK(RunWithStatus(),
                 "Failed compilation of row projector from base schema " +
-                base_.ToString() + " to projection schema " +
-                proj_.ToString());
+                base_->ToString() + " to projection schema " +
+                proj_->ToString());
   }
 
  private:
   Status RunWithStatus() {
     faststring key;
-    RETURN_NOT_OK(RowProjectorFunctions::EncodeKey(base_, proj_, &key));
+    RETURN_NOT_OK(RowProjectorFunctions::EncodeKey(*base_, *proj_, &key));
 
     // Check again to make sure we didn't compile it already.
     // This can occur if we request the same schema pair while the
@@ -113,15 +113,15 @@ class CompilationTask {
 
     scoped_refptr<RowProjectorFunctions> functions;
     LOG_TIMING_IF(INFO, FLAGS_codegen_time_compilation, "code-generating row projector") {
-      RETURN_NOT_OK(generator_->CompileRowProjector(base_, proj_, &functions));
+      RETURN_NOT_OK(generator_->CompileRowProjector(*base_, *proj_, &functions));
     }
 
     RETURN_NOT_OK(cache_->AddEntry(functions));
     return Status::OK();
   }
 
-  Schema base_;
-  Schema proj_;
+  SchemaPtr base_;
+  SchemaPtr proj_;
   CodeCache* const cache_;
   CodeGenerator* const generator_;
 
@@ -175,8 +175,8 @@ Status CompilationManager::StartInstrumentation(const scoped_refptr<MetricEntity
   return Status::OK();
 }
 
-bool CompilationManager::RequestRowProjector(const Schema* base_schema,
-                                             const Schema* projection,
+bool CompilationManager::RequestRowProjector(const SchemaPtr base_schema,
+                                             const SchemaPtr projection,
                                              unique_ptr<RowProjector>* out) {
   faststring key;
   Status s = RowProjectorFunctions::EncodeKey(*base_schema, *projection, &key);
@@ -190,7 +190,7 @@ bool CompilationManager::RequestRowProjector(const Schema* base_schema,
   // If not cached, add a request to compilation pool
   if (!cached) {
     shared_ptr<CompilationTask> task(make_shared<CompilationTask>(
-        *base_schema, *projection, &cache_, &generator_));
+        base_schema, projection, &cache_, &generator_));
     WARN_NOT_OK_EVERY_N_SECS(pool_->Submit([task]() { task->Run(); }),
                     "RowProjector compilation request submit failed", 10);
     return false;
@@ -198,7 +198,7 @@ bool CompilationManager::RequestRowProjector(const Schema* base_schema,
 
   hit_counter_.Increment();
 
-  out->reset(new RowProjector(base_schema, projection, cached));
+  out->reset(new RowProjector(base_schema.get(), projection.get(), cached));
   return true;
 }
 

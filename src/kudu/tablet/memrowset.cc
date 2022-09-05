@@ -399,7 +399,7 @@ class MRSRowProjectorImpl : public MRSRowProjector {
 // If codegen is enabled, then generates a codegen::RowProjector;
 // otherwise makes a regular one.
 unique_ptr<MRSRowProjector> GenerateAppropriateProjector(
-  const Schema* base, const Schema* projection) {
+  const SchemaPtr base, const SchemaPtr projection) {
   // Attempt code-generated implementation
   if (FLAGS_mrs_use_codegen) {
     unique_ptr<codegen::RowProjector> actual;
@@ -424,7 +424,7 @@ MemRowSet::Iterator::Iterator(const std::shared_ptr<const MemRowSet>& mrs,
     : memrowset_(mrs),
       iter_(iter),
       opts_(std::move(opts)),
-      projector_(GenerateAppropriateProjector(mrs->schema().get(), opts_.projection)),
+      projector_(GenerateAppropriateProjector(mrs->schema(), opts_.projection)),
       delta_projector_(mrs->schema().get(), opts_.projection),
       projection_vc_is_deleted_idx_(opts_.projection->first_is_deleted_virtual_column_idx()),
       state_(kUninitialized) {
