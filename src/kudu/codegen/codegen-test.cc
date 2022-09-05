@@ -55,6 +55,7 @@ using std::vector;
 
 DECLARE_bool(codegen_dump_mc);
 DECLARE_int32(codegen_cache_capacity);
+DECLARE_int32(compilation_task_inject_latency_ms);
 
 namespace kudu {
 
@@ -428,6 +429,27 @@ TEST_F(CodegenTest, TestCodeCache) {
       ASSERT_GT(num_hits, 0);
       ASSERT_LT(num_hits, 24);
     }
+  }
+}
+
+TEST_F(CodegenTest, MemConsumption) {
+  Singleton<CompilationManager>::UnsafeReset();
+  FLAGS_codegen_cache_capacity = 1;
+  FLAGS_compilation_task_inject_latency_ms = 100;
+  CompilationManager* cm = CompilationManager::GetSingleton();
+
+  for (size_t i = 0; i < 1000000; i++) {
+    // Generate all permutations of the first four columns (24 permutations).
+    // For each such permutation, we'll create a projection and request code generation.
+    vector<size_t> perm = { 0, 1, 2, 3 };
+    do {
+      SCOPED_TRACE(perm);
+      Schema projection;
+      ASSERT_OK(CreatePartialSchema(perm, &projection));
+
+      unique_ptr<CodegenRP> projector;
+      cm->RequestRowProjector(&base_, &projection, &projector);
+    } while (std::next_permutation(perm.begin(), perm.end()));
   }
 }
 

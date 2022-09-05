@@ -34,6 +34,7 @@
 #include "kudu/gutil/casts.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/util/faststring.h"
+#include "kudu/util/fault_injection.h"
 #include "kudu/util/flag_tags.h"
 #include "kudu/util/logging.h"
 #include "kudu/util/metrics.h"
@@ -59,6 +60,12 @@ TAG_FLAG(codegen_cache_capacity, experimental);
 DEFINE_int32(codegen_queue_capacity, 100, "Number of tasks which may be put in the code "
              "generation task queue.");
 TAG_FLAG(codegen_queue_capacity, experimental);
+
+DEFINE_int32(compilation_task_inject_latency_ms, 0,
+             "The number of milliseconds of latency to inject when running "
+             "compilation task on average.");
+TAG_FLAG(compilation_task_inject_latency_ms, unsafe);
+TAG_FLAG(compilation_task_inject_latency_ms, runtime);
 
 METRIC_DEFINE_gauge_int64(server, code_cache_hits, "Codegen Cache Hits",
                           kudu::MetricUnit::kCacheHits,
@@ -92,6 +99,7 @@ class CompilationTask {
 
   // Can only be run once.
   void Run() {
+    MAYBE_INJECT_FIXED_LATENCY(FLAGS_compilation_task_inject_latency_ms);
     // We need to fail softly because the user could have just given
     // a malformed projection schema pair, but could be long gone by
     // now so there's nowhere to return the status to.
