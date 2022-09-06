@@ -29,6 +29,7 @@
 #include "kudu/util/cache_metrics.h"
 #include "kudu/util/flag_tags.h"
 #include "kudu/util/locks.h"
+#include "kudu/util/logging.h"
 #include "kudu/util/malloc.h"
 #include "kudu/util/mem_tracker.h"
 #include "kudu/util/metrics.h"
@@ -603,6 +604,7 @@ class ShardedCache : public Cache {
 
   UniqueHandle Insert(UniquePendingHandle handle,
                       Cache::EvictionCallback* eviction_callback) override {
+    KLOG_EVERY_N_SECS(WARNING, 5) << "Cache consumption: " << mem_tracker_->consumption();
     RLHandle* h = reinterpret_cast<RLHandle*>(DCHECK_NOTNULL(handle.release()));
     return UniqueHandle(
         shards_[Shard(h->hash)]->Insert(h, eviction_callback),

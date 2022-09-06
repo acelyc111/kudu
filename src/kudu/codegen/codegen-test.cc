@@ -53,6 +53,8 @@ using std::string;
 using std::unique_ptr;
 using std::vector;
 
+DEFINE_int32(mem_consumption_loop_count, 1000000, "");
+
 DECLARE_bool(codegen_dump_mc);
 DECLARE_int32(codegen_cache_capacity);
 DECLARE_int32(compilation_task_inject_latency_ms);
@@ -438,7 +440,9 @@ TEST_F(CodegenTest, MemConsumption) {
   FLAGS_compilation_task_inject_latency_ms = 100;
   CompilationManager* cm = CompilationManager::GetSingleton();
 
-  for (size_t i = 0; i < 1000000; i++) {
+  // 内存会不断上涨
+  for (size_t i = 0; i < FLAGS_mem_consumption_loop_count; i++) {
+    KLOG_EVERY_N_SECS(WARNING, 5) << i;
     // Generate all permutations of the first four columns (24 permutations).
     // For each such permutation, we'll create a projection and request code generation.
     vector<size_t> perm = { 0, 1, 2, 3 };
@@ -449,8 +453,26 @@ TEST_F(CodegenTest, MemConsumption) {
 
       unique_ptr<CodegenRP> projector;
       cm->RequestRowProjector(&base_, &projection, &projector);
+      SleepFor(MonoDelta::FromMicroseconds(5));
     } while (std::next_permutation(perm.begin(), perm.end()));
+
+    // sleep 时内存并不会下降
+//    if (i % 100000 == 0) {
+//      LOG(INFO) << "begin sleep";
+//      SleepFor(MonoDelta::FromSeconds(60));
+//      LOG(INFO) << "end sleep";
+//    }
   }
+  LOG(INFO) << "out of loop";
+  // 此时内存也并不下降
+  SleepFor(MonoDelta::FromSeconds(120));
+  // 退出后，析构时内存开始下降. 即以下代码之后开始释放内存
+//  [       OK ] CodegenTest.MemConsumption (515693 ms)
+//  [----------] 1 test from CodegenTest (515815 ms total)
+//
+//  [----------] Global test environment tear-down
+//  [==========] 1 test from 1 test suite ran. (515815 ms total)
+//  [  PASSED  ] 1 test.
 }
 
 } // namespace kudu

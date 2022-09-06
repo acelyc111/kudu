@@ -214,7 +214,7 @@ bool CompilationManager::RequestRowProjector(const Schema* base_schema,
                                "RowProjector compilation request submit failed",
                                10);
     } else {
-      KLOG_EVERY_N_SECS(WARNING, 10) << "RowProjector compilation request rejected";
+      KLOG_EVERY_N_SECS(WARNING, 10) << "RowProjector compilation request rejected" << THROTTLE_MSG;
     }
     return false;
   }
