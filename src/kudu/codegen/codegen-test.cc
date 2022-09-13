@@ -138,9 +138,6 @@ class CodegenTest : public KuduTest {
     kStrRWCol
   };
 
-  Status CreatePartialSchema(const vector<size_t>& col_indexes,
-                             Schema* out);
-
  private:
   // Projects the test rows into parameter rowblock using projector and
   // member projections_mem_ (should be Reset() manually).
@@ -241,14 +238,16 @@ Status CodegenTest::Generate(const Schema* proj, unique_ptr<CodegenRP>* out) {
   return Status::OK();
 }
 
-Status CodegenTest::CreatePartialSchema(const vector<size_t>& col_indexes,
-                                        Schema* out) {
-  vector<ColumnId> col_ids;
+namespace {
+Status CreatePartialSchema(const Schema& in, const vector<size_t>& col_indexes, Schema* out) {
+  vector<ColumnId> col_ids(col_indexes.size());
+  int i = 0;
   for (size_t col_idx : col_indexes) {
-    col_ids.push_back(defaults_.column_id(col_idx));
+    col_ids[i++] = in.column_id(col_idx);
   }
-  return defaults_.CreateProjectionByIdsIgnoreMissing(col_ids, out);
+  return in.CreateProjectionByIdsIgnoreMissing(col_ids, out);
 }
+} // anonymous namespace
 
 TEST_F(CodegenTest, ObservablesTest) {
   // Test when not identity
@@ -292,7 +291,7 @@ TEST_F(CodegenTest, TestKey) {
 TEST_F(CodegenTest, TestInts) {
   Schema ints;
   vector<size_t> part_cols = { kI32Col, kI32NullValCol, kI32NullCol };
-  ASSERT_OK(CreatePartialSchema(part_cols, &ints));
+  ASSERT_OK(CreatePartialSchema(defaults_, part_cols, &ints));
 
   TestProjection<true>(&ints);
   TestProjection<false>(&ints);
@@ -302,7 +301,7 @@ TEST_F(CodegenTest, TestInts) {
 TEST_F(CodegenTest, TestStrings) {
   Schema strs;
   vector<size_t> part_cols = { kStrCol, kStrNullValCol, kStrNullCol };
-  ASSERT_OK(CreatePartialSchema(part_cols, &strs));
+  ASSERT_OK(CreatePartialSchema(defaults_, part_cols, &strs));
 
   TestProjection<true>(&strs);
   TestProjection<false>(&strs);
@@ -312,7 +311,7 @@ TEST_F(CodegenTest, TestStrings) {
 TEST_F(CodegenTest, TestNonNullables) {
   Schema non_null;
   vector<size_t> part_cols = { kKeyCol, kI32Col, kStrCol };
-  ASSERT_OK(CreatePartialSchema(part_cols, &non_null));
+  ASSERT_OK(CreatePartialSchema(defaults_, part_cols, &non_null));
 
   TestProjection<true>(&non_null);
   TestProjection<false>(&non_null);
@@ -322,7 +321,7 @@ TEST_F(CodegenTest, TestNonNullables) {
 TEST_F(CodegenTest, TestNullables) {
   Schema nullables;
   vector<size_t> part_cols = { kI32NullValCol, kI32NullCol, kStrNullValCol, kStrNullCol };
-  ASSERT_OK(CreatePartialSchema(part_cols, &nullables));
+  ASSERT_OK(CreatePartialSchema(defaults_, part_cols, &nullables));
 
   TestProjection<true>(&nullables);
   TestProjection<false>(&nullables);
@@ -340,13 +339,13 @@ TEST_F(CodegenTest, TestDefaultsOnly) {
 
   // Default read projections
   vector<size_t> part_cols = { kI32RCol, kI32RWCol, kStrRCol, kStrRWCol };
-  ASSERT_OK(CreatePartialSchema(part_cols, &pure_defaults));
+  ASSERT_OK(CreatePartialSchema(defaults_, part_cols, &pure_defaults));
 
   TestProjection<true>(&pure_defaults);
 
   // Default write projections
   part_cols = { kI32RWCol, kStrRWCol };
-  ASSERT_OK(CreatePartialSchema(part_cols, &pure_defaults));
+  ASSERT_OK(CreatePartialSchema(defaults_, part_cols, &pure_defaults));
 
   TestProjection<false>(&pure_defaults);
 }
@@ -366,7 +365,7 @@ TEST_F(CodegenTest, TestFullSchemaWithDefaults) {
                                kStrNullCol,
                                kI32RWCol,
                                kStrRWCol };
-  ASSERT_OK(CreatePartialSchema(part_cols, &full_write));
+  ASSERT_OK(CreatePartialSchema(defaults_, part_cols, &full_write));
 
   TestProjection<false>(&full_write);
 }
@@ -380,7 +379,7 @@ TEST_F(CodegenTest, TestDumpMC) {
 
   Schema ints;
   vector<size_t> part_cols = { kI32Col, kI32NullValCol, kI32NullCol, kStrCol };
-  ASSERT_OK(CreatePartialSchema(part_cols, &ints));
+  ASSERT_OK(CreatePartialSchema(defaults_, part_cols, &ints));
   TestProjection<true>(&ints);
 
   const vector<string>& msgs = sink.logged_msgs();
@@ -409,7 +408,7 @@ TEST_F(CodegenTest, TestCodeCache) {
     do {
       SCOPED_TRACE(perm);
       Schema projection;
-      ASSERT_OK(CreatePartialSchema(perm, &projection));
+      ASSERT_OK(CreatePartialSchema(defaults_, perm, &projection));
 
       unique_ptr<CodegenRP> projector;
       if (cm->RequestRowProjector(&base_, &projection, &projector)) {
@@ -434,13 +433,21 @@ TEST_F(CodegenTest, TestCodeCache) {
   }
 }
 
-TEST_F(CodegenTest, MemConsumption) {
+class CodegenBenchmarkTest : public KuduTest {};
+
+TEST_F(CodegenBenchmarkTest, MemConsumption) {
+  vector<ColumnSchema> cols = {
+      ColumnSchema("day", INT32, false),
+        };
+
+  Schema base_schema(cols, 5);
+  base_schema = SchemaBuilder(base_schema).Build(); // add IDs
+
   Singleton<CompilationManager>::UnsafeReset();
   FLAGS_codegen_cache_capacity = 1;
   FLAGS_compilation_task_inject_latency_ms = 100;
   CompilationManager* cm = CompilationManager::GetSingleton();
 
-  // 内存会不断上涨
   for (size_t i = 0; i < FLAGS_mem_consumption_loop_count; i++) {
     KLOG_EVERY_N_SECS(WARNING, 5) << i;
     // Generate all permutations of the first four columns (24 permutations).
@@ -449,30 +456,12 @@ TEST_F(CodegenTest, MemConsumption) {
     do {
       SCOPED_TRACE(perm);
       Schema projection;
-      ASSERT_OK(CreatePartialSchema(perm, &projection));
+      ASSERT_OK(CreatePartialSchema(base_schema, perm, &projection));
 
       unique_ptr<CodegenRP> projector;
-      cm->RequestRowProjector(&base_, &projection, &projector);
-      SleepFor(MonoDelta::FromMicroseconds(5));
+      cm->RequestRowProjector(&base_schema, &projection, &projector);
     } while (std::next_permutation(perm.begin(), perm.end()));
-
-    // sleep 时内存并不会下降
-//    if (i % 100000 == 0) {
-//      LOG(INFO) << "begin sleep";
-//      SleepFor(MonoDelta::FromSeconds(60));
-//      LOG(INFO) << "end sleep";
-//    }
   }
-  LOG(INFO) << "out of loop";
-  // 此时内存也并不下降
-  SleepFor(MonoDelta::FromSeconds(120));
-  // 退出后，析构时内存开始下降. 即以下代码之后开始释放内存
-//  [       OK ] CodegenTest.MemConsumption (515693 ms)
-//  [----------] 1 test from CodegenTest (515815 ms total)
-//
-//  [----------] Global test environment tear-down
-//  [==========] 1 test from 1 test suite ran. (515815 ms total)
-//  [  PASSED  ] 1 test.
 }
 
 } // namespace kudu
