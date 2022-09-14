@@ -206,18 +206,18 @@ bool CompilationManager::RequestRowProjector(const Schema* base_schema,
     down_cast<RowProjectorFunctions*>(cache_.Lookup(key).get()));
 
   // If not cached, add a request to compilation pool
-  if (!cached) {
+//  if (!cached) {
 //    if (!pool_->QueueOverloaded(nullptr, nullptr)) {
-//      shared_ptr<CompilationTask> task(
-//          make_shared<CompilationTask>(*base_schema, *projection, &cache_, &generator_));
-//      WARN_NOT_OK_EVERY_N_SECS(pool_->Submit([task]() { task->Run(); }),
-//                               "RowProjector compilation request submit failed",
-//                               10);
+      shared_ptr<CompilationTask> task(
+          make_shared<CompilationTask>(*base_schema, *projection, &cache_, &generator_));
+      WARN_NOT_OK_EVERY_N_SECS(pool_->Submit([task]() { task->Run(); }),
+                               "RowProjector compilation request submit failed",
+                               10);
 //    } else {
 //      KLOG_EVERY_N_SECS(WARNING, 10) << "RowProjector compilation request rejected" << THROTTLE_MSG;
 //    }
-//    return false;
-  }
+    return false;
+//  }
 
   hit_counter_.Increment();
 
