@@ -9437,8 +9437,14 @@ TEST_P(ClientTestImmutableColumn, TestUpsert) {
 
   // Perform an UPSERT. This upsert will attemp to update an immutable column,
   // which will result an error.
-  Status s = ApplyUpsertToSession(session.get(), client_table_, 1, 4, "upserted row 3",
-                                  update_immu_col_to_null_ ? nullopt : optional<int>(999));
+  Status s;
+  if (update_immu_col_to_null_) {
+    s = ApplyUpsertToSession(session.get(), client_table_, 1, 4,
+                             "upserted row 3");
+  } else {
+    s = ApplyUpsertToSession(session.get(), client_table_, 1, 4,
+                             "upserted row 3", 999);
+  }
   ASSERT_TRUE(s.IsIOError()) << s.ToString();
   ASSERT_STR_CONTAINS(s.ToString(),
                       "failed to flush data: error details are available "

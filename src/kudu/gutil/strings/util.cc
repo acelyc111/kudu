@@ -688,8 +688,9 @@ char* strndup_with_new(const char* the_string, int max_length) {
     return nullptr;
 
   auto result = new char[max_length + 1];
-  result[max_length] = '\0';  // terminate the string because strncpy might not
-  return strncpy(result, the_string, max_length);
+  result[max_length] = '\0';  // terminate the string because memcpy might not
+  memcpy(result, the_string, max_length);
+  return result;
 }
 
 
