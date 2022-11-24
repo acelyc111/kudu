@@ -121,6 +121,8 @@ DEFINE_bool(ignore_nonexistent, false,
             "Whether to ignore non-existent tablet replicas when deleting: if "
             "set to 'true', the tool does not report an error if the requested "
             "tablet replica to remove is not found");
+DEFINE_bool(dump_comparable_key, true, "");
+DEFINE_bool(dump_min_max, false, "");
 DEFINE_string(src_fs_wal_dir, "",
               "Source: Directory with write-ahead logs.");
 DEFINE_string(src_fs_data_dirs, "",
@@ -208,6 +210,17 @@ constexpr const char* const kRaftPeersArgDesc =
 string Indent(int indent) {
   return string(indent, ' ');
 }
+
+string DecodeKey(const Schema& key_proj, const RowBlock& block, int index) {
+  faststring key;
+  if (FLAGS_dump_comparable_key) {
+    key_proj.EncodeComparableKey(block.row(index), &key);
+    return strings::b2a_hex(key.ToString());
+  } else {
+    return key_proj.DebugRowKey(block.row(index));
+  }
+}
+
 } // anonymous namespace
 
 class TabletCopier {
@@ -967,6 +980,7 @@ Status DumpRowSetInternal(const IOContext& ctx,
                                  &rs));
   vector<string> lines;
   if (FLAGS_dump_all_columns) {
+    // TODO(yingchun): limit the rows to dump
     RETURN_NOT_OK(rs->DebugDump(&lines));
   } else {
     Schema key_proj = rs_meta->tablet_schema()->CreateKeyProjection();
@@ -980,12 +994,29 @@ Status DumpRowSetInternal(const IOContext& ctx,
     RowBlockMemory mem(1024);
     RowBlock block(&key_proj, 100, &mem);
     faststring key;
+    bool min_dumped = false;
     while (it->HasNext()) {
       mem.Reset();
       RETURN_NOT_OK(it->NextBlock(&block));
-      for (int i = 0; i < block.nrows(); i++) {
-        key_proj.EncodeComparableKey(block.row(i), &key);
-        lines.emplace_back(strings::b2a_hex(key.ToString()));
+      if (FLAGS_dump_min_max) {
+        if (block.nrows() == 0 || min_dumped) {
+          // TODO(yingchun): is it possible?
+          continue;
+        }
+        lines.emplace_back(DecodeKey(key_proj, block, 0));
+        min_dumped = true;
+      } else {
+        for (int i = 0; i < block.nrows(); i++) {
+          // TODO(yingchun): limit the rows to dump, early break
+          lines.emplace_back(DecodeKey(key_proj, block, i));
+        }
+      }
+    }
+    if (FLAGS_dump_min_max) {
+      // 'block' is still valid after the previous loop.
+      if (block.nrows() > 0) {
+        // TODO(yingchun): what if the block is empty, is it possible?
+        lines.emplace_back(DecodeKey(key_proj, block, block.nrows() - 1));
       }
     }
   }
@@ -1037,6 +1068,7 @@ Status DumpRowSet(const RunnerContext& context) {
   size_t idx = 0;
   for (const auto& rs_meta : meta->rowsets())  {
     cout << endl << "Dumping rowset " << idx++ << endl << kSeparatorLine;
+    // TODO(yingchun): limit the rows to dump, early break
     RETURN_NOT_OK(DumpRowSetInternal(ctx, rs_meta, kIndent, &rows_left));
   }
   return Status::OK();
