@@ -457,6 +457,8 @@ build_glog() {
       -DBUILD_SHARED_LIBS=$SHARED \
       -DBUILD_TESTING=OFF \
       -DWITH_TLS=OFF \
+      -DWITH_GFLAGS=OFF \
+      -DWITH_GTEST=OFF \
       $EXTRA_CMAKE_FLAGS \
       $GLOG_SOURCE
     ${NINJA:-make} -j$PARALLEL $EXTRA_MAKEFLAGS install
