@@ -1072,6 +1072,7 @@ string RowToString(const RowBlockRow& row, const Mutation* redo_head, const Muta
 }
 
 string CompactionInputRowToString(const CompactionInputRow& input_row) {
+  // TODO(yingchun): undo_head: not needed, redo_head: need the last one only.
   if (input_row.previous_ghost == nullptr) {
     return RowToString(input_row.row, input_row.redo_head, input_row.undo_head);
   }
