@@ -657,7 +657,8 @@ ADD_KUDU_TEST(compression/compression-test)
 if(NOT NO_TESTS)
   target_link_libraries(compression-test
     cfile
-    kudu_util_compression)
+    kudu_util_compression
+    rocksdb)
 endif()
 
 #######################################
@@ -677,7 +678,9 @@ if(NOT NO_TESTS)
   target_link_libraries(jwt-util-test
     mini_oidc
     server_process
-    jwt_test_certs)
+    jwt_test_certs
+    rocksdb
+    lz4)
 endif()
 
 #######################################
