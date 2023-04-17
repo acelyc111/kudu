@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <functional>
 #include <iosfwd>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -30,11 +31,13 @@
 #include "kudu/client/scan_batch.h"
 #include "kudu/client/shared_ptr.h" // IWYU pragma: keep
 #include "kudu/client/write_op.h"
+#include "kudu/clock/hybrid_clock.h"
 #include "kudu/util/mutex.h"
 #include "kudu/util/status.h"
-#include "kudu/util/threadpool.h"
 
 namespace kudu {
+class ThreadPool;
+
 namespace tools {
 
 // This class is not thread-safe.
@@ -45,6 +48,8 @@ class TableScanner {
                std::optional<client::sp::shared_ptr<client::KuduClient>> dst_client =
                    std::nullopt,
                std::optional<std::string> dst_table_name = std::nullopt);
+
+  virtual ~TableScanner();
 
   // Set output stream of this tool, or disable output if not set.
   // 'out' must remain valid for the lifetime of this class.
@@ -86,6 +91,11 @@ class TableScanner {
       client::KuduClient::ReplicaSelection* selection);
 
   Status StartWork(WorkType work_type);
+  enum class ScanMode {
+    kBaseScan,
+    kDiffScan
+  };
+  Status InitScanners(WorkType work_type, ScanMode scan_mode);
   Status ScanData(const std::vector<client::KuduScanToken*>& tokens,
                   const std::function<Status(const client::KuduScanBatch& batch)>& cb);
   void ScanTask(const std::vector<client::KuduScanToken*>& tokens,
@@ -93,6 +103,11 @@ class TableScanner {
   void CopyTask(const std::vector<client::KuduScanToken*>& tokens,
                 Status* thread_status);
 
+  MetricRegistry metric_registry_;
+  scoped_refptr<MetricEntity> metric_entity_;
+
+  clock::HybridClock clock_;
+  uint64_t last_scan_ts_;
   std::atomic<uint64_t> total_count_;
   std::optional<client::KuduScanner::ReadMode> mode_;
   client::sp::shared_ptr<client::KuduClient> client_;
@@ -101,6 +116,11 @@ class TableScanner {
   std::optional<client::sp::shared_ptr<client::KuduClient>> dst_client_;
   std::optional<std::string> dst_table_name_;
   int32_t scan_batch_size_;
+
+  client::sp::shared_ptr<client::KuduTable> src_table_;
+  std::vector<client::KuduScanToken*> all_tokens_;
+  const int num_threads_;
+  std::map<int, std::vector<client::KuduScanToken*>> thread_tokens_;
   std::unique_ptr<ThreadPool> thread_pool_;
 
   // Protects output to 'out_' so that rows don't get interleaved.
