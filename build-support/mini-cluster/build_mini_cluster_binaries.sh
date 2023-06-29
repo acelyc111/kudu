@@ -84,6 +84,17 @@ if [ -d "$BUILD_ROOT" ]; then
   fi
 fi
 
+MACOS=""
+# TODO(mpercy): What's a better way to detect macOS?
+if [ $(uname) == "Darwin" ]; then
+  MACOS=1
+fi
+
+if [ -n "$MACOS" ]; then
+  export EXTRA_CFLAGS="-mmacosx-version-min=10.13 $EXTRA_CFLAGS"
+  export EXTRA_CXXFLAGS="-mmacosx-version-min=10.13 $EXTRA_CXXFLAGS"
+fi
+
 THIRDPARTY_DIR=${THIRDPARTY_DIR:-$SOURCE_ROOT/thirdparty}
 cd $SOURCE_ROOT
 if [ -n "$NO_REBUILD_THIRDPARTY" ]; then
@@ -97,16 +108,11 @@ fi
 mkdir -p $BUILD_ROOT
 cd $BUILD_ROOT
 
-MACOS=""
-# TODO(mpercy): What's a better way to detect macOS?
-if [ $(uname) == "Darwin" ]; then
-  MACOS=1
-fi
-
 EXTRA_CMAKE_FLAGS=""
 if [ -n "$MACOS" ]; then
   # TODO(mpercy): Consider using pkg-config to support building with MacPorts.
-  EXTRA_CMAKE_FLAGS="$EXTRA_CMAKE_FLAGS -DOPENSSL_ROOT_DIR=/usr/local/opt/openssl"
+  EXTRA_CMAKE_FLAGS="$EXTRA_CMAKE_FLAGS -DOPENSSL_ROOT_DIR=/usr/local/opt/openssl
+    -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13"
   # TODO(mpercy): Is it even possible to build Kudu with gcc/g++ on macOS?
   export CC=clang
   export CXX=clang++
