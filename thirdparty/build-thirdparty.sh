@@ -107,6 +107,19 @@ fi
 
 ################################################################################
 
+# Return 0 if the current system appears to be el6 (either CentOS or proper RHEL)
+needs_openssl_workaround() {
+  test -f /etc/redhat-release || return 1
+  rel="$(cat /etc/redhat-release)"
+  pat="(CentOS|Red Hat Enterprise).* release 6.*"
+  [[ "$rel" =~ $pat ]]
+  return $?
+}
+if needs_openssl_workaround && [ ! -d "$OPENSSL_WORKAROUND_DIR" ] ; then
+  echo It's not support building Kudu on el6.
+  return
+fi
+
 finish() {
   # Run the post-flight checks.
   $TP_DIR/postflight.py

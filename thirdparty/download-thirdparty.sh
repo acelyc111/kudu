@@ -361,19 +361,6 @@ fetch_and_patch \
  $BOOST_PATCHLEVEL \
  "patch -p0 < $TP_DIR/patches/boost-issue-12179-fix-compilation-errors.patch"
 
-# Return 0 if the current system appears to be el6 (either CentOS or proper RHEL)
-needs_openssl_workaround() {
-  test -f /etc/redhat-release || return 1
-  rel="$(cat /etc/redhat-release)"
-  pat="(CentOS|Red Hat Enterprise).* release 6.*"
-  [[ "$rel" =~ $pat ]]
-  return $?
-}
-if needs_openssl_workaround && [ ! -d "$OPENSSL_WORKAROUND_DIR" ] ; then
-  echo Building on el6: installing OpenSSL from CentOS 6.4.
-  $TP_DIR/install-openssl-el6-workaround.sh
-fi
-
 BREAKPAD_PATCHLEVEL=1
 fetch_and_patch \
  breakpad-${BREAKPAD_VERSION}.tar.gz \
