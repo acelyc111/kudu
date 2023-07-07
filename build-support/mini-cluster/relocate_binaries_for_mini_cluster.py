@@ -111,12 +111,20 @@ PAT_MACOS_LIB_EXCLUDE = re.compile(r"""(AppleFSCompression$|
                                        )""",
                                        re.VERBOSE)
 
+# Since macOS 11, libraries in this list are no longer present on the filesystem, we have to copy
+# the files from the thirdparty directory.
+# https://developer.apple.com/documentation/macos-release-notes/macos-big-sur-11_0_1-release-notes#Kernel
+PAT_MACOS_LIB_FROM_THIRDPARTY = re.compile(r"""(libc\+\+abi\.dylib
+                                               )""",
+                                           re.VERBOSE)
+
 # Config keys.
 BUILD_ROOT = 'build_root'
 BUILD_BIN_DIR = 'build_bin_dir'
 ARTIFACT_ROOT = 'artifact_root'
 ARTIFACT_BIN_DIR = 'artifact_bin_dir'
 ARTIFACT_LIB_DIR = 'artifact_lib_dir'
+THIRDPARTY_DIR = 'thirdparty_dir'
 
 IS_MACOS = os.uname()[0] == "Darwin"
 IS_LINUX = os.uname()[0] == "Linux"
@@ -261,13 +269,14 @@ def get_artifact_name():
   artifact_name = "kudu-binary-%s-%s-%s" % (version, os_str, arch)
   return artifact_name
 
-def mkconfig(build_root, artifact_root):
+def mkconfig(build_root, thirdparty_dir, artifact_root):
   """
   Build a configuration map for convenient plumbing of path information.
   """
   config = {}
   config[BUILD_ROOT] = build_root
   config[BUILD_BIN_DIR] = os.path.join(build_root, "bin")
+  config[THIRDPARTY_DIR] = os.path.join(thirdparty_dir, "installed/uninstrumented/lib")
   config[ARTIFACT_ROOT] = artifact_root
   config[ARTIFACT_BIN_DIR] = os.path.join(artifact_root, "bin")
   config[ARTIFACT_LIB_DIR] = os.path.join(artifact_root, "lib")
@@ -373,6 +382,7 @@ def relocate_dep_path_macos(target_dst, dep_search_name):
   modified_search_name = re.sub('^.*/', '@rpath/', dep_search_name)
   subprocess.check_call(['install_name_tool', '-change',
                         dep_search_name, modified_search_name, target_dst])
+  print("Relocated %s to %s" % (dep_search_name, modified_search_name))
 
 def relocate_deps_macos(target_src, target_dst, config):
   """
@@ -392,6 +402,13 @@ def relocate_deps_macos(target_src, target_dst, config):
     if PAT_MACOS_LIB_EXCLUDE.search(dep_search_name):
       continue
 
+    if PAT_MACOS_LIB_FROM_THIRDPARTY.search(dep_src):
+      # Change the dependency path to the thirdparty path, the original path is not
+      # able to be copied from.
+      copy_dep_src = os.path.join(config[THIRDPARTY_DIR], os.path.basename(dep_src))
+    else:
+      copy_dep_src = dep_src
+
     # Change the search path of the specified dep in 'target_dst'.
     relocate_dep_path_macos(target_dst, dep_search_name)
 
@@ -399,8 +416,8 @@ def relocate_deps_macos(target_src, target_dst, config):
     dep_dst = os.path.join(config[ARTIFACT_LIB_DIR], os.path.basename(dep_src))
     if not os.path.isfile(dep_dst):
       # Recursively copy and relocate library dependencies as they are found.
-      copy_file(dep_src, dep_dst)
-      relocate_deps_macos(dep_src, dep_dst, config)
+      copy_file(copy_dep_src, dep_dst)
+      relocate_deps_macos(copy_dep_src, dep_dst, config)
 
 def relocate_deps(target_src, target_dst, config):
   """
@@ -459,13 +476,14 @@ def relocate_sasl2(target_src, config):
   return True
 
 def main():
-  if len(sys.argv) < 3:
-    print("Usage: %s kudu_build_dir target [target ...]" % (sys.argv[0], ))
+  if len(sys.argv) < 4:
+    print("Usage: %s kudu_build_dir thirdparty_dir target [target ...]" % (sys.argv[0], ))
     sys.exit(1)
 
   # Command-line arguments.
   build_root = sys.argv[1]
-  targets = sys.argv[2:]
+  thirdparty_dir = sys.argv[2]
+  targets = sys.argv[3:]
 
   init_logging()
 
@@ -475,7 +493,7 @@ def main():
 
   artifact_name = get_artifact_name()
   artifact_root = os.path.join(build_root, artifact_name)
-  config = mkconfig(build_root, artifact_root)
+  config = mkconfig(build_root, thirdparty_dir, artifact_root)
 
   # Clear the artifact root to ensure a clean build.
   if os.path.exists(artifact_root):

@@ -112,7 +112,7 @@ if [ -n "$MACOS" ]; then
   export CXX=clang++
 fi
 
-rm -rf CMakeCache.txt CMakeFiles
+#rm -rf CMakeCache.txt CMakeFiles
 
 # We want a fast build with a small total output size, so we need to build in
 # release mode with dynamic linking so that all of the target executables can
@@ -121,17 +121,17 @@ rm -rf CMakeCache.txt CMakeFiles
 # the test harness is built to not rely on chronyd as NTP server for tests run
 # with the mini-cluster.
 echo Configuring Kudu... >&2
-$SOURCE_ROOT/build-support/enable_devtoolset.sh \
-  $THIRDPARTY_DIR/installed/common/bin/cmake ../.. \
-  -DNO_TESTS=1 -DNO_CHRONY=1 \
-  -DCMAKE_BUILD_TYPE=RELEASE -DKUDU_LINK=dynamic $EXTRA_CMAKE_FLAGS
+#$SOURCE_ROOT/build-support/enable_devtoolset.sh \
+#  $THIRDPARTY_DIR/installed/common/bin/cmake ../.. \
+#  -DNO_TESTS=1 -DNO_CHRONY=1 \
+#  -DCMAKE_BUILD_TYPE=RELEASE -DKUDU_LINK=dynamic $EXTRA_CMAKE_FLAGS
 
 echo Building Kudu... >&2
 NUM_PROCS=$(getconf _NPROCESSORS_ONLN)
 make -j$NUM_PROCS $TARGETS
 
 # Relocate the binaries.
-$MINI_CLUSTER_SRCDIR/relocate_binaries_for_mini_cluster.py $BUILD_ROOT $TARGETS
+$MINI_CLUSTER_SRCDIR/relocate_binaries_for_mini_cluster.py $BUILD_ROOT $THIRDPARTY_DIR $TARGETS
 
 ARTIFACT_NAME="$(ls -dF kudu-binary-* | egrep '.*/$' | sed 's#/##')"
 if [ $(echo $ARTIFACT_NAME | wc -w) -ne 1 ]; then
