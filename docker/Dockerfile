@@ -43,7 +43,7 @@ COPY ./LICENSE.txt /NOTICES/LICENSE.txt
 COPY ./NOTICE.txt /NOTICES/NOTICE.txt
 
 COPY ./docker/bootstrap-runtime-env.sh /
-RUN ./bootstrap-runtime-env.sh && rm bootstrap-runtime-env.sh
+RUN /bootstrap-runtime-env.sh && rm /bootstrap-runtime-env.sh
 
 # Common label arguments.
 # VCS_REF is not specified to improve docker caching.
@@ -81,12 +81,12 @@ COPY ./NOTICE.txt /NOTICES/NOTICE.txt
 COPY ./docker/bootstrap-dev-env.sh /
 COPY ./docker/bootstrap-java-env.sh /
 COPY ./docker/bootstrap-python-env.sh /
-RUN ./bootstrap-dev-env.sh \
-  && ./bootstrap-java-env.sh \
-  && ./bootstrap-python-env.sh \
-  && rm bootstrap-dev-env.sh \
-  && rm bootstrap-java-env.sh \
-  && rm bootstrap-python-env.sh
+RUN /bootstrap-dev-env.sh \
+  && /bootstrap-java-env.sh \
+  && /bootstrap-python-env.sh \
+  && rm /bootstrap-dev-env.sh \
+  && rm /bootstrap-java-env.sh \
+  && rm /bootstrap-python-env.sh
 
 ENV PATH /usr/lib/ccache:/usr/lib64/ccache/:$PATH
 
@@ -306,8 +306,8 @@ RUN groupadd -g ${GID} kudu || groupmod -n kudu $(getent group ${GID} | cut -d: 
     && mkdir -p ${INSTALL_DIR} && chown -R kudu:kudu ${INSTALL_DIR}
 
 COPY ./docker/bootstrap-python-env.sh /
-RUN ./bootstrap-python-env.sh \
-  && rm bootstrap-python-env.sh
+RUN /bootstrap-python-env.sh \
+  && rm /bootstrap-python-env.sh
 
 # Install as the kudu user.
 USER kudu
@@ -419,8 +419,8 @@ SHELL ["/bin/bash", "-c"]
 
 # Install Maven.
 COPY ./docker/bootstrap-maven-env.sh /
-RUN ./bootstrap-maven-env.sh \
-  && rm bootstrap-maven-env.sh
+RUN /bootstrap-maven-env.sh \
+  && rm /bootstrap-maven-env.sh
 
 WORKDIR /impala
 
