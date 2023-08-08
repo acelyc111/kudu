@@ -74,19 +74,16 @@ add_custom_command(OUTPUT ${HMS_PLUGIN_JAR}
   DEPENDS proto_jar)
 add_custom_target(hms_plugin_jar DEPENDS ${HMS_PLUGIN_JAR})
 
-if (NOT NO_TESTS)
-  # The mini_hms library is used only for tests.
-  set(MINI_HMS_SRCS
-    mini_hms.cc)
+set(MINI_HMS_SRCS
+  mini_hms.cc)
 
-  add_library(mini_hms ${MINI_HMS_SRCS})
-  target_link_libraries(mini_hms
-    gutil
-    krpc
-    kudu_test_util
-    kudu_util)
-  add_dependencies(mini_hms hms_plugin_jar)
-endif()
+add_library(mini_hms ${MINI_HMS_SRCS})
+target_link_libraries(mini_hms
+  gutil
+  krpc
+  kudu_test_util
+  kudu_util)
+add_dependencies(mini_hms hms_plugin_jar)
 
 #########################################
 # Unit tests

@@ -114,15 +114,12 @@ set(KUDU_CLI_TOOL_SRCS
   tool_action_remote_replica.cc
   tool_action_table.cc
   tool_action_tablet.cc
+  tool_action_test.cc
   tool_action_tserver.cc
   tool_action_txn.cc
   tool_action_wal.cc
   tool_main.cc
 )
-
-if(NOT NO_TESTS)
-  set(KUDU_CLI_TOOL_SRCS ${KUDU_CLI_TOOL_SRCS} tool_action_test.cc)
-endif()
 
 add_executable(kudu ${KUDU_CLI_TOOL_SRCS})
 
@@ -142,15 +139,14 @@ set(KUDU_CLI_TOOL_LINK_LIBS
   kudu_util
   log
   master
+  mini_cluster
   tablet
   tool_proto
   transactions
   tserver
   ${KUDU_BASE_LIBS}
 )
-if(NOT NO_TESTS)
-  set(KUDU_CLI_TOOL_LINK_LIBS ${KUDU_CLI_TOOL_LINK_LIBS} mini_cluster)
-endif()
+
 target_link_libraries(kudu ${KUDU_CLI_TOOL_LINK_LIBS})
 
 option(KUDU_CLIENT_INSTALL "Whether to install the Kudu command line tool" ON)

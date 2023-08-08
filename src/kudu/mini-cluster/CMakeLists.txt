@@ -15,11 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# The mini-cluster is used only for testing.
-if(NO_TESTS)
-  return()
-endif()
-
 set(MINI_CLUSTER_SRCS
   external_mini_cluster.cc
   internal_mini_cluster.cc

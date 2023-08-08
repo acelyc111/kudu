@@ -72,9 +72,7 @@ set(MASTER_SRCS
   txn_manager.cc
   txn_manager_service.cc)
 
-if(NOT NO_TESTS)
-  set(MASTER_SRCS ${MASTER_SRCS} mini_master.cc)
-endif()
+set(MASTER_SRCS ${MASTER_SRCS} mini_master.cc)
 
 add_library(master ${MASTER_SRCS})
 target_link_libraries(master

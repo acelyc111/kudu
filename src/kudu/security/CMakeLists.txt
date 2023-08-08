@@ -99,16 +99,13 @@ ADD_EXPORTABLE_LIBRARY(security
 # mini_kdc
 ##############################
 
-if (NOT NO_TESTS)
-  # The mini_kdc is used only in tests.
-  set(MINI_KDC_SRCS test/mini_kdc.cc)
+set(MINI_KDC_SRCS test/mini_kdc.cc)
 
-  add_library(mini_kdc ${MINI_KDC_SRCS})
-  target_link_libraries(mini_kdc
-    gutil
-    kudu_test_util
-    kudu_util)
-endif()
+add_library(mini_kdc ${MINI_KDC_SRCS})
+target_link_libraries(mini_kdc
+  gutil
+  kudu_test_util
+  kudu_util)
 
 ##############################
 # security_test_util

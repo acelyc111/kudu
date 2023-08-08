@@ -118,9 +118,7 @@ set(TSERVER_SRCS
   tserver_path_handlers.cc
 )
 
-if(NOT NO_TESTS)
-  set(TSERVER_SRCS ${TSERVER_SRCS} mini_tablet_server.cc)
-endif()
+set(TSERVER_SRCS ${TSERVER_SRCS} mini_tablet_server.cc)
 
 add_library(tserver ${TSERVER_SRCS})
 target_link_libraries(tserver

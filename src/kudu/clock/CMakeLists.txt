@@ -41,12 +41,6 @@ target_link_libraries(clock
 # mini_chronyd
 ##############################
 
-# The mini_chronyd is used only for tests, and corresponding tests for this
-# module below are skipped if NO_TEST=1.
-if(NO_TESTS)
-  return()
-endif()
-
 if (NOT NO_CHRONY)
   # Link the chrony binaries so that they can be found via
   # MiniChronyd::GetPath in MiniChronyd::Start.
@@ -61,10 +55,16 @@ if (NOT NO_CHRONY)
 
   add_library(mini_chronyd ${MINI_CHRONYD_SRCS})
   target_link_libraries(mini_chronyd
-    gutil
-    kudu_test_util
-    kudu_util)
+     gutil
+     kudu_test_util
+     kudu_util)
+endif()
 
+if(NO_TESTS)
+  return()
+endif()
+
+if (NOT NO_CHRONY)
   set(MINI_CHRONYD_TEST_UTIL_SRCS test/mini_chronyd_test_util.cc)
   add_library(mini_chronyd_test_util ${MINI_CHRONYD_TEST_UTIL_SRCS})
   target_link_libraries(mini_chronyd_test_util

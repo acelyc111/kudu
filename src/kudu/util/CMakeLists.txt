@@ -378,24 +378,20 @@ target_link_libraries(kudu_jwt_util
 #######################################
 # mini_oidc
 #######################################
-if(NOT NO_TESTS)
-  add_library(mini_oidc mini_oidc.cc)
-  target_link_libraries(mini_oidc
-    server_process
-    gutil
-    kudu_test_util
-    kudu_util
-    jwt_test_certs)
-endif()
+add_library(mini_oidc mini_oidc.cc)
+target_link_libraries(mini_oidc
+  server_process
+  gutil
+  kudu_test_util
+  kudu_util
+  jwt_test_certs)
 
 #######################################
 # jwt_test_certs
 #######################################
-if(NOT NO_TESTS)
-  add_library(jwt_test_certs jwt_test_certs.cc)
-  target_link_libraries(jwt_test_certs
-    kudu_jwt_util)
-endif()
+add_library(jwt_test_certs jwt_test_certs.cc)
+target_link_libraries(jwt_test_certs
+  kudu_jwt_util)
 
 # See the comment in sanitizer_options.cc for details on this library's usage.
 # The top-level CMakeLists sets a ${SANITIZER_OPTIONS_OVERRIDE} variable which
@@ -430,17 +426,14 @@ target_link_libraries(protoc-gen-insertions gutil protobuf protoc ${KUDU_BASE_LI
 #######################################
 # kudu_test_util
 #######################################
-if(NOT NO_TESTS)
-  # The kudu_test_util is needed only for testing.
-  add_library(kudu_test_util
-    test_util.cc)
-  target_link_libraries(kudu_test_util
-    gflags
-    glog
-    gmock
-    gtest
-    kudu_util)
-endif()
+add_library(kudu_test_util
+  test_util.cc)
+target_link_libraries(kudu_test_util
+  gflags
+  glog
+  gmock
+  gtest
+  kudu_util)
 
 #######################################
 # kudu_test_main

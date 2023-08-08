@@ -15,12 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# The mini_postgres is used only for tests, and its tests are disabled
-# if NO_TESTS=1 is set.
-if(NO_TESTS)
-  return()
-endif()
-
 #######################################
 # mini_postgres
 #######################################
