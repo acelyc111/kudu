@@ -72,6 +72,10 @@
 #include "kudu/util/slice.h"
 #include "kudu/util/status.h"
 
+DEFINE_string(new_kafka_uri,
+              "",
+              "New kafka uri");
+
 using google::protobuf::Descriptor;
 using google::protobuf::DescriptorPool;
 using google::protobuf::DynamicMessageFactory;
@@ -1011,6 +1015,21 @@ Status ReadablePBContainerFile::Dump(ostream* os, ReadablePBContainerFile::Forma
         const auto& google_status = google::protobuf::util::MessageToJsonString(*msg, &buf, opt);
         if (!google_status.ok()) {
           return Status::RuntimeError("could not convert PB to JSON", google_status.ToString());
+        }
+
+        // duplication kafka uri 是唯一的"uri: "字样出现的地方
+        static string kUriTag = "uri\": \"";
+        static auto kUriOffset = kUriTag.size();
+        // 找到uri开头的位置
+        auto uri_begin = buf.find(kUriTag);
+        if (uri_begin != string::npos && uri_begin + kUriOffset < buf.size()) {
+          uri_begin += kUriOffset;
+          // 找到uri结尾的位置
+          auto uri_end = buf.find("\"", uri_begin);
+          if (uri_end != string::npos) {
+            // 将内容替换
+            buf.replace(uri_begin, uri_end - uri_begin, FLAGS_new_kafka_uri);
+          }
         }
         *os << buf << endl;
         break;
