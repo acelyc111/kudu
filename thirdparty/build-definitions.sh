@@ -759,7 +759,6 @@ build_curl() {
     --without-libpsl \
     --without-librtmp \
     --without-libssh2 \
-    --without-nghttp2 \
     --with-gssapi
   unset KRB5CONFIG
   make -j$PARALLEL $EXTRA_MAKEFLAGS install
