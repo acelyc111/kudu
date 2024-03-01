@@ -682,7 +682,7 @@ if(NOT NO_TESTS)
     server_process
     jwt_test_certs
     rocksdb
-    lz4)
+    snappy)
 endif()
 
 #######################################
