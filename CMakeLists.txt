@@ -1077,9 +1077,7 @@ ADD_THIRDPARTY_LIB(libev
 ## LZ4
 find_package(Lz4 REQUIRED)
 include_directories(SYSTEM ${LZ4_INCLUDE_DIR})
-ADD_THIRDPARTY_LIB(lz4
-  STATIC_LIB "${LZ4_STATIC_LIB}"
-  SHARED_LIB "${LZ4_SHARED_LIB}")
+ADD_THIRDPARTY_LIB(lz4 STATIC_LIB "${LZ4_STATIC_LIB}")
 
 ## Bitshuffle
 find_package(Bitshuffle REQUIRED)
