@@ -15,7 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# - Find LZ4 (lz4.h, liblz4.a)
+# - Find LZ4 (lz4.h, liblz4.a, liblz4.so or liblz4.dylib)
 # This module defines
 #  LZ4_INCLUDE_DIR, directory containing headers
 #  LZ4_STATIC_LIB, path to liblz4's static library
@@ -29,6 +29,18 @@ find_library(LZ4_STATIC_LIB liblz4.a
   NO_CMAKE_SYSTEM_PATH
   NO_SYSTEM_ENVIRONMENT_PATH)
 
+set(__CURRENT_FIND_LIBRARY_SUFFIXES ${CMAKE_FIND_LIBRARY_SUFFIXES})
+if (APPLE)
+    set(CMAKE_FIND_LIBRARY_SUFFIXES ".dylib")
+else()
+    set(CMAKE_FIND_LIBRARY_SUFFIXES ".so")
+endif()
+find_library(LZ4_SHARED_LIB lz4
+  NO_CMAKE_SYSTEM_PATH
+  NO_SYSTEM_ENVIRONMENT_PATH)
+set(CMAKE_FIND_LIBRARY_SUFFIXES ${__CURRENT_FIND_LIBRARY_SUFFIXES})
+unset(__CURRENT_FIND_LIBRARY_SUFFIXES)
+
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(Lz4 REQUIRED_VARS
-  LZ4_STATIC_LIB LZ4_INCLUDE_DIR)
+  LZ4_SHARED_LIB LZ4_STATIC_LIB LZ4_INCLUDE_DIR)
