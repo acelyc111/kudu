@@ -1210,7 +1210,8 @@ build_rocksdb() {
     -DWITH_LIBURING=OFF \
     -DWITH_ZSTD=OFF \
     -DWITH_BZ2=OFF \
-    -DWITH_LZ4=OFF \
+    -DWITH_LZ4=ON \
+    -Dlz4_ROOT_DIR=$PREFIX \
     -DWITH_TESTS=OFF \
     -DWITH_GFLAGS=OFF \
     -DCMAKE_BUILD_TYPE=release \
