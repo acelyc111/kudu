@@ -684,31 +684,31 @@ Status DirManager::Open() {
   // All instances are present and accounted for. Time to create the in-memory
   // directory structures.
   vector<unique_ptr<Dir>> dirs;
-  for (int i = 0; i < loaded_instances.size(); i++) {
-    auto& instance = loaded_instances[i];
-    const string dir = instance->dir();
+  for (auto& instance : loaded_instances) {
+    if (!instance->healthy()) {
+      continue;
+    }
 
     // Figure out what filesystem the directory is on.
     FsType fs_type = FsType::OTHER;
-    if (instance->healthy()) {
-      bool result = false;
-      Status fs_check = env_->IsOnExtFilesystem(dir, &result);
-      if (fs_check.ok()) {
-        if (result) {
-          fs_type = FsType::EXT;
-        } else {
-          fs_check = env_->IsOnXfsFilesystem(dir, &result);
-          if (fs_check.ok() && result) {
-            fs_type = FsType::XFS;
-          }
+    const string dir = instance->dir();
+    bool result = false;
+    Status fs_check = env_->IsOnExtFilesystem(dir, &result);
+    if (fs_check.ok()) {
+      if (result) {
+        fs_type = FsType::EXT;
+      } else {
+        fs_check = env_->IsOnXfsFilesystem(dir, &result);
+        if (fs_check.ok() && result) {
+          fs_type = FsType::XFS;
         }
       }
-      // If we hit a disk error, consider the directory failed.
-      if (PREDICT_FALSE(fs_check.IsDiskFailure())) {
-        instance->SetInstanceFailed(fs_check.CloneAndPrepend("failed to check FS type"));
-      } else {
-        RETURN_NOT_OK(fs_check);
-      }
+    }
+    // If we hit a disk error, consider the directory failed.
+    if (PREDICT_FALSE(fs_check.IsDiskFailure())) {
+      instance->SetInstanceFailed(fs_check.CloneAndPrepend("failed to check FS type"));
+    } else {
+      RETURN_NOT_OK(fs_check);
     }
 
     // Create a per-dir thread pool.
