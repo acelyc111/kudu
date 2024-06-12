@@ -386,6 +386,8 @@ DEFINE_bool(txn_rollback, false,
             "the inserted rows. Setting --txn_rollback=true implies setting "
             "--txn_start=true as well.");
 
+DECLARE_bool(diff_scan_interval_ms);
+DECLARE_bool(enable_diff_scan);
 DECLARE_bool(show_values);
 DECLARE_int32(num_threads);
 DECLARE_int32(scan_batch_size);
@@ -1079,6 +1081,8 @@ unique_ptr<Mode> BuildPerfMode() {
           "or whether there is a long latency tail when scanning different tables.")
       .AddRequiredParameter({ kTableNameArg, "Name of the table to scan"})
       .AddOptionalParameter("columns")
+      .AddOptionalParameter("diff_scan_interval_ms")
+      .AddOptionalParameter("enable_diff_scan")
       .AddOptionalParameter("row_count_only")
       .AddOptionalParameter("report_scanner_stats")
       .AddOptionalParameter("scan_batch_size")

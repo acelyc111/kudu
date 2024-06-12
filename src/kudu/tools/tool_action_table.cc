@@ -214,6 +214,8 @@ DECLARE_bool(fault_tolerant);
 DECLARE_int32(create_table_replication_factor);
 DECLARE_bool(row_count_only);
 DECLARE_bool(show_scanner_stats);
+DECLARE_bool(diff_scan_interval_ms);
+DECLARE_bool(enable_diff_scan);
 
 DEFINE_string(encoding_type, "AUTO_ENCODING",
               "Type of encoding for the column including AUTO_ENCODING, PLAIN_ENCODING, "
@@ -1933,6 +1935,8 @@ unique_ptr<Mode> BuildTableMode() {
                         "for the --predicates flag on how predicates can be specified.")
       .AddRequiredParameter({ kTableNameArg, "Name of the table to scan"})
       .AddOptionalParameter("columns")
+      .AddOptionalParameter("diff_scan_interval_ms")
+      .AddOptionalParameter("enable_diff_scan")
       .AddOptionalParameter("row_count_only")
       .AddOptionalParameter("report_scanner_stats")
       .AddOptionalParameter("scan_batch_size")
