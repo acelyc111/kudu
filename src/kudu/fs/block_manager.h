@@ -200,7 +200,11 @@ class BlockManager : public RefCountedThreadSafe<BlockManager> {
   // Lists the available block manager types.
   static std::vector<std::string> block_manager_types() {
 #if defined(__linux__)
+#if !defined(NO_ROCKSDB)
     return { "file", "log", "logr" };
+#else
+    return { "file", "log" };
+#endif
 #else
     return { "file" };
 #endif

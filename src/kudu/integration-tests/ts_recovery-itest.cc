@@ -243,7 +243,11 @@ TEST_P(TsRecoveryITest, TestTabletRecoveryAfterSegmentDelete) {
 // Test for KUDU-2202 that ensures that blocks not found in the FS layer but
 // that are referenced by a tablet will not be reused.
 TEST_P(TsRecoveryITest, TestNoBlockIDReuseIfMissingBlocks) {
-  if (FLAGS_block_manager != "log" && FLAGS_block_manager != "logr") {
+  if (FLAGS_block_manager != "log"
+#if !defined(NO_ROCKSDB)
+      && FLAGS_block_manager != "logr"
+#endif
+      ) {
     GTEST_SKIP() << "Missing blocks is currently only supported by the log "
                     "block manager. Exiting early!";
   }

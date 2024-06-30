@@ -32,12 +32,14 @@
 
 #include <gflags/gflags_declare.h>
 #include <glog/logging.h>
+#if !defined(NO_ROCKSDB)
 #include <rocksdb/cache.h>
 #include <rocksdb/filter_policy.h>
 #include <rocksdb/options.h>
 #include <rocksdb/slice_transform.h>
 #include <rocksdb/status.h>
 #include <rocksdb/table.h>
+#endif
 
 #include "kudu/fs/dir_util.h"
 #include "kudu/fs/fs.pb.h"
@@ -72,7 +74,7 @@ DECLARE_int64(fs_data_dirs_reserved_bytes);
 DECLARE_string(block_manager);
 
 namespace kudu {
-
+#if !defined(NO_ROCKSDB)
 Status FromRdbStatus(const rocksdb::Status& s) {
   switch (s.code()) {
     case rocksdb::Status::kOk:
@@ -95,7 +97,7 @@ Status FromRdbStatus(const rocksdb::Status& s) {
       return Status::RuntimeError(s.ToString());
   }
 }
-
+#endif
 namespace {
 
 // Wrapper for env_util::DeleteTmpFilesRecursively that is suitable for parallel
@@ -205,6 +207,7 @@ int Dir::reserved_bytes() {
   return FLAGS_fs_data_dirs_reserved_bytes;
 }
 
+#if !defined(NO_ROCKSDB)
 shared_ptr<rocksdb::Cache> RdbDir::s_block_cache_;
 RdbDir::RdbDir(Env* env, DirMetrics* metrics,
                FsType fs_type,
@@ -323,6 +326,7 @@ rocksdb::DB* RdbDir::rdb() {
   DCHECK(db_);
   return db_.get();
 }
+#endif
 
 DirManagerOptions::DirManagerOptions(string dir_type,
                                      string tid)

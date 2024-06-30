@@ -39,8 +39,10 @@
 #include <glog/logging.h>
 #include <glog/stl_logging.h>
 #include <gtest/gtest.h>
+#if !defined(NO_ROCKSDB)
 #include <rocksdb/db.h>
 #include <rocksdb/options.h>
+#endif
 
 #include "kudu/fs/block_manager.h"
 #include "kudu/fs/data_dirs.h"
@@ -229,14 +231,18 @@ INSTANTIATE_TEST_SUITE_P(BlockManagerTypes, FsManagerTestBase,
 //    ::testing::ValuesIn(BlockManager::block_manager_types()),
 //    ::testing::ValuesIn(kEncryptionType))
     ::testing::Values(
-    make_tuple("file", kEncryptionType[0]),
-    make_tuple("file", kEncryptionType[1]),
-    make_tuple("file", kEncryptionType[2]),
-    make_tuple("log", kEncryptionType[0]),
-    make_tuple("log", kEncryptionType[1]),
-    make_tuple("log", kEncryptionType[2]),
-    make_tuple("logr", kEncryptionType[0]),
-    make_tuple("logr", kEncryptionType[1])));
+      make_tuple("file", kEncryptionType[0]),
+      make_tuple("file", kEncryptionType[1]),
+      make_tuple("file", kEncryptionType[2]),
+      make_tuple("log", kEncryptionType[0]),
+      make_tuple("log", kEncryptionType[1]),
+#if !defined(NO_ROCKSDB)
+      make_tuple("log", kEncryptionType[2]),
+      make_tuple("logr", kEncryptionType[0]),
+      make_tuple("logr", kEncryptionType[1])));
+#else
+      make_tuple("log", kEncryptionType[2])));
+#endif
 
 TEST_P(FsManagerTestBase, TestBaseOperations) {
   fs_manager()->DumpFileSystemTree(std::cout, tenant_id());
@@ -1406,6 +1412,7 @@ TEST_P(FsManagerTestBase, TestFailToStartWithoutEncryptionKeys) {
   ASSERT_TRUE(fs_manager()->Open().IsIllegalState());
 }
 
+#if !defined(NO_ROCKSDB)
 TEST_P(FsManagerTestBase, TestOpenDirectoryWithRdbMissing) {
   if (FLAGS_block_manager != "logr") {
     GTEST_SKIP() << "Skipping 'logr'-specific test";
@@ -1540,6 +1547,7 @@ TEST_P(FsManagerTestBase, TestInitialOpenDirectoryWithRdbPresent) {
   ASSERT_TRUE(s.IsAlreadyPresent()) << s.ToString();
   ASSERT_STR_CONTAINS(s.ToString(), "FSManager roots already exist");
 }
+#endif
 
 class OpenFsTypeTest : public KuduTest,
                        public ::testing::WithParamInterface<std::tuple<string, bool, bool>> {

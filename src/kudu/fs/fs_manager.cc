@@ -81,10 +81,15 @@ DEFINE_bool(enable_data_block_fsync, true,
 TAG_FLAG(enable_data_block_fsync, unsafe);
 
 #if defined(__linux__)
-DEFINE_string(block_manager, "log", "Which block manager to use for storage. "
-              "Valid options are 'file', 'log' and 'logr'. The file block "
-              "manager is not suitable for production use due to scaling "
-              "limitations.");
+DEFINE_string(block_manager, "log", "Which block manager to use for storage. Valid options are "
+                                    "'file'"
+#if !defined(NO_ROCKSDB)
+                                    ", 'log' and 'logr'"
+#else
+                                    "and 'log'"
+#endif
+                                    ". The 'file' block manager is not suitable for production use "
+                                    "due to scaling limitations.");
 #else
 DEFINE_string(block_manager, "file", "Which block manager to use for storage. "
               "Only the file block manager is supported for non-Linux systems.");
@@ -179,7 +184,9 @@ using kudu::fs::FsErrorManager;
 using kudu::fs::FileBlockManager;
 using kudu::fs::FsReport;
 using kudu::fs::LogBlockManagerNativeMeta;
+#if !defined(NO_ROCKSDB)
 using kudu::fs::LogBlockManagerRdbMeta;
+#endif
 using kudu::fs::ReadableBlock;
 using kudu::fs::UpdateInstanceBehavior;
 using kudu::fs::WritableBlock;
@@ -412,10 +419,12 @@ scoped_refptr<BlockManager> FsManager::InitBlockManager(const string& tenant_id)
     block_manager.reset(new LogBlockManagerNativeMeta(
         GetEnv(tenant_id), dd_manager(tenant_id), error_manager_,
         opts_.file_cache, std::move(bm_opts), tenant_id));
+#if !defined(NO_ROCKSDB)
   } else if (opts_.block_manager_type == "logr") {
     block_manager.reset(new LogBlockManagerRdbMeta(
         GetEnv(tenant_id), dd_manager(tenant_id), error_manager_,
         opts_.file_cache, std::move(bm_opts), tenant_id));
+#endif
   } else {
     LOG(FATAL) << "Unknown block_manager_type: " << opts_.block_manager_type;
   }
@@ -799,7 +808,11 @@ void FsManager::UpdateMetadataFormatAndStampUnlock(InstanceMetadataPB* metadata)
 }
 
 bool FsManager::IsLogType(const std::string& block_manager_type) {
-  return (block_manager_type == "log" || block_manager_type == "logr");
+  return (block_manager_type == "log"
+#if !defined(NO_ROCKSDB)
+          || block_manager_type == "logr"
+#endif
+          );
 }
 
 Status FsManager::AddTenantMetadata(const string& tenant_name,
