@@ -47,9 +47,11 @@
 #include "kudu/fs/block_manager.h"
 #include "kudu/fs/data_dirs.h"
 #include "kudu/fs/dir_manager.h"
+#include "kudu/fs/error_manager.h"
 #include "kudu/fs/fs.pb.h"
 #include "kudu/fs/fs_manager.h"
 #include "kudu/fs/fs_report.h"
+#include "kudu/fs/log_block_manager.h"
 #include "kudu/gutil/map-util.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/strings/human_readable.h"
@@ -94,6 +96,18 @@ DEFINE_string(server_key_iv, "",
               "The server key IV to use in the filesystem.");
 DEFINE_string(server_key_version, "",
               "The server key version to use in the filesystem.");
+#if defined(__linux__)
+DEFINE_string(dst_block_manager, "logr", "The destination block manager type. Valid options are "
+#if defined(NO_ROCKSDB)
+                                 "'log'.");
+#else
+                                 "'log' and 'logr'.");
+#endif
+static bool ValidateBlockManagerType(const char* /*flagname*/, const std::string& value) {
+  return ContainsKey(kudu::fs::BlockManager::block_manager_types(), value) && value != "file";
+}
+DEFINE_validator(dst_block_manager, &ValidateBlockManagerType);
+#endif
 
 bool ServerKeySetTogether() {
   if (FLAGS_server_key.empty() != FLAGS_server_key_iv.empty()
@@ -107,6 +121,8 @@ bool ServerKeySetTogether() {
 
 GROUP_FLAG_VALIDATOR(server_key_set_together, ServerKeySetTogether);
 
+DECLARE_string(block_manager);
+DECLARE_string(tenant_id);
 DECLARE_string(encryption_key_type);
 DECLARE_string(tenant_name);
 DECLARE_string(tenant_id);
@@ -154,9 +170,15 @@ using kudu::cfile::CFileIterator;
 using kudu::cfile::CFileReader;
 using kudu::cfile::ReaderOptions;
 using kudu::fs::BlockDeletionTransaction;
-using kudu::fs::UpdateInstanceBehavior;
+using kudu::fs::BlockManagerOptions;
+using kudu::fs::DataDirManagerOptions;
+using kudu::fs::DataDirManager;
+using kudu::fs::FsErrorManager;
 using kudu::fs::FsReport;
+using kudu::fs::LogBlockManagerNativeMeta;
+using kudu::fs::LogBlockManagerRdbMeta;
 using kudu::fs::ReadableBlock;
+using kudu::fs::UpdateInstanceBehavior;
 using kudu::tablet::RowSetMetadata;
 using kudu::tablet::TabletDataState;
 using kudu::tablet::TabletMetadata;
@@ -539,6 +561,64 @@ Status UpgradeEncryptionKey(const RunnerContext& /*context*/) {
 
   RETURN_NOT_OK(UpdateEncryptionKeyInfo(env));
 
+  return Status::OK();
+}
+
+// block_manager_instance
+Status DoTransferBlockManagerType(Env* env) {
+  FsManagerOpts src_fs_opts;
+  src_fs_opts.update_instances = UpdateInstanceBehavior::UPDATE_AND_ERROR_ON_FAILURE;
+  src_fs_opts.skip_block_manager = false;
+  FsManager src_fs_manager(env, std::move(src_fs_opts));
+  RETURN_NOT_OK(src_fs_manager.Open());
+
+  const auto tenant_id = FLAGS_tenant_id.empty() ? fs::kDefaultTenantID : FLAGS_tenant_id;
+  const auto data_roots = src_fs_manager.GetDataRootDirs(tenant_id);
+  CanonicalizedRootsList data_fs_roots;
+  for (const auto &data_root : data_roots) {
+    data_fs_roots.push_back({data_root, Status::OK()});
+  }
+
+  FsManagerOpts dst_fs_opts;
+  dst_fs_opts.block_manager_type == FLAGS_dst_block_manager;
+  scoped_refptr<FsErrorManager> dst_em(new FsErrorManager());
+  DataDirManagerOptions dst_ddm_opts;
+  auto* dst_env = src_fs_manager.GetEnv(tenant_id);
+  scoped_refptr<DataDirManager> dst_ddm;
+  RETURN_NOT_OK(DataDirManager::CreateNew(dst_env, data_fs_roots, dst_ddm_opts, &dst_ddm));
+//  RETURN_NOT_OK(dst_ddm->Open());
+
+  DCHECK_NE(dst_fs_opts.block_manager_type, "file");
+  scoped_refptr<fs::BlockManager> dst_block_manager;
+  BlockManagerOptions dst_bm_opts;
+  if (dst_fs_opts.block_manager_type == "log") {
+    dst_block_manager.reset(new LogBlockManagerNativeMeta(
+        dst_env, dst_ddm, dst_em,
+        dst_fs_opts.file_cache, dst_bm_opts, tenant_id));
+#if !defined(NO_ROCKSDB)
+  } else {
+    DCHECK_EQ(dst_fs_opts.block_manager_type, "logr");
+    dst_block_manager.reset(new LogBlockManagerRdbMeta(
+        dst_env, dst_ddm, dst_em,
+        dst_fs_opts.file_cache, dst_bm_opts, tenant_id));
+#endif
+  }
+
+  return Status::OK();
+}
+
+Status TransferBlockManagerType(const RunnerContext& /*context*/) {
+  Env* env = Env::Default();
+  const string& filename = "/tmp/kudu_tserver-transfer-block-manager-type-instance.lock";
+  FileLock* file_lock;
+  KUDU_RETURN_NOT_OK_PREPEND(env->LockFile(filename, &file_lock),
+                             "Could not lock instance file. Make sure that "
+                             "this tool is not already running.");
+  auto unlock = MakeScopedCleanup([&]() {
+    env->UnlockFile(file_lock);
+  });
+
+  RETURN_NOT_OK(DoTransferBlockManagerType(env));
   return Status::OK();
 }
 
@@ -1111,6 +1191,18 @@ unique_ptr<Mode> BuildFsMode() {
       .AddOptionalParameter("fs_wal_dir")
       .Build();
 
+#if defined(__linux__)
+  unique_ptr<Action> transfer_block_manager_type =
+      ActionBuilder("transfer_block_manager_type", &TransferBlockManagerType)
+          .Description("Transfer the block manager type")
+          .AddOptionalParameter("block_manager")
+          .AddOptionalParameter("dst_block_manager")
+          .AddOptionalParameter("fs_data_dirs")
+          .AddOptionalParameter("fs_metadata_dir")
+          .AddOptionalParameter("fs_wal_dir")
+          .Build();
+#endif
+
   return ModeBuilder("fs")
       .Description("Operate on a local Kudu filesystem")
       .AddMode(BuildFsDumpMode())
@@ -1118,6 +1210,9 @@ unique_ptr<Mode> BuildFsMode() {
       .AddAction(std::move(format))
       .AddAction(std::move(list))
       .AddAction(std::move(locate_block))
+#if defined(__linux__)
+      .AddAction(std::move(transfer_block_manager_type))
+#endif
       .AddAction(std::move(update))
       .AddAction(std::move(upgrade_encryption_key))
       .Build();
