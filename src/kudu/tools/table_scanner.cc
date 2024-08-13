@@ -43,10 +43,12 @@
 #include "kudu/client/value.h"
 #include "kudu/client/write_op.h"
 #include "kudu/common/column_predicate.h"
+#include "kudu/common/common.pb.h"
 #include "kudu/common/partial_row.h"
 #include "kudu/common/partition.h"
 #include "kudu/common/row.h"
 #include "kudu/common/schema.h"
+#include "kudu/common/types.h"
 #include "kudu/gutil/map-util.h"
 #include "kudu/gutil/port.h"
 #include "kudu/gutil/stl_util.h"
@@ -58,6 +60,7 @@
 #include "kudu/util/logging.h"
 #include "kudu/util/memory/arena.h"
 #include "kudu/util/monotime.h"
+#include "kudu/util/oid_generator.h"
 #include "kudu/util/slice.h"
 #include "kudu/util/stopwatch.h"
 #include "kudu/util/string_case.h"
@@ -152,6 +155,9 @@ DEFINE_double(table_copy_throttler_burst_factor, 1.0F,
              "which means the maximum rate is equal to --table_copy_throttler_bytes_per_sec.");
 
 DECLARE_bool(row_count_only);
+DECLARE_bool(show_attributes);
+DECLARE_bool(show_column_comment);
+DECLARE_bool(strict_column_id);
 DECLARE_int32(num_threads);
 DECLARE_int64(timeout_ms);
 DECLARE_string(columns);
@@ -411,9 +417,26 @@ Status AddPredicates(const client::sp::shared_ptr<KuduTable>& table,
   return Status::OK();
 }
 
+Status CheckSchemaMatched(const KuduSchema& src_table_schema,
+                          const KuduSchema& dst_table_schema) {
+  bool same_schema = FLAGS_strict_column_id ?
+                     src_table_schema.EqualsWithColumnId(dst_table_schema) :
+                     (src_table_schema == dst_table_schema);
+  if (!same_schema) {
+    FLAGS_show_attributes = true;
+    FLAGS_show_column_comment = true;
+    return Status::NotSupported(Substitute(
+        "destination table's schema differs from the source one ($0 vs $1)",
+        dst_table_schema.ToString(), src_table_schema.ToString()));
+  }
+  return Status::OK();
+}
+
 Status CreateDstTableIfNeeded(const client::sp::shared_ptr<KuduTable>& src_table,
                               const client::sp::shared_ptr<KuduClient>& dst_client,
                               const string& dst_table_name) {
+  FLAGS_show_attributes = true;
+  FLAGS_show_column_comment = true;
   client::sp::shared_ptr<KuduTable> dst_table;
   Status s = dst_client->OpenTable(dst_table_name, &dst_table);
   if (!s.IsNotFound() && !s.ok()) {
@@ -426,14 +449,7 @@ Status CreateDstTableIfNeeded(const client::sp::shared_ptr<KuduTable>& src_table
     if (src_table->id() == dst_table->id()) {
       return Status::AlreadyPresent("Destination table is the same as the source table.");
     }
-
-    const KuduSchema& dst_table_schema = dst_table->schema();
-    if (src_table_schema != dst_table_schema) {
-      return Status::NotSupported(Substitute(
-          "destination table's schema differs from the source one ($0 vs $1)",
-          dst_table_schema.ToString(), src_table_schema.ToString()));
-    }
-
+    RETURN_NOT_OK(CheckSchemaMatched(src_table_schema, dst_table->schema()));
     return Status::OK();
   }
 
@@ -443,16 +459,79 @@ Status CreateDstTableIfNeeded(const client::sp::shared_ptr<KuduTable>& src_table
                                        dst_table_name));
   }
 
-  Schema schema_internal = KuduSchema::ToSchema(src_table_schema);
-  // Convert Schema to KuduSchema will drop internal ColumnIds.
-  KuduSchema dst_table_schema = KuduSchema::FromSchema(schema_internal);
+  static const uint8_t kShowAllAttr = ColumnSchema::ToStringMode::WITH_ATTRIBUTES |
+                                      ColumnSchema::ToStringMode::WITH_COMMENTS;
+  const Schema src_schema_internal = KuduSchema::ToSchema(src_table_schema);
+  KuduSchema dst_table_schema;
+  Schema dst_schema_internal;
+  vector<string> to_delete_columns;
+  if (FLAGS_strict_column_id) {
+    static ObjectIdGenerator oid_generator;
+    SchemaBuilder builder;
+    int32_t expect_column_id = src_schema_internal.column_id(0);
+    for (size_t idx = 0; idx < src_schema_internal.num_columns();) {
+      const int32_t actual_column_id = src_schema_internal.column_id(idx);
+      if (expect_column_id == actual_column_id) {
+        // Construct the destination column schema according to the source column for continuous
+        // ColumnId.
+        const auto col_schema = src_schema_internal.column(idx);
+        const ColumnSchema new_col_schema(col_schema.name(),
+                                          col_schema.type_info()->type(),
+                                          col_schema.is_nullable(),
+                                          col_schema.is_immutable(),
+                                          col_schema.is_auto_incrementing(),
+                                          // Because the write_default_value will be ignored when
+                                          // creating a table because it's an internal column
+                                          // attribute, so set the read default value to
+                                          // read_default_value if it exists, otherwise use
+                                          // write_default_value if it exists.
+                                          col_schema.has_read_default() ?
+                                              col_schema.read_default_value() :
+                                                  (col_schema.has_write_default() ?
+                                                   col_schema.write_default_value() : nullptr),
+                                          // TODO(yingchun): it can be removed because the
+                                          //  read_default_value has been set.
+                                          col_schema.has_write_default() ?
+                                              col_schema.write_default_value() : nullptr,
+                                          col_schema.attributes(),
+                                          col_schema.type_attributes(),
+                                          col_schema.comment());
+        builder.AddColumn(new_col_schema, src_schema_internal.is_key_column(idx));
+        LOG(INFO) << Substitute("Add a real column $0 for column id $1",
+                                new_col_schema.ToString(kShowAllAttr),
+                                actual_column_id);
+        ++expect_column_id;
+        ++idx;
+      } else {
+        CHECK_LT(expect_column_id, actual_column_id);
+        // Fill the hole with dummy columns.
+        for (; expect_column_id < actual_column_id; ++expect_column_id) {
+          auto dummy_column_name = "dummy" + oid_generator.Next();
+          builder.AddColumn(dummy_column_name, DataType::INT8);
+          LOG(INFO) << Substitute("Add a dummy column $0 for column id $1",
+                                  dummy_column_name, expect_column_id);
+          // The dummy columns will be dropped after the table is created.
+          to_delete_columns.emplace_back(dummy_column_name);
+        }
+      }
+    }
+    dst_schema_internal = builder.Build();
+    LOG(INFO) << Substitute("dst_schema_internal: $0", dst_schema_internal.ToString(kShowAllAttr));
+    dst_table_schema = KuduSchema::FromSchema(dst_schema_internal);
+    LOG(INFO) << Substitute("dst_table_schema: $0", dst_table_schema.ToString());
+  } else {
+    // Convert Schema to KuduSchema will drop internal ColumnIds. The ColumnIds in the destination
+    // table will be continuous even if the source table has holes in ColumnIds.
+    dst_schema_internal = KuduSchema::ToSchema(src_table_schema);
+    dst_table_schema = KuduSchema::FromSchema(dst_schema_internal);
+  }
   const auto& partition_schema = src_table->partition_schema();
 
-  auto convert_column_ids_to_names = [&schema_internal] (const vector<ColumnId>& column_ids) {
+  auto convert_column_ids_to_names = [&dst_schema_internal] (const vector<ColumnId>& column_ids) {
     vector<string> column_names;
     column_names.reserve(column_ids.size());
     for (const auto& column_id : column_ids) {
-      column_names.emplace_back(schema_internal.column_by_id(column_id).name());
+      column_names.emplace_back(dst_schema_internal.column_by_id(column_id).name());
     }
     return column_names;
   };
@@ -537,8 +616,8 @@ Status CreateDstTableIfNeeded(const client::sp::shared_ptr<KuduTable>& src_table
     ScopedDisableRedaction no_redaction;
 
     Arena arena(256);
-    std::unique_ptr<KuduPartialRow> lower(new KuduPartialRow(&schema_internal));
-    std::unique_ptr<KuduPartialRow> upper(new KuduPartialRow(&schema_internal));
+    std::unique_ptr<KuduPartialRow> lower(new KuduPartialRow(&dst_schema_internal));
+    std::unique_ptr<KuduPartialRow> upper(new KuduPartialRow(&dst_schema_internal));
     Slice range_key_start(partition.begin().range_key());
     Slice range_key_end(partition.end().range_key());
     RETURN_NOT_OK(partition_schema.DecodeRangeKey(&range_key_start, lower.get(), &arena));
@@ -557,6 +636,21 @@ Status CreateDstTableIfNeeded(const client::sp::shared_ptr<KuduTable>& src_table
 
   // Create table.
   RETURN_NOT_OK(table_creator->Create());
+
+  // Drop dummy columns.
+  if (!to_delete_columns.empty()) {
+    unique_ptr<client::KuduTableAlterer> alterer(dst_client->NewTableAlterer(dst_table_name));
+    for (const auto &to_delete_column: to_delete_columns) {
+      LOG(INFO) << Substitute("Drop dummy column $0", to_delete_column);
+      alterer->DropColumn(to_delete_column);
+    }
+    RETURN_NOT_OK(alterer->Alter());
+  }
+
+  // Check the schemas are matched.
+//  RETURN_NOT_OK(dst_client->OpenTable(dst_table_name, &dst_table));
+//  RETURN_NOT_OK(CheckSchemaMatched(src_table_schema, dst_table->schema()));
+
   LOG(INFO) << "Table " << dst_table_name << " created successfully";
 
   return Status::OK();

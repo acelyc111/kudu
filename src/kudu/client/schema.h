@@ -736,6 +736,15 @@ class KUDU_EXPORT KuduSchema {
   bool Equals(const KuduSchema& other) const
       ATTRIBUTE_DEPRECATED("use operator==(const KuduSchema&) instead");
 
+  /// Check whether the schema is identical to the other one if consider
+  /// column id as well.
+  ///
+  /// @param [in] other
+  ///   The other KuduSchema object to compare with.
+  /// @return @c true iff this KuduSchema object is identical
+  ///   to the specified one.
+  bool EqualsWithColumnId(const KuduSchema& other) const;
+
   /// Check whether the schema is identical to the other one.
   ///
   /// @param [in] rhs

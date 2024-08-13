@@ -842,6 +842,28 @@ class Schema {
   // so should only be used when necessary for output.
   std::string ToString(uint8_t mode = ToStringMode::WITH_COLUMN_IDS) const;
 
+  bool Equals(const Schema& other, ColumnSchema::CompareFlags flags) const {
+    if (this == &other) {
+      return true;
+    }
+
+    if (this->num_key_columns_ != other.num_key_columns_) {
+      return false;
+    }
+
+    const size_t num_columns = this->num_columns();
+    if (num_columns != other.num_columns()) {
+      return false;
+    }
+    for (size_t i = 0; i < num_columns; ++i) {
+      if (!this->cols_[i].Equals(other.cols_[i], flags)) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
   bool operator==(const Schema& other) const {
     if (this == &other) {
       return true;

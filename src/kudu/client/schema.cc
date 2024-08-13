@@ -50,6 +50,10 @@ DEFINE_bool(show_attributes, false,
 DEFINE_bool(show_column_comment, false,
             "Whether to show column comment.");
 
+DEFINE_bool(strict_column_id, false,
+            "Whether to show column id. And whether to consider the column id when "
+            "compare schemas when using 'kudu table copy'.");
+
 MAKE_ENUM_LIMITS(kudu::client::KuduColumnStorageAttributes::EncodingType,
                  kudu::client::KuduColumnStorageAttributes::AUTO_ENCODING,
                  kudu::client::KuduColumnStorageAttributes::RLE);
@@ -982,6 +986,10 @@ bool KuduSchema::Equals(const KuduSchema& other) const {
   return *this == other;
 }
 
+bool KuduSchema::EqualsWithColumnId(const KuduSchema& other) const {
+  return this == &other || (*this == other && schema_->column_ids() == other.schema_->column_ids());
+}
+
 KuduColumnSchema KuduSchema::Column(size_t idx) const {
   const ColumnSchema& col = schema_->column(idx);
 #pragma GCC diagnostic push
@@ -1045,6 +1053,9 @@ string KuduSchema::ToString() const {
   }
   if (FLAGS_show_column_comment) {
     mode |= Schema::ToStringMode::WITH_COLUMN_COMMENTS;
+  }
+  if (FLAGS_strict_column_id) {
+    mode |= Schema::ToStringMode::WITH_COLUMN_IDS;
   }
   return schema_->ToString(mode);
 }
