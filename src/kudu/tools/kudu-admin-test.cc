@@ -3974,7 +3974,7 @@ TEST_F(AdminCliTest, TestRebuildMasterWithTombstones) {
   KuduClientBuilder builder;
   ASSERT_OK(cluster_->CreateClient(&builder, &client_));
   client::sp::shared_ptr<KuduTable> table;
-  s = client_->OpenTable(kTable, &table);
+  const auto s = client_->OpenTable(kTable, &table);
   ASSERT_TRUE(s.IsNotFound()) << s.ToString();
 
   // We should still be able to create a table of the same name though.

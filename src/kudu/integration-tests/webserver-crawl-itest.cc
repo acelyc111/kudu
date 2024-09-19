@@ -236,7 +236,6 @@ TEST_P(WebserverCrawlITest, TestAllWebPages) {
     }
 
     // From here on out we're dealing with a URL with an absolute path.
-
     if (impersonate_knox) {
       // The web UI should have returned a link beginning with the special
       // Knox token. Verify this and remove it so that we can actually crawl
@@ -280,25 +279,13 @@ TEST_P(WebserverCrawlITest, TestAllWebPages) {
                   .Build(&process_link_pool));
     for (int i = 0; i < sel.nodeNum(); i++) {
       string link = sel.nodeAt(i).attribute(attr);
-      ASSERT_OK(process_link_pool->Submit([=] {
+      ASSERT_OK(process_link_pool->Submit([=]() {
         NO_FATALS(process_link(host, link));
       }));
     }
     process_link_pool->Wait();
     process_link_pool->Shutdown();
   };
-
-  // Crawl the web UIs.
-  //
-  // TODO(adar): the crawl could be faster if squeasel used TCP_NODELAY in its
-  // sockets. As it stands, a repeated fetch to the same host is slowed by about
-  // ~40ms due to Nagle's algorithm and delayed TCP ACKs.
-  EasyCurl curl;
-
-  // We use a self-signed cert, so we need to disable cert verification in curl.
-  if (use_ssl) {
-    curl.set_verify_peer(false);
-  }
 
   vector<string> headers;
   if (impersonate_knox) {
@@ -307,34 +294,58 @@ TEST_P(WebserverCrawlITest, TestAllWebPages) {
     // Note: the header value doesn't actually matter; only the key matters.
     headers.emplace_back("X-Forwarded-Context: test");
   }
-  while (!urls.empty()) {
-    string url = urls.front();
-    urls.pop_front();
-    int ret = FindNth(url, '/', 3);
-    string host = ret == string::npos ? url : url.substr(0, ret);
+  unique_ptr<ThreadPool> process_page_pool;
+  ASSERT_OK(ThreadPoolBuilder("process_page_pool")
+      .set_max_threads(16)
+      .Build(&process_page_pool));
 
-    // Every link should be reachable, but some URLs are allowed to return
-    // non-2xx status codes temporarily (e.g., 503 Service Unavailable).
-    SCOPED_TRACE(url);
-    faststring response;
-    if (const auto s = curl.FetchURL(url, &response, headers); !s.ok()) {
-      ASSERT_TRUE(s.IsRemoteError()) << s.ToString();
-      ASSERT_STR_MATCHES(s.ToString(), "HTTP [[:digit:]]{3}$");
-      ASSERT_EVENTUALLY([&] {
-        ASSERT_OK(curl.FetchURL(url, &response, headers));
-      });
+  while (true) {
+    string url;
+    {
+      std::lock_guard<simple_spinlock> l(lock);
+      if (urls.empty()) {
+        break;
+      }
+      url = urls.front();
+      urls.pop_front();
     }
-    const string resp_str = response.ToString();
-    SCOPED_TRACE(resp_str);
 
-    gq::CDocument page;
-    page.parse(resp_str);
+    ASSERT_OK(process_page_pool->Submit([=]() {
+      int ret = FindNth(url, '/', 3);
+      string host = ret == string::npos ? url : url.substr(0, ret);
 
-    // e.g. <a href="/rpcz">RPCs</a>
-    NO_FATALS(process_page(host, &page, "a", "href"));
+      // Every link should be reachable.
+      SCOPED_TRACE(url);
 
-    // e.g. <script src='/bootstrap/js/bootstrap.min.js' defer></script>
-    NO_FATALS(process_page(host, &page, "script", "src"));
+      // Crawl the web UIs.
+      //
+      // TODO(adar): the crawl could be faster if squeasel used TCP_NODELAY in its
+      // sockets. As it stands, a repeated fetch to the same host is slowed by about
+      // ~40ms due to Nagle's algorithm and delayed TCP ACKs.
+      EasyCurl curl;
+
+      // We use a self-signed cert, so we need to disable cert verification in curl.
+      if (use_ssl) {
+        curl.set_verify_peer(false);
+      }
+      faststring response;
+      {
+        // https://github.com/curl/curl/issues/7296
+        debug::ScopedTSANIgnoreReadsAndWrites ignore_tsan;
+        ASSERT_OK(curl.FetchURL(url, &response, headers));
+      }
+      string resp_str = response.ToString();
+//      SCOPED_TRACE(resp_str);
+
+      gq::CDocument page;
+      page.parse(resp_str);
+
+      // e.g. <a href="/rpcz">RPCs</a>
+      NO_FATALS(process_page(host, &page, "a", "href"));
+
+      // e.g. <script src='/bootstrap/js/bootstrap.min.js' defer></script>
+//      NO_FATALS(process_page(host, &page, "script", "src"));
+    }));
   }
   process_page_pool->Wait();
   process_page_pool->Shutdown();

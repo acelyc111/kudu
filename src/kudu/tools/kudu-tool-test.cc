@@ -1425,7 +1425,7 @@ TEST_F(ToolTest, TestTopLevelHelp) {
 
 TEST_F(ToolTest, TestModeHelp) {
   SKIP_IF_SLOW_NOT_ALLOWED();
-  {
+
   CHECK_OK(pool_->Submit([this]() {
     const string kCmd = "cluster";
     const vector<string> kClusterModeRegexes = {
@@ -3756,19 +3756,19 @@ TEST_F(ToolTest, TestLoadgenZeroRowsPerThread) {
   for (auto num_threads : { 1, 2, 10, 100 }) {
     CHECK_OK(pool_->Submit([]() {
       SCOPED_TRACE(Substitute("num_threads=$0", num_threads));
-      const vector<string> args = {
+      const vector<string> args({
         "perf",
         "loadgen",
         cluster_->master()->bound_rpc_addr().ToString(),
         Substitute("--num_threads=$0", num_threads),
         "--num_rows_per_thread=0",
-        "--run_scan",
-      };
+        "--run_scan"
+      });
       string out;
       ASSERT_OK(RunKuduTool(args, &out));
       ASSERT_STR_MATCHES(out, "expected rows: 0");
       ASSERT_STR_MATCHES(out, "actual rows  : 0");
-    })):
+    }));
   }
 }
 

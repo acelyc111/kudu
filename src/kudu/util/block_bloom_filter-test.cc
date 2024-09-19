@@ -243,7 +243,7 @@ TEST_F(BlockBloomFilterTest, MinSpaceMaxNdv) {
 
   for (int log2fpp = -2; log2fpp >= -30; --log2fpp) {
     const double fpp = pow(2, log2fpp);
-    for (int given_log_space = 8; given_log_space < max_given_log_space; ++given_log_space) {
+    for (int given_log_space = 8; given_log_space < 30; ++given_log_space) {
       const size_t derived_ndv = BlockBloomFilter::MaxNdv(given_log_space, fpp);
       // If NO values can be added without exceeding fpp, then the space needed is
       // trivially zero. This becomes a useless test; skip to the next iteration.
@@ -261,7 +261,7 @@ TEST_F(BlockBloomFilterTest, MinSpaceMaxNdv) {
       EXPECT_LE(derived_log_space, given_log_space) << "fpp: " << fpp
                                                     << " derived_ndv: " << derived_ndv;
     }
-    for (size_t given_ndv = 1000; given_ndv < max_given_ndv; given_ndv *= 3) {
+    for (size_t given_ndv = 1000; given_ndv < 1000 * 1000; given_ndv *= 3) {
       const int derived_log_space = BlockBloomFilter::MinLogSpace(given_ndv, fpp);
       const size_t derived_ndv = BlockBloomFilter::MaxNdv(derived_log_space, fpp);
 
