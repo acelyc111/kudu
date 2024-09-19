@@ -868,8 +868,9 @@ class IntEncodingTest : public TestEncoding, public ::testing::WithParamInterfac
 
   template <DataType IntType>
   void DoIntSeekTestTinyBlock() {
+    static const int kNumQueries = AllowSlowTests() ? 1000 : 100;
     for (int block_size = 1; block_size < 16; block_size++) {
-      DoIntSeekTest<IntType>(block_size, 1000, true);
+      DoIntSeekTest<IntType>(block_size, kNumQueries, true);
     }
   }
 
@@ -882,15 +883,16 @@ INSTANTIATE_TEST_SUITE_P(Encodings, IntEncodingTest,
                          ::testing::Values(RLE, PLAIN_ENCODING, BIT_SHUFFLE));
 
 TEST_P(IntEncodingTest, TestSeekAllTypes) {
-  this->template DoIntSeekTest<UINT8>(100, 1000, true);
-  this->template DoIntSeekTest<INT8>(100, 1000, true);
-  this->template DoIntSeekTest<UINT16>(10000, 1000, true);
-  this->template DoIntSeekTest<INT16>(10000, 1000, true);
-  this->template DoIntSeekTest<UINT32>(10000, 1000, true);
-  this->template DoIntSeekTest<INT32>(10000, 1000, true);
-  this->template DoIntSeekTest<UINT64>(10000, 1000, true);
-  this->template DoIntSeekTest<INT64>(10000, 1000, true);
-  // TODO: Uncomment when adding 128 bit support to RLE (KUDU-2284)
+  static const int kNumQueries = AllowSlowTests() ? 1000 : 100;
+  this->template DoIntSeekTest<UINT8>(100, kNumQueries, true);
+  this->template DoIntSeekTest<INT8>(100, kNumQueries, true);
+  this->template DoIntSeekTest<UINT16>(10000, kNumQueries, true);
+  this->template DoIntSeekTest<INT16>(10000, kNumQueries, true);
+  this->template DoIntSeekTest<UINT32>(10000, kNumQueries, true);
+  this->template DoIntSeekTest<INT32>(10000, kNumQueries, true);
+  this->template DoIntSeekTest<UINT64>(10000, kNumQueries, true);
+  this->template DoIntSeekTest<INT64>(10000, kNumQueries, true);
+  // TODO(unknown): Uncomment when adding 128 bit support to RLE (KUDU-2284)
   // this->template DoIntSeekTest<INT128>();
 }
 

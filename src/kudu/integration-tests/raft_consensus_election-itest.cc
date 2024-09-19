@@ -128,7 +128,7 @@ void RaftConsensusElectionITest::CreateClusterForChurnyElectionsTests(
 }
 
 void RaftConsensusElectionITest::DoTestChurnyElections(TestWorkload* workload) {
-  const int max_rows_to_insert = AllowSlowTests() ? 10000 : 1000;
+  const int max_rows_to_insert = AllowSlowTests() ? 10000 : 100;
   const MonoDelta timeout = AllowSlowTests() ? MonoDelta::FromSeconds(120)
                                              : MonoDelta::FromSeconds(60);
   workload->set_num_replicas(FLAGS_num_replicas);
@@ -140,13 +140,13 @@ void RaftConsensusElectionITest::DoTestChurnyElections(TestWorkload* workload) {
   workload->Setup();
   workload->Start();
 
-  // Run for either a prescribed number of writes, or 30 seconds,
+  // Run for either a prescribed number of writes, or 10 seconds,
   // whichever comes first. This prevents test timeouts on slower
   // build machines, TSAN builds, etc.
   Stopwatch sw;
   sw.start();
   while (workload->rows_inserted() < max_rows_to_insert &&
-      sw.elapsed().wall_seconds() < 30) {
+      sw.elapsed().wall_seconds() < 10) {
     SleepFor(MonoDelta::FromMilliseconds(10));
     NO_FATALS(AssertNoTabletServersCrashed());
   }

@@ -567,6 +567,7 @@ class RangerITestHarness : public MasterAuthzITestHarness {
 class MasterAuthzITestBase : public ExternalMiniClusterITestBase {
  public:
   void SetUp() override {
+    //SKIP_IF_AUTHZ_DISABLED();
     NO_FATALS(ExternalMiniClusterITestBase::SetUp());
   }
 
@@ -598,6 +599,7 @@ class MasterAuthzITestBase : public ExternalMiniClusterITestBase {
   }
 
   void TearDown() override {
+    //SKIP_IF_AUTHZ_DISABLED();
     harness_->TearDown();
     ExternalMiniClusterITestBase::TearDown();
   }
@@ -725,6 +727,7 @@ class MasterAuthzITest : public MasterAuthzITestBase,
                          public ::testing::WithParamInterface<HarnessEnum> {
  public:
   void SetUp() override {
+    //SKIP_IF_AUTHZ_DISABLED();
     NO_FATALS(MasterAuthzITestBase::SetUp());
     NO_FATALS(SetUpCluster(GetParam()));
   }
@@ -739,6 +742,7 @@ INSTANTIATE_TEST_SUITE_P(AuthzProviders, MasterAuthzITest,
 // Test that creation of the transaction status table foregoes fine-grained
 // authorization.
 TEST_P(MasterAuthzITest, TestCreateTransactionStatusTable) {
+  //SKIP_IF_AUTHZ_DISABLED();
   // Create a transaction status table and add a range. Both requests should
   // succeed, despite no privileges being granted in Ranger.
   ASSERT_OK(this->cluster_->kdc()->Kinit(kTestUser));
@@ -765,6 +769,7 @@ TEST_P(MasterAuthzITest, TestCreateTransactionStatusTable) {
 }
 
 TEST_P(MasterAuthzITest, TestCreateTableAuthorized) {
+  //SKIP_IF_AUTHZ_DISABLED();
   ASSERT_OK(cluster_->kdc()->Kinit(kAdminUser));
   ASSERT_OK(cluster_->CreateClient(nullptr, &client_));
 
@@ -783,6 +788,7 @@ TEST_P(MasterAuthzITest, TestCreateTableAuthorized) {
 }
 
 TEST_P(MasterAuthzITest, TestCreateTableUnauthorized) {
+  //SKIP_IF_AUTHZ_DISABLED();
   ASSERT_OK(cluster_->kdc()->Kinit(kTestUser));
   ASSERT_OK(cluster_->CreateClient(nullptr, &client_));
 
@@ -801,6 +807,7 @@ TEST_P(MasterAuthzITest, TestCreateTableUnauthorized) {
 }
 
 TEST_P(MasterAuthzITest, TestCreateTableDifferentOwner) {
+  //SKIP_IF_AUTHZ_DISABLED();
   ASSERT_OK(cluster_->kdc()->Kinit(kTestUser));
   ASSERT_OK(cluster_->CreateClient(nullptr, &client_));
 
@@ -831,6 +838,7 @@ TEST_P(MasterAuthzITest, TestCreateTableDifferentOwner) {
 
 // Test that the trusted user can access the cluster without being authorized.
 TEST_P(MasterAuthzITest, TestTrustedUserAcl) {
+  //SKIP_IF_AUTHZ_DISABLED();
   // Log in as 'impala' and reset the client to pick up the change in user.
   ASSERT_OK(this->cluster_->kdc()->Kinit(kImpalaUser));
   ASSERT_OK(this->cluster_->CreateClient(nullptr, &this->client_));
@@ -865,6 +873,7 @@ TEST_P(MasterAuthzITest, TestTrustedUserAcl) {
 }
 
 TEST_P(MasterAuthzITest, TestAuthzListTables) {
+  //SKIP_IF_AUTHZ_DISABLED();
   // ListTables is not parameterized as other operations below, because non-authorized
   // tables will be filtered instead of returning NOT_AUTHORIZED error.
   const auto table_name = Substitute("$0.$1", kDatabaseName, kTableName);
@@ -892,6 +901,7 @@ TEST_P(MasterAuthzITest, TestAuthzListTables) {
 // When authorizing ListTables, if there is a concurrent rename, we may not end
 // up showing the table.
 TEST_P(MasterAuthzITest, TestAuthzListTablesConcurrentRename) {
+  //SKIP_IF_AUTHZ_DISABLED();
   ASSERT_OK(this->cluster_->SetFlag(this->cluster_->master(),
       "catalog_manager_inject_latency_list_authz_ms", "3000"));;
   const auto table_name = Substitute("$0.$1", kDatabaseName, kTableName);
@@ -915,6 +925,7 @@ TEST_P(MasterAuthzITest, TestAuthzListTablesConcurrentRename) {
 }
 
 TEST_P(MasterAuthzITest, TestAuthzGiveAwayOwnership) {
+  //SKIP_IF_AUTHZ_DISABLED();
   this->GrantAllWithGrantTablePrivilege({ kDatabaseName, kTableName, "{OWNER}"});
 
   // We need to grant metadata permissions to the user, otherwise the ownership
@@ -949,6 +960,7 @@ TEST_P(MasterAuthzITest, TestAuthzGiveAwayOwnership) {
 }
 
 TEST_P(MasterAuthzITest, TestChangeOwnerWithoutDelegateAdmin) {
+  //SKIP_IF_AUTHZ_DISABLED();
   this->GrantAllDatabasePrivilege({kDatabaseName, kTableName});
   const string table_name = Substitute("$0.$1", kDatabaseName, kTableName);
 
@@ -958,6 +970,7 @@ TEST_P(MasterAuthzITest, TestChangeOwnerWithoutDelegateAdmin) {
 }
 
 TEST_P(MasterAuthzITest, TestChangeOwnerWithoutAll) {
+  //SKIP_IF_AUTHZ_DISABLED();
   this->GrantAlterWithGrantTablePrivilege({kDatabaseName, kTableName});
   const string table_name = Substitute("$0.$1", kDatabaseName, kTableName);
 
@@ -967,6 +980,7 @@ TEST_P(MasterAuthzITest, TestChangeOwnerWithoutAll) {
 }
 
 TEST_P(MasterAuthzITest, TestAlterAndChangeOwner) {
+  //SKIP_IF_AUTHZ_DISABLED();
   this->GrantAlterTablePrivilege({kDatabaseName, kTableName});
   const string table_name = Substitute("$0.$1", kDatabaseName, kTableName);
 
@@ -984,6 +998,7 @@ class MasterAuthzOwnerITest : public MasterAuthzITestBase,
                                   tuple<HarnessEnum, string>> {
  public:
   void SetUp() override {
+    //SKIP_IF_AUTHZ_DISABLED();
     NO_FATALS(MasterAuthzITestBase::SetUp());
     NO_FATALS(SetUpCluster(std::get<0>(GetParam())));
   }
@@ -1004,6 +1019,7 @@ INSTANTIATE_TEST_SUITE_P(
 // both tables for returning TABLE_NOT_FOUND error to avoid leaking table
 // existence.
 TEST_P(MasterAuthzOwnerITest, TestMismatchedTable) {
+  //SKIP_IF_AUTHZ_DISABLED();
   const auto table_name_a = Substitute("$0.$1", kDatabaseName, kTableName);
   const auto table_name_b = Substitute("$0.$1", kDatabaseName, kSecondTable);
   const string& kUsername = std::get<1>(GetParam());
@@ -1074,12 +1090,14 @@ class TestAuthzTable :
     public ::testing::WithParamInterface<tuple<HarnessEnum, AuthzDescriptor, string>> {
  public:
   void SetUp() override {
+    //SKIP_IF_AUTHZ_DISABLED();
     NO_FATALS(MasterAuthzITestBase::SetUp());
     NO_FATALS(SetUpCluster(std::get<0>(GetParam())));
   }
 };
 
 TEST_P(TestAuthzTable, TestAuthorizeTable) {
+  //SKIP_IF_AUTHZ_DISABLED();
   const AuthzDescriptor& desc = std::get<1>(GetParam());
   const string& owner = std::get<2>(GetParam());
   if (desc.funcs.description == "CreateTable" && owner == "{OWNER}") {
@@ -1231,12 +1249,14 @@ class AuthzErrorHandlingTest :
     // TODO(aserbin): update the test to introduce authz privilege caching
  public:
   void SetUp() override {
+    //SKIP_IF_AUTHZ_DISABLED();
     NO_FATALS(MasterAuthzITestBase::SetUp());
     NO_FATALS(SetUpCluster(std::get<0>(GetParam())));
   }
 };
 TEST_P(AuthzErrorHandlingTest, TestNonExistentTable) {
-  static constexpr const char* const kTableName = "non_existent";
+  //SKIP_IF_AUTHZ_DISABLED();
+  const char* kTableName = "non_existent";
   const AuthzFuncs& funcs = std::get<1>(GetParam());
   const auto table_name = Substitute("$0.$1", kDatabaseName, kTableName);
   const auto new_table_name = Substitute("$0.$1", kDatabaseName, "b");

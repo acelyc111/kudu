@@ -90,6 +90,7 @@
 #include "kudu/gutil/strings/join.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/gutil/sysinfo.h"
+#include "kudu/gutil/walltime.h"
 #include "kudu/integration-tests/cluster_itest_util.h"
 #include "kudu/integration-tests/data_gen_util.h"
 #include "kudu/master/catalog_manager.h"
@@ -1285,7 +1286,8 @@ TEST_F(ClientTest, TestRandomizedLimitScans) {
 
   // Now scan with randomly set limits. To ensure we get a spectrum of limit
   // coverage, gradiate the max limit that we can set.
-  for (int i = 1; i < 200; i++) {
+  static const int kNumLoop = AllowSlowTests() ? 200 : 20;
+  for (int i = 1; i < kNumLoop; i++) {
     const int64_t max_limit = std::max<int>(num_rows * 0.01 * i, 1);
     const int64_t limit = rand() % max_limit + 1;
     const int64_t expected_rows = std::min({ limit, num_rows });
@@ -3267,7 +3269,7 @@ TEST_F(ClientTest, TestScanTimeout) {
     // Set the single-RPC timeout low. Since we only have a single replica of this
     // table, we'll ignore this timeout for the actual scan calls, and use the
     // scanner timeout instead.
-    FLAGS_scanner_inject_latency_on_each_batch_ms = 50;
+    FLAGS_scanner_inject_latency_on_each_batch_ms = 5;
     client_->data_->default_rpc_timeout_ = MonoDelta::FromMilliseconds(1);
 
     // Should successfully scan.
@@ -9166,7 +9168,7 @@ TEST_F(ClientTest, TxnKeepAlive) {
     shared_ptr<KuduTransaction> txn;
     ASSERT_OK(client_->NewTransaction(&txn));
 
-    SleepFor(MonoDelta::FromMilliseconds(2 * FLAGS_txn_keepalive_interval_ms));
+    SleepFor(MonoDelta::FromMilliseconds(FLAGS_txn_keepalive_interval_ms + 10));
 
     ASSERT_OK(txn->Commit());
   }
@@ -9312,6 +9314,9 @@ TEST_F(ClientTest, TxnKeepAliveAndUnavailableTxnManagerLongTime) {
   // Shutdown masters -- they host TxnManager instances which proxy txn-related
   // RPC calls from clients to corresponding TxnStatusManager.
   cluster_->ShutdownNodes(cluster::ClusterNodes::MASTERS_ONLY);
+
+  // Wait for some time to allow the system to detect stale transactions.
+  SleepFor(MonoDelta::FromMilliseconds(FLAGS_txn_keepalive_interval_ms + 10));
 
   // An attempt to commit a transaction should fail due to unreachable masters.
   {

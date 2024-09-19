@@ -536,19 +536,20 @@ TEST_P(TestCFileBothCacheMemoryTypes, TestWrite100MFileStringsPlainEncoding) {
 // Write and Read 1 million unique strings with dictionary encoding
 TEST_P(TestCFileBothCacheMemoryTypes, TestWrite1MUniqueFileStringsDictEncoding) {
   RETURN_IF_NO_NVM_CACHE(GetParam().first);
+  const int kNumEntries = AllowSlowTests() ? 1000 * 1000 : 10 * 1000;
   BlockId block_id;
   LOG_TIMING(INFO, "writing 1M unique strings") {
     LOG(INFO) << "Starting writefile";
     StringDataGenerator<false> generator("hello %zu");
-    WriteTestFile(&generator, DICT_ENCODING, NO_COMPRESSION, 1000000, NO_FLAGS, &block_id);
+    WriteTestFile(&generator, DICT_ENCODING, NO_COMPRESSION, kNumEntries, NO_FLAGS, &block_id);
     LOG(INFO) << "Done writing";
   }
 
   LOG_TIMING(INFO, "reading 1M strings") {
     LOG(INFO) << "Starting readfile";
-    size_t n;
+    size_t n = 0;
     TimeReadFile(fs_manager_.get(), block_id, &n);
-    ASSERT_EQ(1000000, n);
+    ASSERT_EQ(kNumEntries, n);
     LOG(INFO) << "End readfile";
   }
 }
@@ -556,7 +557,8 @@ TEST_P(TestCFileBothCacheMemoryTypes, TestWrite1MUniqueFileStringsDictEncoding) 
 // Write and Read 1 million strings, which contains duplicates with dictionary encoding
 TEST_P(TestCFileBothCacheMemoryTypes, TestWrite1MLowCardinalityStringsDictEncoding) {
   RETURN_IF_NO_NVM_CACHE(GetParam().first);
-  TestWriteDictEncodingLowCardinalityStrings(1000000);
+  const int kNumEntries = AllowSlowTests() ? 1000 * 1000 : 10 * 1000;
+  TestWriteDictEncodingLowCardinalityStrings(kNumEntries);
 }
 
 TEST_P(TestCFileBothCacheMemoryTypes, TestReadWriteUInt32) {
@@ -639,10 +641,12 @@ void TestCFile::TestReadWriteStrings(EncodingType encoding,
                                      std::function<string(size_t)> formatter) {
   Schema schema({ ColumnSchema("key", STRING) }, 1);
 
-  const int nrows = 10000;
+  static const int kNumRows = AllowSlowTests() ? 10 * 1000 : 1000;
+  ASSERT_TRUE(kNumRows % 100 == 0);
+  ASSERT_TRUE(kNumRows > 0);
   BlockId block_id;
   StringDataGenerator<false> generator(formatter);
-  WriteTestFile(&generator, encoding, NO_COMPRESSION, nrows,
+  WriteTestFile(&generator, encoding, NO_COMPRESSION, kNumRows,
                 SMALL_BLOCKSIZE | WRITE_VALIDX, &block_id);
 
   unique_ptr<ReadableBlock> block;
@@ -652,26 +656,26 @@ void TestCFile::TestReadWriteStrings(EncodingType encoding,
 
   rowid_t reader_nrows;
   ASSERT_OK(reader->CountRows(&reader_nrows));
-  ASSERT_EQ(nrows, reader_nrows);
+  ASSERT_EQ(kNumRows, reader_nrows);
 
   unique_ptr<CFileIterator> iter;
   ASSERT_OK(reader->NewIterator(&iter, CFileReader::CACHE_BLOCK, nullptr));
 
   RowBlockMemory mem;
 
-  ASSERT_OK(iter->SeekToOrdinal(5000));
-  ASSERT_EQ(5000, iter->GetCurrentOrdinal());
+  ASSERT_OK(iter->SeekToOrdinal(kNumRows / 2));
+  ASSERT_EQ(kNumRows / 2, iter->GetCurrentOrdinal());
   Slice s;
 
   CopyOne<STRING>(iter.get(), &s, &mem);
-  ASSERT_EQ(formatter(5000), s.ToString());
+  ASSERT_EQ(formatter(kNumRows / 2), s.ToString());
 
   // Seek to last key exactly, should succeed
-  ASSERT_OK(iter->SeekToOrdinal(9999));
-  ASSERT_EQ(9999, iter->GetCurrentOrdinal());
+  ASSERT_OK(iter->SeekToOrdinal(kNumRows - 1));
+  ASSERT_EQ(kNumRows - 1, iter->GetCurrentOrdinal());
 
   // Seek to after last key. Should result in not found.
-  ASSERT_TRUE(iter->SeekToOrdinal(10000).IsNotFound());
+  ASSERT_TRUE(iter->SeekToOrdinal(kNumRows).IsNotFound());
 
 
   ////////
@@ -684,7 +688,7 @@ void TestCFile::TestReadWriteStrings(EncodingType encoding,
   // Seek in between each key.
   // (seek to "hello 0000.5" through "hello 9999.5")
   string buf;
-  for (int i = 1; i < 10000; i++) {
+  for (int i = 1; i < kNumRows; i++) {
     mem.Reset();
     buf = formatter(i - 1);
     buf.append(".5");
@@ -699,7 +703,7 @@ void TestCFile::TestReadWriteStrings(EncodingType encoding,
 
   // Seek exactly to each key
   // (seek to "hello 0000" through "hello 9999")
-  for (int i = 0; i < 9999; i++) {
+  for (int i = 0; i < kNumRows - 1; i++) {
     mem.Reset();
     buf = formatter(i);
     s = Slice(buf);
@@ -713,8 +717,8 @@ void TestCFile::TestReadWriteStrings(EncodingType encoding,
   }
 
   // after last entry
-  // (seek to "hello 9999.x")
-  buf = formatter(9999) + ".x";
+  // (seek to "hello <kNumRows - 1>.x")
+  buf = formatter(kNumRows - 1) + ".x";
   s = Slice(buf);
   EncodeStringKey(schema, s, &mem.arena, &encoded_key);
   EXPECT_TRUE(iter->SeekAtOrAfter(*encoded_key, &exact).IsNotFound());
@@ -740,14 +744,14 @@ void TestCFile::TestReadWriteStrings(EncodingType encoding,
   // Reseek to start and fetch all data.
   // We fetch in 10 smaller chunks to avoid using too much RAM for the
   // case where the values are large.
-  SelectionVector sel(10000);
+  SelectionVector sel(kNumRows);
   ASSERT_OK(iter->SeekToFirst());
   for (int i = 0; i < 10; i++) {
-    ScopedColumnBlock<STRING> cb(10000);
+    ScopedColumnBlock<STRING> cb(kNumRows);
     ColumnMaterializationContext cb_ctx = CreateNonDecoderEvalContext(&cb, &sel);
-    size_t n = 1000;
+    size_t n = kNumRows / 10;
     ASSERT_OK(iter->CopyNextValues(&n, &cb_ctx));
-    ASSERT_EQ(1000, n);
+    ASSERT_EQ(kNumRows / 10, n);
   }
 }
 
@@ -1133,19 +1137,19 @@ INSTANTIATE_TEST_SUITE_P(Codecs, TestCFileDifferentCodecs,
 // Read/write a file with uncompressible data (random int32s)
 TEST_P(TestCFileDifferentCodecs, TestUncompressible) {
   auto codec = GetParam();
-  const size_t nrows = 1000000;
+  static const int kNumRows = AllowSlowTests() ? 1000 * 1000 : 10 * 1000;
   BlockId block_id;
-  size_t rdrows;
+  size_t rdrows = 0;
 
   // Generate a plain-encoded file with random (uncompressible) data.
   // This exercises the code path which short-circuits compression
   // when the codec is not able to be effective on the input data.
   {
     RandomInt32DataGenerator int_gen;
-    WriteTestFile(&int_gen, PLAIN_ENCODING, codec, nrows,
+    WriteTestFile(&int_gen, PLAIN_ENCODING, codec, kNumRows,
                   NO_FLAGS, &block_id);
     TimeReadFile(fs_manager_.get(), block_id, &rdrows);
-    ASSERT_EQ(nrows, rdrows);
+    ASSERT_EQ(kNumRows, rdrows);
   }
 }
 

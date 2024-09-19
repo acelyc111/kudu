@@ -586,7 +586,7 @@ TEST_P(TestRpc, TestClientConnectionMetrics) {
     add_req.set_x(rand());
     add_req.set_y(rand());
     AddResponsePB add_resp;
-    string big_string(8 * 1024 * 1024, 'a');
+    string big_string(AllowSlowTests() ? 8 * 1024 * 1024 : 8 * 1024, 'a');
 
     // Send the calls.
     vector<unique_ptr<RpcController>> controllers;
@@ -1817,7 +1817,7 @@ TEST_P(TestRpc, TestCancellationMultiThreads) {
           GenericCalculatorService::static_service_name());
 
   // Buffer used for sidecars by SendAndCancelRpcs().
-  string buf(16 * 1024 * 1024, 'a');
+  string buf(AllowSlowTests() ? 16 * 1024 * 1024 : 16 * 1024, 'a');
   Slice slice(buf);
 
   // Start a bunch of threads which invoke async RPC and cancellation.
@@ -1834,9 +1834,9 @@ TEST_P(TestRpc, TestCancellationMultiThreads) {
   client_messenger->Shutdown();
 }
 
-
 // Test performance of Ipv4 vs unix sockets.
 TEST_P(TestRpc, TestPerformanceBySocketType) {
+  SKIP_IF_SLOW_NOT_ALLOWED();
   static constexpr int kNumMb = 1024;
   static constexpr int kMbPerRpc = 4;
   static_assert(kNumMb % kMbPerRpc == 0, "total should be a multiple of per-RPC");

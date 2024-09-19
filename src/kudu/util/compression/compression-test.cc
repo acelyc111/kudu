@@ -154,6 +154,7 @@ TEST_F(TestCompression, TestSnappyCompressionCodec) {
 }
 
 TEST_F(TestCompression, TestSimpleBenchmark) {
+  SKIP_IF_SLOW_NOT_ALLOWED();
   Random r(SeedRandom());
   for (auto type : { SNAPPY, LZ4, ZLIB }) {
     NO_FATALS(Benchmark(r, type));

@@ -86,7 +86,8 @@ class BlockBloomFilterTest : public KuduTest {
 
 // We can construct (and destruct) Bloom filters with different spaces.
 TEST_F(BlockBloomFilterTest, Constructor) {
-  for (int i = 0; i < 30; ++i) {
+  static const int kNumSpaces = AllowSlowTests() ? 30 : 8;
+  for (int i = 0; i < kNumSpaces; ++i) {
     CreateBloomFilter(i);
   }
 }

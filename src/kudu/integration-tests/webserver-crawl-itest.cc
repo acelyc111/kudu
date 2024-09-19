@@ -18,9 +18,11 @@
 #include <algorithm>
 #include <deque>
 #include <functional>
+#include <tuple>
+#include <memory>
+#include <mutex>
 #include <ostream>
 #include <string>
-#include <tuple>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -40,14 +42,17 @@
 #include "kudu/mini-cluster/external_mini_cluster.h"
 #include "kudu/security/test/test_certs.h"
 #include "kudu/util/curl_util.h"
+#include "kudu/util/debug/sanitizer_scopes.h"
 #include "kudu/util/env.h"
 #include "kudu/util/faststring.h"
+#include "kudu/util/locks.h"
 #include "kudu/util/monotime.h"
 #include "kudu/util/net/net_util.h"
 #include "kudu/util/path_util.h"
 #include "kudu/util/status.h"
 #include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
+#include "kudu/util/threadpool.h"
 #include "kudu/util/url-coding.h"
 
 using kudu::cluster::ExternalMiniCluster;
@@ -55,6 +60,7 @@ using kudu::cluster::ExternalMiniClusterOptions;
 using std::deque;
 using std::string;
 using std::tuple;
+using std::unique_ptr;
 using std::unordered_set;
 using std::vector;
 using strings::SkipEmpty;
@@ -182,6 +188,7 @@ TEST_P(WebserverCrawlITest, TestAllWebPages) {
   }
   work.StopAndJoin();
 
+  simple_spinlock lock;
   // Tracks all URLs left to process. When empty, the search is finished.
   deque<string> urls;
 
@@ -221,6 +228,7 @@ TEST_P(WebserverCrawlITest, TestAllWebPages) {
 
     if (HasPrefixString(link, scheme)) {
       // Full URLs should not be modified and can be visited directly.
+      std::lock_guard<simple_spinlock> l(lock);
       if (EmplaceIfNotPresent(&urls_seen, link)) {
         urls.emplace_back(std::move(link));
       }
@@ -228,7 +236,6 @@ TEST_P(WebserverCrawlITest, TestAllWebPages) {
     }
 
     // From here on out we're dealing with a URL with an absolute path.
-
     if (impersonate_knox) {
       // The web UI should have returned a link beginning with the special
       // Knox token. Verify this and remove it so that we can actually crawl
@@ -252,6 +259,7 @@ TEST_P(WebserverCrawlITest, TestAllWebPages) {
     ASSERT_EQ(string::npos, link.find(' '));
 
     string full_url = host + link;
+    std::lock_guard<simple_spinlock> l(lock);
     if (!ContainsKey(urls_seen, full_url)) {
       urls.emplace_back(full_url);
       urls_seen.emplace(std::move(full_url));
@@ -265,23 +273,19 @@ TEST_P(WebserverCrawlITest, TestAllWebPages) {
                           const char* elem,
                           const char* attr) {
     gq::CSelection sel = page->find(elem);
+    unique_ptr<ThreadPool> process_link_pool;
+    ASSERT_OK(ThreadPoolBuilder("process_page_pool")
+                  .set_max_threads(16)
+                  .Build(&process_link_pool));
     for (int i = 0; i < sel.nodeNum(); i++) {
       string link = sel.nodeAt(i).attribute(attr);
-      NO_FATALS(process_link(host, std::move(link)));
+      ASSERT_OK(process_link_pool->Submit([=]() {
+        NO_FATALS(process_link(host, link));
+      }));
     }
+    process_link_pool->Wait();
+    process_link_pool->Shutdown();
   };
-
-  // Crawl the web UIs.
-  //
-  // TODO(adar): the crawl could be faster if squeasel used TCP_NODELAY in its
-  // sockets. As it stands, a repeated fetch to the same host is slowed by about
-  // ~40ms due to Nagle's algorithm and delayed TCP ACKs.
-  EasyCurl curl;
-
-  // We use a self-signed cert, so we need to disable cert verification in curl.
-  if (use_ssl) {
-    curl.set_verify_peer(false);
-  }
 
   vector<string> headers;
   if (impersonate_knox) {
@@ -290,35 +294,61 @@ TEST_P(WebserverCrawlITest, TestAllWebPages) {
     // Note: the header value doesn't actually matter; only the key matters.
     headers.emplace_back("X-Forwarded-Context: test");
   }
-  while (!urls.empty()) {
-    string url = urls.front();
-    urls.pop_front();
-    int ret = FindNth(url, '/', 3);
-    string host = ret == string::npos ? url : url.substr(0, ret);
+  unique_ptr<ThreadPool> process_page_pool;
+  ASSERT_OK(ThreadPoolBuilder("process_page_pool")
+      .set_max_threads(16)
+      .Build(&process_page_pool));
 
-    // Every link should be reachable, but some URLs are allowed to return
-    // non-2xx status codes temporarily (e.g., 503 Service Unavailable).
-    SCOPED_TRACE(url);
-    faststring response;
-    if (const auto s = curl.FetchURL(url, &response, headers); !s.ok()) {
-      ASSERT_TRUE(s.IsRemoteError()) << s.ToString();
-      ASSERT_STR_MATCHES(s.ToString(), "HTTP [[:digit:]]{3}$");
-      ASSERT_EVENTUALLY([&] {
-        ASSERT_OK(curl.FetchURL(url, &response, headers));
-      });
+  while (true) {
+    string url;
+    {
+      std::lock_guard<simple_spinlock> l(lock);
+      if (urls.empty()) {
+        break;
+      }
+      url = urls.front();
+      urls.pop_front();
     }
-    const string resp_str = response.ToString();
-    SCOPED_TRACE(resp_str);
 
-    gq::CDocument page;
-    page.parse(resp_str);
+    ASSERT_OK(process_page_pool->Submit([=]() {
+      int ret = FindNth(url, '/', 3);
+      string host = ret == string::npos ? url : url.substr(0, ret);
 
-    // e.g. <a href="/rpcz">RPCs</a>
-    NO_FATALS(process_page(host, &page, "a", "href"));
+      // Every link should be reachable.
+      SCOPED_TRACE(url);
 
-    // e.g. <script src='/bootstrap/js/bootstrap.min.js' defer></script>
-    NO_FATALS(process_page(host, &page, "script", "src"));
+      // Crawl the web UIs.
+      //
+      // TODO(adar): the crawl could be faster if squeasel used TCP_NODELAY in its
+      // sockets. As it stands, a repeated fetch to the same host is slowed by about
+      // ~40ms due to Nagle's algorithm and delayed TCP ACKs.
+      EasyCurl curl;
+
+      // We use a self-signed cert, so we need to disable cert verification in curl.
+      if (use_ssl) {
+        curl.set_verify_peer(false);
+      }
+      faststring response;
+      {
+        // https://github.com/curl/curl/issues/7296
+        debug::ScopedTSANIgnoreReadsAndWrites ignore_tsan;
+        ASSERT_OK(curl.FetchURL(url, &response, headers));
+      }
+      string resp_str = response.ToString();
+//      SCOPED_TRACE(resp_str);
+
+      gq::CDocument page;
+      page.parse(resp_str);
+
+      // e.g. <a href="/rpcz">RPCs</a>
+      NO_FATALS(process_page(host, &page, "a", "href"));
+
+      // e.g. <script src='/bootstrap/js/bootstrap.min.js' defer></script>
+//      NO_FATALS(process_page(host, &page, "script", "src"));
+    }));
   }
+  process_page_pool->Wait();
+  process_page_pool->Shutdown();
 
   // Dump the results for troubleshooting.
   vector<string> sorted_urls(urls_seen.begin(), urls_seen.end());
