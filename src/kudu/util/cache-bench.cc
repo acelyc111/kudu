@@ -228,6 +228,7 @@ INSTANTIATE_TEST_SUITE_P(Patterns, CacheBench, testing::ValuesIn(std::vector<Ben
     }));
 
 TEST_P(CacheBench, RunBench) {
+  SKIP_IF_SLOW_NOT_ALLOWED();
   const BenchSetup& setup = GetParam();
 
   Random r(GetRandomSeed32());

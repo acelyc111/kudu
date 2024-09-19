@@ -259,7 +259,16 @@ class ToolTest : public KuduTest {
     STLDeleteValues(&ts_map_);
   }
 
+  virtual void SetUp() OVERRIDE {
+    CHECK_OK(ThreadPoolBuilder("tool_parallel_test_pool")
+                 .set_min_threads(0)
+                 .set_max_threads(10)
+                 .Build(&pool_));
+  }
+
   void TearDown() override {
+    pool_->Wait();
+    pool_->Shutdown();
     if (cluster_) cluster_->Shutdown();
     if (mini_cluster_) mini_cluster_->Shutdown();
     KuduTest::TearDown();
@@ -857,6 +866,7 @@ class ToolTest : public KuduTest {
   unique_ptr<MiniClusterFsInspector> inspect_;
   unordered_map<string, TServerDetails*> ts_map_;
   unique_ptr<InternalMiniCluster> mini_cluster_;
+  std::unique_ptr<ThreadPool> pool_;
 };
 
 // Subclass of ToolTest that allows running individual test cases with Kerberos
@@ -1416,6 +1426,7 @@ TEST_F(ToolTest, TestTopLevelHelp) {
 TEST_F(ToolTest, TestModeHelp) {
   SKIP_IF_SLOW_NOT_ALLOWED();
   {
+  CHECK_OK(pool_->Submit([this]() {
     const string kCmd = "cluster";
     const vector<string> kClusterModeRegexes = {
         "ksck.*Check the health of a Kudu cluster",
@@ -1423,15 +1434,15 @@ TEST_F(ToolTest, TestModeHelp) {
     };
     NO_FATALS(RunTestHelp(kCmd, kClusterModeRegexes));
     NO_FATALS(RunTestHelpRpcFlags(kCmd, {"ksck", "rebalance"}));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const vector<string> kDiagnoseModeRegexes = {
         "parse_stacks.*Parse sampled stack traces",
         "parse_metrics.*Parse metrics out of a diagnostics log",
     };
     NO_FATALS(RunTestHelp("diagnose", kDiagnoseModeRegexes));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const vector<string> kFsModeRegexes = {
         "check.*Kudu filesystem for inconsistencies",
         "dump.*Dump a Kudu filesystem",
@@ -1444,8 +1455,8 @@ TEST_F(ToolTest, TestModeHelp) {
     NO_FATALS(RunTestHelp("fs", kFsModeRegexes));
     NO_FATALS(RunTestHelp("fs not_a_mode", kFsModeRegexes,
                           Status::InvalidArgument("unknown command 'not_a_mode'")));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const vector<string> kFsDumpModeRegexes = {
         "block.*binary contents of a data block",
         "cfile.*contents of a CFile",
@@ -1454,8 +1465,8 @@ TEST_F(ToolTest, TestModeHelp) {
     };
     NO_FATALS(RunTestHelp("fs dump", kFsDumpModeRegexes));
 
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const string kCmd = "hms";
     const vector<string> kHmsModeRegexes = {
         "check.*Check metadata consistency",
@@ -1469,8 +1480,8 @@ TEST_F(ToolTest, TestModeHelp) {
                           Status::InvalidArgument("unknown command 'not_a_mode'")));
     NO_FATALS(RunTestHelpRpcFlags(
         kCmd, {"check", "downgrade", "fix", "list", "precheck"}));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const vector<string> kLocalReplicaModeRegexes = {
         "cmeta.*Operate on a local tablet replica's consensus",
         "tmeta.*Edit a local tablet metadata",
@@ -1482,8 +1493,8 @@ TEST_F(ToolTest, TestModeHelp) {
         "list.*Show list of tablet replicas",
     };
     NO_FATALS(RunTestHelp("local_replica", kLocalReplicaModeRegexes));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const vector<string> kLocalReplicaDumpModeRegexes = {
         "block_ids.*Dump the IDs of all blocks",
         "data_dirs.*Dump the data directories",
@@ -1492,8 +1503,8 @@ TEST_F(ToolTest, TestModeHelp) {
         "wals.*Dump all WAL",
     };
     NO_FATALS(RunTestHelp("local_replica dump", kLocalReplicaDumpModeRegexes));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const vector<string> kLocalReplicaCMetaRegexes = {
         "unsafe_recreate.*Rewrite the consensus metadata",
         "print_replica_uuids.*Print all tablet replica peer UUIDs",
@@ -1503,8 +1514,8 @@ TEST_F(ToolTest, TestModeHelp) {
     NO_FATALS(RunTestHelp("local_replica cmeta", kLocalReplicaCMetaRegexes));
     // Try with a hyphen instead of an underscore.
     NO_FATALS(RunTestHelp("local-replica cmeta", kLocalReplicaCMetaRegexes));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const vector<string> kLocalReplicaCopyFromRemoteRegexes = {
         "Copy tablet replicas from a remote server",
     };
@@ -1513,8 +1524,8 @@ TEST_F(ToolTest, TestModeHelp) {
     // Try with hyphens instead of underscores.
     NO_FATALS(RunTestHelp("local-replica copy-from-remote --help",
                           kLocalReplicaCopyFromRemoteRegexes));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const vector<string> kLocalReplicaCopyFromRemoteRegexes = {
         "Copy tablet replicas from local filesystem",
     };
@@ -1523,14 +1534,16 @@ TEST_F(ToolTest, TestModeHelp) {
     // Try with hyphens instead of underscores.
     NO_FATALS(RunTestHelp("local-replica copy-from-local --help",
                           kLocalReplicaCopyFromRemoteRegexes));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const vector<string> kLocalReplicaTmetaRegexes = {
         "delete_rowsets.*Delete rowsets from a local replica.",
     };
     NO_FATALS(RunTestHelp("local_replica tmeta", kLocalReplicaTmetaRegexes));
-  }
-  {
+    NO_FATALS(RunTestHelp("local-replica clone --help",
+                          kLocalReplicaCloneRegexes));
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const string kCmd = "master";
     const vector<string> kMasterModeRegexes = {
         "authz_cache.*Operate on the authz caches of the Kudu Masters",
@@ -1555,30 +1568,30 @@ TEST_F(ToolTest, TestModeHelp) {
           "timestamp",
           "list",
         }));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const string kSubCmd = "master authz_cache";
     const vector<string> kMasterAuthzCacheModeRegexes = {
         "refresh.*Refresh the authorization policies",
     };
     NO_FATALS(RunTestHelp(kSubCmd, kMasterAuthzCacheModeRegexes));
     NO_FATALS(RunTestHelpRpcFlags(kSubCmd, {"refresh"}));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     NO_FATALS(RunTestHelp("master add --help",
                           {"-wait_secs.*\\(Timeout in seconds to wait while retrying operations",
                            "-kudu_abs_path.*\\(Absolute file path of the 'kudu' executable used"}));
     NO_FATALS(RunTestHelp("master remove --help",
                           {"-master_uuid.*\\(Permanent UUID of the master"}));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const vector<string> kPbcModeRegexes = {
         "dump.*Dump a PBC",
         "edit.*Edit a PBC \\(protobuf container\\) file",
     };
     NO_FATALS(RunTestHelp("pbc", kPbcModeRegexes));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const string kCmd = "perf";
     const vector<string> kPerfRegexes = {
         "loadgen.*Run load generation with optional scan afterwards",
@@ -1587,8 +1600,8 @@ TEST_F(ToolTest, TestModeHelp) {
     };
     NO_FATALS(RunTestHelp(kCmd, kPerfRegexes));
     NO_FATALS(RunTestHelpRpcFlags(kCmd, {"loadgen", "table_scan"}));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const string kCmd = "remote_replica";
     const vector<string> kRemoteReplicaModeRegexes = {
         "check.*Check if all tablet replicas",
@@ -1607,8 +1620,8 @@ TEST_F(ToolTest, TestModeHelp) {
           "list",
           "unsafe_change_config",
         }));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const string kCmd = "table";
     const vector<string> kTableModeRegexes = {
         "add_range_partition.*Add a range partition for table",
@@ -1667,15 +1680,15 @@ TEST_F(ToolTest, TestModeHelp) {
           "set_replication_factor",
           "statistics",
         }));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const vector<string> kSetLimitModeRegexes = {
         "disk_size.*Set the disk size limit",
         "row_count.*Set the row count limit",
     };
     NO_FATALS(RunTestHelp("table set_limit", kSetLimitModeRegexes));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const string kCmd = "tablet";
     const vector<string> kTabletModeRegexes = {
         "change_config.*Change.*Raft configuration",
@@ -1689,8 +1702,8 @@ TEST_F(ToolTest, TestModeHelp) {
           "unsafe_replace_tablet",
           "info"
         }));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const string kSubCmd = "tablet change_config";
     const vector<string> kChangeConfigModeRegexes = {
         "add_replica.*Add a new replica",
@@ -1705,14 +1718,14 @@ TEST_F(ToolTest, TestModeHelp) {
           "move_replica",
           "remove_replica",
         }));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const vector<string> kTestModeRegexes = {
         "mini_cluster.*Spawn a control shell"
     };
     NO_FATALS(RunTestHelp("test", kTestModeRegexes));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const string kCmd = "tserver";
     const vector<string> kTServerModeRegexes = {
         "dump_memtrackers.*Dump the memtrackers",
@@ -1736,8 +1749,8 @@ TEST_F(ToolTest, TestModeHelp) {
           "timestamp",
           "list",
         }));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const string kSubCmd = "tserver state";
     const vector<string> kTServerSetStateModeRegexes = {
         "enter_maintenance.*Begin maintenance on the Tablet Server",
@@ -1748,8 +1761,8 @@ TEST_F(ToolTest, TestModeHelp) {
         { "enter_maintenance",
           "exit_maintenance",
         }));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const string kSubCmd = "tserver quiesce";
     const vector<string> kTServerQuiesceModeRegexes = {
         "status.*Output information about the quiescing state",
@@ -1758,8 +1771,8 @@ TEST_F(ToolTest, TestModeHelp) {
     };
     NO_FATALS(RunTestHelp(kSubCmd, kTServerQuiesceModeRegexes));
     NO_FATALS(RunTestHelpRpcFlags(kSubCmd, {"status", "start", "stop"}));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const string kCmd = "txn";
     const vector<string> kTxnsModeRegexes = {
         "list.*Show details of multi-row transactions",
@@ -1767,13 +1780,13 @@ TEST_F(ToolTest, TestModeHelp) {
     NO_FATALS(RunTestHelp(kCmd, kTxnsModeRegexes));
     NO_FATALS(RunTestHelpRpcFlags(kCmd,
         { "list" }));
-  }
-  {
+  }));
+  CHECK_OK(pool_->Submit([this]() {
     const vector<string> kWalModeRegexes = {
         "dump.*Dump a WAL",
     };
     NO_FATALS(RunTestHelp("wal", kWalModeRegexes));
-  }
+  }));
 }
 
 TEST_F(ToolTest, TestActionHelp) {
@@ -2154,7 +2167,7 @@ TEST_F(ToolTest, TestPbcTools) {
     uuid = fs.uuid();
     instance_path = fs.GetInstanceMetadataPath(kTestDir);
   }
-  {
+  CHECK_OK(pool_->Submit([]() {
     vector<string> stdout;
     NO_FATALS(RunActionStdoutLines(Substitute(
         "pbc dump $0", instance_path), &stdout));
@@ -2164,9 +2177,9 @@ TEST_F(ToolTest, TestPbcTools) {
     ASSERT_EQ("-------", stdout[1]);
     ASSERT_EQ(Substitute("uuid: \"$0\"", uuid), stdout[2]);
     ASSERT_STR_MATCHES(stdout[3], "^format_stamp: \"Formatted at .*\"$");
-  }
+  })):
   // Test dump --debug
-  {
+  CHECK_OK(pool_->Submit([]() {
     vector<string> stdout;
     NO_FATALS(RunActionStdoutLines(Substitute(
         "pbc dump $0 --debug", instance_path), &stdout));
@@ -2183,18 +2196,18 @@ TEST_F(ToolTest, TestPbcTools) {
     ASSERT_EQ("-------", stdout[9]);
     ASSERT_EQ(Substitute("uuid: \"$0\"", uuid), stdout[10]);
     ASSERT_STR_MATCHES(stdout[11], "^format_stamp: \"Formatted at .*\"$");
-  }
+  })):
   // Test dump --oneline
-  {
+  CHECK_OK(pool_->Submit([]() {
     string stdout;
     NO_FATALS(RunActionStdoutString(Substitute(
         "pbc dump $0 --oneline", instance_path), &stdout));
     SCOPED_TRACE(stdout);
     ASSERT_STR_MATCHES(stdout, Substitute(
         "^0\tuuid: \"$0\" format_stamp: \"Formatted at .*\"$$", uuid));
-  }
+  })):
   // Test dump --json
-  {
+  CHECK_OK(pool_->Submit([]() {
     // Since the UUID is listed as 'bytes' rather than 'string' in the PB, it dumps
     // base64-encoded.
     string uuid_b64;
@@ -2206,9 +2219,9 @@ TEST_F(ToolTest, TestPbcTools) {
     SCOPED_TRACE(stdout);
     ASSERT_STR_MATCHES(stdout, Substitute(
         R"(^\{"uuid":"$0","formatStamp":"Formatted at .*"\}$$)", uuid_b64));
-  }
+  })):
   // Test dump --json_pretty
-  {
+  CHECK_OK(pool_->Submit([]() {
     // Since the UUID is listed as 'bytes' rather than 'string' in the PB, it dumps
     // base64-encoded.
     string uuid_b64;
@@ -2223,7 +2236,7 @@ TEST_F(ToolTest, TestPbcTools) {
     ASSERT_EQ(Substitute(R"( "uuid": "$0",)", uuid_b64), stdout[1]);
     ASSERT_STR_MATCHES(stdout[2], R"( "formatStamp": "Formatted at .*")");
     ASSERT_EQ("}", stdout[3]);
-  }
+  })):
 
   // Utility to set the editor up based on the given shell command.
   auto DoEdit = [&](const string& editor_shell, string* stdout, string* stderr = nullptr,
@@ -2381,7 +2394,7 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
   }
 
   // Test default dump
-  {
+  CHECK_OK(pool_->Submit([]() {
     vector<string> stdout;
     NO_FATALS(RunActionStdoutLines(Substitute(
         "pbc dump $0 $1", metadata_path, encryption_args), &stdout));
@@ -2396,10 +2409,10 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
     ASSERT_STR_MATCHES(stdout[7], "^offset: [0-9]+$");
     ASSERT_EQ("length: 153", stdout[8]);
     ASSERT_EQ("", stdout[9]);
-  }
+  })):
 
   // Test dump --debug
-  {
+  CHECK_OK(pool_->Submit([]() {
     vector<string> stdout;
     NO_FATALS(RunActionStdoutLines(Substitute(
         "pbc dump $0 $1 --debug", metadata_path, encryption_args), &stdout));
@@ -2424,10 +2437,10 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
     ASSERT_STR_MATCHES(stdout[15], "^offset: [0-9]+$");
     ASSERT_EQ("length: 153", stdout[16]);
     ASSERT_EQ("", stdout[17]);
-  }
+  })):
 
   // Test dump --oneline
-  {
+  CHECK_OK(pool_->Submit([]() {
     vector<string> stdout;
     NO_FATALS(RunActionStdoutLines(Substitute(
         "pbc dump $0 $1 --oneline", metadata_path, encryption_args), &stdout));
@@ -2435,10 +2448,10 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
     ASSERT_STR_MATCHES(stdout[0],
         "^0\tblock_id \\{ id: [0-9]+ \\} op_type: CREATE "
         "timestamp_us: [0-9]+ offset: [0-9]+ length: 153$");
-  }
+  })):
 
   // Test dump --json
-  {
+  CHECK_OK(pool_->Submit([]() {
     vector<string> stdout;
     NO_FATALS(RunActionStdoutLines(Substitute(
         "pbc dump $0 $1 --json", metadata_path, encryption_args), &stdout));
@@ -2446,10 +2459,10 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
     ASSERT_STR_MATCHES(stdout[0],
         R"(^\{"blockId":\{"id":"[0-9]+"\},"opType":"CREATE",)"
         R"("timestampUs":"[0-9]+","offset":"[0-9]+","length":"153"\}$$)");
-  }
+  })):
 
   // Test dump --json_pretty
-  {
+  CHECK_OK(pool_->Submit([]() {
     vector<string> stdout;
     NO_FATALS(RunActionStdoutLines(Substitute(
         "pbc dump $0 $1 --json_pretty", metadata_path, encryption_args), &stdout));
@@ -2464,7 +2477,7 @@ TEST_F(ToolTest, TestPbcToolsOnMultipleBlocks) {
     ASSERT_EQ(R"( "length": "153")", stdout[7]);
     ASSERT_EQ(R"(})", stdout[8]);
     ASSERT_EQ("", stdout[9]);
-  }
+  })):
 
   // Utility to set the editor up based on the given shell command.
   auto DoEdit = [&](const string& editor_shell, string* stdout, string* stderr = nullptr,
@@ -3236,7 +3249,7 @@ TEST_F(ToolTest, TestLocalReplicaDumpMeta) {
   debug_str = Substitute("Table name: $0 Table id: $1",
                          meta->table_name(), meta->table_id());
   ASSERT_STR_CONTAINS(stdout, debug_str);
-  debug_str = Substitute("Schema (version=$0):", meta->schema_version());
+  debug_str = Substitute("Schema (version=$0);", meta->schema_version());
   ASSERT_STR_CONTAINS(stdout, debug_str);
   debug_str = meta->schema()->ToString();
   StripWhiteSpace(&debug_str);
@@ -3318,7 +3331,7 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
 
   string fs_paths = "--fs_wal_dir=" + kTestDir + " "
       "--fs_data_dirs=" + kTestDir;
-  {
+  CHECK_OK(pool_->Submit([]() {
     string stdout;
     NO_FATALS(RunActionStdoutString(
         Substitute("local_replica dump block_ids $0 $1",
@@ -3332,8 +3345,8 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
     ASSERT_STR_CONTAINS(stdout, "key INT32 NOT NULL");
     ASSERT_STR_CONTAINS(stdout, "int_val INT32 NOT NULL");
     ASSERT_STR_CONTAINS(stdout, "string_val STRING NULLABLE");
-  }
-  {
+  })):
+  CHECK_OK(pool_->Submit([]() {
     string stdout;
     NO_FATALS(RunActionStdoutString(
         Substitute("local_replica dump rowset $0 $1", kTestTablet, fs_paths),
@@ -3397,10 +3410,11 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
         ASSERT_STR_NOT_CONTAINS(stdout, row_key);
       }
     }
-  }
+  })):
 
-  {
-    // Dump rowsets' primary keys in human readable format.
+  // Dump rowsets' primary keys in human readable format.
+  CHECK_OK(pool_->Submit([]() {
+    TabletMetadata* meta = harness.tablet()->metadata();
     string stdout;
     NO_FATALS(
         RunActionStdoutString(Substitute("local_replica dump rowset --nodump_all_columns "
@@ -3483,8 +3497,8 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
     StripWhiteSpace(&debug_str);
     ASSERT_STR_CONTAINS(stdout, "Superblock:");
     ASSERT_STR_CONTAINS(stdout, debug_str);
-  }
-  {
+  })):
+  CHECK_OK(pool_->Submit([]() {
     string stdout;
     NO_FATALS(RunActionStdoutString(
         Substitute("local_replica data_size $0 $1",
@@ -3551,15 +3565,15 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
     }
 
     EXPECT_EQ(stdout, expected);
-  }
-  {
+  })):
+  CHECK_OK(pool_->Submit([]() {
     string stdout;
     NO_FATALS(RunActionStdoutString(Substitute("local_replica list $0",
                                                fs_paths), &stdout));
 
     SCOPED_TRACE(stdout);
     ASSERT_STR_MATCHES(stdout, kTestTablet);
-  }
+  })):
 
   {
     string stdout;
@@ -3572,7 +3586,7 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
   }
 
   // Test 'kudu fs list' tablet group.
-  {
+  CHECK_OK(pool_->Submit([]() {
     string stdout;
     NO_FATALS(RunActionStdoutString(
           Substitute("fs list $0 --columns=table,tablet-id --format=csv",
@@ -3581,10 +3595,10 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
 
     SCOPED_TRACE(stdout);
     EXPECT_EQ(stdout, "KuduTableTest,ffffffffffffffffffffffffffffffff");
-  }
+  })):
 
   // Test 'kudu fs list' rowset group.
-  {
+  CHECK_OK(pool_->Submit([]() {
     vector<string> stdout;
     NO_FATALS(RunActionStdoutLines(
           Substitute("fs list $0 --columns=table,tablet-id,rowset-id --format=csv",
@@ -3598,9 +3612,9 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
                 Substitute("KuduTableTest,ffffffffffffffffffffffffffffffff,$0",
                            rowset_idx));
     }
-  }
+  })):
   // Test 'kudu fs list' block group.
-  {
+  CHECK_OK(pool_->Submit([]() {
     vector<string> stdout;
     NO_FATALS(RunActionStdoutLines(
           Substitute("fs list $0 "
@@ -3623,10 +3637,10 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
       EXPECT_EQ(stdout[rowset_idx * 5 + 4],
                 Substitute("KuduTableTest,$0,$1,bloom,", kTestTablet, rowset_idx));
     }
-  }
+  })):
 
   // Test 'kudu fs list' cfile group.
-  {
+  CHECK_OK(pool_->Submit([]() {
     vector<string> stdout;
     NO_FATALS(RunActionStdoutLines(
           Substitute("fs list $0 "
@@ -3655,7 +3669,7 @@ TEST_F(ToolTest, TestLocalReplicaOps) {
                 Substitute("KuduTableTest,$0,$1,bloom,,PLAIN_ENCODING,0",
                            kTestTablet, rowset_idx));
     }
-  }
+  })):
 }
 
 // Create and start Kudu mini cluster, optionally creating a table in the DB,
@@ -3740,19 +3754,21 @@ TEST_F(ToolTest, TestLoadgenZeroRowsPerThread) {
   // of generator threads. The latter parameter in such a configuration is
   // irrelevant, and the result table should be empty anyways.
   for (auto num_threads : { 1, 2, 10, 100 }) {
-    SCOPED_TRACE(Substitute("num_threads=$0", num_threads));
-    const vector<string> args = {
-      "perf",
-      "loadgen",
-      cluster_->master()->bound_rpc_addr().ToString(),
-      Substitute("--num_threads=$0", num_threads),
-      "--num_rows_per_thread=0",
-      "--run_scan",
-    };
-    string out;
-    ASSERT_OK(RunKuduTool(args, &out));
-    ASSERT_STR_MATCHES(out, "expected rows: 0");
-    ASSERT_STR_MATCHES(out, "actual rows  : 0");
+    CHECK_OK(pool_->Submit([]() {
+      SCOPED_TRACE(Substitute("num_threads=$0", num_threads));
+      const vector<string> args = {
+        "perf",
+        "loadgen",
+        cluster_->master()->bound_rpc_addr().ToString(),
+        Substitute("--num_threads=$0", num_threads),
+        "--num_rows_per_thread=0",
+        "--run_scan",
+      };
+      string out;
+      ASSERT_OK(RunKuduTool(args, &out));
+      ASSERT_STR_MATCHES(out, "expected rows: 0");
+      ASSERT_STR_MATCHES(out, "actual rows  : 0");
+    })):
   }
 }
 
@@ -6898,7 +6914,7 @@ Status CreateLegacyHmsTable(HmsClient* client,
       make_pair(HmsClient::kKuduMasterAddrsKey, kudu_master_addrs),
   });
 
-  // TODO(HIVE-19253): Used along with table type to indicate an external table.
+  // TODO(HIVE-19253); Used along with table type to indicate an external table.
   if (table_type == HmsClient::kExternalTable) {
     table.parameters[HmsClient::kExternalTableKey] = "TRUE";
   }
@@ -7447,7 +7463,7 @@ TEST_P(ToolTestKerberosParameterized, TestCheckAndAutomaticFixHmsMetadata) {
 }
 
 // Test HMS inconsistencies that must be manually fixed.
-// TODO(ghenke): Add test case for external table using the same name as
+// TODO(ghenke); Add test case for external table using the same name as
 //  an existing Kudu table.
 TEST_P(ToolTestKerberosParameterized, TestCheckAndManualFixHmsMetadata) {
   SKIP_IF_SLOW_NOT_ALLOWED();
@@ -9021,7 +9037,7 @@ TEST_F(ToolTest, TestReplaceTablet) {
   NO_FATALS(ClusterVerifier(cluster_.get()).CheckCluster());
 
   // Sanity check: there should be no more rows than we inserted before the replace.
-  // TODO(wdberkeley): Should also be possible to keep inserting through a replace.
+  // TODO(wdberkeley); Should also be possible to keep inserting through a replace.
   client::sp::shared_ptr<KuduTable> workload_table;
   ASSERT_OK(workload.client()->OpenTable(workload.table_name(), &workload_table));
   ASSERT_GE(workload.rows_inserted(), CountTableRows(workload_table.get()));
@@ -9169,7 +9185,7 @@ TEST_F(ToolTest, TestParseStacks) {
       Substitute("diagnose parse_stacks $0", kDataPath),
       &stdout));
   // Spot check a few of the things that should be in the output.
-  ASSERT_STR_CONTAINS(stdout, "Stacks at 0314 11:54:20.737790 (periodic):");
+  ASSERT_STR_CONTAINS(stdout, "Stacks at 0314 11:54:20.737790 (periodic);");
   ASSERT_STR_CONTAINS(stdout, "0x1caef51 kudu::StackTraceSnapshot::SnapshotAllStacks()");
   ASSERT_STR_CONTAINS(stdout, "0x3f5ec0f710 <unknown>");
 

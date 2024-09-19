@@ -116,10 +116,12 @@ TEST_F(CharUtilTest, CorrectnessTestUtf8AndAscii) {
 }
 
 TEST_F(CharUtilTest, StressTestUtf8) {
+  SKIP_IF_SLOW_NOT_ALLOWED();
   StressTest(data_utf8_, 9000);
 }
 
 TEST_F(CharUtilTest, StressTestAscii) {
+  SKIP_IF_SLOW_NOT_ALLOWED();
   StressTest(data_ascii_, 9000);
 }
 

@@ -26,6 +26,7 @@
 
 #include "kudu/util/monotime.h"
 #include "kudu/util/process_memory.h"
+#include "kudu/util/test_util.h"
 
 using std::atomic;
 using std::thread;
@@ -36,7 +37,7 @@ namespace kudu {
 // Microbenchmark for our new/delete hooks which track process-wide
 // memory consumption.
 TEST(ProcessMemory, BenchmarkConsumptionTracking) {
-  const int kNumThreads = 200;
+  const int kNumThreads = AllowSlowTests() ? 200 : 10;
   vector<thread> threads;
   atomic<bool> done(false);
   atomic<int64_t> total_count(0);
@@ -52,7 +53,7 @@ TEST(ProcessMemory, BenchmarkConsumptionTracking) {
           for (int a = 0; a < 10; a++) {
             // Mark 'x' volatile so that the compiler does not optimize out the
             // allocation.
-            char* volatile x = new char[8000];
+            char* volatile x = new char[AllowSlowTests() ? 8000 : 80];
             delete[] x;
           }
           process_memory::CurrentConsumption();
@@ -61,7 +62,7 @@ TEST(ProcessMemory, BenchmarkConsumptionTracking) {
         total_count += local_count;
       });
   }
-  double secs = 3;
+  double secs = AllowSlowTests() ? 3 : 1;
   SleepFor(MonoDelta::FromSeconds(secs));
   done = true;
 

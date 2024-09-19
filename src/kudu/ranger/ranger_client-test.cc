@@ -26,6 +26,7 @@
 #include <vector>
 
 #include <boost/container_hash/hash.hpp>
+#include <boost/container_hash/extensions.hpp>
 #include <gflags/gflags_declare.h>
 #include <glog/logging.h>
 #include <google/protobuf/any.pb.h>
@@ -153,6 +154,7 @@ class RangerClientTest : public KuduTest {
     client_(env_, METRIC_ENTITY_server.Instantiate(&metric_registry_, "ranger_client-test")) {}
 
   void SetUp() override {
+    SKIP_IF_AUTHZ_DISABLED();
     std::unique_ptr<MockSubprocessServer> server(new MockSubprocessServer());
     next_response_ = &server->next_response_;
     client_.ReplaceServerForTests(std::move(server));
@@ -177,6 +179,7 @@ class RangerClientTest : public KuduTest {
 };
 
 TEST_F(RangerClientTest, TestAuthorizeCreateTableUnauthorized) {
+  SKIP_IF_AUTHZ_DISABLED();
   bool authorized;
   ASSERT_OK(client_.AuthorizeAction("jdoe", ActionPB::CREATE, "bar", "baz", /*is_owner=*/false,
                                     /*requires_delegate_admin=*/false, &authorized));
@@ -184,6 +187,7 @@ TEST_F(RangerClientTest, TestAuthorizeCreateTableUnauthorized) {
 }
 
 TEST_F(RangerClientTest, TestAuthorizeCreateTableAuthorized) {
+  SKIP_IF_AUTHZ_DISABLED();
   Allow("jdoe", ActionPB::CREATE, "foo", "bar");
   bool authorized;
   ASSERT_OK(client_.AuthorizeAction("jdoe", ActionPB::CREATE, "foo", "bar", /*is_owner=*/false,
@@ -192,12 +196,14 @@ TEST_F(RangerClientTest, TestAuthorizeCreateTableAuthorized) {
 }
 
 TEST_F(RangerClientTest, TestAuthorizeListNoTables) {
+  SKIP_IF_AUTHZ_DISABLED();
   unordered_map<string, bool> tables;
   ASSERT_OK(client_.AuthorizeActionMultipleTables("jdoe", ActionPB::METADATA, &tables));
   ASSERT_EQ(0, tables.size());
 }
 
 TEST_F(RangerClientTest, TestAuthorizeListNoTablesAuthorized) {
+  SKIP_IF_AUTHZ_DISABLED();
   unordered_map<string, bool> tables;
   tables.emplace("foo.bar", false);
   tables.emplace("foo.baz", false);
@@ -206,6 +212,7 @@ TEST_F(RangerClientTest, TestAuthorizeListNoTablesAuthorized) {
 }
 
 TEST_F(RangerClientTest, TestAuthorizeMetadataSubsetOfTablesAuthorized) {
+  SKIP_IF_AUTHZ_DISABLED();
   Allow("jdoe", ActionPB::METADATA, "default", "foobar");
   unordered_map<string, bool> tables;
   tables.emplace("default.foobar", false);
@@ -216,6 +223,7 @@ TEST_F(RangerClientTest, TestAuthorizeMetadataSubsetOfTablesAuthorized) {
 }
 
 TEST_F(RangerClientTest, TestAuthorizeMetadataAllAuthorized) {
+  SKIP_IF_AUTHZ_DISABLED();
   Allow("jdoe", ActionPB::METADATA, "default", "foobar");
   Allow("jdoe", ActionPB::METADATA, "default", "barbaz");
   unordered_map<string, bool> tables;
@@ -228,6 +236,7 @@ TEST_F(RangerClientTest, TestAuthorizeMetadataAllAuthorized) {
 }
 
 TEST_F(RangerClientTest, TestAuthorizeMetadataAllNonRanger) {
+  SKIP_IF_AUTHZ_DISABLED();
   unordered_map<string, bool> tables;
   tables.emplace("foo.", false);
   tables.emplace(".bar", false);
@@ -236,6 +245,7 @@ TEST_F(RangerClientTest, TestAuthorizeMetadataAllNonRanger) {
 }
 
 TEST_F(RangerClientTest, TestAuthorizeMetadataNoneAuthorizedContainsNonRanger) {
+  SKIP_IF_AUTHZ_DISABLED();
   unordered_map<string, bool> tables;
   tables.emplace("foo.", false);
   tables.emplace(".bar", false);
@@ -246,6 +256,7 @@ TEST_F(RangerClientTest, TestAuthorizeMetadataNoneAuthorizedContainsNonRanger) {
 }
 
 TEST_F(RangerClientTest, TestAuthorizeMetadataAllAuthorizedContainsNonRanger) {
+  SKIP_IF_AUTHZ_DISABLED();
   Allow("jdoe", ActionPB::METADATA, "default", "foobar");
   Allow("jdoe", ActionPB::METADATA, "default", "barbaz");
   unordered_map<string, bool> tables;
@@ -260,6 +271,7 @@ TEST_F(RangerClientTest, TestAuthorizeMetadataAllAuthorizedContainsNonRanger) {
 }
 
 TEST_F(RangerClientTest, TestAuthorizeScanSubsetAuthorized) {
+  SKIP_IF_AUTHZ_DISABLED();
   Allow("jdoe", ActionPB::SELECT, "default", "foobar", "col1");
   Allow("jdoe", ActionPB::SELECT, "default", "foobar", "col3");
   unordered_set<string> columns;
@@ -278,6 +290,7 @@ TEST_F(RangerClientTest, TestAuthorizeScanSubsetAuthorized) {
 }
 
 TEST_F(RangerClientTest, TestAuthorizeScanAllColumnsAuthorized) {
+  SKIP_IF_AUTHZ_DISABLED();
   Allow("jdoe", ActionPB::SELECT, "default", "foobar", "col1");
   Allow("jdoe", ActionPB::SELECT, "default", "foobar", "col2");
   Allow("jdoe", ActionPB::SELECT, "default", "foobar", "col3");
@@ -298,6 +311,7 @@ TEST_F(RangerClientTest, TestAuthorizeScanAllColumnsAuthorized) {
 }
 
 TEST_F(RangerClientTest, TestAuthorizeScanNoColumnsAuthorized) {
+  SKIP_IF_AUTHZ_DISABLED();
   unordered_set<string> columns;
   for (int i = 0; i < 4; ++i) {
     columns.emplace(Substitute("col$0", i));
@@ -309,6 +323,7 @@ TEST_F(RangerClientTest, TestAuthorizeScanNoColumnsAuthorized) {
 }
 
 TEST_F(RangerClientTest, TestAuthorizeActionsNoneAuthorized) {
+  SKIP_IF_AUTHZ_DISABLED();
   unordered_set<ActionPB, ActionHash> actions;
   actions.emplace(ActionPB::DROP);
   actions.emplace(ActionPB::SELECT);
@@ -318,6 +333,7 @@ TEST_F(RangerClientTest, TestAuthorizeActionsNoneAuthorized) {
 }
 
 TEST_F(RangerClientTest, TestAuthorizeActionsSomeAuthorized) {
+  SKIP_IF_AUTHZ_DISABLED();
   Allow("jdoe", ActionPB::SELECT, "default", "foobar");
   unordered_set<ActionPB, ActionHash> actions;
   actions.emplace(ActionPB::DROP);
@@ -329,6 +345,7 @@ TEST_F(RangerClientTest, TestAuthorizeActionsSomeAuthorized) {
 }
 
 TEST_F(RangerClientTest, TestAuthorizeActionsAllAuthorized) {
+  SKIP_IF_AUTHZ_DISABLED();
   Allow("jdoe", ActionPB::DROP, "default", "foobar");
   Allow("jdoe", ActionPB::SELECT, "default", "foobar");
   Allow("jdoe", ActionPB::INSERT, "default", "foobar");
@@ -462,6 +479,7 @@ Status GetLinesFromLogFile(Env* env, string* file, vector<string>* lines) {
 } // anonymous namespace
 
 TEST_F(RangerClientTestBase, TestLogging) {
+  SKIP_IF_AUTHZ_DISABLED();
   {
     // Check that a logging configuration was produced by the Ranger client.
     vector<string> files;

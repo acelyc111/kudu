@@ -18,9 +18,11 @@
 #include <algorithm>
 #include <deque>
 #include <functional>
+#include <tuple>
+#include <memory>
+#include <mutex>
 #include <ostream>
 #include <string>
-#include <tuple>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -40,14 +42,17 @@
 #include "kudu/mini-cluster/external_mini_cluster.h"
 #include "kudu/security/test/test_certs.h"
 #include "kudu/util/curl_util.h"
+#include "kudu/util/debug/sanitizer_scopes.h"
 #include "kudu/util/env.h"
 #include "kudu/util/faststring.h"
+#include "kudu/util/locks.h"
 #include "kudu/util/monotime.h"
 #include "kudu/util/net/net_util.h"
 #include "kudu/util/path_util.h"
 #include "kudu/util/status.h"
 #include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
+#include "kudu/util/threadpool.h"
 #include "kudu/util/url-coding.h"
 
 using kudu::cluster::ExternalMiniCluster;
@@ -55,6 +60,7 @@ using kudu::cluster::ExternalMiniClusterOptions;
 using std::deque;
 using std::string;
 using std::tuple;
+using std::unique_ptr;
 using std::unordered_set;
 using std::vector;
 using strings::SkipEmpty;
@@ -182,6 +188,7 @@ TEST_P(WebserverCrawlITest, TestAllWebPages) {
   }
   work.StopAndJoin();
 
+  simple_spinlock lock;
   // Tracks all URLs left to process. When empty, the search is finished.
   deque<string> urls;
 
@@ -221,6 +228,7 @@ TEST_P(WebserverCrawlITest, TestAllWebPages) {
 
     if (HasPrefixString(link, scheme)) {
       // Full URLs should not be modified and can be visited directly.
+      std::lock_guard<simple_spinlock> l(lock);
       if (EmplaceIfNotPresent(&urls_seen, link)) {
         urls.emplace_back(std::move(link));
       }
@@ -252,6 +260,7 @@ TEST_P(WebserverCrawlITest, TestAllWebPages) {
     ASSERT_EQ(string::npos, link.find(' '));
 
     string full_url = host + link;
+    std::lock_guard<simple_spinlock> l(lock);
     if (!ContainsKey(urls_seen, full_url)) {
       urls.emplace_back(full_url);
       urls_seen.emplace(std::move(full_url));
@@ -265,10 +274,18 @@ TEST_P(WebserverCrawlITest, TestAllWebPages) {
                           const char* elem,
                           const char* attr) {
     gq::CSelection sel = page->find(elem);
+    unique_ptr<ThreadPool> process_link_pool;
+    ASSERT_OK(ThreadPoolBuilder("process_page_pool")
+                  .set_max_threads(16)
+                  .Build(&process_link_pool));
     for (int i = 0; i < sel.nodeNum(); i++) {
       string link = sel.nodeAt(i).attribute(attr);
-      NO_FATALS(process_link(host, std::move(link)));
+      ASSERT_OK(process_link_pool->Submit([=] {
+        NO_FATALS(process_link(host, link));
+      }));
     }
+    process_link_pool->Wait();
+    process_link_pool->Shutdown();
   };
 
   // Crawl the web UIs.
@@ -319,6 +336,8 @@ TEST_P(WebserverCrawlITest, TestAllWebPages) {
     // e.g. <script src='/bootstrap/js/bootstrap.min.js' defer></script>
     NO_FATALS(process_page(host, &page, "script", "src"));
   }
+  process_page_pool->Wait();
+  process_page_pool->Shutdown();
 
   // Dump the results for troubleshooting.
   vector<string> sorted_urls(urls_seen.begin(), urls_seen.end());

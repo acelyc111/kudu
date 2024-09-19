@@ -47,6 +47,7 @@
 #include "kudu/util/status.h"
 #include "kudu/util/stopwatch.h"
 #include "kudu/util/test_macros.h"
+#include "kudu/util/test_util.h"
 
 METRIC_DECLARE_entity(server);
 METRIC_DECLARE_gauge_uint64(block_manager_total_blocks_created);
@@ -108,10 +109,7 @@ INSTANTIATE_TEST_SUITE_P(, DenseNodeTest,
 // proxy for data in areas we care about (such as start up time, thread count,
 // memory usage, etc.).
 TEST_P(DenseNodeTest, RunTest) {
-  #ifdef THREAD_SANITIZER
-    SKIP_IF_SLOW_NOT_ALLOWED();
-  #endif
-
+  SKIP_IF_SLOW_NOT_ALLOWED();
   ExternalMiniClusterOptions opts;
 
   opts.extra_tserver_flags = {

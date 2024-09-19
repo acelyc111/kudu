@@ -582,7 +582,7 @@ class WireProtocolBenchmark :
     RowBlock block(&benchmark_schema_, 1000, &mem);
     // Regardless of the config, use a constant number of selected cells for the test by
     // looping the conversion an appropriate number of times.
-    const int64_t kNumCellsToConvert = AllowSlowTests() ? 100000000 : 1000000;
+    const int64_t kNumCellsToConvert = AllowSlowTests() ? 100 * 1000 * 1000 : 100 * 1000;
     const int64_t kCellsPerBlock = block.nrows() * spec.columns.size();
     const double kSelectedCellsPerBlock = kCellsPerBlock * select_rate;
     const int kNumTrials = static_cast<int>(kNumCellsToConvert /  kSelectedCellsPerBlock);

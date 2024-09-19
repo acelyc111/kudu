@@ -19,10 +19,12 @@
 #include <vector>
 
 #include <gflags/gflags.h>
+#include <glog/logging.h>
 #include <gtest/gtest.h>
 
 #include "kudu/cfile/bloomfile-test-base.h"
 #include "kudu/util/test_macros.h"
+#include "kudu/util/test_util.h"
 
 DEFINE_int32(benchmark_num_threads, 8, "Number of threads to use for the benchmark");
 
@@ -36,6 +38,7 @@ class MTBloomFileTest : public BloomFileTestBase {
 };
 
 TEST_F(MTBloomFileTest, Benchmark) {
+  SKIP_IF_SLOW_NOT_ALLOWED();
   NO_FATALS(WriteTestBloomFile());
   ASSERT_OK(OpenBloomFile());
 

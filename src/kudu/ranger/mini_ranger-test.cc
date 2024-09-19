@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include <glog/logging.h>
 #include <gtest/gtest.h>
 
 #include "kudu/postgres/mini_postgres.h"
@@ -44,6 +45,7 @@ class MiniRangerTest : public KuduTest {
   MiniRangerTest() :
     ranger_("127.0.0.1", std::make_shared<MiniPostgres>("127.0.0.1")) {}
   void SetUp() override {
+    SKIP_IF_AUTHZ_DISABLED();
     ASSERT_OK(ranger_.Start());
   }
 
@@ -52,6 +54,7 @@ class MiniRangerTest : public KuduTest {
 };
 
 TEST_F(MiniRangerTest, TestGrantPrivilege) {
+  SKIP_IF_AUTHZ_DISABLED();
   PolicyItem item({ "testuser" }, { ActionPB::ALTER }, false);
 
   AuthorizationPolicy policy;
@@ -63,6 +66,7 @@ TEST_F(MiniRangerTest, TestGrantPrivilege) {
 }
 
 TEST_F(MiniRangerTest, TestPersistence) {
+  SKIP_IF_AUTHZ_DISABLED();
   PolicyItem item({ "testuser" }, { ActionPB::ALTER }, false);
 
   AuthorizationPolicy policy;

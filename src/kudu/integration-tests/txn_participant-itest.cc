@@ -237,9 +237,9 @@ class TxnParticipantITest : public KuduTest {
     w.set_write_pattern(pattern);
     w.Setup();
     w.Start();
-    while (w.rows_inserted() < 1) {
-      SleepFor(kDefaultTimeout);
-    }
+    ASSERT_EVENTUALLY([&] {
+      ASSERT_GE(w.rows_inserted(), 1);
+    });
     if (table_name) {
       *table_name = w.table_name();
     }

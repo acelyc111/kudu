@@ -84,6 +84,7 @@ namespace kudu {
 
 const char* kInvalidPath = "/dev/invalid-path-for-kudu-tests";
 static const char* const kSlowTestsEnvVar = "KUDU_ALLOW_SLOW_TESTS";
+static const char* const kAuthzTestsEnvVar = "KUDU_ALLOW_AUTHZ_TESTS";
 static const char* const kLargeKeysEnvVar = "KUDU_USE_LARGE_KEYS_IN_TESTS";
 static const char* const kEncryptDataInTests = "KUDU_ENCRYPT_DATA_IN_TESTS";
 static const int kEncryptionKeySize = 16;
@@ -244,6 +245,8 @@ void KuduTest::GetEncryptionKey(string* name, string* id, string* key, string* i
 ///////////////////////////////////////////////////
 
 bool AllowSlowTests() { return GetBooleanEnvironmentVariable(kSlowTestsEnvVar); }
+
+bool AllowAuthzTests() { return GetBooleanEnvironmentVariable(kAuthzTestsEnvVar); }
 
 bool UseLargeKeys() { return GetBooleanEnvironmentVariable(kLargeKeysEnvVar); }
 
