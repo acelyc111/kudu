@@ -353,13 +353,14 @@ TEST_F(BitRle, Random64Bit) {
     srand(iters++);
     if (iters % 10000 == 0) LOG(ERROR) << "Seed: " << iters;
     vector<uint64_t > values;
-    for (int i = 0; i < 1000; ++i) {
+    int n_sub_iters = AllowSlowTests() ? 1000 : 100;
+    for (int i = 0; i < n_sub_iters; ++i) {
       int group_size = rand() % 20 + 1; // NOLINT(*)
       uint64_t cur_value = (static_cast<uint64_t>(rand()) << 32) + static_cast<uint64_t>(rand());
       if (group_size > 16) {
         group_size = 1;
       }
-      for (int i = 0; i < group_size; ++i) {
+      for (int j = 0; j < group_size; ++j) {
         values.push_back(cur_value);
       }
 
@@ -373,7 +374,7 @@ TEST_F(BitRle, Random64Bit) {
 TEST_F(BitRle, RepeatedPattern) {
   vector<bool> values;
   const int min_run = 1;
-  const int max_run = 32;
+  const int max_run = AllowSlowTests() ? 32 : 8;
 
   for (int i = min_run; i <= max_run; ++i) {
     int v = i % 2;

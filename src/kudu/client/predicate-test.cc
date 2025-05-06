@@ -1415,7 +1415,10 @@ class BloomFilterPredicateTest : public PredicateTest {
 };
 
 TEST_F(BloomFilterPredicateTest, TestKuduBloomFilterPredicate) {
-  Init(100000/*num_all_values*/, 10000/*num_included_values*/, 10000/*num_excluded_values*/);
+  const int num_all_values = AllowSlowTests() ? 100 * 1000 : 10 * 1000;
+  const int num_included_values = AllowSlowTests() ? 10 * 1000 : 1000;
+  const int num_excluded_values = AllowSlowTests() ? 10 * 1000 : 1000;
+  Init(num_all_values, num_included_values, num_excluded_values);
   KuduBloomFilter* included_bf = CreateBloomFilterWithValues(included_values_);
   KuduBloomFilter* excluded_bf = CreateBloomFilterWithValues(excluded_values_);
 
@@ -1447,7 +1450,10 @@ TEST_F(BloomFilterPredicateTest, TestKuduBloomFilterPredicate) {
 // Same as TestKuduBloomFilterPredicate above but using the overloaded NewInBloomFilterPredicate()
 // client API with direct BlockBloomFilter pointer.
 TEST_F(BloomFilterPredicateTest, TestDirectBlockBloomFilterPredicate) {
-  Init(100000/*num_all_values*/, 10000/*num_included_values*/, 10000/*num_excluded_values*/);
+  const int num_all_values = AllowSlowTests() ? 100 * 1000 : 10 * 1000;
+  const int num_included_values = AllowSlowTests() ? 10 * 1000 : 1000;
+  const int num_excluded_values = AllowSlowTests() ? 10 * 1000 : 1000;
+  Init(num_all_values, num_included_values, num_excluded_values);
 
   unique_ptr<BlockBloomFilter> included_bf = CreateDirectBloomFilterWithValues(included_values_);
   unique_ptr<BlockBloomFilter> excluded_bf = CreateDirectBloomFilterWithValues(excluded_values_);
@@ -1546,7 +1552,7 @@ TEST_P(ParameterizedBloomFilterPredicateTest, TestDisabledBloomFilterWithRepeate
                           "Harry", ""};
 
   // Populate table with a small set of strings that are repeated.
-  static constexpr int kNumRows = 10000;
+  static const int kNumRows = AllowSlowTests() ? 10 * 1000: 1000;
   auto upsert_rows = [&]() {
     int i = 0;
     int last_flush = i;

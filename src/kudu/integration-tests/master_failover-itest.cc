@@ -109,7 +109,6 @@ class MasterFailoverTest : public KuduTest,
 
   void SetUp() override {
     KuduTest::SetUp();
-    NO_FATALS(RestartCluster());
   }
 
   void TearDown() override {
@@ -173,9 +172,11 @@ INSTANTIATE_TEST_SUITE_P(HmsConfigurations, MasterFailoverTest, ::testing::Value
 // wait until the table has been created) works even when the original
 // leader master has been paused.
 TEST_P(MasterFailoverTest, TestCreateTableSync) {
-  const char* kTableName = "default.test_create_table_sync";
-
   SKIP_IF_SLOW_NOT_ALLOWED();
+
+  NO_FATALS(RestartCluster());
+
+  const char* kTableName = "default.test_create_table_sync";
 
   LOG(INFO) << "Pausing leader master";
   int leader_idx;
@@ -203,9 +204,11 @@ TEST_P(MasterFailoverTest, TestCreateTableSync) {
 // immediately after, then verify that the table has been created on
 // the newly elected leader master.
 TEST_P(MasterFailoverTest, TestPauseAfterCreateTableIssued) {
-  const char* kTableName = "default.test_pause_after_create_table_issued";
-
   SKIP_IF_SLOW_NOT_ALLOWED();
+
+  NO_FATALS(RestartCluster());
+
+  const char* kTableName = "default.test_pause_after_create_table_issued";
 
   ASSERT_OK(CreateTable(kTableName, kNoWaitForCreate));
 
@@ -231,8 +234,11 @@ TEST_P(MasterFailoverTest, TestPauseAfterCreateTableIssued) {
 // and then issue the DeleteTable call: DeleteTable should go to the newly
 // elected leader master and succeed.
 TEST_P(MasterFailoverTest, TestDeleteTableSync) {
-  const char* kTableName = "default.test_delete_table_sync";
   SKIP_IF_SLOW_NOT_ALLOWED();
+
+  NO_FATALS(RestartCluster());
+
+  const char* kTableName = "default.test_delete_table_sync";
 
   ASSERT_OK(CreateTable(kTableName, kWaitForCreate));
 
@@ -260,10 +266,13 @@ TEST_P(MasterFailoverTest, TestDeleteTableSync) {
 // TODO(unknown): Add an equivalent async test. Add a test for adding and/or
 // renaming a column in a table.
 TEST_P(MasterFailoverTest, TestRenameTableSync) {
+  SKIP_IF_SLOW_NOT_ALLOWED();
+
+  NO_FATALS(RestartCluster());
+
   const char* kTableNameOrig = "default.test_alter_table_sync";
   const char* kTableNameNew = "default.test_alter_table_sync_renamed";
 
-  SKIP_IF_SLOW_NOT_ALLOWED();
   ASSERT_OK(CreateTable(kTableNameOrig, kWaitForCreate));
 
   LOG(INFO) << "Pausing leader master";
@@ -285,6 +294,7 @@ TEST_P(MasterFailoverTest, TestRenameTableSync) {
 
 
 TEST_P(MasterFailoverTest, TestKUDU1374) {
+  NO_FATALS(RestartCluster());
   const char* kTableName = "default.test_kudu_1374";
 
   // Wait at least one additional heartbeat interval after creating the table.
@@ -329,6 +339,7 @@ TEST_P(MasterFailoverTest, TestKUDU1374) {
 }
 
 TEST_P(MasterFailoverTest, TestMasterUUIDResolution) {
+  NO_FATALS(RestartCluster());
   // After a fresh start, the masters should have received RPCs asking for
   // their UUIDs.
   for (int i = 0; i < cluster_->num_masters(); i++) {
@@ -368,6 +379,7 @@ TEST_P(MasterFailoverTest, TestMasterUUIDResolution) {
 }
 
 TEST_P(MasterFailoverTest, TestMasterPermanentFailure) {
+  NO_FATALS(RestartCluster());
   const string kBinPath = cluster_->GetBinaryPath("kudu");
   Random r(SeedRandom());
   string encryption_args;
@@ -496,6 +508,7 @@ TEST_P(MasterFailoverTest, TestMasterPermanentFailure) {
 }
 
 TEST_P(MasterFailoverTest, TestClusterIdOnFailover) {
+  NO_FATALS(RestartCluster());
   // Validate and store the initial cluster ID.
   int leader_idx;
   ASSERT_OK(cluster_->GetLeaderMasterIndex(&leader_idx));

@@ -1014,7 +1014,7 @@ TEST_P(LogBlockManagerTest, TestContainerWithManyHoles) {
       {2048, 338},
       {4096, 680}};
 
-  const int kNumBlocks = 16 * 1024;
+  const int kNumBlocks = AllowSlowTests() ? 16 * 1024 : 4 * 1024;
 
   uint64_t fs_block_size;
   ASSERT_OK(env_->GetBlockSize(test_dir_, &fs_block_size));

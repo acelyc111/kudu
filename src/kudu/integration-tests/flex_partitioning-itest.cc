@@ -56,6 +56,7 @@
 #include "kudu/util/status.h"
 #include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
+#include "kudu/util/threadpool.h"
 
 using kudu::client::KuduClient;
 using kudu::client::KuduColumnSchema;
@@ -511,18 +512,23 @@ void FlexPartitioningITest::InsertAndVerifyScans(const RangePartitionOptions& ra
   }
 
   // Perform some scans with predicates.
+  std::unique_ptr<ThreadPool> pool;
+  CHECK_OK(ThreadPoolBuilder("scan_pool")
+               .set_max_threads(10)
+               .Build(&pool));
 
   // 1) Various predicates on 'c0', which has non-random data.
   // We concentrate around the value '500' since there is a split point
   // there.
-  NO_FATALS(CheckScanWithColumnPredicate("c0", 100, 120));
-  NO_FATALS(CheckScanWithColumnPredicate("c0", 490, 610));
-  NO_FATALS(CheckScanWithColumnPredicate("c0", 499, 499));
-  NO_FATALS(CheckScanWithColumnPredicate("c0", 500, 500));
-  NO_FATALS(CheckScanWithColumnPredicate("c0", 501, 501));
-  NO_FATALS(CheckScanWithColumnPredicate("c0", 499, 501));
-  NO_FATALS(CheckScanWithColumnPredicate("c0", 499, 500));
-  NO_FATALS(CheckScanWithColumnPredicate("c0", 500, 501));
+  ASSERT_OK(pool->Submit([this]() { NO_FATALS(CheckScanWithColumnPredicate("c0", 100, 120)); }));
+  ASSERT_OK(pool->Submit([this]() { NO_FATALS(CheckScanWithColumnPredicate("c0", 490, 610)); }));
+  ASSERT_OK(pool->Submit([this]() { NO_FATALS(CheckScanWithColumnPredicate("c0", 499, 499)); }));
+  ASSERT_OK(pool->Submit([this]() { NO_FATALS(CheckScanWithColumnPredicate("c0", 500, 500)); }));
+  ASSERT_OK(pool->Submit([this]() { NO_FATALS(CheckScanWithColumnPredicate("c0", 501, 501)); }));
+  ASSERT_OK(pool->Submit([this]() { NO_FATALS(CheckScanWithColumnPredicate("c0", 499, 501)); }));
+  ASSERT_OK(pool->Submit([this]() { NO_FATALS(CheckScanWithColumnPredicate("c0", 499, 500)); }));
+  ASSERT_OK(pool->Submit([this]() { NO_FATALS(CheckScanWithColumnPredicate("c0", 500, 501)); }));
+  pool->Wait();
 
   // 2) Random range predicates on the other columns, which are random ints.
   for (int col_idx = 1; col_idx < table_->schema().num_columns(); col_idx++) {
@@ -534,21 +540,25 @@ void FlexPartitioningITest::InsertAndVerifyScans(const RangePartitionOptions& ra
         std::swap(lower, upper);
       }
 
-      NO_FATALS(CheckScanWithColumnPredicate(table_->schema().Column(col_idx).name(),
-                                             lower, upper));
+      ASSERT_OK(pool->Submit([this, col_idx, lower, upper]() {
+        NO_FATALS(CheckScanWithColumnPredicate(table_->schema().Column(col_idx).name(),
+                                               lower, upper));
+      }));
     }
   }
+  pool->Wait();
 
   // 3) Use the "primary key range" API.
   {
-    NO_FATALS(CheckPKRangeScan(100, 120));
-    NO_FATALS(CheckPKRangeScan(490, 610));
-    NO_FATALS(CheckPKRangeScan(499, 499));
-    NO_FATALS(CheckPKRangeScan(500, 500));
-    NO_FATALS(CheckPKRangeScan(501, 501));
-    NO_FATALS(CheckPKRangeScan(499, 501));
-    NO_FATALS(CheckPKRangeScan(499, 500));
-    NO_FATALS(CheckPKRangeScan(500, 501));
+    ASSERT_OK(pool->Submit([this]() { NO_FATALS(CheckPKRangeScan(100, 120)); }));
+    ASSERT_OK(pool->Submit([this]() { NO_FATALS(CheckPKRangeScan(490, 610)); }));
+    ASSERT_OK(pool->Submit([this]() { NO_FATALS(CheckPKRangeScan(499, 499)); }));
+    ASSERT_OK(pool->Submit([this]() { NO_FATALS(CheckPKRangeScan(500, 500)); }));
+    ASSERT_OK(pool->Submit([this]() { NO_FATALS(CheckPKRangeScan(501, 501)); }));
+    ASSERT_OK(pool->Submit([this]() { NO_FATALS(CheckPKRangeScan(499, 501)); }));
+    ASSERT_OK(pool->Submit([this]() { NO_FATALS(CheckPKRangeScan(499, 500)); }));
+    ASSERT_OK(pool->Submit([this]() { NO_FATALS(CheckPKRangeScan(500, 501)); }));
+    pool->Wait();
   }
 
   // 4) Use the Per-tablet "partition key range" API.
@@ -558,17 +568,40 @@ void FlexPartitioningITest::InsertAndVerifyScans(const RangePartitionOptions& ra
 
   // 5) Use the Per-tablet "partition key range" API with primary key range.
   {
-    NO_FATALS(CheckPartitionKeyRangeScanWithPKRange(100, 120));
-    NO_FATALS(CheckPartitionKeyRangeScanWithPKRange(200, 400));
-    NO_FATALS(CheckPartitionKeyRangeScanWithPKRange(490, 610));
-    NO_FATALS(CheckPartitionKeyRangeScanWithPKRange(499, 499));
-    NO_FATALS(CheckPartitionKeyRangeScanWithPKRange(500, 500));
-    NO_FATALS(CheckPartitionKeyRangeScanWithPKRange(501, 501));
-    NO_FATALS(CheckPartitionKeyRangeScanWithPKRange(499, 501));
-    NO_FATALS(CheckPartitionKeyRangeScanWithPKRange(499, 500));
-    NO_FATALS(CheckPartitionKeyRangeScanWithPKRange(500, 501));
-    NO_FATALS(CheckPartitionKeyRangeScanWithPKRange(650, 700));
-    NO_FATALS(CheckPartitionKeyRangeScanWithPKRange(700, 800));
+    ASSERT_OK(pool->Submit([this]() {
+      NO_FATALS(CheckPartitionKeyRangeScanWithPKRange(100, 120));
+    }));
+    ASSERT_OK(pool->Submit([this]() {
+      NO_FATALS(CheckPartitionKeyRangeScanWithPKRange(200, 400));
+    }));
+    ASSERT_OK(pool->Submit([this]() {
+      NO_FATALS(CheckPartitionKeyRangeScanWithPKRange(490, 610));
+    }));
+    ASSERT_OK(pool->Submit([this]() {
+      NO_FATALS(CheckPartitionKeyRangeScanWithPKRange(499, 499));
+    }));
+    ASSERT_OK(pool->Submit([this]() {
+      NO_FATALS(CheckPartitionKeyRangeScanWithPKRange(500, 500));
+    }));
+    ASSERT_OK(pool->Submit([this]() {
+      NO_FATALS(CheckPartitionKeyRangeScanWithPKRange(501, 501));
+    }));
+    ASSERT_OK(pool->Submit([this]() {
+      NO_FATALS(CheckPartitionKeyRangeScanWithPKRange(499, 501));
+    }));
+    ASSERT_OK(pool->Submit([this]() {
+      NO_FATALS(CheckPartitionKeyRangeScanWithPKRange(499, 500));
+    }));
+    ASSERT_OK(pool->Submit([this]() {
+      NO_FATALS(CheckPartitionKeyRangeScanWithPKRange(500, 501));
+    }));
+    ASSERT_OK(pool->Submit([this]() {
+      NO_FATALS(CheckPartitionKeyRangeScanWithPKRange(650, 700));
+    }));
+    ASSERT_OK(pool->Submit([this]() {
+      NO_FATALS(CheckPartitionKeyRangeScanWithPKRange(700, 800));
+    }));
+    pool->Wait();
   }
 }
 
@@ -603,7 +636,7 @@ const vector<RangePartitionOptions> kRangeOptions {
   RangePartitionOptions { { "c0" }, { }, { { { 0 }, { 500 } }, { { 500 }, { 1000 } } } },
   // RANGE (c0, c1) SPLIT ROWS (500), (2001), (2500), (2999)
   //                BOUNDS ((0), (1000)), ((2000), (3000))
-   RangePartitionOptions{ { "c0", "c1" }, { { 500 }, { 2001 }, { 2500 }, { 2999 } },
+  RangePartitionOptions { { "c0", "c1" }, { { 500 }, { 2001 }, { 2500 }, { 2999 } },
                           { { { 0 }, { 1000 } }, { { 2000 }, { 3000 } } } },
 };
 

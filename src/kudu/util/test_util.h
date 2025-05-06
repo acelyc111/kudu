@@ -39,6 +39,13 @@
   } \
 } while (0)
 
+#define SKIP_IF_AUTHZ_DISABLED() do { \
+  if (!AllowAuthzTests()) { \
+    LOG(WARNING) << "test is skipped; set KUDU_ALLOW_AUTHZ_TESTS=1 to run"; \
+    return; \
+  } \
+} while (0)
+
 #define ASSERT_EVENTUALLY(expr) do { \
   AssertEventually(expr); \
   NO_PENDING_FATALS(); \
@@ -97,6 +104,9 @@ class KuduTest : public ::testing::Test {
 
 // Returns true if slow tests are runtime-enabled.
 bool AllowSlowTests();
+
+// Returns true if authz tests are runtime-enabled.
+bool AllowAuthzTests();
 
 // Returns true if the KUDU_USE_LARGE_KEYS_IN_TESTS environment variable is set
 // to true. This is required to pass certain tests in FIPS approved mode.

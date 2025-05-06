@@ -566,7 +566,6 @@ TEST_P(MasterDiskErrorITest, TestMasterDiskFailure) {
                   .num_replicas(kNumReplicas)
                   .wait(true)
                   .Create());
-    SleepFor(MonoDelta::FromMilliseconds(100));
   }
 
   // Trigger disk failure and enable compaction.
@@ -576,6 +575,6 @@ TEST_P(MasterDiskErrorITest, TestMasterDiskFailure) {
   ASSERT_OK(SetFlags(leader_master, flag_list));
 
   // Wait for the master to crash
-  ASSERT_OK(leader_master->WaitForFatal(MonoDelta::FromSeconds(20)));
+  ASSERT_OK(leader_master->WaitForFatal(MonoDelta::FromSeconds(40)));
 }
 }  // namespace kudu

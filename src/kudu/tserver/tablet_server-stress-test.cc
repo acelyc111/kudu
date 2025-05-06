@@ -38,7 +38,12 @@
 #include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
 
-DEFINE_int32(runtime_secs, 10,
+DEFINE_int32(runtime_secs,
+#ifndef NDEBUG
+             2,
+#else
+             10
+#endif
              "Maximum number of seconds to run. If the threads have not completed "
              "inserting by this time, they will stop regardless. Set to 0 to disable "
              "the timeout.");

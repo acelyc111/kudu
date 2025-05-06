@@ -83,6 +83,7 @@
 #include "kudu/util/random.h"
 #include "kudu/util/scoped_cleanup.h"
 #include "kudu/util/status.h"
+#include "kudu/util/stopwatch.h"
 #include "kudu/util/test_macros.h"
 #include "kudu/util/test_util.h"
 
@@ -1862,7 +1863,7 @@ TEST_F(RaftConsensusITest, TestMasterNotifiedOnConfigChange) {
 // operations that the leader has committed.
 TEST_F(RaftConsensusITest, TestEarlyCommitDespiteMemoryPressure) {
   // Enough operations to put us over our memory limit (defined below).
-  const int kNumOps = 10000;
+  const int kNumOps = AllowSlowTests() ? 10000 : 2000;
 
   // Set up a 3-node configuration with only one live follower so that we can
   // manipulate it directly via RPC.
@@ -1961,6 +1962,7 @@ TEST_F(RaftConsensusITest, TestAutoCreateReplica) {
     "--log_segment_size_mb=1",
     "--log_async_preallocate_segments=false",
     "--flush_threshold_mb=1",
+    "--flush_threshold_secs=1",
     "--maintenance_manager_polling_interval_ms=300",
   };
   const vector<string> kMasterFlags = {
@@ -1977,8 +1979,10 @@ TEST_F(RaftConsensusITest, TestAutoCreateReplica) {
   FLAGS_num_replicas = 2;
   NO_FATALS(BuildAndStart(kTsFlags, kMasterFlags));
 
-  // 50K is enough to cause flushes & log rolls.
+  // Make sure either num_rows_to_write rows or num_seconds_to_write seconds
+  // is enough to cause flushes & log rolls.
   const int num_rows_to_write = AllowSlowTests() ? 150000 : 50000;
+  const int num_seconds_to_write = AllowSlowTests() ? 10 : 3;
 
   vector<TServerDetails*> tservers;
   AppendValuesFromMap(tablet_servers_, &tservers);
@@ -2016,12 +2020,10 @@ TEST_F(RaftConsensusITest, TestAutoCreateReplica) {
   LOG(INFO) << "Starting write workload...";
   workload.Start();
 
-  while (true) {
-    int rows_inserted = workload.rows_inserted();
-    if (rows_inserted >= num_rows_to_write) {
-      break;
-    }
-    LOG(INFO) << "Only inserted " << rows_inserted << " rows so far, sleeping for 100ms";
+  Stopwatch sw;
+  sw.start();
+  while (workload.rows_inserted() < num_rows_to_write &&
+      sw.elapsed().wall_seconds() < num_seconds_to_write) {
     SleepFor(MonoDelta::FromMilliseconds(100));
   }
 

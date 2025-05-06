@@ -195,10 +195,12 @@ void TestJsonWriter::DoBenchmark(const Message& pb) {
 }
 
 TEST_F(TestJsonWriter, BenchmarkAllTypes) {
+  SKIP_IF_SLOW_NOT_ALLOWED();
   DoBenchmark(MakeAllTypesPB());
 }
 
 TEST_F(TestJsonWriter, BenchmarkNestedMessage) {
+  SKIP_IF_SLOW_NOT_ALLOWED();
   TestAllTypes pb;
   pb.add_repeated_nested_message()->set_int_field(12345);
   pb.mutable_optional_nested_message()->set_int_field(54321);
@@ -206,6 +208,7 @@ TEST_F(TestJsonWriter, BenchmarkNestedMessage) {
 }
 
 TEST_F(TestJsonWriter, BenchmarkRepeatedInt64) {
+  SKIP_IF_SLOW_NOT_ALLOWED();
   TestAllTypes pb;
   for (int i = 0; i < 10000; i++) {
     pb.add_repeated_int64(i);

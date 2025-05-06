@@ -519,8 +519,8 @@ TEST_F(BuiltinNtpWithMiniChronydTest, Basic) {
   // Make sure WalltimeWithError() works with the built-in NTP client once
   // it has initted/synchronized with the reference test NTP servers.
   for (auto i = 0; i < 5; ++i) {
-    SleepFor(MonoDelta::FromMilliseconds(500));
-    uint64_t now, error;
+    uint64_t now = 0;
+    uint64_t error = 0;
     ASSERT_OK(c.WalltimeWithError(&now, &error));
     LOG(INFO) << StringPrintf("built-in: " WALLTIME_DIAG_FMT, now, error);
   }

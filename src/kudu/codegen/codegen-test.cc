@@ -402,9 +402,10 @@ TEST_F(CodegenTest, TestCodeCache) {
   for (int pass = 0; pass < 2; pass++) {
     int num_hits = 0;
 
-    // Generate all permutations of the first four columns (24 permutations).
+    // Generate all permutations of the first four/three columns (24/6 permutations).
     // For each such permutation, we'll create a projection and request code generation.
-    vector<size_t> perm = { 0, 1, 2, 3 };
+    vector<size_t> perm = AllowSlowTests() ? vector<size_t>({ 0, 1, 2, 3 }) :
+                                             vector<size_t>({ 0, 1, 2 });
     do {
       SCOPED_TRACE(perm);
       Schema projection;
@@ -428,7 +429,7 @@ TEST_F(CodegenTest, TestCodeCache) {
       // an entry before we look for it again. But, our LRU cache is sharded
       // so we expect to get some hits on the second time.
       ASSERT_GT(num_hits, 0);
-      ASSERT_LT(num_hits, 24);
+      ASSERT_LT(num_hits, AllowSlowTests() ? 24 : 6);
     }
   }
 }

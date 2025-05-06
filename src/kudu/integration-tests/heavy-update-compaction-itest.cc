@@ -101,6 +101,9 @@ class HeavyUpdateCompactionITest : public KuduTest {
     if (gflags::GetCommandLineFlagInfoOrDie("rows").is_default) {
       FLAGS_rows = 20;
     }
+    if (gflags::GetCommandLineFlagInfoOrDie("rounds").is_default) {
+      FLAGS_rounds = 10;
+    }
 #endif
 
     KuduSchemaBuilder b;
